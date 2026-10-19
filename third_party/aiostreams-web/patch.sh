@@ -6,6 +6,7 @@
 # AIOStreams is checked by hand.
 set -eu
 web=packages/web
+here=$(cd "$(dirname "$0")" && pwd)
 
 change() { # file, old, new
 	grep -qF -- "$2" "$1" || { echo "patch.sh: '$2' not in $1" >&2; exit 1; }
@@ -30,3 +31,8 @@ change $web/src/lib/paths.ts "(__STANDALONE__ ? null : '/stremio/configure')" "(
 change $web/src/lib/settings.ts "font: syncedChoice<SubtitleFont>('subtitleFont', SUBTITLE_FONTS, 'default')," "font: syncedChoice<SubtitleFont>('subtitleFont', SUBTITLE_FONTS, 'sans-serif'),"
 change $web/src/lib/settings.ts "bold: syncedFlag('subtitleBold', false, ['aiostreams-web-subtitle-bold'])," "bold: syncedFlag('subtitleBold', true, ['aiostreams-web-subtitle-bold']),"
 change $web/src/lib/settings.ts "shadow: syncedFlag('subtitleShadow')," "shadow: syncedFlag('subtitleShadow', true),"
+# Versions start without the version list: the first, in the server's
+# order, as Jellyfin apps play. Off again under Settings › Playback.
+change $web/src/lib/settings.ts "autoPlayFirst: syncedFlag('autoPlayFirst', false, [" "autoPlayFirst: syncedFlag('autoPlayFirst', true, ["
+# Transcoding in the browser player (see transcode.ts).
+node "$here/transcode-patch.mjs"

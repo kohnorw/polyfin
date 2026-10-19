@@ -9,7 +9,10 @@ contributors, licensed under the GNU Affero General Public License v3.0
 It is built from the commit named by AIOSTREAMS_COMMIT in the Dockerfile,
 with the changes of patch.sh (beside this file): its files are served
 under /web/, its API is the server's root, its logo and "Configure" link
-point at Polyfin, and its subtitles default to a Plex-like style.
+point at Polyfin, its subtitles default to a Plex-like style, the first
+version plays without the version list, and its browser player plays
+versions a browser cannot through the server's HLS conversion
+(transcode.ts and transcode-patch.mjs, with hls.js 1.7.3, Apache-2.0).
 
 Its complete source is that commit of the AIOStreams repository with
 patch.sh applied.

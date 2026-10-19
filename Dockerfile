@@ -45,16 +45,21 @@ ADD --checksum=sha256:a89a68a12f9c3976d50ed33438a7e58c6a73f608d5d8e86cd98a360fd0
 # AIOStreams' web app (AGPL-3.0), the web client this fork serves at /web/
 # in place of jellyfin-web: packages/web of github.com/Viren070/AIOStreams at
 # a pinned commit, fitted to Polyfin by third_party/aiostreams-web/patch.sh,
-# which fails the build when a line it changes is gone. Built once, natively:
+# which fails the build when a line it changes is gone, with transcoding in
+# its browser player (transcode.ts, through hls.js, Apache-2.0, added beside
+# its locked dependencies). Built once, natively:
 # its files are the same on every platform.
 FROM --platform=$BUILDPLATFORM node:24.21.0-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS aiostreams-web
 ARG AIOSTREAMS_COMMIT=6ca32ed21e3036d87c35c49b24f2cf507d065ed1
 ADD https://github.com/Viren070/AIOStreams.git#${AIOSTREAMS_COMMIT} /src
-COPY third_party/aiostreams-web/patch.sh /patch.sh
+COPY third_party/aiostreams-web/ /patch/
 WORKDIR /src
 RUN npm install -g --no-audit --no-fund pnpm@11.0.8 \
-	&& sh /patch.sh \
+	&& sh /patch/patch.sh \
 	&& pnpm install --frozen-lockfile --ignore-scripts --filter @aiostreams/web --filter @aiostreams/ui \
+	&& mkdir -p packages/web/node_modules/hls.js \
+	&& npm pack --silent --pack-destination /tmp hls.js@1.7.3 \
+	&& tar -xzf /tmp/hls.js-1.7.3.tgz -C packages/web/node_modules/hls.js --strip-components=1 \
 	&& pnpm -F @aiostreams/web build \
 	&& mkdir /out \
 	&& cp -r packages/web/dist/. /out/ \
@@ -207,7 +212,7 @@ COPY third_party/jellyfin-web/LICENSE third_party/jellyfin-web/NOTICE /usr/share
 # serves jellyfin-web instead. Its license, and where its source is.
 COPY --from=aiostreams-web /out/ /usr/share/polyfin/aiostreams-web/
 COPY --from=aiostreams-web /out-license /usr/share/doc/aiostreams-web/LICENSE
-COPY third_party/aiostreams-web/NOTICE third_party/aiostreams-web/patch.sh /usr/share/doc/aiostreams-web/
+COPY third_party/aiostreams-web/ /usr/share/doc/aiostreams-web/
 # hls.js, embedded in Polyfin for the page of share links (Apache-2.0): its
 # license and a notice.
 COPY third_party/hls.js/LICENSE third_party/hls.js/NOTICE /usr/share/doc/hls.js/
