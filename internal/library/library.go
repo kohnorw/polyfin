@@ -2202,6 +2202,9 @@ func (s *Service) Seasons(ctx context.Context, user accounts.User, seriesID acco
 	}
 	posters := seasonPosters(meta)
 	result := seasons(series, shown, posters, v.words, s.now())
+	if s.settings().HideSpecials {
+		result = slices.DeleteFunc(result, func(season Item) bool { return season.IndexNumber == 0 })
+	}
 	records := make([]record, 0, len(result))
 	for _, season := range result {
 		records = append(records, record{ID: season.ID, Key: seasonKey(meta.ID, season.IndexNumber), Kind: KindSeason,
@@ -2249,6 +2252,11 @@ func (s *Service) Episodes(ctx context.Context, user accounts.User, seriesID acc
 		video := videos[episode.StremioID]
 		records = append(records, record{ID: episode.ID, Key: episodeKey(video.ID), Kind: KindEpisode,
 			Parent: &result[i].SeasonID, SeriesID: meta.ID, Season: episode.ParentIndexNumber, Video: &video})
+	}
+	if s.settings().HideSpecials {
+		// Specials (season 0) are left out of listings; their records stay,
+		// so a link to one still opens.
+		result = slices.DeleteFunc(result, func(episode Item) bool { return episode.ParentIndexNumber == 0 })
 	}
 	return s.overridden(result), s.save(ctx, records)
 }

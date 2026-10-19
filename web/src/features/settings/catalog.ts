@@ -235,6 +235,12 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'playback',
+    anchor: 'hide-specials',
+    label: (t) => s(t).hideSpecials,
+    help: (t) => s(t).hideSpecialsHelp,
+  },
+  {
+    section: 'playback',
     anchor: 'playback-history',
     label: (t) => s(t).playbackHistory,
     help: (t) => s(t).playbackHistoryHelp,

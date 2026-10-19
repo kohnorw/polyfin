@@ -235,6 +235,9 @@ const settings: typeof en = {
     hiddenVersionCodecs: 'Masquer ces codecs vidéo',
     hiddenVersionCodecsHelp:
       'Les versions dont on sait qu’elles sont dans ces codecs ne sont listées nulle part.',
+    hideSpecials: 'Masquer les épisodes spéciaux',
+    hideSpecialsHelp:
+      'Retire les épisodes spéciaux des séries (saison 0) de leurs saisons, listes d’épisodes et de « À suivre ». Activé par défaut.',
     hiddenRipTypes: 'Exclure ces rips',
     hiddenRipTypesHelp:
       'Les versions dont le nom, la description ou le nom de fichier porte une de ces étiquettes sont retirées partout, même quand il ne reste aucune autre version du titre. Les étiquettes sont reconnues comme mots entiers : CAM, HDCAM, TS, HD-TS, TELESYNC, TC, TELECINE, SCR, DVDSCR, SCREENER, R5, WORKPRINT, etc. Toutes par défaut.',

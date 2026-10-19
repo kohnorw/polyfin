@@ -361,6 +361,8 @@ export type Settings = {
   hiddenVersionWords: string[]
   /** Excludes the versions tagged as these pre-release rips, even when none is left. */
   hiddenRipTypes: RipType[]
+  /** Leaves series' specials (season 0) out of seasons, episode lists and Next Up. */
+  hideSpecials: boolean
   /** Ends version names with how the app asking plays each, as its last playback decides it. */
   nameHowVersionsPlay: boolean
   /** Times the addons' subtitles to the version played, against when it has speech. */

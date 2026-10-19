@@ -409,6 +409,13 @@ function Playback({ form, update, error, number, range, limits }: SectionFormApi
             )}
           </fieldset>
         </SettingRow>
+        <SwitchRow
+          anchor="hide-specials"
+          label={s.hideSpecials}
+          help={s.hideSpecialsHelp}
+          checked={form.hideSpecials}
+          onChange={(hideSpecials) => update({ hideSpecials })}
+        />
       </SettingsGroup>
       <SettingsGroup title={s.playbackHistoryGroup}>
         <SwitchRow

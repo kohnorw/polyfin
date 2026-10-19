@@ -4,6 +4,7 @@
 > **This fork** adds to Polyfin:
 > - **Rip exclusion list** (Settings › Playback): CAM, telesync, telecine, screener and workprint releases are removed from every title, each type toggled on its own, all on by default.
 > - **NostalgiaTV and other live-TV apps:** library-wide episode listings (`/Items?IncludeItemTypes=Episode&Recursive=true`, with or without a library, narrowed by `Genres`/`GenreIds`) and `/Genres` without a library, answered from a pool of each TV library's first 40 series, ported from AIOFin.
+> - **Hide specials** toggle (Settings › Playback): season 0 left out of seasons, episode lists and Next Up, on by default.
 > - **AIOStreams theme** for the web player and the admin app, with **Plex-style subtitles** (white, outlined, no box).
 > - **Docker image on GitHub:** every push to `main` publishes `ghcr.io/<owner>/polyfin` (see `.github/workflows/docker.yml`). Set `POLYFIN_IMAGE` in `.env` and run `docker compose up -d`.
 

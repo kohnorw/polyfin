@@ -229,6 +229,9 @@ const settings = {
       `Versions known to be larger are listed nowhere: not on title pages, in playback or in downloads. When the rules below and this one would hide every version of a title, none is hidden. Up to ${r.max} GB; ${r.default} by default.`,
     hiddenVersionCodecs: 'Hide these video codecs',
     hiddenVersionCodecsHelp: 'Versions known to be in these codecs are listed nowhere.',
+    hideSpecials: 'Hide specials',
+    hideSpecialsHelp:
+      'Leaves series’ specials (season 0) out of their seasons, episode lists and Next Up. On by default.',
     hiddenRipTypes: 'Exclude these rips',
     hiddenRipTypesHelp:
       'Versions whose name, description or file name carries one of these release tags are removed everywhere, even when no other version of the title is left. Tags are matched as whole words: CAM, HDCAM, TS, HD-TS, TELESYNC, TC, TELECINE, SCR, DVDSCR, SCREENER, R5, WORKPRINT and the like. All of them by default.',
