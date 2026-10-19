@@ -1,0 +1,15 @@
+AIOStreams web app
+==================
+
+The web client served at /web/ is the web app of AIOStreams
+(packages/web of https://github.com/Viren070/AIOStreams), by Viren070 and
+contributors, licensed under the GNU Affero General Public License v3.0
+(the LICENSE file beside this one).
+
+It is built from the commit named by AIOSTREAMS_COMMIT in the Dockerfile,
+with the changes of patch.sh (beside this file): its files are served
+under /web/, its API is the server's root, its logo and "Configure" link
+point at Polyfin, and its subtitles default to a Plex-like style.
+
+Its complete source is that commit of the AIOStreams repository with
+patch.sh applied.

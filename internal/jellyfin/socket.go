@@ -174,6 +174,15 @@ func isSocket(r *http.Request) bool {
 // app's other messages, which ask for what Polyfin does not offer, such as
 // the sessions of the server for its dashboard, are left unanswered.
 func (h *Handler) socket(w http.ResponseWriter, r *http.Request) {
+	// AIOStreams' web app, which this fork serves at /web/, opens its socket
+	// with its session token as api_key, a legacy form Jellyfin 12.2 reads
+	// only with legacy authorization. A socket only ever takes a signed-in
+	// device's token (an API key is refused below), so it is read here
+	// whatever the setting.
+	if q := r.URL.Query(); q.Get("ApiKey") == "" && q.Get("api_key") != "" {
+		q.Set("ApiKey", q.Get("api_key"))
+		r.URL.RawQuery = q.Encode()
+	}
 	c, ok, err := h.signedInCaller(r)
 	switch {
 	case err != nil:
