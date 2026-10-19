@@ -124,11 +124,15 @@ No app can be given a new kind of home section. With **Also a library in other a
 
 ### Default theme
 
-By default, **Custom CSS** holds the AIOStreams theme (`internal/accounts/aiostreams_theme.css`), which gives jellyfin-web the look of AIOStreams' own Jellyfin client: near-black surfaces (`#070707`), a violet accent (`#6152df`), the Inter font and 0.5rem corners. **Custom JavaScript** is empty.
+By default, **Custom CSS** imports the stylesheet of [LumaaGlaass](https://github.com/Dyhlio/LumaaGlaass), a theme for jellyfin-web, and **Custom JavaScript** loads its script. Both load the main branch of its repository, so the theme's changes reach the web client without a Polyfin update.
 
-- The stylesheet is held whole in the setting; browsers fetch only the Inter font from Google Fonts.
-- To keep the web client's own look, empty **Custom CSS**.
-- A server upgraded from a version that loaded LumaaGlaass moves to the AIOStreams theme if both fields still held the LumaaGlaass defaults. A server whose fields hold its own CSS or script keeps both as they are.
+- Each browser loads the theme's files from jsDelivr (`cdn.jsdelivr.net`). A browser that cannot reach it shows the web client's own look.
+- jsDelivr takes up to 12 hours to serve a change to the theme, and a browser keeps the files it loaded for up to 7 days.
+- Each user chooses the theme's appearance and features on the LumaaGlaass page of the web client's settings menu. The choices are saved with their account, on every device.
+- The theme needs jellyfin-web's Dark theme, the default.
+- To keep the web client's own look, empty both fields: emptying one leaves half the theme.
+- To keep one version of the theme, replace `main` with a commit or a tag of its repository in both addresses.
+- A server upgraded from an earlier version gets the theme at its first start if both fields were empty, and moves to its main branch if both still held the theme at the commit Polyfin pinned before. A server whose fields hold its own CSS or script keeps both as they are.
 
 **Compared with Jellyfin:**
 
