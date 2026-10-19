@@ -229,6 +229,16 @@ const settings = {
       `Versions known to be larger are listed nowhere: not on title pages, in playback or in downloads. When the rules below and this one would hide every version of a title, none is hidden. Up to ${r.max} GB; ${r.default} by default.`,
     hiddenVersionCodecs: 'Hide these video codecs',
     hiddenVersionCodecsHelp: 'Versions known to be in these codecs are listed nowhere.',
+    hiddenRipTypes: 'Exclude these rips',
+    hiddenRipTypesHelp:
+      'Versions whose name, description or file name carries one of these release tags are removed everywhere, even when no other version of the title is left. Tags are matched as whole words: CAM, HDCAM, TS, HD-TS, TELESYNC, TC, TELECINE, SCR, DVDSCR, SCREENER, R5, WORKPRINT and the like. All of them by default.',
+    ripTypes: {
+      cam: 'CAM (CAM, HDCAM, CAMRip)',
+      telesync: 'Telesync (TS, HD-TS, PDVD)',
+      telecine: 'Telecine (TC, HDTC)',
+      screener: 'Screener (SCR, DVDSCR, R5)',
+      workprint: 'Workprint (WP)',
+    },
     hiddenVersionWords: 'Hide versions whose labels contain',
     hiddenVersionWordsHelp: (r: RangeText) =>
       `One word or phrase a line, matched in any letter case in a version’s name, description and file name: for addons that say in their labels that a file is not ready to play yet. Up to ${r.max} lines; none by default.`,
@@ -705,10 +715,10 @@ const settings = {
     openWebPlayer: 'Open the web player',
     customCss: 'Custom CSS',
     customCssHelp:
-      'Applied to every page of the web player, for every user, as Jellyfin’s custom CSS. Users can turn it off under Settings › Display. By default, it holds the LumaaGlaass theme’s stylesheet, which goes with the default Custom JavaScript: empty both to keep the web player’s own look.',
+      'Applied to every page of the web player, for every user, as Jellyfin’s custom CSS. Users can turn it off under Settings › Display. By default, it holds the AIOStreams theme: near-black surfaces, a violet accent and the Inter font. Empty it to keep the web player’s own look.',
     customJs: 'Custom JavaScript',
     customJsHelp:
-      'Loaded by every page of the web player, after its own scripts. Empty loads nothing. By default, it loads the LumaaGlaass theme’s script, which goes with the default Custom CSS.',
+      'Loaded by every page of the web player, after its own scripts. Empty loads nothing, the default.',
     customJsWarningTitle: 'Only paste code you trust',
     customJsWarning:
       'This script runs in the browser of every user who opens the web player on this server, with their account. It can read what they see and act for them.',

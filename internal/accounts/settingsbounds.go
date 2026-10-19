@@ -1,38 +1,22 @@
 package accounts
 
 import (
+	_ "embed"
 	"net/netip"
 	"slices"
 )
 
 // DefaultCustomCss and DefaultCustomJs are the web player's custom CSS and
-// script on a new server: they load the LumaaGlaass theme from jsDelivr at
-// the main branch of its repository, so servers follow the theme without a
-// Polyfin release, with its settings page for each user. Changing them takes
-// both, and a migration replacing the column defaults and the values still
-// equal to these.
-const DefaultCustomCss = `@import url('https://cdn.jsdelivr.net/gh/Dyhlio/LumaaGlaass@main/assets/lumaaglaass.css');`
+// script on a new server: the AIOStreams theme (aiostreams_theme.css),
+// held whole in the setting (it only fetches the Inter font), and no
+// script. Changing them takes a migration replacing the column defaults
+// and the values still equal to these (see 0142_aiostreams_theme.sql,
+// written by scripts/theme-migration.py).
+//
+//go:embed aiostreams_theme.css
+var DefaultCustomCss string
 
-const DefaultCustomJs = `(() => {
-    window.LumaaGlaassOptions = {
-        preferences: true,
-        homeCarousel: true,
-        collectionFilter: true
-    };
-
-    const id = 'lg-script';
-    if (document.getElementById(id)) return;
-
-    const script = document.createElement('script');
-    script.id = id;
-    script.src = 'https://cdn.jsdelivr.net/gh/Dyhlio/LumaaGlaass@main/assets/lumaaglaass.js';
-    script.onerror = () => {
-        script.remove();
-        console.error('LumaaGlaass could not be loaded.');
-    };
-
-    document.head.appendChild(script);
-})();`
+const DefaultCustomJs = ""
 
 // DefaultSettings are the settings of a new server, those the columns of
 // the settings default to: changing a default takes this and a migration
@@ -98,6 +82,7 @@ func DefaultSettings() Settings {
 		VersionSourceOrder:  []ID{},
 		HiddenVersionCodecs: []string{},
 		HiddenVersionWords:  []string{},
+		HiddenRipTypes:      slices.Clone(RipTypes),
 		NameHowVersionsPlay: true,
 		SyncAddonSubtitles:  true,
 		MaxConversions:      DefaultMaxConversions,
@@ -300,6 +285,7 @@ func SettingsBounds() map[string]SettingBounds {
 		"hideVersionsLargerGb": orZero(1, MaxHideVersionsLargerGB, d.HideVersionsLargerGB),
 		"hiddenVersionCodecs":  choice(d.HiddenVersionCodecs, anys(VersionCodecs)),
 		"hiddenVersionWords":   between(0, MaxHiddenVersionWords, d.HiddenVersionWords),
+		"hiddenRipTypes":       choice(d.HiddenRipTypes, anys(RipTypes)),
 		"nameHowVersionsPlay":  is(d.NameHowVersionsPlay),
 		"syncAddonSubtitles":   is(d.SyncAddonSubtitles),
 		"maxConversions":       between(MinMaxConversions, MaxMaxConversions, d.MaxConversions),

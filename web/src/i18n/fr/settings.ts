@@ -235,6 +235,16 @@ const settings: typeof en = {
     hiddenVersionCodecs: 'Masquer ces codecs vidéo',
     hiddenVersionCodecsHelp:
       'Les versions dont on sait qu’elles sont dans ces codecs ne sont listées nulle part.',
+    hiddenRipTypes: 'Exclure ces rips',
+    hiddenRipTypesHelp:
+      'Les versions dont le nom, la description ou le nom de fichier porte une de ces étiquettes sont retirées partout, même quand il ne reste aucune autre version du titre. Les étiquettes sont reconnues comme mots entiers : CAM, HDCAM, TS, HD-TS, TELESYNC, TC, TELECINE, SCR, DVDSCR, SCREENER, R5, WORKPRINT, etc. Toutes par défaut.',
+    ripTypes: {
+      cam: 'CAM (CAM, HDCAM, CAMRip)',
+      telesync: 'Telesync (TS, HD-TS, PDVD)',
+      telecine: 'Telecine (TC, HDTC)',
+      screener: 'Screener (SCR, DVDSCR, R5)',
+      workprint: 'Workprint (WP)',
+    },
     hiddenVersionWords: 'Masquer les versions dont les libellés contiennent',
     hiddenVersionWordsHelp: (r: RangeText) =>
       `Un mot ou une expression par ligne, cherché sans tenir compte des majuscules dans le nom, la description et le nom de fichier d’une version : pour les addons qui disent dans leurs libellés qu’un fichier n’est pas encore prêt à être lu. Jusqu’à ${r.max} lignes ; aucun par défaut.`,
@@ -725,10 +735,10 @@ const settings: typeof en = {
     openWebPlayer: 'Ouvrir le lecteur web',
     customCss: 'CSS personnalisé',
     customCssHelp:
-      'Appliqué à toutes les pages du lecteur web, pour tous les utilisateurs, comme le CSS personnalisé de Jellyfin. Chacun peut le désactiver dans Paramètres › Affichage. Par défaut, il contient la feuille de style du thème LumaaGlaass, qui va avec le JavaScript personnalisé par défaut : videz les deux pour garder l’apparence d’origine du lecteur web.',
+      'Appliqué à toutes les pages du lecteur web, pour tous les utilisateurs, comme le CSS personnalisé de Jellyfin. Chacun peut le désactiver dans Paramètres › Affichage. Par défaut, il contient le thème AIOStreams : surfaces presque noires, accent violet et police Inter. Videz-le pour garder l’apparence d’origine du lecteur web.',
     customJs: 'JavaScript personnalisé',
     customJsHelp:
-      'Chargé par toutes les pages du lecteur web, après ses propres scripts. Vide, rien n’est chargé. Par défaut, il charge le script du thème LumaaGlaass, qui va avec le CSS personnalisé par défaut.',
+      'Chargé par toutes les pages du lecteur web, après ses propres scripts. Vide, rien n’est chargé, ce qui est le défaut.',
     customJsWarningTitle: 'Ne collez que du code de confiance',
     customJsWarning:
       'Ce script s’exécute dans le navigateur de chaque utilisateur qui ouvre le lecteur web de ce serveur, avec son compte. Il peut lire ce qu’il voit et agir à sa place.',

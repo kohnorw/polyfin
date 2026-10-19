@@ -359,6 +359,8 @@ export type Settings = {
   hiddenVersionCodecs: VersionCodec[]
   /** Hides the versions whose labels hold one of these words, in any letter case. */
   hiddenVersionWords: string[]
+  /** Excludes the versions tagged as these pre-release rips, even when none is left. */
+  hiddenRipTypes: RipType[]
   /** Ends version names with how the app asking plays each, as its last playback decides it. */
   nameHowVersionsPlay: boolean
   /** Times the addons' subtitles to the version played, against when it has speech. */
@@ -594,6 +596,7 @@ export type VersionCriterion =
   | 'hdr-last'
   | 'source'
 export type VersionCodec = 'av1' | 'hevc' | 'vp9' | 'h264' | 'vc1' | 'mpeg4' | 'mpeg2video'
+export type RipType = 'cam' | 'telesync' | 'telecine' | 'screener' | 'workprint'
 /** A source of the server listing versions of movies and episodes, in Content › Sources order. */
 export type VersionSource = { id: string; name: string }
 export type ToneMappingAlgorithm =

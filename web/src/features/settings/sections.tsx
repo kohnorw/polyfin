@@ -8,6 +8,7 @@ import {
   type AcmeChallenge,
   type HttpsMode,
   type Settings,
+  type RipType,
   type VersionCodec,
   type VersionCriterion,
 } from '@/api'
@@ -377,6 +378,37 @@ function Playback({ form, update, error, number, range, limits }: SectionFormApi
             onValue={(hiddenVersionWords) => update({ hiddenVersionWords })}
           />
         </FieldRow>
+        <SettingRow anchor="hidden-rip-types">
+          <fieldset aria-describedby="hidden-rip-types-help">
+            <legend className="text-[15px] font-medium tracking-[-0.01em] text-ink">
+              {s.hiddenRipTypes}
+            </legend>
+            <p id="hidden-rip-types-help" className="mt-1 max-w-[60ch] text-small text-ink-3">
+              {s.hiddenRipTypesHelp}
+            </p>
+            <div className="mt-3.5 grid grid-cols-2 gap-3 sm:grid-cols-3">
+              {((form.bounds.hiddenRipTypes?.choices ?? []) as RipType[]).map((kind, _, all) => (
+                <Checkbox
+                  key={kind}
+                  label={s.ripTypes[kind]}
+                  checked={form.hiddenRipTypes.includes(kind)}
+                  onChange={(checked) =>
+                    update({
+                      hiddenRipTypes: all.filter((other) =>
+                        other === kind ? checked : form.hiddenRipTypes.includes(other),
+                      ),
+                    })
+                  }
+                />
+              ))}
+            </div>
+            {error('hidden-rip-types') && (
+              <div className="mt-2">
+                <FieldError>{error('hidden-rip-types')}</FieldError>
+              </div>
+            )}
+          </fieldset>
+        </SettingRow>
       </SettingsGroup>
       <SettingsGroup title={s.playbackHistoryGroup}>
         <SwitchRow

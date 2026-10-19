@@ -302,6 +302,23 @@ var VersionCriteria = []string{"language", "resolution-high", "resolution-low", 
 // efficient first.
 var VersionCodecs = []string{"av1", "hevc", "vp9", "h264", "vc1", "mpeg4", "mpeg2video"}
 
+// RipTypes are the kinds of pre-release rips Settings.HiddenRipTypes can
+// exclude: recordings made in a cinema with a camera (cam) or from its
+// audio and projection feeds (telesync, telecine), copies sent out ahead of
+// release (screener, R5 included) and unfinished cuts (workprint). Each is
+// told by the release tags of its labels and file name (see RipTags).
+var RipTypes = []string{"cam", "telesync", "telecine", "screener", "workprint"}
+
+// RipTags are the release tags naming each of RipTypes, in lower case,
+// matched as whole words of a version's labels and file name.
+var RipTags = map[string][]string{
+	"cam":       {"cam", "camrip", "hdcam", "hqcam", "tscam", "newcam"},
+	"telesync":  {"ts", "hdts", "tsrip", "telesync", "pdvd", "predvd", "predvdrip", "hqts"},
+	"telecine":  {"tc", "hdtc", "telecine", "tcrip"},
+	"screener":  {"scr", "screener", "dvdscr", "dvdscreener", "bdscr", "webscr", "webscreener", "r5", "r6"},
+	"workprint": {"workprint", "wp"},
+}
+
 // The bounds of the version rules: MaxVersionCriteria criteria order the
 // versions at most, MaxVersionSources sources are placed at most, versions
 // are hidden above MaxHideVersionsLargerGB at most, and
@@ -335,6 +352,9 @@ var (
 	ErrInvalidHideVersionsLarger  = errors.New("invalid size above which versions are hidden")
 	ErrInvalidHiddenVersionCodecs = errors.New("invalid hidden video codecs")
 	ErrInvalidHiddenVersionWords  = errors.New("invalid words hiding versions")
+	// ErrInvalidHiddenRipTypes reports a HiddenRipTypes holding a value
+	// that is not one of RipTypes, or one twice.
+	ErrInvalidHiddenRipTypes = errors.New("invalid rip types excluded")
 )
 
 // VersionCriterionKind is what a criterion of VersionCriteria looks at,
@@ -354,6 +374,16 @@ func validVersionOrder(order []string) bool {
 	for i, criterion := range order {
 		if !slices.Contains(VersionCriteria, criterion) ||
 			slices.ContainsFunc(order[:i], func(before string) bool { return VersionCriterionKind(before) == VersionCriterionKind(criterion) }) {
+			return false
+		}
+	}
+	return true
+}
+
+// validRipTypes reports whether types are some of RipTypes, each once.
+func validRipTypes(types []string) bool {
+	for i, kind := range types {
+		if !slices.Contains(RipTypes, kind) || slices.Contains(types[:i], kind) {
 			return false
 		}
 	}
@@ -1276,6 +1306,11 @@ type Settings struct {
 	HideVersionsLargerGB int
 	HiddenVersionCodecs  []string
 	HiddenVersionWords   []string
+	// HiddenRipTypes excludes the versions whose labels or file name tag
+	// them as one of these kinds of pre-release rips, of RipTypes: CAM,
+	// telesync and the like. Unlike the rules above, these are excluded
+	// even when no other version is left. Every kind by default.
+	HiddenRipTypes []string
 	// NameHowVersionsPlay ends the names of a movie's or an episode's
 	// versions with how the app asking plays each, as the device profile of
 	// its last PlaybackInfo decides it.
@@ -1691,7 +1726,7 @@ const settingsColumns = "server_name, quick_connect_enabled, legacy_authorizatio
 	"two_step_administrators, " +
 	"https_mode, https_port, https_redirect, https_certificate, https_private_key, acme_hosts, acme_email, acme_terms, acme_challenge, detailed_log, " +
 	"analysis_timeout, version_attempts, prefer_direct_play, " +
-	"version_order, version_codec_order, version_source_order, hide_versions_larger_gb, hidden_version_codecs, hidden_version_words, name_how_versions_play, " +
+	"version_order, version_codec_order, version_source_order, hide_versions_larger_gb, hidden_version_codecs, hidden_version_words, hidden_rip_types, name_how_versions_play, " +
 	"sync_addon_subtitles, max_conversions, max_conversion_height, converted_downloads, subtitle_ocr, subtitle_ocr_tracks, " +
 	"encoder_preset, h264_quality, hevc_quality, allow_hevc_encoding, hardware_acceleration, hardware_decoding_codecs, " +
 	"adaptive_quality, " +
@@ -1738,7 +1773,7 @@ func (settings *Settings) fields() []any {
 		&settings.ACMEHosts, &settings.ACMEEmail, &settings.ACMETerms, &settings.ACMEChallenge, &settings.DetailedLog,
 		&settings.AnalysisTimeout, &settings.VersionAttempts, &settings.PreferDirectPlay,
 		&settings.VersionOrder, &settings.VersionCodecOrder, &settings.VersionSourceOrder, &settings.HideVersionsLargerGB, &settings.HiddenVersionCodecs,
-		&settings.HiddenVersionWords,
+		&settings.HiddenVersionWords, &settings.HiddenRipTypes,
 		&settings.NameHowVersionsPlay,
 		&settings.SyncAddonSubtitles, &settings.MaxConversions, &settings.MaxConversionHeight, &settings.ConvertedDownloads, &settings.SubtitleOCR, &settings.SubtitleOCRTracks,
 		&settings.EncoderPreset, &settings.H264Quality, &settings.HevcQuality, &settings.AllowHevcEncoding, &settings.HardwareAcceleration, &settings.HardwareDecodingCodecs,
@@ -2061,6 +2096,16 @@ func (s *Store) UpdateSettings(ctx context.Context, settings Settings) (Settings
 	if err != nil {
 		return Settings{}, err
 	}
+	if !validRipTypes(settings.HiddenRipTypes) {
+		return Settings{}, ErrInvalidHiddenRipTypes
+	}
+	rips := []string{}
+	for _, kind := range RipTypes {
+		if slices.Contains(settings.HiddenRipTypes, kind) {
+			rips = append(rips, kind)
+		}
+	}
+	settings.HiddenRipTypes = rips
 	// The lists are kept apart from the caller's, none being an empty
 	// list: the columns hold no NULL. The codecs hidden are kept in the
 	// order of VersionCodecs.

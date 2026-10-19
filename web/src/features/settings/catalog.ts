@@ -228,6 +228,13 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'playback',
+    anchor: 'hidden-rip-types',
+    label: (t) => s(t).hiddenRipTypes,
+    help: (t) => s(t).hiddenRipTypesHelp,
+    codes: ['invalid_hidden_rip_types'],
+  },
+  {
+    section: 'playback',
     anchor: 'playback-history',
     label: (t) => s(t).playbackHistory,
     help: (t) => s(t).playbackHistoryHelp,
