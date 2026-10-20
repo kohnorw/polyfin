@@ -719,6 +719,7 @@ const settings = {
     webPlayerHelp:
       'What the web player (jellyfin-web, at /web/) shows besides its own pages. The script applies the next time a page of the web player is loaded; the web player keeps the CSS and the sign-in message for up to a minute.',
     openWebPlayer: 'Open the web player',
+    brandingHelp: 'The logo the web player shows in place of Jellyfin’s, and on the register page.',
     brandLogo: 'Logo',
     brandLogoHelp:
       'Shown in place of the Jellyfin logo in the web player: its header, menu, splash and sign-in screens and the browser tab, and in the Jellyfin apps that open the web player (desktop, Android, iOS). Apps with screens of their own, such as Infuse or Swiftfin, keep theirs. PNG, JPEG, WebP, GIF or SVG, up to 1 MB; a wide logo suits the header best.',

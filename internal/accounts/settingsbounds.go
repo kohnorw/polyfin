@@ -11,7 +11,7 @@ import (
 // whole in the setting (it fetches only the Inter font), and no script.
 // Changing the CSS takes a new migration replacing the column default and
 // the values still equal to the last one, which
-// scripts/aiostreams-look-migration.py writes (0145, then 0147).
+// scripts/aiostreams-look-migration.py writes (0145, 0147, 0148).
 //
 //go:embed aiostreams_theme.css
 var DefaultCustomCss string

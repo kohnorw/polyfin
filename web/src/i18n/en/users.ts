@@ -3,6 +3,12 @@ const users = {
   users: {
     title: 'Users',
     description: 'Create and manage the accounts allowed to use this server.',
+    registrationTitle: 'Registration',
+    registration: 'Let people register',
+    registrationHelp:
+      'Anyone who opens /register on this server can create a member account with the default settings. Off, the page says registration is closed.',
+    registrationOpenPage: 'Open the page',
+    registrationFailed: 'The setting could not be saved. Try again.',
     listTitle: 'Accounts',
     empty: 'No user yet.',
     administrator: 'Administrator',

@@ -4,6 +4,12 @@ const users: typeof en = {
   users: {
     title: 'Utilisateurs',
     description: 'Créez et gérez les comptes autorisés à utiliser ce serveur.',
+    registrationTitle: 'Inscription',
+    registration: 'Permettre l’inscription',
+    registrationHelp:
+      'Quiconque ouvre /register sur ce serveur peut créer un compte membre avec les réglages par défaut. Désactivée, la page indique que les inscriptions sont fermées.',
+    registrationOpenPage: 'Ouvrir la page',
+    registrationFailed: 'Le réglage n’a pas pu être enregistré. Réessayez.',
     listTitle: 'Comptes',
     empty: 'Aucun utilisateur pour le moment.',
     administrator: 'Administrateur',

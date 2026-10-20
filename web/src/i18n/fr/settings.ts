@@ -739,6 +739,8 @@ const settings: typeof en = {
     webPlayerHelp:
       'Ce que le lecteur web (jellyfin-web, sur /web/) affiche en plus de ses propres pages. Le script s’applique au prochain chargement d’une page du lecteur web ; le lecteur web garde le CSS et le message de connexion jusqu’à une minute.',
     openWebPlayer: 'Ouvrir le lecteur web',
+    brandingHelp:
+      'Le logo que le lecteur web affiche à la place de celui de Jellyfin, et sur la page d’inscription.',
     brandLogo: 'Logo',
     brandLogoHelp:
       'Affiché à la place du logo Jellyfin dans le lecteur web : son en-tête, son menu, ses écrans de démarrage et de connexion et l’onglet du navigateur, ainsi que dans les applications Jellyfin qui ouvrent le lecteur web (bureau, Android, iOS). Les applications qui ont leurs propres écrans, comme Infuse ou Swiftfin, gardent le leur. PNG, JPEG, WebP, GIF ou SVG, 1 Mo au plus ; un logo large convient le mieux à l’en-tête.',

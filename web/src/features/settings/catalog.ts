@@ -1229,7 +1229,7 @@ export const settingEntries: readonly SettingEntry[] = [
     codes: ['invalid_custom_js'],
   },
   {
-    section: 'web-player',
+    section: 'branding',
     anchor: 'brand-logo',
     label: (t) => s(t).brandLogo,
     help: (t) => s(t).brandLogoHelp,

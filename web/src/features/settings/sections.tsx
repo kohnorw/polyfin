@@ -95,6 +95,7 @@ export const sectionFields: Record<SettingsSectionId, (api: SectionFormApi) => R
   backups: (api) => <Backups {...api} />,
   notifications: (api) => <Notifications {...api} />,
   'web-player': (api) => <WebPlayer {...api} />,
+  branding: (api) => <Branding {...api} />,
   diagnostics: (api) => <DiagnosticsFields {...api} />,
 }
 
@@ -1549,6 +1550,23 @@ function Backups({ form, update, error, number, range, limits }: SectionFormApi)
   )
 }
 
+function Branding({ form, update, error }: SectionFormApi) {
+  const { t } = useI18n()
+  const s = t.settings
+  return (
+    <SettingsGroup>
+      <FieldRow
+        anchor="brand-logo"
+        label={s.brandLogo}
+        help={s.brandLogoHelp}
+        error={error('brand-logo')}
+      >
+        <LogoField value={form.brandLogo} onValue={(brandLogo) => update({ brandLogo })} />
+      </FieldRow>
+    </SettingsGroup>
+  )
+}
+
 function WebPlayer({ form, update, error, limits }: SectionFormApi) {
   const { t } = useI18n()
   const s = t.settings
@@ -1572,14 +1590,6 @@ function WebPlayer({ form, update, error, limits }: SectionFormApi) {
             </ExternalButtonLink>
           </SettingRow>
         )}
-        <FieldRow
-          anchor="brand-logo"
-          label={s.brandLogo}
-          help={s.brandLogoHelp}
-          error={error('brand-logo')}
-        >
-          <LogoField value={form.brandLogo} onValue={(brandLogo) => update({ brandLogo })} />
-        </FieldRow>
         <SettingRow anchor="custom-css">
           <CodeEditor
             label={s.customCss}
