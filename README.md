@@ -5,7 +5,8 @@
 > - **Rip exclusion list** (Settings › Playback): CAM, telesync, telecine, screener and workprint releases are removed from every title, each type toggled on its own, all on by default.
 > - **NostalgiaTV and other live-TV apps:** library-wide episode listings (`/Items?IncludeItemTypes=Episode&Recursive=true`, with or without a library, narrowed by `Genres`/`GenreIds`) and `/Genres` without a library, answered from a pool of each TV library's first 40 series, ported from AIOFin.
 > - **Hide specials** toggle (Settings › Playback): season 0 left out of seasons, episode lists and Next Up, on by default.
-> - **AIOStreams' own web client at `/web/`**, the same app AIOStreams serves to Jellyfin apps (built from its source at a pinned commit, AGPL-3.0, see `third_party/aiostreams-web`), with **Plex-style subtitles** by default (white, bold, outlined, shadowed, no box). Set `POLYFIN_WEB_DIR=/usr/share/polyfin/jellyfin-web` to serve jellyfin-web instead.
+> - **AIOStreams look** for the web player (jellyfin-web, themed by its default Custom CSS: near-black pages, white pill buttons, rounded cards, Inter), with **Plex-style subtitles**.
+> - **Wide collections:** an addon's collection with a landscape poster (`posterShape`), such as streaming-service tiles, shows on wide cards on the home page and in its library.
 > - **Docker image on GitHub:** every push to `main` publishes `ghcr.io/<owner>/polyfin` (see `.github/workflows/docker.yml`). Set `POLYFIN_IMAGE` in `.env` and run `docker compose up -d`.
 
 Polyfin is a self-hosted server that speaks the Jellyfin API. Its content comes from:

@@ -198,14 +198,7 @@ func serveWebIndex(w http.ResponseWriter, r *http.Request, files fs.FS, custom h
 		http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
 		return
 	}
-	if _, err := fs.Stat(files, aiostreamsMarker); err == nil {
-		// AIOStreams' web app in place of jellyfin-web (see
-		// third_party/aiostreams-web) is served as it is built: Polyfin's
-		// script and the custom script (LumaaGlaass by default) are made
-		// for jellyfin-web's pages, which it does not have.
-	} else {
-		page = withWebScripts(page, custom)
-	}
+	page = withWebScripts(page, custom)
 	header := w.Header()
 	header.Set("Content-Type", "text/html; charset=utf-8")
 	header.Set("Cache-Control", "no-cache")
@@ -229,10 +222,6 @@ func withWebScripts(page []byte, custom hashedScript) []byte {
 	}
 	return slices.Concat(page[:at], webScriptTag, customTag, page[at:])
 }
-
-// aiostreamsMarker is the file the folder of AIOStreams' web app holds, which
-// Polyfin serves at /web/ in place of jellyfin-web.
-const aiostreamsMarker = ".aiostreams-web"
 
 func etag(content []byte) string {
 	sum := sha256.Sum256(content)

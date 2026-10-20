@@ -718,10 +718,10 @@ const settings = {
     openWebPlayer: 'Open the web player',
     customCss: 'Custom CSS',
     customCssHelp:
-      'Applied to every page of the web player, for every user, as Jellyfin’s custom CSS. Users can turn it off under Settings › Display. By default, it holds the LumaaGlaass theme’s stylesheet, which goes with the default Custom JavaScript: empty both to keep the web player’s own look.',
+      'Applied to every page of the web player, for every user, as Jellyfin’s custom CSS. Users can turn it off under Settings › Display. By default, it holds the AIOStreams look: near-black pages, white pill buttons, rounded cards, the Inter font and Plex-style subtitles. Empty it to keep the web player’s own look.',
     customJs: 'Custom JavaScript',
     customJsHelp:
-      'Loaded by every page of the web player, after its own scripts. Empty loads nothing. By default, it loads the LumaaGlaass theme’s script, which goes with the default Custom CSS.',
+      'Loaded by every page of the web player, after its own scripts. Empty loads nothing, the default.',
     customJsWarningTitle: 'Only paste code you trust',
     customJsWarning:
       'This script runs in the browser of every user who opens the web player on this server, with their account. It can read what they see and act for them.',
