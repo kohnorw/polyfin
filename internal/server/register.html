@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#070707">
+<meta name="color-scheme" content="dark">
+<meta name="robots" content="noindex">
+<title>Register</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
+<style>
+  :root {
+    --bg: #070707; --field: #161616; --border: rgba(255, 255, 255, 0.1);
+    --text: #e6e6e6; --muted: rgba(255, 255, 255, 0.55); --danger: #f27d74;
+    --font: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; min-height: 100%; background: var(--bg); color: var(--text); font-family: var(--font); }
+  body { display: flex; justify-content: center; padding: 6vh 16px 48px; }
+  main { width: 100%; max-width: 900px; perspective: 1600px; }
+  .logo { display: block; margin: 0 auto 2.25rem; max-width: min(320px, 70%); max-height: 96px; object-fit: contain; }
+  .card { position: relative; transition: transform 0.8s cubic-bezier(0.2, 0.7, 0.2, 1); transform-style: preserve-3d; }
+  .card.flipped { transform: rotateY(180deg); }
+  .face { backface-visibility: hidden; -webkit-backface-visibility: hidden; }
+  .back { position: absolute; inset: 0 0 auto 0; transform: rotateY(180deg); }
+  .card.flipped .front { pointer-events: none; }
+  .card:not(.flipped) .back { pointer-events: none; }
+  label { display: block; color: var(--muted); font-size: 1.05rem; margin: 0 0 0.6rem; }
+  .field { margin-bottom: 1.6rem; }
+  input {
+    width: 100%; height: 3.4rem; padding: 0 1rem; font: inherit; font-size: 1.05rem; color: var(--text);
+    background: var(--field); border: 1px solid var(--border); border-radius: 0.6rem; outline: none;
+  }
+  input:focus { border-color: rgba(255, 255, 255, 0.45); box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.08); }
+  button, .button {
+    display: flex; align-items: center; justify-content: center; width: 100%; height: 3.6rem; margin-top: 0.6rem;
+    font: inherit; font-size: 1.1rem; font-weight: 600; color: #000; background: #fff; border: none;
+    border-radius: 999px; cursor: pointer; text-decoration: none;
+  }
+  button:hover, .button:hover { background: #e6e6e6; }
+  button:disabled { opacity: 0.6; cursor: default; }
+  .secondary { color: #fff; background: rgba(255, 255, 255, 0.08); border: 1px solid var(--border); }
+  .secondary:hover { background: rgba(255, 255, 255, 0.14); }
+  .error { min-height: 1.4rem; margin: 0 0 0.6rem; color: var(--danger); font-size: 0.95rem; }
+  h1 { margin: 0 0 0.4rem; text-align: center; font-size: 1.9rem; font-weight: 800; letter-spacing: -0.02em; color: #fff; }
+  .lead { margin: 0 0 1.8rem; text-align: center; color: var(--muted); }
+  .details { margin: 0 0 1.6rem; padding: 0.4rem 1.25rem; background: var(--field); border: 1px solid var(--border); border-radius: 0.9rem; }
+  .row { display: flex; align-items: center; gap: 1rem; padding: 0.95rem 0; border-bottom: 1px solid var(--border); }
+  .row:last-child { border-bottom: none; }
+  .row dt { flex: none; width: 6.5rem; color: var(--muted); }
+  .row dd { flex: 1; margin: 0; min-width: 0; overflow-wrap: anywhere; color: #fff; font-weight: 500; }
+  .copy {
+    flex: none; width: auto; height: 2.2rem; margin: 0; padding: 0 0.9rem; font-size: 0.85rem; font-weight: 500;
+    color: #fff; background: rgba(255, 255, 255, 0.08); border: 1px solid var(--border);
+  }
+  .copy:hover { background: rgba(255, 255, 255, 0.14); }
+  .closed { text-align: center; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<main>
+  <img class="logo" id="logo" alt="">
+  <div id="closed" class="closed" hidden>
+    <h1>Registration is closed</h1>
+    <p class="lead">This server is not taking new accounts right now.</p>
+    <a class="button" id="back" href="web/">Go back</a>
+  </div>
+  <div class="card" id="card" hidden>
+    <form class="face front" id="form" novalidate>
+      <div class="field">
+        <label for="name">User</label>
+        <input id="name" name="name" autocomplete="username" autocapitalize="none" spellcheck="false" required>
+      </div>
+      <div class="field">
+        <label for="password">Password</label>
+        <input id="password" name="password" type="password" autocomplete="new-password" required>
+      </div>
+      <p class="error" id="error" role="alert"></p>
+      <button type="submit" id="submit">Register</button>
+    </form>
+    <section class="face back" id="done" aria-live="polite">
+      <h1>You're all set</h1>
+      <p class="lead">Sign in to the server with these details in any Jellyfin app.</p>
+      <dl class="details">
+        <div class="row"><dt>Server</dt><dd id="out-server"></dd><button type="button" class="copy" data-copy="out-server">Copy</button></div>
+        <div class="row"><dt>Username</dt><dd id="out-name"></dd><button type="button" class="copy" data-copy="out-name">Copy</button></div>
+        <div class="row"><dt>Password</dt><dd id="out-password"></dd><button type="button" class="copy" data-copy="out-password">Copy</button></div>
+      </dl>
+      <a class="button" id="signin" href="web/">Go to sign in</a>
+    </section>
+  </div>
+</main>
+<script>
+(function () {
+  // Everything is found from this page's own address, so that it works at
+  // the server's root, under /jellyfin, or under a reverse proxy's path.
+  var base = location.pathname.replace(/\/register\/?$/i, '')
+  var server = location.origin + base
+  var api = base + '/register/api'
+  var web = base + '/web/'
+  document.getElementById('back').href = web
+  document.getElementById('signin').href = web
+
+  var logo = document.getElementById('logo')
+  logo.onerror = function () {
+    logo.onerror = function () { logo.hidden = true }
+    logo.src = base + '/register/jellyfin-logo.png'
+  }
+  logo.src = base + '/Branding/Logo'
+
+  var messages = {
+    name_taken: 'That user name is taken. Choose another.',
+    invalid_name: 'Enter a user name.',
+    invalid_password: 'The password must be at least 8 characters.',
+    too_many_attempts: 'Too many tries from this address. Wait a while, then try again.',
+    registration_closed: 'Registration is closed.',
+  }
+
+  fetch(api, { cache: 'no-store' }).then(function (r) { return r.json() }).then(function (info) {
+    if (info.serverName) document.title = 'Register · ' + info.serverName
+    document.getElementById(info.open ? 'card' : 'closed').hidden = false
+    if (info.open) document.getElementById('name').focus()
+  }).catch(function () {
+    document.getElementById('card').hidden = false
+  })
+
+  var form = document.getElementById('form')
+  var error = document.getElementById('error')
+  var submit = document.getElementById('submit')
+  form.addEventListener('submit', function (event) {
+    event.preventDefault()
+    var name = form.name.value.trim()
+    var password = form.password.value
+    error.textContent = ''
+    if (!name) { error.textContent = messages.invalid_name; return }
+    if (password.length < 8) { error.textContent = messages.invalid_password; return }
+    submit.disabled = true
+    fetch(api, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: name, password: password }),
+    }).then(function (r) {
+      return r.json().catch(function () { return {} }).then(function (body) { return { ok: r.ok, body: body } })
+    }).then(function (result) {
+      submit.disabled = false
+      if (!result.ok) {
+        var code = result.body && (result.body.error || result.body.code)
+        if (code === 'registration_closed') {
+          document.getElementById('card').hidden = true
+          document.getElementById('closed').hidden = false
+          return
+        }
+        error.textContent = messages[code] || 'Registration failed. Try again.'
+        return
+      }
+      document.getElementById('out-server').textContent = server
+      document.getElementById('out-name').textContent = (result.body.user && result.body.user.name) || name
+      document.getElementById('out-password').textContent = password
+      form.password.value = ''
+      document.getElementById('card').classList.add('flipped')
+    }).catch(function () {
+      submit.disabled = false
+      error.textContent = 'The server could not be reached. Try again.'
+    })
+  })
+
+  document.querySelectorAll('[data-copy]').forEach(function (button) {
+    button.addEventListener('click', function () {
+      var text = document.getElementById(button.getAttribute('data-copy')).textContent
+      var done = function () { button.textContent = 'Copied'; setTimeout(function () { button.textContent = 'Copy' }, 1500) }
+      if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done, function () {})
+      else {
+        var area = document.createElement('textarea')
+        area.value = text; document.body.appendChild(area); area.select()
+        try { document.execCommand('copy'); done() } catch (e) {}
+        area.remove()
+      }
+    })
+  })
+})()
+</script>
+</body>
+</html>

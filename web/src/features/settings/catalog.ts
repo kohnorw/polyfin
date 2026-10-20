@@ -705,6 +705,12 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'security',
+    anchor: 'registration',
+    label: (t) => s(t).registration,
+    help: (t) => s(t).registrationHelp,
+  },
+  {
+    section: 'security',
     anchor: 'share-links',
     label: (t) => s(t).shareLinks,
     help: (t) => s(t).shareLinksHelp,
@@ -1221,6 +1227,14 @@ export const settingEntries: readonly SettingEntry[] = [
     help: (t) => `${s(t).customJsHelp} ${s(t).customJsWarning}`,
     keywords: ['javascript', 'js', 'jellyfin-web'],
     codes: ['invalid_custom_js'],
+  },
+  {
+    section: 'web-player',
+    anchor: 'brand-logo',
+    label: (t) => s(t).brandLogo,
+    help: (t) => s(t).brandLogoHelp,
+    keywords: ['markdown', 'disclaimer'],
+    codes: ['invalid_brand_logo'],
   },
   {
     section: 'web-player',

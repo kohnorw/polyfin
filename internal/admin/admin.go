@@ -50,7 +50,7 @@ const (
 	// maxSettingsBody fits the settings with their custom CSS and script at
 	// their largest, each character written as JSON's longest escape
 	// (\u003c), plus the other settings.
-	maxSettingsBody = 6*(2*accounts.MaxCustomCodeBytes+accounts.MaxLoginDisclaimerBytes) + maxBody
+	maxSettingsBody = 6*(2*accounts.MaxCustomCodeBytes+accounts.MaxLoginDisclaimerBytes) + 2*accounts.MaxBrandLogoBytes + maxBody
 	readyWait       = 2 * time.Second
 )
 
@@ -198,6 +198,8 @@ func New(options Options) http.Handler {
 	mux.HandleFunc("POST /admin/api/session/two-step", h.signInSecondStep)
 	mux.HandleFunc("GET /admin/api/invite/{token}", h.publicInvite)
 	mux.HandleFunc("POST /admin/api/invite/{token}", h.acceptInvite)
+	mux.HandleFunc("GET /admin/api/register", h.registration)
+	mux.HandleFunc("POST /admin/api/register", h.register)
 
 	mux.Handle("GET /admin/api/session", h.signedInAnyHour(h.session))
 	mux.Handle("DELETE /admin/api/session", h.signedInAnyHour(h.signOut))
@@ -593,6 +595,7 @@ func accountError(w http.ResponseWriter, err error) bool {
 		{accounts.ErrInvalidCustomCss, http.StatusBadRequest, "invalid_custom_css"},
 		{accounts.ErrInvalidCustomJs, http.StatusBadRequest, "invalid_custom_js"},
 		{accounts.ErrInvalidLoginDisclaimer, http.StatusBadRequest, "invalid_login_disclaimer"},
+		{accounts.ErrInvalidBrandLogo, http.StatusBadRequest, "invalid_brand_logo"},
 		{accounts.ErrInvalidTraktApp, http.StatusBadRequest, "invalid_trakt_app"},
 		{accounts.ErrInvalidSimklApp, http.StatusBadRequest, "invalid_simkl_app"},
 		{accounts.ErrInvalidLastFMApp, http.StatusBadRequest, "invalid_lastfm_app"},

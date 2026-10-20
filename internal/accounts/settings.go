@@ -2,6 +2,7 @@ package accounts
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"net"
 	"net/mail"
@@ -679,6 +680,10 @@ var (
 	ErrInvalidCustomCss       = errors.New("invalid custom CSS")
 	ErrInvalidCustomJs        = errors.New("invalid custom JavaScript")
 	ErrInvalidLoginDisclaimer = errors.New("invalid login disclaimer")
+	// ErrInvalidBrandLogo reports a Settings.BrandLogo that is not an
+	// image of BrandLogoTypes as a base64 data URL, or larger than
+	// MaxBrandLogoBytes once decoded.
+	ErrInvalidBrandLogo = errors.New("invalid brand logo")
 )
 
 // The largest Settings.CustomCss and CustomJs, and LoginDisclaimer, in
@@ -1231,6 +1236,10 @@ type Settings struct {
 	// ShareLink). Off, no link is made and every link is refused, without
 	// being deleted.
 	ShareLinks bool
+	// Registration lets anyone who opens /register create a member
+	// account with the default settings; closed, the page says so. On by
+	// default.
+	Registration bool
 	// LoginAttempts is how many wrong passwords in a row block an account
 	// for LoginBlock; 0 never blocks.
 	LoginAttempts int
@@ -1460,6 +1469,11 @@ type Settings struct {
 	CustomCss       string
 	CustomJs        string
 	LoginDisclaimer string
+	// BrandLogo is the logo the web player shows in place of Jellyfin's
+	// (its header, menu, splash and sign-in screens, the TV layout and the
+	// browser tab), as a base64 data URL of one of BrandLogoTypes, served at
+	// /Branding/Logo; empty for Jellyfin's own.
+	BrandLogo string
 	// AddVersionsToOpenPage has the web player add the versions the
 	// addons find to a title's page while it is open (see
 	// /Polyfin/Items/{id}/Versions). When off, it only replaces the
@@ -1714,6 +1728,31 @@ func validTrackingApp(credential string) bool {
 }
 
 // validWebText reports whether text fits in max bytes and holds no NUL.
+// MaxBrandLogoBytes is the largest Settings.BrandLogo image, decoded.
+const MaxBrandLogoBytes = 1 << 20
+
+// BrandLogoTypes are the image types a Settings.BrandLogo may be.
+var BrandLogoTypes = []string{"image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml"}
+
+// BrandLogoImage decodes a Settings.BrandLogo data URL into its type and
+// bytes; ok is false for anything else.
+func BrandLogoImage(logo string) (contentType string, image []byte, ok bool) {
+	header, data, found := strings.Cut(strings.TrimPrefix(logo, "data:"), ",")
+	if !found || !strings.HasPrefix(logo, "data:") {
+		return "", nil, false
+	}
+	contentType, encoding, _ := strings.Cut(header, ";")
+	if encoding != "base64" || !slices.Contains(BrandLogoTypes, contentType) ||
+		base64.StdEncoding.DecodedLen(len(data)) > MaxBrandLogoBytes+3 {
+		return "", nil, false
+	}
+	image, err := base64.StdEncoding.DecodeString(data)
+	if err != nil || len(image) == 0 || len(image) > MaxBrandLogoBytes {
+		return "", nil, false
+	}
+	return contentType, image, true
+}
+
 func validWebText(text string, max int) bool {
 	return len(text) <= max && !strings.ContainsRune(text, 0)
 }
@@ -1725,7 +1764,7 @@ const settingsColumns = "server_name, quick_connect_enabled, legacy_authorizatio
 	"dlna, dlna_name, dlna_new_devices_user, dlna_mark_played, " +
 	"skip_buttons, publicmetadb_key, theintrodb_key, segment_order, segment_sources_off, audio_intros, similar_titles, generate_images, lyrics, even_volume, measure_loudness, played_percent, resume_percent, version_list_minutes, catalog_refresh_minutes, " +
 	"mdblist_ratings_key, critic_rating_shows, tmdb_key, " +
-	"personal_addons, server_imports, share_links, login_attempts, inactive_device_days, known_proxies, known_proxy_names, " +
+	"personal_addons, server_imports, share_links, registration, login_attempts, inactive_device_days, known_proxies, known_proxy_names, " +
 	"two_step_administrators, " +
 	"https_mode, https_port, https_redirect, https_certificate, https_private_key, acme_hosts, acme_email, acme_terms, acme_challenge, detailed_log, " +
 	"analysis_timeout, version_attempts, prefer_direct_play, " +
@@ -1740,7 +1779,7 @@ const settingsColumns = "server_name, quick_connect_enabled, legacy_authorizatio
 	"recording_commercials, " +
 	"live_tv_refresh_hours, local_scan_hours, watch_local_folders, " +
 	"convert_recordings, convert_recordings_from, convert_recordings_until, convert_recordings_on_processor, " +
-	"custom_css, custom_js, login_disclaimer, add_versions_to_open_page, trakt_client_id, trakt_client_secret, simkl_client_id, lastfm_api_key, lastfm_secret, " +
+	"custom_css, custom_js, login_disclaimer, brand_logo, add_versions_to_open_page, trakt_client_id, trakt_client_secret, simkl_client_id, lastfm_api_key, lastfm_secret, " +
 	"anilist_client_id, anilist_client_secret, myanimelist_client_id, myanimelist_client_secret, " +
 	"backup_hour, backups_kept, collection_read_hour, collection_library_apps, remuxdb, remuxdb_url, " +
 	"cache_size_gb, vaapi_device, recording, recordings_folder, backups, backup_folder, public_address, " +
@@ -1769,7 +1808,7 @@ func (settings *Settings) fields() []any {
 		&settings.SimilarTitles, &settings.GenerateImages, &settings.Lyrics, &settings.EvenVolume, &settings.MeasureLoudness, &settings.PlayedPercent, &settings.ResumePercent,
 		&settings.VersionListMinutes, &settings.CatalogRefreshMinutes,
 		&settings.MDBListRatingsKey, &settings.CriticRatingShows, &settings.TMDBKey,
-		&settings.PersonalAddons, &settings.ServerImports, &settings.ShareLinks, &settings.LoginAttempts, &settings.InactiveDeviceDays, &settings.KnownProxies,
+		&settings.PersonalAddons, &settings.ServerImports, &settings.ShareLinks, &settings.Registration, &settings.LoginAttempts, &settings.InactiveDeviceDays, &settings.KnownProxies,
 		&settings.KnownProxyNames,
 		&settings.TwoStepAdministrators,
 		&settings.HTTPSMode, &settings.HTTPSPort, &settings.HTTPSRedirect, &settings.HTTPSCertificate, &settings.HTTPSPrivateKey,
@@ -1791,7 +1830,7 @@ func (settings *Settings) fields() []any {
 		&settings.LiveTvRefreshHours, &settings.LocalScanHours,
 		&settings.WatchLocalFolders,
 		&settings.ConvertRecordings, &settings.ConvertRecordingsFrom, &settings.ConvertRecordingsUntil, &settings.ConvertRecordingsOnProcessor,
-		&settings.CustomCss, &settings.CustomJs, &settings.LoginDisclaimer, &settings.AddVersionsToOpenPage,
+		&settings.CustomCss, &settings.CustomJs, &settings.LoginDisclaimer, &settings.BrandLogo, &settings.AddVersionsToOpenPage,
 		&settings.TraktClientID, &settings.TraktClientSecret, &settings.SimklClientID,
 		&settings.LastFMAPIKey, &settings.LastFMSecret,
 		&settings.AniListClientID, &settings.AniListClientSecret, &settings.MyAnimeListClientID, &settings.MyAnimeListClientSecret,
@@ -2173,6 +2212,11 @@ func (s *Store) UpdateSettings(ctx context.Context, settings Settings) (Settings
 	}
 	if !validWebText(settings.LoginDisclaimer, MaxLoginDisclaimerBytes) {
 		return Settings{}, ErrInvalidLoginDisclaimer
+	}
+	if settings.BrandLogo != "" {
+		if _, _, ok := BrandLogoImage(settings.BrandLogo); !ok {
+			return Settings{}, ErrInvalidBrandLogo
+		}
 	}
 	if !validTrackingApp(settings.TraktClientID) || !validTrackingApp(settings.TraktClientSecret) {
 		return Settings{}, ErrInvalidTraktApp

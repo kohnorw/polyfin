@@ -295,6 +295,8 @@ export type Settings = {
   personalAddons: boolean
   /** Whether users may import their own watch history from another server, under My account. */
   serverImports: boolean
+  /** Lets anyone who opens /register create a member account. */
+  registration: boolean
   /** Whether users with the permission may share a movie or an episode through a link that expires. */
   shareLinks: boolean
   /** Wrong passwords in a row that block an account for 15 minutes; 0 never blocks. */
@@ -469,6 +471,8 @@ export type Settings = {
   customJs: string
   /** Text, Markdown or HTML jellyfin-web shows under its sign-in form (Jellyfin's branding). */
   loginDisclaimer: string
+  /** The web player's logo in place of Jellyfin's, as a data URL; empty for Jellyfin's. */
+  brandLogo: string
   /** Whether the web player adds the versions that come to a title's page while it is open. */
   addVersionsToOpenPage: boolean
   /** Trakt app users connect through; both its client ID and secret are needed. */

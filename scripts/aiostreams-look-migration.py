@@ -1,28 +1,35 @@
 #!/usr/bin/env python3
-"""Writes internal/database/migrations/0145_aiostreams_look.sql from
-internal/accounts/aiostreams_theme.css: the web player's default custom CSS
-becomes the AIOStreams look, its default script none, on new servers and on
-servers whose two fields still hold the LumaaGlaass defaults (those 0144
-restored). Run it again after changing the CSS only while 0145 is not yet
-released: a released migration never changes."""
-import pathlib, re
+"""Writes the migration that makes internal/accounts/aiostreams_theme.css, as
+it is now, the web player's default custom CSS: on new servers, and on
+servers whose custom CSS still holds the look as the last migration setting
+it left it, with no custom script. A released migration never changes, so
+after each change of the CSS this writes a new one:
+
+    scripts/aiostreams-look-migration.py 0147_aiostreams_look_mobile
+"""
+import pathlib, re, sys
 
 root = pathlib.Path(__file__).resolve().parent.parent
 mig = root / "internal/database/migrations"
+name = sys.argv[1]
 css = (root / "internal/accounts/aiostreams_theme.css").read_text()
-before = (mig / "0144_web_player_defaults_again.sql").read_text()
-old_css = re.search(r"SET DEFAULT \$css\$(.*?)\$css\$,", before, re.S).group(1)
-old_js = re.search(r"custom_js SET DEFAULT \$js\$(.*?)\$js\$;", before, re.S).group(1)
 assert "$css$" not in css
-(mig / "0145_aiostreams_look.sql").write_text(f"""-- The web player's default custom CSS is the AIOStreams look (see
--- internal/accounts/aiostreams_theme.css), held whole in the setting, and its
--- default custom script none: on new servers, and on servers whose two
--- fields still hold the LumaaGlaass defaults. A server that changed either
--- keeps both as they are.
-ALTER TABLE settings
-    ALTER COLUMN custom_css SET DEFAULT $css${css}$css$,
-    ALTER COLUMN custom_js SET DEFAULT '';
-UPDATE settings SET custom_css = DEFAULT, custom_js = DEFAULT
-    WHERE custom_css = $css${old_css}$css$
-    AND custom_js = $js${old_js}$js$;
+# The CSS the last migration made the default.
+last = None
+for path in sorted(mig.glob("*.sql")):
+    if path.stem == name:
+        continue
+    found = re.search(r"ALTER COLUMN custom_css SET DEFAULT \$css\$(.*?)\$css\$", path.read_text(), re.S)
+    if found:
+        last = found.group(1)
+assert last is not None and last != css, "nothing to change"
+(mig / (name + ".sql")).write_text(f"""-- The AIOStreams look of the web player, as it is now (see
+-- internal/accounts/aiostreams_theme.css), becomes the default custom CSS:
+-- on new servers, and on servers that still hold the look as the last
+-- migration setting it left it, without a custom script. A server that
+-- changed either keeps both as they are.
+ALTER TABLE settings ALTER COLUMN custom_css SET DEFAULT $css${css}$css$;
+UPDATE settings SET custom_css = DEFAULT
+    WHERE custom_css = $css${last}$css$
+    AND custom_js = '';
 """)

@@ -574,6 +574,9 @@ const settings = {
     importEveryMinutes: 'Import connected accounts every',
     importEveryMinutesHelp:
       'How often Polyfin imports again the Stremio and Nuvio accounts users stay connected to, and the watch histories they import from tracking services. A change applies at once: each next import comes this long after the last one. Each import reads the whole account again, so a short interval sends more requests to those services, and, for Stremio, whose terms forbid automated extraction, makes that grey area more pronounced. 6 hours by default.',
+    registration: 'Registration',
+    registrationHelp:
+      'Lets anyone who opens /register on this server create a member account, with the default settings, hidden from the sign-in screen. Off, the page says registration is closed and leads back to the sign-in screen. Each address may register only a few accounts before it waits, as for failed sign-ins.',
     shareLinks: 'Allow share links',
     shareLinksHelp:
       'Users with Can share titles, on their page under Users, may give a movie or an episode to someone without an account, through a link that expires after 1 hour to 30 days. The guest watches in a browser, at 1080p at most and within the user’s quality group, and counts among the user’s playbacks at once. When off, no link can be made and every link is refused, without being deleted. Off by default.',
@@ -716,6 +719,14 @@ const settings = {
     webPlayerHelp:
       'What the web player (jellyfin-web, at /web/) shows besides its own pages. The script applies the next time a page of the web player is loaded; the web player keeps the CSS and the sign-in message for up to a minute.',
     openWebPlayer: 'Open the web player',
+    brandLogo: 'Logo',
+    brandLogoHelp:
+      'Shown in place of the Jellyfin logo in the web player: its header, menu, splash and sign-in screens and the browser tab, and in the Jellyfin apps that open the web player (desktop, Android, iOS). Apps with screens of their own, such as Infuse or Swiftfin, keep theirs. PNG, JPEG, WebP, GIF or SVG, up to 1 MB; a wide logo suits the header best.',
+    brandLogoChoose: 'Choose an image',
+    brandLogoRemove: 'Use the Jellyfin logo',
+    brandLogoNone: 'Jellyfin logo',
+    brandLogoType: 'Choose a PNG, JPEG, WebP, GIF or SVG image.',
+    brandLogoSize: 'Choose an image of 1 MB at most.',
     customCss: 'Custom CSS',
     customCssHelp:
       'Applied to every page of the web player, for every user, as Jellyfin’s custom CSS. Users can turn it off under Settings › Display. By default, it holds the AIOStreams look: near-black pages, white pill buttons, rounded cards, the Inter font and Plex-style subtitles. Empty it to keep the web player’s own look.',

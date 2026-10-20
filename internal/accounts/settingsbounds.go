@@ -9,9 +9,9 @@ import (
 // DefaultCustomCss and DefaultCustomJs are the web player's custom CSS and
 // script on a new server: the AIOStreams look (aiostreams_theme.css), held
 // whole in the setting (it fetches only the Inter font), and no script.
-// Changing them takes a migration replacing the column defaults and the
-// values still equal to these (see 0145_aiostreams_look.sql, which
-// scripts/aiostreams-look-migration.py writes).
+// Changing the CSS takes a new migration replacing the column default and
+// the values still equal to the last one, which
+// scripts/aiostreams-look-migration.py writes (0145, then 0147).
 //
 //go:embed aiostreams_theme.css
 var DefaultCustomCss string
@@ -59,6 +59,7 @@ func DefaultSettings() Settings {
 		PersonalAddons:     true,
 		ServerImports:      true,
 		ShareLinks:         false,
+		Registration:       true,
 		LoginAttempts:      DefaultLoginAttempts,
 		InactiveDeviceDays: DefaultInactiveDeviceDays,
 		KnownProxies:       []netip.Prefix{},
@@ -261,6 +262,7 @@ func SettingsBounds() map[string]SettingBounds {
 		"personalAddons":     is(d.PersonalAddons),
 		"serverImports":      is(d.ServerImports),
 		"shareLinks":         is(d.ShareLinks),
+		"registration":       is(d.Registration),
 		"loginAttempts":      orZero(MinLoginAttempts, MaxLoginAttempts, d.LoginAttempts),
 		"inactiveDeviceDays": between(0, MaxInactiveDeviceDays, d.InactiveDeviceDays),
 		"knownProxies":       between(0, MaxKnownProxies, d.KnownProxies),
@@ -341,6 +343,7 @@ func SettingsBounds() map[string]SettingBounds {
 		"customCss":               text(MaxCustomCodeBytes, d.CustomCss),
 		"customJs":                text(MaxCustomCodeBytes, d.CustomJs),
 		"loginDisclaimer":         text(MaxLoginDisclaimerBytes, d.LoginDisclaimer),
+		"brandLogo":               text(MaxBrandLogoBytes, d.BrandLogo),
 		"addVersionsToOpenPage":   is(d.AddVersionsToOpenPage),
 		"traktClientId":           text(MaxTrackingAppBytes, d.TraktClientID),
 		"traktClientSecret":       text(MaxTrackingAppBytes, d.TraktClientSecret),

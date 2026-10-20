@@ -30,6 +30,7 @@ import {
 import NotificationTargets from '@/features/notifications/NotificationTargets'
 import { computer, useServerSystem } from '@/features/sources/LocalFolders'
 import CodeEditor from './CodeEditor'
+import LogoField from './LogoField'
 import CollectionLibraryApps from './CollectionLibraryApps'
 import BackupDestinations from './BackupDestinations'
 import HomeRows from './HomeRows'
@@ -889,6 +890,13 @@ function Security({ form, update, error, number, range, limits }: SectionFormApi
         />
       </FieldRow>
       <SwitchRow
+        anchor="registration"
+        label={s.registration}
+        help={s.registrationHelp}
+        checked={form.registration}
+        onChange={(registration) => update({ registration })}
+      />
+      <SwitchRow
         anchor="share-links"
         label={s.shareLinks}
         help={s.shareLinksHelp}
@@ -1564,6 +1572,14 @@ function WebPlayer({ form, update, error, limits }: SectionFormApi) {
             </ExternalButtonLink>
           </SettingRow>
         )}
+        <FieldRow
+          anchor="brand-logo"
+          label={s.brandLogo}
+          help={s.brandLogoHelp}
+          error={error('brand-logo')}
+        >
+          <LogoField value={form.brandLogo} onValue={(brandLogo) => update({ brandLogo })} />
+        </FieldRow>
         <SettingRow anchor="custom-css">
           <CodeEditor
             label={s.customCss}

@@ -203,6 +203,14 @@ a { color: inherit; }
 .mediaInfoCriticRating, .starRatingContainer .material-icons, .starIcon { color: #f5c518 !important; }
 .genres a, .itemGenres a, .itemExternalLinks a, .itemDetailsGroup a, .detailsGroupItem a { color: var(--aio-text) !important; }
 .genres a:hover, .itemGenres a:hover { color: #fff !important; }
+/* Phones: the backdrop above already shows the title's art, as AIOStreams'
+   mobile pages do, so the image beside the name goes (a wide collection
+   image showed there cut to a strip) and the text takes the full width. */
+.layout-mobile .itemDetailPage .detailImageContainer { display: none !important; }
+.layout-mobile .itemDetailPage .infoWrapper { padding-left: 0 !important; padding-right: 0 !important; }
+.layout-mobile .itemDetailPage .detailRibbon { padding: 0.75rem 5% 0.25rem !important; }
+.layout-mobile .itemDetailPage .nameContainer, .layout-mobile .itemDetailPage .itemMiscInfo { justify-content: center; text-align: center; }
+.layout-mobile .itemDetailPage .mainDetailButtons { justify-content: center; }
 
 /* Video player */
 .videoOsdBottom, .osdControls { background: linear-gradient(to top, rgba(0, 0, 0, 0.9), rgba(0, 0, 0, 0)) !important; }
@@ -222,19 +230,27 @@ a { color: inherit; }
 ::selection { background: rgba(97, 82, 223, 0.45); }
 
 /* Subtitles, as Plex shows them: white, semi-bold sans serif with a thin
-   black outline and a soft shadow, no box behind, low in the frame. Styled
-   ASS/SSA subtitles keep their own look. */
+   black outline and a soft shadow, no box behind, low on the picture.
+   Styled ASS/SSA subtitles keep their own look. In portrait, a 16:9 picture
+   is a band across the middle of the screen: they sit just above its bottom
+   edge, not at the bottom of the screen, and their size follows its width. */
 .videoSubtitles { bottom: 6% !important; padding: 0 6% !important; }
+@media (orientation: portrait) {
+  .videoSubtitles { bottom: max(2%, calc((100% - 56.25vw) / 2 + 0.6em)) !important; padding: 0 4% !important; }
+}
 .videoSubtitlesInner, .videoSubtitles .videoSubtitlesInner span {
   background: transparent !important;
   color: #fff !important;
   font-family: var(--aio-font) !important;
   font-weight: 600 !important;
-  font-size: clamp(18px, 3.4vh, 46px) !important;
+  font-size: clamp(16px, min(3.8vh, 2.4vw), 46px) !important;
   line-height: 1.25 !important;
   text-shadow:
     -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000,
     0 0 2px #000, 0 2px 6px rgba(0, 0, 0, 0.85) !important;
+}
+@media (orientation: portrait) {
+  .videoSubtitlesInner, .videoSubtitles .videoSubtitlesInner span { font-size: clamp(14px, 4.4vw, 24px) !important; }
 }
 video::cue {
   background: transparent !important;

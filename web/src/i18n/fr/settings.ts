@@ -593,6 +593,9 @@ const settings: typeof en = {
     importEveryMinutes: 'Importer les comptes connectés toutes les',
     importEveryMinutesHelp:
       'Tous les combien Polyfin importe de nouveau les comptes Stremio et Nuvio auxquels les utilisateurs restent connectés, et les historiques qu’ils importent depuis les services de suivi. Un changement s’applique tout de suite : chaque prochaine importation a lieu ce délai après la dernière. Chaque importation relit tout le compte : un intervalle court envoie plus de requêtes à ces services et, pour Stremio, dont les conditions interdisent l’extraction automatisée, rend cette zone grise plus marquée. 6 heures par défaut.',
+    registration: 'Inscription',
+    registrationHelp:
+      'Permet à quiconque ouvre /register sur ce serveur de créer un compte membre, avec les réglages par défaut, masqué de l’écran de connexion. Désactivée, la page indique que les inscriptions sont fermées et ramène à l’écran de connexion. Chaque adresse ne peut créer que quelques comptes avant de devoir attendre, comme pour les connexions échouées.',
     shareLinks: 'Autoriser les liens de partage',
     shareLinksHelp:
       'Les utilisateurs qui ont « Peut partager des titres », sur leur page sous Utilisateurs, peuvent donner un film ou un épisode à quelqu’un qui n’a pas de compte, grâce à un lien qui expire après 1 heure à 30 jours. L’invité regarde dans un navigateur, en 1080p au plus et dans le groupe de qualité de l’utilisateur, et compte parmi les lectures simultanées de l’utilisateur. Sinon, aucun lien ne peut être créé et tous les liens sont refusés, sans être supprimés. Désactivé par défaut.',
@@ -736,6 +739,14 @@ const settings: typeof en = {
     webPlayerHelp:
       'Ce que le lecteur web (jellyfin-web, sur /web/) affiche en plus de ses propres pages. Le script s’applique au prochain chargement d’une page du lecteur web ; le lecteur web garde le CSS et le message de connexion jusqu’à une minute.',
     openWebPlayer: 'Ouvrir le lecteur web',
+    brandLogo: 'Logo',
+    brandLogoHelp:
+      'Affiché à la place du logo Jellyfin dans le lecteur web : son en-tête, son menu, ses écrans de démarrage et de connexion et l’onglet du navigateur, ainsi que dans les applications Jellyfin qui ouvrent le lecteur web (bureau, Android, iOS). Les applications qui ont leurs propres écrans, comme Infuse ou Swiftfin, gardent le leur. PNG, JPEG, WebP, GIF ou SVG, 1 Mo au plus ; un logo large convient le mieux à l’en-tête.',
+    brandLogoChoose: 'Choisir une image',
+    brandLogoRemove: 'Utiliser le logo Jellyfin',
+    brandLogoNone: 'Logo Jellyfin',
+    brandLogoType: 'Choisissez une image PNG, JPEG, WebP, GIF ou SVG.',
+    brandLogoSize: 'Choisissez une image de 1 Mo au plus.',
     customCss: 'CSS personnalisé',
     customCssHelp:
       'Appliqué à toutes les pages du lecteur web, pour tous les utilisateurs, comme le CSS personnalisé de Jellyfin. Chacun peut le désactiver dans Paramètres › Affichage. Par défaut, il contient l’apparence d’AIOStreams : pages presque noires, boutons blancs arrondis, cartes arrondies, police Inter et sous-titres façon Plex. Videz-le pour garder l’apparence d’origine du lecteur web.',
