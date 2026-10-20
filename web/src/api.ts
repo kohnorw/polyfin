@@ -297,6 +297,12 @@ export type Settings = {
   serverImports: boolean
   /** Lets anyone who opens /register create a member account. */
   registration: boolean
+  /** Asks /register for an unused registration code before its form. */
+  registrationCodes: boolean
+  /** ISO 639-2 audio language played for users who chose none, '' for none. */
+  defaultAudioLanguage: string
+  /** ISO 639-2 subtitle language shown for users who chose none, '' for none. */
+  defaultSubtitleLanguage: string
   /** Whether users with the permission may share a movie or an episode through a link that expires. */
   shareLinks: boolean
   /** Wrong passwords in a row that block an account for 15 minutes; 0 never blocks. */
@@ -365,6 +371,8 @@ export type Settings = {
   hiddenRipTypes: RipType[]
   /** Leaves series' specials (season 0) out of seasons, episode lists and Next Up. */
   hideSpecials: boolean
+  /** Leaves out the versions whose file name names another title. */
+  exactTitleMatch: boolean
   /** Ends version names with how the app asking plays each, as its last playback decides it. */
   nameHowVersionsPlay: boolean
   /** Times the addons' subtitles to the version played, against when it has speech. */
@@ -2100,6 +2108,22 @@ export type Invite = {
  * server's public address is set.
  */
 export type NewInvite = Invite & { token: string; url: string | null }
+
+export type RegistrationCode = {
+  code: string
+  createdAt: string
+  usedAt: string | null
+  usedBy: string | null
+}
+
+export const fetchRegistrationCodes = (signal?: AbortSignal) =>
+  request<RegistrationCode[]>('GET', '/registration-codes', undefined, signal)
+
+export const createRegistrationCodes = (count: number) =>
+  request<RegistrationCode[]>('POST', '/registration-codes', { count })
+
+export const deleteRegistrationCode = (code: string) =>
+  request<void>('DELETE', `/registration-codes/${seg(code)}`)
 
 export const fetchInvites = (signal?: AbortSignal) =>
   request<Invite[]>('GET', '/invites', undefined, signal)
@@ -3963,6 +3987,7 @@ export const queryKeys = {
   userContentChoices: ['user-content-choices'] as const,
   apiKeys: ['api-keys'] as const,
   invites: ['invites'] as const,
+  registrationCodes: ['registration-codes'] as const,
   ownShareLinks: ['account', 'share-links'] as const,
   shareTitles: (term: string) => ['account', 'share-titles', term] as const,
   shareTitle: (id: string) => ['account', 'share-title', id] as const,

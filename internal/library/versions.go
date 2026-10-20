@@ -290,7 +290,7 @@ func (s *Service) versionsOf(ctx context.Context, user accounts.User, id account
 	if mode == askLater || mode == staleNow {
 		s.askStreams(ctx, user, t, unknown)
 	}
-	return s.withoutTorrents(user, versions), len(unknown) == 0, nil
+	return s.withoutMismatched(t, s.withoutTorrents(user, versions)), len(unknown) == 0, nil
 }
 
 // listVersions lists the versions serving list for t, as far as mode goes,

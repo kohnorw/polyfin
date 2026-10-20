@@ -278,6 +278,9 @@ func New(options Options) http.Handler {
 	mux.Handle("POST /admin/api/users/{id}/app-import/stremio/key", h.administrator(h.readStremioKey(h.userAppImportTarget)))
 	mux.Handle("POST /admin/api/users/{id}/app-connections/{app}/import", h.administrator(h.importAppConnection(h.userAppImportTarget)))
 	mux.Handle("DELETE /admin/api/users/{id}/app-connections/{app}", h.administrator(h.disconnectApp(h.userAppImportTarget)))
+	mux.Handle("GET /admin/api/registration-codes", h.administrator(h.registrationCodes))
+	mux.Handle("POST /admin/api/registration-codes", h.administrator(h.createRegistrationCodes))
+	mux.Handle("DELETE /admin/api/registration-codes/{code}", h.administrator(h.deleteRegistrationCode))
 	mux.Handle("GET /admin/api/invites", h.administrator(h.invites))
 	mux.Handle("POST /admin/api/invites", h.administrator(h.createInvite))
 	mux.Handle("POST /admin/api/invites/{id}/revoke", h.administrator(h.revokeInvite))
@@ -563,6 +566,9 @@ func accountError(w http.ResponseWriter, err error) bool {
 		{accounts.ErrInvalidHiddenVersionCodecs, http.StatusBadRequest, "invalid_hidden_version_codecs"},
 		{accounts.ErrInvalidHiddenVersionWords, http.StatusBadRequest, "invalid_hidden_version_words"},
 		{accounts.ErrInvalidHiddenRipTypes, http.StatusBadRequest, "invalid_hidden_rip_types"},
+		{accounts.ErrInvalidDefaultLanguage, http.StatusBadRequest, "invalid_default_language"},
+		{accounts.ErrTooManyRegistrationCodes, http.StatusConflict, "too_many_registration_codes"},
+		{accounts.ErrRegistrationCodeUnknown, http.StatusNotFound, "registration_code_not_found"},
 		{accounts.ErrInvalidMaxConversions, http.StatusBadRequest, "invalid_max_conversions"},
 		{accounts.ErrInvalidMaxConversionHeight, http.StatusBadRequest, "invalid_max_conversion_height"},
 		{accounts.ErrInvalidSubtitleOCR, http.StatusBadRequest, "invalid_subtitle_ocr"},

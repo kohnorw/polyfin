@@ -196,6 +196,24 @@ function General({ form, update, error, range, limits }: SectionFormApi) {
   )
 }
 
+const defaultLanguageCodes = [
+  'eng', 'fre', 'spa', 'ger', 'ita', 'por', 'dut', 'swe', 'nor', 'dan', 'fin', 'pol', 'rus', 'ukr', 'cze',
+  'gre', 'tur', 'ara', 'heb', 'hin', 'jpn', 'kor', 'chi', 'tha', 'vie', 'ind',
+] as const
+
+function languageOptions(none: string) {
+  const names = new Intl.DisplayNames([navigator.language || 'en'], { type: 'language' })
+  const two: Record<string, string> = { eng: 'en', fre: 'fr', spa: 'es', ger: 'de', ita: 'it', por: 'pt', dut: 'nl', swe: 'sv',
+    nor: 'no', dan: 'da', fin: 'fi', pol: 'pl', rus: 'ru', ukr: 'uk', cze: 'cs', gre: 'el', tur: 'tr', ara: 'ar', heb: 'he',
+    hin: 'hi', jpn: 'ja', kor: 'ko', chi: 'zh', tha: 'th', vie: 'vi', ind: 'id' }
+  return [
+    { value: '', label: none },
+    ...defaultLanguageCodes
+      .map((code) => ({ value: code as string, label: names.of(two[code]) ?? code }))
+      .sort((a, b) => a.label.localeCompare(b.label)),
+  ]
+}
+
 function Playback({ form, update, error, number, range, limits }: SectionFormApi) {
   const { t } = useI18n()
   const s = t.settings
@@ -418,6 +436,39 @@ function Playback({ form, update, error, number, range, limits }: SectionFormApi
           checked={form.hideSpecials}
           onChange={(hideSpecials) => update({ hideSpecials })}
         />
+        <SwitchRow
+          anchor="exact-title-match"
+          label={s.exactTitleMatch}
+          help={s.exactTitleMatchHelp}
+          checked={form.exactTitleMatch}
+          onChange={(exactTitleMatch) => update({ exactTitleMatch })}
+        />
+        <FieldRow
+          anchor="default-audio-language"
+          label={s.defaultAudioLanguage}
+          help={s.defaultAudioLanguageHelp}
+          error={error('default-audio-language')}
+        >
+          <Select
+            value={form.defaultAudioLanguage}
+            options={languageOptions(s.defaultLanguageNone)}
+            onValue={(defaultAudioLanguage) => update({ defaultAudioLanguage })}
+            className="max-w-xs"
+          />
+        </FieldRow>
+        <FieldRow
+          anchor="default-subtitle-language"
+          label={s.defaultSubtitleLanguage}
+          help={s.defaultSubtitleLanguageHelp}
+          error={error('default-subtitle-language')}
+        >
+          <Select
+            value={form.defaultSubtitleLanguage}
+            options={languageOptions(s.defaultLanguageNone)}
+            onValue={(defaultSubtitleLanguage) => update({ defaultSubtitleLanguage })}
+            className="max-w-xs"
+          />
+        </FieldRow>
       </SettingsGroup>
       <SettingsGroup title={s.playbackHistoryGroup}>
         <SwitchRow

@@ -356,6 +356,9 @@ var (
 	// ErrInvalidHiddenRipTypes reports a HiddenRipTypes holding a value
 	// that is not one of RipTypes, or one twice.
 	ErrInvalidHiddenRipTypes = errors.New("invalid rip types excluded")
+	// ErrInvalidDefaultLanguage reports a default language that is not an
+	// ISO 639-2 code of three letters.
+	ErrInvalidDefaultLanguage = errors.New("invalid default language")
 )
 
 // VersionCriterionKind is what a criterion of VersionCriteria looks at,
@@ -1240,6 +1243,13 @@ type Settings struct {
 	// account with the default settings; closed, the page says so. On by
 	// default.
 	Registration bool
+	// RegistrationCodes asks /register for an unused registration code
+	// before its form (see RegistrationCode).
+	RegistrationCodes bool
+	// DefaultAudioLanguage and DefaultSubtitleLanguage are the ISO 639-2
+	// languages played for users who chose none, empty for none.
+	DefaultAudioLanguage    string
+	DefaultSubtitleLanguage string
 	// LoginAttempts is how many wrong passwords in a row block an account
 	// for LoginBlock; 0 never blocks.
 	LoginAttempts int
@@ -1323,6 +1333,10 @@ type Settings struct {
 	// HideSpecials leaves series' specials (season 0) out of their seasons,
 	// episode lists and Next Up. On by default.
 	HideSpecials bool
+	// ExactTitleMatch leaves out the versions whose file names a title
+	// other than the movie's or the series' own: Smiling Friends for
+	// Friends. On by default.
+	ExactTitleMatch bool
 	// NameHowVersionsPlay ends the names of a movie's or an episode's
 	// versions with how the app asking plays each, as the device profile of
 	// its last PlaybackInfo decides it.
@@ -1768,11 +1782,11 @@ const settingsColumns = "server_name, quick_connect_enabled, legacy_authorizatio
 	"dlna, dlna_name, dlna_new_devices_user, dlna_mark_played, " +
 	"skip_buttons, publicmetadb_key, theintrodb_key, segment_order, segment_sources_off, audio_intros, similar_titles, generate_images, lyrics, even_volume, measure_loudness, played_percent, resume_percent, version_list_minutes, catalog_refresh_minutes, " +
 	"mdblist_ratings_key, critic_rating_shows, tmdb_key, " +
-	"personal_addons, server_imports, share_links, registration, login_attempts, inactive_device_days, known_proxies, known_proxy_names, " +
+	"personal_addons, server_imports, share_links, registration, registration_codes, default_audio_language, default_subtitle_language, login_attempts, inactive_device_days, known_proxies, known_proxy_names, " +
 	"two_step_administrators, " +
 	"https_mode, https_port, https_redirect, https_certificate, https_private_key, acme_hosts, acme_email, acme_terms, acme_challenge, detailed_log, " +
 	"analysis_timeout, version_attempts, prefer_direct_play, " +
-	"version_order, version_codec_order, version_source_order, hide_versions_larger_gb, hidden_version_codecs, hidden_version_words, hidden_rip_types, hide_specials, name_how_versions_play, " +
+	"version_order, version_codec_order, version_source_order, hide_versions_larger_gb, hidden_version_codecs, hidden_version_words, hidden_rip_types, hide_specials, exact_title_match, name_how_versions_play, " +
 	"sync_addon_subtitles, max_conversions, max_conversion_height, converted_downloads, web_safe_video, subtitle_ocr, subtitle_ocr_tracks, " +
 	"encoder_preset, h264_quality, hevc_quality, allow_hevc_encoding, hardware_acceleration, hardware_decoding_codecs, " +
 	"adaptive_quality, " +
@@ -1812,14 +1826,14 @@ func (settings *Settings) fields() []any {
 		&settings.SimilarTitles, &settings.GenerateImages, &settings.Lyrics, &settings.EvenVolume, &settings.MeasureLoudness, &settings.PlayedPercent, &settings.ResumePercent,
 		&settings.VersionListMinutes, &settings.CatalogRefreshMinutes,
 		&settings.MDBListRatingsKey, &settings.CriticRatingShows, &settings.TMDBKey,
-		&settings.PersonalAddons, &settings.ServerImports, &settings.ShareLinks, &settings.Registration, &settings.LoginAttempts, &settings.InactiveDeviceDays, &settings.KnownProxies,
+		&settings.PersonalAddons, &settings.ServerImports, &settings.ShareLinks, &settings.Registration, &settings.RegistrationCodes, &settings.DefaultAudioLanguage, &settings.DefaultSubtitleLanguage, &settings.LoginAttempts, &settings.InactiveDeviceDays, &settings.KnownProxies,
 		&settings.KnownProxyNames,
 		&settings.TwoStepAdministrators,
 		&settings.HTTPSMode, &settings.HTTPSPort, &settings.HTTPSRedirect, &settings.HTTPSCertificate, &settings.HTTPSPrivateKey,
 		&settings.ACMEHosts, &settings.ACMEEmail, &settings.ACMETerms, &settings.ACMEChallenge, &settings.DetailedLog,
 		&settings.AnalysisTimeout, &settings.VersionAttempts, &settings.PreferDirectPlay,
 		&settings.VersionOrder, &settings.VersionCodecOrder, &settings.VersionSourceOrder, &settings.HideVersionsLargerGB, &settings.HiddenVersionCodecs,
-		&settings.HiddenVersionWords, &settings.HiddenRipTypes, &settings.HideSpecials,
+		&settings.HiddenVersionWords, &settings.HiddenRipTypes, &settings.HideSpecials, &settings.ExactTitleMatch,
 		&settings.NameHowVersionsPlay,
 		&settings.SyncAddonSubtitles, &settings.MaxConversions, &settings.MaxConversionHeight, &settings.ConvertedDownloads, &settings.WebSafeVideo, &settings.SubtitleOCR, &settings.SubtitleOCRTracks,
 		&settings.EncoderPreset, &settings.H264Quality, &settings.HevcQuality, &settings.AllowHevcEncoding, &settings.HardwareAcceleration, &settings.HardwareDecodingCodecs,
@@ -2142,6 +2156,12 @@ func (s *Store) UpdateSettings(ctx context.Context, settings Settings) (Settings
 	if err != nil {
 		return Settings{}, err
 	}
+	for _, language := range []*string{&settings.DefaultAudioLanguage, &settings.DefaultSubtitleLanguage} {
+		*language = strings.ToLower(strings.TrimSpace(*language))
+		if !validDefaultLanguage(*language) {
+			return Settings{}, ErrInvalidDefaultLanguage
+		}
+	}
 	if !validRipTypes(settings.HiddenRipTypes) {
 		return Settings{}, ErrInvalidHiddenRipTypes
 	}
@@ -2422,4 +2442,19 @@ func validConversion(settings Settings) ([]string, error) {
 		return nil, ErrInvalidHardwareDecodingCodecs
 	}
 	return codecs, nil
+}
+
+func validDefaultLanguage(language string) bool {
+	if language == "" {
+		return true
+	}
+	if len(language) != 3 {
+		return false
+	}
+	for _, c := range language {
+		if c < 'a' || c > 'z' {
+			return false
+		}
+	}
+	return true
 }

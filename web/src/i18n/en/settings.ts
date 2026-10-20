@@ -230,6 +230,14 @@ const settings = {
     hiddenVersionCodecs: 'Hide these video codecs',
     hiddenVersionCodecsHelp: 'Versions known to be in these codecs are listed nowhere.',
     hideSpecials: 'Hide specials',
+    exactTitleMatch: 'Match titles exactly',
+    exactTitleMatchHelp:
+      'Leaves out the versions whose file name starts with a longer title holding the movie’s or the series’ own: Smiling Friends’ releases are not offered for Friends. A leading “The”, the year and punctuation do not count. Versions without a file name are kept. On by default.',
+    defaultAudioLanguage: 'Default audio language',
+    defaultAudioLanguageHelp: 'The audio language played for users who chose none in their own settings.',
+    defaultSubtitleLanguage: 'Default subtitle language',
+    defaultSubtitleLanguageHelp: 'The subtitle language shown for users who chose none in their own settings.',
+    defaultLanguageNone: 'None',
     hideSpecialsHelp:
       'Leaves series’ specials (season 0) out of their seasons, episode lists and Next Up. On by default.',
     hiddenRipTypes: 'Exclude these rips',

@@ -484,6 +484,10 @@ type settingsJSON struct {
 	ServerImports      *bool `json:"serverImports"`
 	ShareLinks         *bool `json:"shareLinks"`
 	Registration       *bool `json:"registration"`
+	RegistrationCodes  *bool `json:"registrationCodes"`
+	DefaultAudioLanguage    *string `json:"defaultAudioLanguage"`
+	DefaultSubtitleLanguage *string `json:"defaultSubtitleLanguage"`
+	ExactTitleMatch    *bool `json:"exactTitleMatch"`
 	LoginAttempts      *int  `json:"loginAttempts"`
 	InactiveDeviceDays *int  `json:"inactiveDeviceDays"`
 	DetailedLog        *bool `json:"detailedLog"`
@@ -773,6 +777,10 @@ func newSettingsJSON(settings accounts.Settings) settingsJSON {
 		ServerImports:         &settings.ServerImports,
 		ShareLinks:            &settings.ShareLinks,
 		Registration:          &settings.Registration,
+		RegistrationCodes:     &settings.RegistrationCodes,
+		DefaultAudioLanguage:    &settings.DefaultAudioLanguage,
+		DefaultSubtitleLanguage: &settings.DefaultSubtitleLanguage,
+		ExactTitleMatch:       &settings.ExactTitleMatch,
 		LoginAttempts:         &settings.LoginAttempts,
 		TwoStepAdministrators: &settings.TwoStepAdministrators,
 		InactiveDeviceDays:    &settings.InactiveDeviceDays,
@@ -1448,6 +1456,10 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		ServerImports:         valueOr(body.ServerImports, current.ServerImports),
 		ShareLinks:            valueOr(body.ShareLinks, current.ShareLinks),
 		Registration:          valueOr(body.Registration, current.Registration),
+		RegistrationCodes:     valueOr(body.RegistrationCodes, current.RegistrationCodes),
+		DefaultAudioLanguage:    valueOr(body.DefaultAudioLanguage, current.DefaultAudioLanguage),
+		DefaultSubtitleLanguage: valueOr(body.DefaultSubtitleLanguage, current.DefaultSubtitleLanguage),
+		ExactTitleMatch:       valueOr(body.ExactTitleMatch, current.ExactTitleMatch),
 		LoginAttempts:         valueOr(body.LoginAttempts, current.LoginAttempts),
 		TwoStepAdministrators: valueOr(body.TwoStepAdministrators, current.TwoStepAdministrators),
 		InactiveDeviceDays:    valueOr(body.InactiveDeviceDays, current.InactiveDeviceDays),

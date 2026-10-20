@@ -236,6 +236,14 @@ const settings: typeof en = {
     hiddenVersionCodecsHelp:
       'Les versions dont on sait qu’elles sont dans ces codecs ne sont listées nulle part.',
     hideSpecials: 'Masquer les épisodes spéciaux',
+    exactTitleMatch: 'Titres exacts',
+    exactTitleMatchHelp:
+      'Retire les versions dont le nom de fichier commence par un autre titre que celui du film ou de la série : les sorties de Smiling Friends ne sont pas proposées pour Friends. « The », l’année et la ponctuation ne comptent pas. Les versions sans nom de fichier sont gardées. Activé par défaut.',
+    defaultAudioLanguage: 'Langue audio par défaut',
+    defaultAudioLanguageHelp: 'La langue audio jouée pour les utilisateurs qui n’en ont choisi aucune.',
+    defaultSubtitleLanguage: 'Langue des sous-titres par défaut',
+    defaultSubtitleLanguageHelp: 'La langue des sous-titres affichée pour les utilisateurs qui n’en ont choisi aucune.',
+    defaultLanguageNone: 'Aucune',
     hideSpecialsHelp:
       'Retire les épisodes spéciaux des séries (saison 0) de leurs saisons, listes d’épisodes et de « À suivre ». Activé par défaut.',
     hiddenRipTypes: 'Exclure ces rips',

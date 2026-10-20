@@ -241,6 +241,25 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'playback',
+    anchor: 'exact-title-match',
+    label: (t) => s(t).exactTitleMatch,
+    help: (t) => s(t).exactTitleMatchHelp,
+  },
+  {
+    section: 'playback',
+    anchor: 'default-audio-language',
+    label: (t) => s(t).defaultAudioLanguage,
+    help: (t) => s(t).defaultAudioLanguageHelp,
+    codes: ['invalid_default_language'],
+  },
+  {
+    section: 'playback',
+    anchor: 'default-subtitle-language',
+    label: (t) => s(t).defaultSubtitleLanguage,
+    help: (t) => s(t).defaultSubtitleLanguageHelp,
+  },
+  {
+    section: 'playback',
     anchor: 'playback-history',
     label: (t) => s(t).playbackHistory,
     help: (t) => s(t).playbackHistoryHelp,
