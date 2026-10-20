@@ -2330,6 +2330,7 @@ func (s *Service) search(ctx context.Context, v view, term string, kinds []Kind,
 	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	titles = append(titles, s.fallbackSearch(ctx, v, term, kinds, titles, min(limit, searchLimit))...)
 	titles = titles[:min(len(titles), limit, searchLimit)]
 	var items []Item
 	var records, translated []record
@@ -2636,4 +2637,45 @@ func (s *Service) artworkView(ctx context.Context, r record) (view, error) {
 		v.addons = append([]installed{{addon: addon, confined: r.Confined}}, v.addons...)
 	}
 	return v, nil
+}
+
+// fallbackAddon is Cinemeta, the public Stremio metadata addon, which a
+// search asks for the kinds of title the user's own search catalogs found
+// nothing of, as some addons' series searches always answer empty. Its
+// titles are IMDb's, which the user's addons describe and stream.
+var fallbackAddon = installed{addon: addons.Addon{
+	ID:          accounts.ID{0xc1, 0x4e, 0x3e, 0x7a, 0x5e, 0xa7, 0xc4, 0x00, 0x80, 0x00, 0, 0, 0, 0, 0, 1},
+	Kind:        addons.KindStremio,
+	ManifestURL: "https://v3-cinemeta.strem.io/manifest.json",
+	Enabled:     true,
+}}
+
+func fallbackCatalog(kind Kind) stremio.Catalog {
+	return stremio.Catalog{Type: string(kind), ID: "top", Extra: []stremio.Extra{{Name: "search", IsRequired: true}}}
+}
+
+// fallbackSearch searches Cinemeta for each movie or series kind asked for
+// that found shows none of, when one of the user's addons describes IMDb
+// titles of that kind.
+func (s *Service) fallbackSearch(ctx context.Context, v view, term string, kinds []Kind, found []listed, need int) []listed {
+	var sources []source
+	for _, kind := range []Kind{KindMovie, KindSeries} {
+		if !slices.Contains(kinds, kind) || slices.ContainsFunc(found, func(l listed) bool {
+			k, _ := titleKind(l.meta.Type)
+			return k == kind
+		}) {
+			continue
+		}
+		described := slices.ContainsFunc(v.addons, func(entry installed) bool {
+			return entry.addon.Manifest.Serves("meta", string(kind), "tt0000001")
+		})
+		if !described {
+			continue
+		}
+		sources = append(sources, source{addon: fallbackAddon, catalog: fallbackCatalog(kind), search: term, first: true})
+	}
+	if len(sources) == 0 {
+		return nil
+	}
+	return s.searched(ctx, v, sources, need)
 }
