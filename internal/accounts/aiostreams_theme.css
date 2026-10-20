@@ -259,18 +259,27 @@ a { color: inherit; }
    centred, so that subtitles sit on the picture, not in the black below it.
    jellyfin-web makes Safari's subtitle text 170% and pushes its box 15% to
    the right: undone, the size follows the screen's width, centred. */
+/* The insets are a phone's or tablet's only: a Mac with a notch reports one
+   at the top in full screen too, which would push the picture down. */
+.videoPlayerContainer { --pf-safe-top: 0px; --pf-safe-left: 0px; --pf-safe-right: 0px; --pf-safe-bottom: 0px; }
+@media (pointer: coarse) {
+  .videoPlayerContainer {
+    --pf-safe-top: env(safe-area-inset-top, 0px); --pf-safe-left: env(safe-area-inset-left, 0px);
+    --pf-safe-right: env(safe-area-inset-right, 0px); --pf-safe-bottom: env(safe-area-inset-bottom, 0px);
+  }
+}
 .videoPlayerContainer .htmlvideoplayer {
   position: absolute !important; margin: 0 !important;
-  top: env(safe-area-inset-top, 0px) !important; left: env(safe-area-inset-left, 0px) !important;
+  top: var(--pf-safe-top) !important; left: var(--pf-safe-left) !important;
   right: auto !important; bottom: auto !important; transform: none;
-  width: calc(100% - env(safe-area-inset-left, 0px) - env(safe-area-inset-right, 0px)) !important;
-  height: calc(100% - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)) !important;
+  width: calc(100% - var(--pf-safe-left) - var(--pf-safe-right)) !important;
+  height: calc(100% - var(--pf-safe-top) - var(--pf-safe-bottom)) !important;
   max-width: none !important; max-height: none !important; object-fit: contain;
 }
 @media (orientation: portrait) {
   .videoPlayerContainer .htmlvideoplayer {
     top: 50% !important; height: auto !important;
-    max-height: calc(100% - env(safe-area-inset-top, 0px) - env(safe-area-inset-bottom, 0px)) !important;
+    max-height: calc(100% - var(--pf-safe-top) - var(--pf-safe-bottom)) !important;
     transform: translateY(-50%) !important;
   }
 }
