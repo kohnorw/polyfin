@@ -305,6 +305,9 @@ const settings: typeof en = {
       'Les vidéos converties sont réduites à cette hauteur au plus, sans être déformées, pour passer mieux sur une connexion lente. Les fichiers lus tels quels ou simplement présentés autrement gardent leur qualité. La carte graphique convertit jusqu’en 4K ; le processeur s’arrête à 1080p, et quand il convertit du HDR en SDR, à « Qualité max du HDR converti par le processeur » (Conversion › HDR).',
     conversionHeightOriginal: 'Originale',
     conversionHeight: (height: number) => `${height}p`,
+    webSafeVideo: 'Lire tous les fichiers dans le lecteur web',
+    webSafeVideoHelp:
+      'Les navigateurs disent lire la vidéo HEVC, Dolby Vision et AV1, puis l’affichent souvent en noir, le son et l’horloge tournant. Activé, le lecteur web ne les reçoit jamais telles quelles : ces versions sont lues converties en H.264. Les applications Jellyfin gardent leurs propres lecteurs.',
     convertedDownloads: 'Téléchargements convertis',
     convertedDownloadsHelp:
       'Les applis qui le demandent, comme Streamyfin, enregistrent un titre dans la qualité choisie par l’utilisateur : Polyfin envoie une copie plus légère, faite pendant que l’appli la télécharge et jamais gardée sur le serveur. Sinon, elles enregistrent le fichier tel quel. Chaque téléchargement compte dans « Conversions vidéo en même temps » quand il convertit, et comme une des « Lectures en même temps » de l’utilisateur. L’utilisateur doit pouvoir télécharger, et utiliser la conversion (transcodage) quand l’image ou le son sont convertis. Un téléchargement interrompu recommence du début. Désactivé par défaut.',

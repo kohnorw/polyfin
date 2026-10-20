@@ -532,6 +532,7 @@ type settingsJSON struct {
 	MaxConversions      *int  `json:"maxConversions"`
 	MaxConversionHeight *int  `json:"maxConversionHeight"`
 	ConvertedDownloads  *bool `json:"convertedDownloads"`
+	WebSafeVideo        *bool `json:"webSafeVideo"`
 	// SubtitleOCR ("off", "played" or "scans") and SubtitleOCRTracks keep
 	// their current values when a PUT leaves them out.
 	SubtitleOCR       *string `json:"subtitleOcr"`
@@ -801,6 +802,7 @@ func newSettingsJSON(settings accounts.Settings) settingsJSON {
 		MaxConversions:        &settings.MaxConversions,
 		MaxConversionHeight:   &settings.MaxConversionHeight,
 		ConvertedDownloads:    &settings.ConvertedDownloads,
+		WebSafeVideo:          &settings.WebSafeVideo,
 		SubtitleOCR:           &settings.SubtitleOCR,
 		SubtitleOCRTracks:     &settings.SubtitleOCRTracks,
 
@@ -1477,6 +1479,7 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		MaxConversions:        valueOr(body.MaxConversions, current.MaxConversions),
 		MaxConversionHeight:   valueOr(body.MaxConversionHeight, current.MaxConversionHeight),
 		ConvertedDownloads:    valueOr(body.ConvertedDownloads, current.ConvertedDownloads),
+		WebSafeVideo:          valueOr(body.WebSafeVideo, current.WebSafeVideo),
 		SubtitleOCR:           valueOr(body.SubtitleOCR, current.SubtitleOCR),
 		SubtitleOCRTracks:     valueOr(body.SubtitleOCRTracks, current.SubtitleOCRTracks),
 

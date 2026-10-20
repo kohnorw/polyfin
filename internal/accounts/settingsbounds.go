@@ -90,6 +90,7 @@ func DefaultSettings() Settings {
 		MaxConversions:      DefaultMaxConversions,
 		MaxConversionHeight: ConversionHeights[0],
 		ConvertedDownloads:  false,
+		WebSafeVideo:        true,
 		SubtitleOCR:         SubtitleOCRModes[0],
 		SubtitleOCRTracks:   DefaultSubtitleOCRTracks,
 
@@ -295,6 +296,7 @@ func SettingsBounds() map[string]SettingBounds {
 		"maxConversions":       between(MinMaxConversions, MaxMaxConversions, d.MaxConversions),
 		"maxConversionHeight":  choice(d.MaxConversionHeight, anys(ConversionHeights)),
 		"convertedDownloads":   is(d.ConvertedDownloads),
+		"webSafeVideo":         is(d.WebSafeVideo),
 		"subtitleOcr":          choice(d.SubtitleOCR, anys(SubtitleOCRModes)),
 		"subtitleOcrTracks":    between(MinSubtitleOCRTracks, MaxSubtitleOCRTracks, d.SubtitleOCRTracks),
 

@@ -374,6 +374,8 @@ export type Settings = {
   /** Height converted video is scaled down to at most, 0 to keep the original's. */
   maxConversionHeight: number
   /** Streams a title as one file, copied or converted within the user's quality, to apps saving it offline. */
+  /** Offers the web player no HEVC, Dolby Vision or AV1 video, which browsers often show black. */
+  webSafeVideo: boolean
   convertedDownloads: boolean
   /**
    * Reads picture subtitles (PGS, VobSub) into text tracks with Tesseract: never, when an app that

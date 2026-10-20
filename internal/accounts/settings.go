@@ -1343,6 +1343,10 @@ type Settings struct {
 	// do, for users who may download. Off, such apps download the version
 	// as it is.
 	ConvertedDownloads bool
+	// WebSafeVideo offers the web player (jellyfin-web, in a browser) no
+	// HEVC, Dolby Vision or AV1 video, which browsers claim and then often
+	// show black: such versions play converted to H.264. On by default.
+	WebSafeVideo bool
 	// SubtitleOCR reads picture subtitles into text with Tesseract, one of
 	// SubtitleOCRModes; SubtitleOCRTracks bounds the tracks read at once.
 	SubtitleOCR       string
@@ -1769,7 +1773,7 @@ const settingsColumns = "server_name, quick_connect_enabled, legacy_authorizatio
 	"https_mode, https_port, https_redirect, https_certificate, https_private_key, acme_hosts, acme_email, acme_terms, acme_challenge, detailed_log, " +
 	"analysis_timeout, version_attempts, prefer_direct_play, " +
 	"version_order, version_codec_order, version_source_order, hide_versions_larger_gb, hidden_version_codecs, hidden_version_words, hidden_rip_types, hide_specials, name_how_versions_play, " +
-	"sync_addon_subtitles, max_conversions, max_conversion_height, converted_downloads, subtitle_ocr, subtitle_ocr_tracks, " +
+	"sync_addon_subtitles, max_conversions, max_conversion_height, converted_downloads, web_safe_video, subtitle_ocr, subtitle_ocr_tracks, " +
 	"encoder_preset, h264_quality, hevc_quality, allow_hevc_encoding, hardware_acceleration, hardware_decoding_codecs, " +
 	"adaptive_quality, " +
 	"tone_mapping, tone_mapping_algorithm, tone_mapping_peak, tone_mapping_desat, gpu_tone_mapping, processor_tone_mapping_height, deinterlace_method, deinterlace_double_rate, " +
@@ -1817,7 +1821,7 @@ func (settings *Settings) fields() []any {
 		&settings.VersionOrder, &settings.VersionCodecOrder, &settings.VersionSourceOrder, &settings.HideVersionsLargerGB, &settings.HiddenVersionCodecs,
 		&settings.HiddenVersionWords, &settings.HiddenRipTypes, &settings.HideSpecials,
 		&settings.NameHowVersionsPlay,
-		&settings.SyncAddonSubtitles, &settings.MaxConversions, &settings.MaxConversionHeight, &settings.ConvertedDownloads, &settings.SubtitleOCR, &settings.SubtitleOCRTracks,
+		&settings.SyncAddonSubtitles, &settings.MaxConversions, &settings.MaxConversionHeight, &settings.ConvertedDownloads, &settings.WebSafeVideo, &settings.SubtitleOCR, &settings.SubtitleOCRTracks,
 		&settings.EncoderPreset, &settings.H264Quality, &settings.HevcQuality, &settings.AllowHevcEncoding, &settings.HardwareAcceleration, &settings.HardwareDecodingCodecs,
 		&settings.AdaptiveQuality,
 		&settings.ToneMapping, &settings.ToneMappingAlgorithm, &settings.ToneMappingPeak, &settings.ToneMappingDesat, &settings.GPUToneMapping, &settings.ProcessorToneMappingHeight,

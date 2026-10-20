@@ -276,6 +276,12 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'conversion',
+    anchor: 'web-safe-video',
+    label: (t) => s(t).webSafeVideo,
+    help: (t) => s(t).webSafeVideoHelp,
+  },
+  {
+    section: 'conversion',
     anchor: 'converted-downloads',
     label: (t) => s(t).convertedDownloads,
     help: (t) => s(t).convertedDownloadsHelp,

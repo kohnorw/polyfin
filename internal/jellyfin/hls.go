@@ -261,12 +261,15 @@ func (h *Handler) remuxFor(w http.ResponseWriter, r *http.Request, user accounts
 	if index, err := strconv.Atoi(query(r, "subtitleStreamIndex")); err == nil && index >= 0 && remux.ConvertVideo != nil &&
 		strings.EqualFold(query(r, "subtitleMethod"), "Encode") {
 		switch {
-		case index < len(files):
-			if pictureFile(files[index]) {
-				remux.BurnFile = files[index].URL
-			}
-		case playback.BurnableSubtitle(analysis, index-len(files)):
+		case index < len(files) && pictureFile(files[index]):
+			remux.BurnFile = files[index].URL
+		case index >= len(files) && playback.BurnableSubtitle(analysis, index-len(files)):
 			remux.Burn = new(index - len(files))
+		default:
+			// A text subtitle: drawn by libass from a file Polyfin writes.
+			if path, styled, ok := h.textBurnFile(r.Context(), version, analysis, files, index); ok {
+				remux.BurnText, remux.StyledText = path, styled
+			}
 		}
 	}
 	if strings.EqualFold(query(r, "allowAudioStreamCopy"), "false") {

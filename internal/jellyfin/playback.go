@@ -524,6 +524,12 @@ func (h *Handler) readPlaybackInfoBody(w http.ResponseWriter, r *http.Request, b
 	}
 	if posted.DeviceProfile != nil {
 		request.DeviceProfile = posted.DeviceProfile
+		// Browsers claim video they then show black (see
+		// playback.WithoutRiskyVideo): the web player is offered H.264 and
+		// the like, converted when the file is not.
+		if webApp(r) && h.Accounts.Settings().WebSafeVideo {
+			request.DeviceProfile = playback.WithoutRiskyVideo(request.DeviceProfile)
+		}
 	}
 	if posted.EnableDirectPlay != nil {
 		request.EnableDirectPlay = posted.EnableDirectPlay
@@ -880,15 +886,16 @@ func (h *Handler) prefetchSubtitle(ctx context.Context, decision playback.Decisi
 }
 
 // burnable reports whether the subtitle stream of Jellyfin index index can
-// be burned into converted video: a picture subtitle file, or an image
-// track inside the file.
+// be burned into converted video: a subtitle file, pictures or text, an
+// image track inside the file, or a text track Polyfin reads (see
+// textBurnFile). A picture subtitle's text copy, listed after the tracks,
+// goes out as text.
 func burnable(streams []playback.MediaStream, analysis media.Analysis, index int) bool {
 	files := subtitleFiles(streams)
 	if index < files {
-		i := slices.IndexFunc(streams, func(s playback.MediaStream) bool { return s.Type == "Subtitle" && s.Index == index })
-		return i >= 0 && !streams[i].IsTextSubtitleStream
+		return slices.ContainsFunc(streams, func(s playback.MediaStream) bool { return s.Type == "Subtitle" && s.Index == index })
 	}
-	return playback.BurnableSubtitle(analysis, index-files)
+	return playback.BurnableSubtitle(analysis, index-files) || playback.ExtractableSubtitle(analysis, index-files)
 }
 
 // permitted reports whether the conversions a decision plans, of the video
