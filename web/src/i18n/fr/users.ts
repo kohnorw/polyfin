@@ -12,12 +12,18 @@ const users: typeof en = {
     registrationFailed: 'Le réglage n’a pas pu être enregistré. Réessayez.',
     registrationCodes: 'Exiger un code d’inscription',
     registrationCodesHelp:
-      'Les visiteurs de /register saisissent un de ces codes avant le formulaire. Chaque code crée un compte.',
-    registrationCodesCount: (n: number) => (n <= 1 ? `${n} code inutilisé` : `${n} codes inutilisés`),
+      'Les visiteurs de /register saisissent un de ces codes avant le formulaire. Choisissez à côté de chaque code combien de comptes il peut créer.',
+    registrationCodesCount: (n: number) =>
+      n <= 1 ? `${n} code inutilisé` : `${n} codes inutilisés`,
     registrationCodesNew: 'Nouveau code',
     registrationCodesFailed: 'Les codes n’ont pas pu être modifiés. Réessayez.',
     registrationCodeUsed: (name: string) => `Utilisé par ${name}`,
     registrationCodeUnused: 'Inutilisé',
+    registrationCodeUses: (uses: number, max: number) =>
+      max === 0 ? `Utilisé ${uses} fois` : `Utilisé ${uses} sur ${max}`,
+    registrationCodeLimit: (n: number) => (n === 1 ? 'Usage unique' : `${n} usages`),
+    registrationCodeUnlimited: 'Illimité',
+    registrationCodeLimitLabel: 'Combien de fois le code peut servir',
     registrationCodeCopy: 'Copier le code',
     registrationCodeCopied: 'Copié',
     registrationCodeDelete: 'Supprimer le code',

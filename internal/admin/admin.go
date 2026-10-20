@@ -281,6 +281,7 @@ func New(options Options) http.Handler {
 	mux.Handle("GET /admin/api/registration-codes", h.administrator(h.registrationCodes))
 	mux.Handle("POST /admin/api/registration-codes", h.administrator(h.createRegistrationCodes))
 	mux.Handle("DELETE /admin/api/registration-codes/{code}", h.administrator(h.deleteRegistrationCode))
+	mux.Handle("PATCH /admin/api/registration-codes/{code}", h.administrator(h.updateRegistrationCode))
 	mux.Handle("GET /admin/api/invites", h.administrator(h.invites))
 	mux.Handle("POST /admin/api/invites", h.administrator(h.createInvite))
 	mux.Handle("POST /admin/api/invites/{id}/revoke", h.administrator(h.revokeInvite))
@@ -569,6 +570,7 @@ func accountError(w http.ResponseWriter, err error) bool {
 		{accounts.ErrInvalidDefaultLanguage, http.StatusBadRequest, "invalid_default_language"},
 		{accounts.ErrTooManyRegistrationCodes, http.StatusConflict, "too_many_registration_codes"},
 		{accounts.ErrRegistrationCodeUnknown, http.StatusNotFound, "registration_code_not_found"},
+		{accounts.ErrInvalidRegistrationCodeUses, http.StatusBadRequest, "invalid_max_uses"},
 		{accounts.ErrInvalidMaxConversions, http.StatusBadRequest, "invalid_max_conversions"},
 		{accounts.ErrInvalidMaxConversionHeight, http.StatusBadRequest, "invalid_max_conversion_height"},
 		{accounts.ErrInvalidSubtitleOCR, http.StatusBadRequest, "invalid_subtitle_ocr"},

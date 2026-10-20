@@ -8,10 +8,13 @@ import {
   fetchSettings,
   queryKeys,
   saveSettings,
+  updateRegistrationCode,
   type Settings,
 } from '@/api'
 import { useI18n } from '@/i18n'
-import { Block, Button, ExternalButtonLink, IconButton, Switch } from '@/ui'
+import { Block, Button, ExternalButtonLink, IconButton, Select, Switch } from '@/ui'
+
+const useLimits = [1, 2, 3, 5, 10, 25, 50, 100, 0]
 
 /**
  * The Users page's switches for /register, where visitors create their own
@@ -43,7 +46,12 @@ export default function Registration() {
             {save.isError && <p className="mt-1 text-small text-danger">{s.registrationFailed}</p>}
           </div>
           <div className="flex items-center gap-3">
-            <ExternalButtonLink href="/register" target="_blank" rel="noopener" iconEnd={ArrowSquareOutIcon}>
+            <ExternalButtonLink
+              href="/register"
+              target="_blank"
+              rel="noopener"
+              iconEnd={ArrowSquareOutIcon}
+            >
               {s.registrationOpenPage}
             </ExternalButtonLink>
             <Switch
@@ -86,6 +94,12 @@ function Codes() {
   const refresh = () => client.invalidateQueries({ queryKey: queryKeys.registrationCodes })
   const create = useMutation({ mutationFn: () => createRegistrationCodes(1), onSuccess: refresh })
   const remove = useMutation({ mutationFn: deleteRegistrationCode, onSuccess: refresh })
+  const limit = useMutation({
+    mutationFn: ({ code, maxUses }: { code: string; maxUses: number }) =>
+      updateRegistrationCode(code, maxUses),
+    onSuccess: refresh,
+  })
+  const usedUp = (c: { uses: number; maxUses: number }) => c.maxUses > 0 && c.uses >= c.maxUses
   const copy = (code: string) => {
     void navigator.clipboard?.writeText(code).then(() => {
       setCopied(code)
@@ -96,26 +110,46 @@ function Codes() {
     <div className="mt-4 border-t border-line pt-4">
       <div className="flex items-center justify-between gap-3">
         <p className="text-small text-ink-3">
-          {codes.data ? s.registrationCodesCount(codes.data.filter((c) => !c.usedAt).length) : ''}
+          {codes.data ? s.registrationCodesCount(codes.data.filter((c) => !usedUp(c)).length) : ''}
         </p>
-        <Button size="sm" icon={PlusIcon} loading={create.isPending} onClick={() => create.mutate()}>
+        <Button
+          size="sm"
+          icon={PlusIcon}
+          loading={create.isPending}
+          onClick={() => create.mutate()}
+        >
           {s.registrationCodesNew}
         </Button>
       </div>
-      {(create.isError || remove.isError) && (
+      {(create.isError || remove.isError || limit.isError) && (
         <p className="mt-2 text-small text-danger">{s.registrationCodesFailed}</p>
       )}
       {codes.data && codes.data.length > 0 && (
         <ul className="mt-3 divide-y divide-line">
           {codes.data.map((code) => (
             <li key={code.code} className="flex items-center gap-3 py-2">
-              <span className={code.usedAt ? 'font-mono text-ink-3 line-through' : 'font-mono text-ink'}>
+              <span
+                className={
+                  usedUp(code) ? 'font-mono text-ink-3 line-through' : 'font-mono text-ink'
+                }
+              >
                 {code.code}
               </span>
               <span className="min-w-0 flex-1 truncate text-small text-ink-3">
-                {code.usedAt ? s.registrationCodeUsed(code.usedBy ?? '—') : s.registrationCodeUnused}
+                {s.registrationCodeUses(code.uses, code.maxUses)}
+                {code.usedBy ? ` · ${s.registrationCodeUsed(code.usedBy)}` : ''}
               </span>
-              {!code.usedAt && (
+              <Select
+                value={code.maxUses}
+                options={[...new Set([...useLimits, code.maxUses])].map((n) => ({
+                  value: n,
+                  label: n === 0 ? s.registrationCodeUnlimited : s.registrationCodeLimit(n),
+                }))}
+                onValue={(maxUses) => limit.mutate({ code: code.code, maxUses })}
+                aria-label={s.registrationCodeLimitLabel}
+                className="w-36"
+              />
+              {!usedUp(code) && (
                 <IconButton
                   size="sm"
                   icon={CopyIcon}

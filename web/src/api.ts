@@ -2114,13 +2114,20 @@ export type RegistrationCode = {
   createdAt: string
   usedAt: string | null
   usedBy: string | null
+  /** Accounts created with it. */
+  uses: number
+  /** Accounts it may create, 0 for no limit. */
+  maxUses: number
 }
 
 export const fetchRegistrationCodes = (signal?: AbortSignal) =>
   request<RegistrationCode[]>('GET', '/registration-codes', undefined, signal)
 
-export const createRegistrationCodes = (count: number) =>
-  request<RegistrationCode[]>('POST', '/registration-codes', { count })
+export const createRegistrationCodes = (count: number, maxUses = 1) =>
+  request<RegistrationCode[]>('POST', '/registration-codes', { count, maxUses })
+
+export const updateRegistrationCode = (code: string, maxUses: number) =>
+  request<void>('PATCH', `/registration-codes/${seg(code)}`, { maxUses })
 
 export const deleteRegistrationCode = (code: string) =>
   request<void>('DELETE', `/registration-codes/${seg(code)}`)

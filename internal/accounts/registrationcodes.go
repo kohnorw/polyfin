@@ -9,7 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 )
 
-// MaxRegistrationCodes bounds the unused registration codes kept at once.
+// MaxRegistrationCodes bounds the usable registration codes kept at once.
 const MaxRegistrationCodes = 500
 
 // ErrRegistrationCodeUnknown reports a code that is no unused registration
@@ -20,13 +20,37 @@ var (
 )
 
 // RegistrationCode is a code a visitor of /register types before
-// registering, when Settings.RegistrationCodes asks for one. Each creates
-// one account: UsedAt and UsedBy tell when and whose.
+// registering, when Settings.RegistrationCodes asks for one. It creates
+// up to MaxUses accounts, without limit when 0; Uses counts those created,
+// UsedAt and UsedBy tell the last.
 type RegistrationCode struct {
 	Code      string
 	CreatedAt time.Time
 	UsedAt    *time.Time
 	UsedBy    *string
+	Uses      int
+	MaxUses   int
+}
+
+// MaxRegistrationCodeUses bounds a code's uses, 0 being no limit.
+const MaxRegistrationCodeUses = 10000
+
+// ErrInvalidRegistrationCodeUses refuses a limit out of bounds.
+var ErrInvalidRegistrationCodeUses = errors.New("invalid registration code uses")
+
+// usable is the condition of a code that may create one more account.
+const usableCode = "(max_uses = 0 OR uses < max_uses)"
+
+// SetRegistrationCodeUses changes how many accounts a code may create.
+func (s *Store) SetRegistrationCodeUses(ctx context.Context, code string, maxUses int) error {
+	if maxUses < 0 || maxUses > MaxRegistrationCodeUses {
+		return ErrInvalidRegistrationCodeUses
+	}
+	tag, err := s.db.Exec(ctx, "UPDATE registration_codes SET max_uses = $2 WHERE code = $1", NormalizeRegistrationCode(code), maxUses)
+	if err == nil && tag.RowsAffected() == 0 {
+		err = ErrRegistrationCodeUnknown
+	}
+	return err
 }
 
 // codeAlphabet leaves out the letters and digits read for one another.
@@ -64,12 +88,15 @@ func NormalizeRegistrationCode(code string) string {
 }
 
 // CreateRegistrationCodes makes count new codes.
-func (s *Store) CreateRegistrationCodes(ctx context.Context, count int) ([]RegistrationCode, error) {
+func (s *Store) CreateRegistrationCodes(ctx context.Context, count, maxUses int) ([]RegistrationCode, error) {
+	if maxUses < 0 || maxUses > MaxRegistrationCodeUses {
+		return nil, ErrInvalidRegistrationCodeUses
+	}
 	var created []RegistrationCode
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		created = nil
 		var unused int
-		if err := tx.QueryRow(ctx, "SELECT count(*) FROM registration_codes WHERE used_at IS NULL").Scan(&unused); err != nil {
+		if err := tx.QueryRow(ctx, "SELECT count(*) FROM registration_codes WHERE "+usableCode).Scan(&unused); err != nil {
 			return err
 		}
 		if unused+count > MaxRegistrationCodes {
@@ -77,8 +104,8 @@ func (s *Store) CreateRegistrationCodes(ctx context.Context, count int) ([]Regis
 		}
 		for range count {
 			var code RegistrationCode
-			err := tx.QueryRow(ctx, "INSERT INTO registration_codes (code) VALUES ($1) ON CONFLICT DO NOTHING RETURNING code, created_at",
-				newRegistrationCode()).Scan(&code.Code, &code.CreatedAt)
+			err := tx.QueryRow(ctx, "INSERT INTO registration_codes (code, max_uses) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING code, created_at, max_uses",
+				newRegistrationCode(), maxUses).Scan(&code.Code, &code.CreatedAt, &code.MaxUses)
 			if errors.Is(err, pgx.ErrNoRows) {
 				continue
 			}
@@ -94,14 +121,14 @@ func (s *Store) CreateRegistrationCodes(ctx context.Context, count int) ([]Regis
 
 // RegistrationCodes lists the codes, newest first.
 func (s *Store) RegistrationCodes(ctx context.Context) ([]RegistrationCode, error) {
-	rows, err := s.db.Query(ctx, "SELECT c.code, c.created_at, c.used_at, u.name FROM registration_codes c "+
+	rows, err := s.db.Query(ctx, "SELECT c.code, c.created_at, c.used_at, u.name, c.uses, c.max_uses FROM registration_codes c "+
 		"LEFT JOIN users u ON u.id = c.used_by ORDER BY c.created_at DESC, c.code")
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (RegistrationCode, error) {
 		var code RegistrationCode
-		err := row.Scan(&code.Code, &code.CreatedAt, &code.UsedAt, &code.UsedBy)
+		err := row.Scan(&code.Code, &code.CreatedAt, &code.UsedAt, &code.UsedBy, &code.Uses, &code.MaxUses)
 		return code, err
 	})
 }
@@ -115,10 +142,10 @@ func (s *Store) DeleteRegistrationCode(ctx context.Context, code string) error {
 	return err
 }
 
-// RegistrationCodeUsable reports whether code is an unused code.
+// RegistrationCodeUsable reports whether code may create an account.
 func (s *Store) RegistrationCodeUsable(ctx context.Context, code string) (bool, error) {
 	var usable bool
-	err := s.db.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM registration_codes WHERE code = $1 AND used_at IS NULL)",
+	err := s.db.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM registration_codes WHERE code = $1 AND "+usableCode+")",
 		NormalizeRegistrationCode(code)).Scan(&usable)
 	return usable, err
 }
@@ -127,7 +154,7 @@ func (s *Store) RegistrationCodeUsable(ctx context.Context, code string) (bool, 
 // created; ReleaseRegistrationCode gives it back when that fails, and
 // RegistrationCodeUsedBy names the account it created.
 func (s *Store) ClaimRegistrationCode(ctx context.Context, code string) error {
-	tag, err := s.db.Exec(ctx, "UPDATE registration_codes SET used_at = now() WHERE code = $1 AND used_at IS NULL",
+	tag, err := s.db.Exec(ctx, "UPDATE registration_codes SET uses = uses + 1, used_at = now() WHERE code = $1 AND "+usableCode,
 		NormalizeRegistrationCode(code))
 	if err == nil && tag.RowsAffected() == 0 {
 		err = ErrRegistrationCodeUnknown
@@ -136,7 +163,7 @@ func (s *Store) ClaimRegistrationCode(ctx context.Context, code string) error {
 }
 
 func (s *Store) ReleaseRegistrationCode(ctx context.Context, code string) error {
-	_, err := s.db.Exec(ctx, "UPDATE registration_codes SET used_at = NULL, used_by = NULL WHERE code = $1",
+	_, err := s.db.Exec(ctx, "UPDATE registration_codes SET uses = greatest(uses - 1, 0) WHERE code = $1",
 		NormalizeRegistrationCode(code))
 	return err
 }

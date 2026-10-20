@@ -101,12 +101,14 @@ type registrationCodeJSON struct {
 	CreatedAt time.Time  `json:"createdAt"`
 	UsedAt    *time.Time `json:"usedAt"`
 	UsedBy    *string    `json:"usedBy"`
+	Uses      int        `json:"uses"`
+	MaxUses   int        `json:"maxUses"`
 }
 
 func newRegistrationCodeJSONs(codes []accounts.RegistrationCode) []registrationCodeJSON {
 	result := make([]registrationCodeJSON, 0, len(codes))
 	for _, c := range codes {
-		result = append(result, registrationCodeJSON{c.Code, c.CreatedAt, c.UsedAt, c.UsedBy})
+		result = append(result, registrationCodeJSON{c.Code, c.CreatedAt, c.UsedAt, c.UsedBy, c.Uses, c.MaxUses})
 	}
 	return result
 }
@@ -124,7 +126,8 @@ func (h *handler) registrationCodes(w http.ResponseWriter, r *http.Request) {
 // createRegistrationCodes makes count codes, 1 by default, up to 50.
 func (h *handler) createRegistrationCodes(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Count int `json:"count"`
+		Count   int  `json:"count"`
+		MaxUses *int `json:"maxUses"`
 	}
 	if r.ContentLength != 0 && !decode(w, r, &body) {
 		return
@@ -136,7 +139,7 @@ func (h *handler) createRegistrationCodes(w http.ResponseWriter, r *http.Request
 		writeError(w, http.StatusBadRequest, "invalid_count")
 		return
 	}
-	codes, err := h.Accounts.CreateRegistrationCodes(r.Context(), body.Count)
+	codes, err := h.Accounts.CreateRegistrationCodes(r.Context(), body.Count, valueOr(body.MaxUses, 1))
 	if accountError(w, err) {
 		return
 	}
@@ -149,6 +152,26 @@ func (h *handler) createRegistrationCodes(w http.ResponseWriter, r *http.Request
 
 func (h *handler) deleteRegistrationCode(w http.ResponseWriter, r *http.Request) {
 	err := h.Accounts.DeleteRegistrationCode(r.Context(), r.PathValue("code"))
+	if accountError(w, err) {
+		return
+	}
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// updateRegistrationCode changes how many accounts a code may create, 0
+// for no limit.
+func (h *handler) updateRegistrationCode(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		MaxUses int `json:"maxUses"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	err := h.Accounts.SetRegistrationCodeUses(r.Context(), r.PathValue("code"), body.MaxUses)
 	if accountError(w, err) {
 		return
 	}
