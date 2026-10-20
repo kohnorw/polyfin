@@ -48,6 +48,12 @@
   --jf-palette-SnackbarContent-color: #e6e6e6 !important;
 }
 html, body, .backgroundContainer, .skinBody, .dashboardDocument { background-color: var(--aio-bg) !important; }
+/* While a desktop app such as Jellyfin Media Player plays, it draws the
+   video beneath the page, which jellyfin-web makes transparent. */
+html.transparentDocument, html.transparentDocument body, .transparentDocument .backgroundContainer,
+.transparentDocument .skinBody, .transparentDocument .mainAnimatedPages, .transparentDocument .page {
+  background: transparent !important; background-color: transparent !important;
+}
 /* The backdrop of a title's page fades into the page, as AIOStreams' hero
    does: dark at the bottom and on the left, where the text is. */
 .backgroundContainer.withBackdrop {
