@@ -35,6 +35,10 @@ A host that answers one byte range at a time would take a request for nearly eve
 - Before it offers such a track, Polyfin learns whether the host serves several ranges at once, from what it already knows of the host or with one request for two ranges.
 - Polyfin logs the tracks it leaves out.
 
+### Tracks read with the whole file
+
+A text track that the index cannot give cheaply is still offered as a file. When it is shown, Polyfin reads the version's file once, from start to end, in the background, in one request, and keeps every text track it finds, so that later playbacks of the version find them at once. The app waits up to 90 seconds for the track; picked again later, it is there. One file is read at a time. Torrents, replays and local folders' files are not read this way.
+
 ### Tracks offered after a remux
 
 Tracks left out for that reason, and tracks the index does not locate (as in MP4 files), are offered as files once a remux has read them whole. See [Transcoding](transcoding.md).

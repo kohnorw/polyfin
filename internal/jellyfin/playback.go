@@ -812,6 +812,7 @@ func (h *Handler) deliverable(ctx context.Context, decision playback.Decision, s
 		}
 		return located[stream]
 	}
+	wholeAsked := false
 	for _, stream := range streams {
 		delivery, ok := decision.Subtitles[stream.Index]
 		if stream.Type != "Subtitle" || !ok {
@@ -821,8 +822,17 @@ func (h *Handler) deliverable(ctx context.Context, decision playback.Decision, s
 		pgs := !stream.IsExternal && playback.PGSSubtitle(analysis, stream.Index-files)
 		switch {
 		case delivery.Method == "Embed" && !stream.IsExternal && decision.DirectPlay:
-		case delivery.Method == "External" && (stream.IsExternal || (extractable && (whole || locate(stream.Index-files))) ||
-			(pgs && locate(stream.Index-files))):
+		case delivery.Method == "External" && extractable && !whole && !locate(stream.Index-files):
+			// Its index cannot give it cheaply: the file is read once,
+			// whole, in the background, and the track is served once read
+			// (see embeddedTrack). Only for the track shown, so that no file
+			// is read for a playback without subtitles; picking one later
+			// asks for it.
+			if !wholeAsked && stream.Index == decision.SubtitleStreamIndex {
+				h.Playback.ExtractSubtitlesWhole(version, analysis)
+				wholeAsked = true
+			}
+		case delivery.Method == "External" && (stream.IsExternal || extractable || (pgs && locate(stream.Index-files))):
 		case delivery.Method == "Hls" && streamed && (stream.IsExternal || extractable):
 		case delivery.Method == "Encode" && streamed && decision.Video != nil && stream.Index == decision.SubtitleStreamIndex &&
 			burnable(streams, analysis, stream.Index):
@@ -1205,9 +1215,33 @@ func (h *Handler) embeddedTrack(r *http.Request, item accounts.ID, stream int) (
 			}
 		}
 	}
-	cues, ok := h.Playback.ExtractedTrack(r.Context(), version.ID, analysis.Duration, stream)
-	return subtitleText{cues: cues}, ok
+	if cues, ok := h.Playback.ExtractedTrack(r.Context(), version.ID, analysis.Duration, stream); ok {
+		return subtitleText{cues: cues}, true
+	}
+	// Not read yet: the file is read whole for its text tracks, and the
+	// app waits for it a while, as it waits for a track read through the
+	// index; asked again later, it is there.
+	h.Playback.ExtractSubtitlesWhole(version, analysis)
+	ctx, cancel := context.WithTimeout(r.Context(), wholeTrackWait)
+	defer cancel()
+	tick := time.NewTicker(time.Second)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return subtitleText{}, false
+		case <-tick.C:
+			if cues, ok := h.Playback.ExtractedTrack(ctx, version.ID, analysis.Duration, stream); ok {
+				return subtitleText{cues: cues}, true
+			}
+		}
+	}
 }
+
+// wholeTrackWait bounds how long a request for an embedded text track
+// waits for its file to be read whole: under the 100 seconds reverse
+// proxies such as Cloudflare's give an answer.
+const wholeTrackWait = 90 * time.Second
 
 // pgsFormat reports whether a subtitle URL asks for PGS, as Jellyfin
 // names it: "pgssub", "pgs" or "sup".

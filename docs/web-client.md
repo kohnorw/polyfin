@@ -78,6 +78,15 @@ A user signed in to the web client, administrator or member, arrives in the admi
 
 - The token goes to `POST /admin/api/session/jellyfin`, in the `Authorization` header only, never in the URL.
 
+## Subtitle size, height and timing
+
+In the video player, a button after the subtitle button opens a panel to adjust subtitles while watching:
+
+- **Size**, from 50% to 300%, and **Height**, raising them by up to 30% of the screen. Both are kept in the browser and apply to every video.
+- **Timing**, earlier or later by 0.1 or 0.5 seconds. This is jellyfin-web's own subtitle offset, which starts again at zero for each video; the G and H keys move it too.
+
+**Reset** puts all three back.
+
 ## Caching and security headers
 
 - The page itself is never cached.

@@ -6,8 +6,9 @@
 // eighth, shows a title's three scores for a ninth, adds entries to the
 // item menus for a tenth, adds the server's home rows to the home page for
 // an eleventh, offers to share a movie or an episode for a twelfth, and adds
-// reminders to a programme's page for a thirteenth, and makes the server's
-// logo, when it has one, the page's icon for a fourteenth.
+// reminders to a programme's page for a thirteenth, makes the server's
+// logo, when it has one, the page's icon for a fourteenth, and adds a
+// subtitle panel to the video player for a fifteenth.
 //
 // First, it sends the pages of jellyfin-web that need a Jellyfin server's
 // administration, which Polyfin does not have, to Polyfin's admin app. It
@@ -273,6 +274,24 @@
 // page anew. Its words follow jellyfin-web's language, as the third's. It
 // never changes the page during a video, and takes the buttons off as the
 // route leaves the programme. Any error just stops it.
+//
+// Fifteenth, in the video player (#/video), it adds a button after the
+// subtitle button of the controls (.videoOsdBottom .btnSubtitles) that
+// opens a panel with three rows: the subtitles' size, from 50% to 300%;
+// how high they sit, raised by up to 30% of the screen's height; and their
+// timing, earlier or later by tenths and halves of a second. Size and
+// height are kept in the browser's local storage and apply to every video,
+// through a stylesheet: the subtitles jellyfin-web draws itself
+// (.videoSubtitlesInner) are scaled from their bottom and raised, those the
+// browser draws (::cue) take the size only. Timing is jellyfin-web's own
+// subtitle offset, which it resets for each video: the panel moves the
+// slider of jellyfin-web's subtitle sync (.subtitleSyncSlider, which
+// jellyfin-web makes once a video with subtitles plays) through its
+// updateOffset, as jellyfin-web's own G and H keys do; with no subtitle
+// shown, the row says to pick one. Keys pressed in the panel stay in it.
+// The panel closes on its button, on Escape, and as the route leaves the
+// player. Its words follow jellyfin-web's language, as the third's. Any
+// error just stops it.
 ;(function () {
   var menus = document.createElement('style')
   menus.textContent =
@@ -2424,4 +2443,288 @@
       })
       .catch(function () {})
   })()
+})()
+
+;(function () {
+  var videoRoute = /^#!?\/video(?:[?#/]|$)/i
+  var words = {
+    en: {
+      button: 'Subtitle size and timing',
+      size: 'Size',
+      height: 'Height',
+      timing: 'Timing',
+      reset: 'Reset',
+      pick: 'Pick a subtitle to change its timing',
+      close: 'Close',
+    },
+    fr: {
+      button: 'Taille et décalage des sous-titres',
+      size: 'Taille',
+      height: 'Hauteur',
+      timing: 'Décalage',
+      reset: 'Réinitialiser',
+      pick: 'Choisissez un sous-titre pour le décaler',
+      close: 'Fermer',
+    },
+  }
+  function say(key) {
+    var language = /^[a-z]*/.exec(String(document.documentElement.lang || '').toLowerCase())[0]
+    return (words[language] || words.en)[key]
+  }
+  function quietly(listener) {
+    return function (event) {
+      try {
+        listener(event)
+      } catch (error) {}
+    }
+  }
+  function load(key, fallback, low, high) {
+    try {
+      var value = parseFloat(localStorage.getItem(key))
+      if (isFinite(value)) return Math.min(high, Math.max(low, value))
+    } catch (error) {}
+    return fallback
+  }
+  function save(key, value) {
+    try {
+      localStorage.setItem(key, String(value))
+    } catch (error) {}
+  }
+  var scale = load('polyfinSubtitleScale', 1, 0.5, 3)
+  var raise = load('polyfinSubtitleRaise', 0, 0, 30)
+  var observer = null
+  var panel = null
+  // apply writes the stylesheet that sizes and raises the subtitles.
+  function apply() {
+    var sheet = document.getElementById('polyfinSubtitleSize')
+    if (!sheet) {
+      sheet = document.createElement('style')
+      sheet.id = 'polyfinSubtitleSize'
+      document.head.appendChild(sheet)
+    }
+    var css = ''
+    if (scale !== 1) {
+      css +=
+        '.videoSubtitlesInner{transform:scale(' + scale + ');transform-origin:center bottom}' +
+        'video::cue,.htmlvideoplayer::cue{font-size:calc(clamp(16px,2.6vw,34px)*' + scale + ')!important}'
+    }
+    if (raise !== 0) css += '.videoSubtitles{translate:0 -' + raise + 'vh}'
+    sheet.textContent = css
+    draw()
+  }
+  function slider() {
+    var found = document.querySelector('.subtitleSyncSlider')
+    return found && typeof found.updateOffset === 'function' ? found : null
+  }
+  function offset() {
+    var found = slider()
+    return found ? Math.round(parseFloat(found.value || '0') * 10) / 10 : null
+  }
+  function shift(by) {
+    var found = slider()
+    if (!found) return
+    var value = by === null ? 0 : Math.round((parseFloat(found.value || '0') + by) * 10) / 10
+    found.updateOffset(Math.min(30, Math.max(-30, value)))
+    draw()
+  }
+  function percent(value) {
+    return Math.round(value * 100) + '%'
+  }
+  function seconds(value) {
+    return (value > 0 ? '+' : '') + value.toFixed(1) + ' s'
+  }
+  function button(label, action) {
+    var b = document.createElement('button')
+    b.type = 'button'
+    b.className = 'polyfinSubButton'
+    b.textContent = label
+    b.addEventListener('click', quietly(action))
+    return b
+  }
+  function row(name, value, buttons) {
+    var line = document.createElement('div')
+    line.className = 'polyfinSubRow'
+    var title = document.createElement('div')
+    title.className = 'polyfinSubName'
+    title.textContent = name
+    var shown = document.createElement('div')
+    shown.className = 'polyfinSubValue'
+    shown.textContent = value
+    line.appendChild(title)
+    var controls = document.createElement('div')
+    controls.className = 'polyfinSubControls'
+    for (var i = 0; i < buttons.length; i++) {
+      if (i === Math.floor(buttons.length / 2)) controls.appendChild(shown)
+      controls.appendChild(buttons[i])
+    }
+    line.appendChild(controls)
+    return line
+  }
+  // draw fills the panel, when open, with the values now.
+  function draw() {
+    if (!panel) return
+    panel.textContent = ''
+    var head = document.createElement('div')
+    head.className = 'polyfinSubHead'
+    head.textContent = say('button')
+    var close = button('✕', toggle)
+    close.title = say('close')
+    close.classList.add('polyfinSubClose')
+    head.appendChild(close)
+    panel.appendChild(head)
+    panel.appendChild(
+      row(say('size'), percent(scale), [
+        button('−', function () {
+          setScale(scale - 0.1)
+        }),
+        button('+', function () {
+          setScale(scale + 0.1)
+        }),
+      ]),
+    )
+    panel.appendChild(
+      row(say('height'), raise + '%', [
+        button('−', function () {
+          setRaise(raise - 2)
+        }),
+        button('+', function () {
+          setRaise(raise + 2)
+        }),
+      ]),
+    )
+    var now = offset()
+    if (now === null) {
+      var note = document.createElement('div')
+      note.className = 'polyfinSubNote'
+      note.textContent = say('pick')
+      var line = document.createElement('div')
+      line.className = 'polyfinSubRow'
+      var title = document.createElement('div')
+      title.className = 'polyfinSubName'
+      title.textContent = say('timing')
+      line.appendChild(title)
+      line.appendChild(note)
+      panel.appendChild(line)
+    } else {
+      panel.appendChild(
+        row(say('timing'), seconds(now), [
+          button('−0.5', function () {
+            shift(-0.5)
+          }),
+          button('−0.1', function () {
+            shift(-0.1)
+          }),
+          button('+0.1', function () {
+            shift(0.1)
+          }),
+          button('+0.5', function () {
+            shift(0.5)
+          }),
+        ]),
+      )
+    }
+    var footer = document.createElement('div')
+    footer.className = 'polyfinSubFooter'
+    footer.appendChild(
+      button(say('reset'), function () {
+        scale = 1
+        raise = 0
+        save('polyfinSubtitleScale', scale)
+        save('polyfinSubtitleRaise', raise)
+        if (offset() !== null) shift(null)
+        apply()
+      }),
+    )
+    panel.appendChild(footer)
+  }
+  function setScale(value) {
+    scale = Math.round(Math.min(3, Math.max(0.5, value)) * 10) / 10
+    save('polyfinSubtitleScale', scale)
+    apply()
+  }
+  function setRaise(value) {
+    raise = Math.min(30, Math.max(0, value))
+    save('polyfinSubtitleRaise', raise)
+    apply()
+  }
+  function toggle() {
+    if (panel) {
+      if (panel.parentNode) panel.parentNode.removeChild(panel)
+      panel = null
+      return
+    }
+    panel = document.createElement('div')
+    panel.className = 'polyfinSubPanel'
+    // Keys stay in the panel: jellyfin-web's player takes them otherwise.
+    panel.addEventListener('keydown', function (event) {
+      if (event.key === 'Escape') toggle()
+      event.stopPropagation()
+    })
+    document.body.appendChild(panel)
+    draw()
+  }
+  // place puts the button after the player's subtitle button.
+  function place() {
+    var subtitles = document.querySelector('.videoOsdBottom .btnSubtitles')
+    if (!subtitles || subtitles.parentNode.querySelector('.btnPolyfinSubtitleStyle')) return
+    var b = document.createElement('button')
+    b.type = 'button'
+    b.className = subtitles.className.replace(/\bbtnSubtitles\b/, '').replace(/\bhide\b/, '') + ' btnPolyfinSubtitleStyle'
+    b.title = say('button')
+    b.setAttribute('aria-label', say('button'))
+    var icon = document.createElement('span')
+    var shape = subtitles.querySelector('.material-icons')
+    icon.className = (shape ? shape.className.replace(/\b(closed_caption|subtitles)\b/g, '') : 'material-icons') + ' format_size'
+    icon.setAttribute('aria-hidden', 'true')
+    b.appendChild(icon)
+    b.addEventListener('click', quietly(toggle))
+    subtitles.parentNode.insertBefore(b, subtitles.nextSibling)
+  }
+  function style() {
+    if (document.getElementById('polyfinSubtitlePanelStyle')) return
+    var sheet = document.createElement('style')
+    sheet.id = 'polyfinSubtitlePanelStyle'
+    sheet.textContent =
+      '.polyfinSubPanel{position:fixed;right:1em;bottom:6.5em;z-index:1100;min-width:18em;padding:.8em 1em;' +
+      'border-radius:.75em;background:rgba(17,17,17,.96);color:#fff;box-shadow:0 .4em 1.6em rgba(0,0,0,.6);font-size:.95em}' +
+      '.polyfinSubHead{display:flex;align-items:center;justify-content:space-between;font-weight:600;margin-bottom:.6em}' +
+      '.polyfinSubRow{display:flex;align-items:center;justify-content:space-between;gap:1em;margin:.45em 0}' +
+      '.polyfinSubName{opacity:.75}' +
+      '.polyfinSubControls{display:flex;align-items:center;gap:.3em}' +
+      '.polyfinSubValue{min-width:4.2em;text-align:center;font-variant-numeric:tabular-nums}' +
+      '.polyfinSubNote{opacity:.6;font-size:.9em;text-align:right}' +
+      '.polyfinSubButton{min-width:2.2em;padding:.35em .55em;border:0;border-radius:.4em;background:rgba(255,255,255,.1);' +
+      'color:inherit;font:inherit;cursor:pointer}' +
+      '.polyfinSubButton:hover,.polyfinSubButton:focus{background:rgba(255,255,255,.2)}' +
+      '.polyfinSubClose{background:none}' +
+      '.polyfinSubFooter{display:flex;justify-content:flex-end;margin-top:.6em}'
+    document.head.appendChild(sheet)
+  }
+  function follow() {
+    if (!videoRoute.test(location.hash)) {
+      if (observer) observer.disconnect()
+      observer = null
+      if (panel) toggle()
+      return
+    }
+    style()
+    place()
+    if (!observer) {
+      // jellyfin-web draws the controls once the video starts.
+      observer = new MutationObserver(quietly(place))
+      observer.observe(document.body, { childList: true, subtree: true })
+    }
+  }
+  ;['pushState', 'replaceState'].forEach(function (name) {
+    var original = history[name]
+    history[name] = function () {
+      var result = original.apply(this, arguments)
+      quietly(follow)()
+      return result
+    }
+  })
+  addEventListener('hashchange', quietly(follow))
+  addEventListener('popstate', quietly(follow))
+  quietly(apply)()
+  quietly(follow)()
 })()

@@ -74,8 +74,11 @@ type Service struct {
 	signer   Signer
 	logger   *slog.Logger
 
-	flight   singleflight.Group
-	analyses *cache.Cache[accounts.ID, media.Analysis]
+	flight singleflight.Group
+	// wholeSubtitles lets one version at a time be read whole for its
+	// text subtitles (see ExtractSubtitlesWhole).
+	wholeSubtitles chan struct{}
+	analyses       *cache.Cache[accounts.ID, media.Analysis]
 	// failures are why versions could not be analyzed or reached, kept
 	// for failureTTL (see fail).
 	failures *cache.Cache[accounts.ID, versionFailure]
@@ -148,36 +151,37 @@ func New(db *pgxpool.Pool, opener source.Opener, ffprobePath string, signer Sign
 	segments.LimitAhead(func() time.Duration { return time.Duration(settings().AheadSeconds) * time.Second })
 	segments.KeepVideo(func() bool { return settings().KeepConvertedVideo })
 	s := &Service{
-		db:          db,
-		opener:      opener,
-		settings:    settings,
-		prober:      media.Prober{Path: ffprobePath},
-		sources:     sources,
-		segments:    segments,
-		loopback:    server,
-		renew:       renew,
-		signer:      signer,
-		logger:      logger,
-		analyses:    cache.New[accounts.ID, media.Analysis](2000, time.Hour),
-		failures:    cache.New[accounts.ID, versionFailure](2000, failureTTL),
-		unmastered:  cache.New[accounts.ID, error](2000, failureTTL),
-		live:        cache.New[accounts.ID, struct{}](2000, liveTTL),
-		hosts:       cache.New[string, bool](500, 5*time.Minute),
-		indexes:     cache.New[accounts.ID, []time.Duration](200, time.Hour),
-		unindexed:   cache.New[accounts.ID, error](2000, failureTTL),
-		offsets:     cache.New[accounts.ID, []container.Keyframe](50, time.Hour),
-		warming:     map[accounts.ID]*warmRun{},
-		warmed:      cache.New[accounts.ID, time.Duration](500, warmedFor),
-		extractions: cache.New[accounts.ID, *extracted](200, 6*time.Hour),
-		locations:   cache.New[accounts.ID, []int](2000, time.Hour),
-		unlocated:   cache.New[accounts.ID, error](2000, failureTTL),
-		tracks:      cache.New[trackKey, Track](100, time.Hour).Sized(maxKeptTracks, func(t Track) int { return len(t.Data) }),
-		untracked:   cache.New[trackKey, error](2000, failureTTL),
-		trackReads:  make(chan struct{}, maxTrackReads),
-		rangeHosts:  cache.New[string, bool](500, 24*time.Hour),
-		trackCues:   cache.New[trackKey, []subtitles.Cue](50, time.Hour),
-		attached:    cache.New[accounts.ID, []container.Attachment](8, 10*time.Minute),
-		speech:      newSpeechState(),
+		db:             db,
+		opener:         opener,
+		settings:       settings,
+		prober:         media.Prober{Path: ffprobePath},
+		sources:        sources,
+		segments:       segments,
+		loopback:       server,
+		renew:          renew,
+		signer:         signer,
+		logger:         logger,
+		analyses:       cache.New[accounts.ID, media.Analysis](2000, time.Hour),
+		failures:       cache.New[accounts.ID, versionFailure](2000, failureTTL),
+		unmastered:     cache.New[accounts.ID, error](2000, failureTTL),
+		live:           cache.New[accounts.ID, struct{}](2000, liveTTL),
+		hosts:          cache.New[string, bool](500, 5*time.Minute),
+		indexes:        cache.New[accounts.ID, []time.Duration](200, time.Hour),
+		unindexed:      cache.New[accounts.ID, error](2000, failureTTL),
+		offsets:        cache.New[accounts.ID, []container.Keyframe](50, time.Hour),
+		warming:        map[accounts.ID]*warmRun{},
+		warmed:         cache.New[accounts.ID, time.Duration](500, warmedFor),
+		extractions:    cache.New[accounts.ID, *extracted](200, 6*time.Hour),
+		wholeSubtitles: make(chan struct{}, 1),
+		locations:      cache.New[accounts.ID, []int](2000, time.Hour),
+		unlocated:      cache.New[accounts.ID, error](2000, failureTTL),
+		tracks:         cache.New[trackKey, Track](100, time.Hour).Sized(maxKeptTracks, func(t Track) int { return len(t.Data) }),
+		untracked:      cache.New[trackKey, error](2000, failureTTL),
+		trackReads:     make(chan struct{}, maxTrackReads),
+		rangeHosts:     cache.New[string, bool](500, 24*time.Hour),
+		trackCues:      cache.New[trackKey, []subtitles.Cue](50, time.Hour),
+		attached:       cache.New[accounts.ID, []container.Attachment](8, 10*time.Minute),
+		speech:         newSpeechState(),
 	}
 	server.live = s.ServeLive
 	return s, nil
