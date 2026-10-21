@@ -437,6 +437,13 @@ function Playback({ form, update, error, number, range, limits }: SectionFormApi
           onChange={(hideSpecials) => update({ hideSpecials })}
         />
         <SwitchRow
+          anchor="in-file-subtitles-only"
+          label={s.inFileSubtitlesOnly}
+          help={s.inFileSubtitlesOnlyHelp}
+          checked={form.inFileSubtitlesOnly}
+          onChange={(inFileSubtitlesOnly) => update({ inFileSubtitlesOnly })}
+        />
+        <SwitchRow
           anchor="exact-title-match"
           label={s.exactTitleMatch}
           help={s.exactTitleMatchHelp}

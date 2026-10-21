@@ -241,6 +241,12 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'playback',
+    anchor: 'in-file-subtitles-only',
+    label: (t) => s(t).inFileSubtitlesOnly,
+    help: (t) => s(t).inFileSubtitlesOnlyHelp,
+  },
+  {
+    section: 'playback',
     anchor: 'exact-title-match',
     label: (t) => s(t).exactTitleMatch,
     help: (t) => s(t).exactTitleMatchHelp,

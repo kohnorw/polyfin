@@ -373,6 +373,8 @@ export type Settings = {
   hideSpecials: boolean
   /** Leaves out the versions whose file name names another title. */
   exactTitleMatch: boolean
+  /** Offers only the subtitle tracks inside the files. */
+  inFileSubtitlesOnly: boolean
   /** Ends version names with how the app asking plays each, as its last playback decides it. */
   nameHowVersionsPlay: boolean
   /** Times the addons' subtitles to the version played, against when it has speech. */

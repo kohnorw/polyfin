@@ -236,6 +236,9 @@ const settings: typeof en = {
     hiddenVersionCodecsHelp:
       'Les versions dont on sait qu’elles sont dans ces codecs ne sont listées nulle part.',
     hideSpecials: 'Masquer les épisodes spéciaux',
+    inFileSubtitlesOnly: 'Seulement les sous-titres des fichiers',
+    inFileSubtitlesOnlyHelp:
+      'Ne propose que les pistes de sous-titres des fichiers vidéo : ni ceux des addons, ni les fichiers à côté ou ajoutés par les utilisateurs. Incrustés, ils sont dessinés dans l’image comme le demande le réglage « Incruster les sous-titres » du lecteur. Activé par défaut.',
     exactTitleMatch: 'Titres exacts',
     exactTitleMatchHelp:
       'Retire les versions dont le nom de fichier commence par un autre titre que celui du film ou de la série : les sorties de Smiling Friends ne sont pas proposées pour Friends. « The », l’année et la ponctuation ne comptent pas. Les versions sans nom de fichier sont gardées. Activé par défaut.',
