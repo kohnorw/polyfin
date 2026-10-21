@@ -2,6 +2,7 @@ package playback
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/moodiness/polyfin/internal/library"
@@ -40,13 +41,26 @@ func (s *Service) ExtractSubtitlesWhole(version library.Version, analysis media.
 			}
 			ctx, cancel := context.WithTimeout(ctx, wholeReadTime)
 			defer cancel()
-			src := s.open(version)
-			defer src.Release()
-			target, free := s.loopback.register(src)
-			defer free()
 			x := s.extractedOf(ctx, version.ID)
+			add := func(stream int, cue subtitles.Cue) { x.Add(stream, cue) }
 			started := time.Now()
-			err := s.segments.ExtractTextSubtitles(ctx, target, nil, streams, func(stream int, cue subtitles.Cue) { x.Add(stream, cue) })
+			var err error
+			if direct(version) {
+				// FFmpeg reads the link itself, at the host's full speed:
+				// through the source cache, a background read gives way to
+				// the playback reading the same file meanwhile, and would
+				// take minutes.
+				err = s.segments.ExtractTextSubtitles(ctx, version.URL, directOptions, streams, add)
+			}
+			if !direct(version) || err != nil && ctx.Err() == nil {
+				src := s.open(version)
+				defer src.Release()
+				// Urged, as a playback is: someone waits for the track.
+				defer src.Urge()()
+				target, free := s.loopback.register(src)
+				defer free()
+				err = s.segments.ExtractTextSubtitles(ctx, target, nil, streams, add)
+			}
 			if err != nil {
 				s.logger.Warn("The text subtitles of a version could not be read whole", "addon", version.Addon, "error", err)
 				s.saveExtracted(context.Background(), version.ID, x)
@@ -60,3 +74,16 @@ func (s *Service) ExtractSubtitlesWhole(version library.Version, analysis media.
 		})
 	}()
 }
+
+// direct reports whether FFmpeg may read a version's link itself: an
+// address of the web that needs no headers, from a source not confined to
+// the server's own network routes.
+func direct(version library.Version) bool {
+	return !version.Confined && len(version.Headers) == 0 &&
+		(strings.HasPrefix(version.URL, "https://") || strings.HasPrefix(version.URL, "http://"))
+}
+
+// directOptions have FFmpeg reconnect when a host drops the connection
+// of a long read, as debrid hosts do.
+var directOptions = []string{"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1",
+	"-reconnect_delay_max", "5", "-rw_timeout", "15000000"}

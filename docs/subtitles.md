@@ -37,7 +37,7 @@ A host that answers one byte range at a time would take a request for nearly eve
 
 ### Tracks read with the whole file
 
-A text track that the index cannot give cheaply is still offered as a file. When it is shown, Polyfin reads the version's file once, from start to end, in the background, in one request, and keeps every text track it finds, so that later playbacks of the version find them at once. The app waits up to 90 seconds for the track; picked again later, it is there. One file is read at a time. Torrents, replays and local folders' files are not read this way.
+A text track that the index cannot give cheaply is still offered as a file. When it is shown, Polyfin reads the version's file once, from start to end, in the background, in one request at the host's full speed (FFmpeg reads the link itself when the addon allows it, else through Polyfin at a playback's priority), and keeps every text track it finds, so that later playbacks of the version find them at once. The app waits up to 90 seconds for the track; picked again later, it is there. One file is read at a time. Torrents, replays and local folders' files are not read this way.
 
 ### Tracks offered after a remux
 
