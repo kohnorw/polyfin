@@ -197,15 +197,64 @@ function General({ form, update, error, range, limits }: SectionFormApi) {
 }
 
 const defaultLanguageCodes = [
-  'eng', 'fre', 'spa', 'ger', 'ita', 'por', 'dut', 'swe', 'nor', 'dan', 'fin', 'pol', 'rus', 'ukr', 'cze',
-  'gre', 'tur', 'ara', 'heb', 'hin', 'jpn', 'kor', 'chi', 'tha', 'vie', 'ind',
+  'eng',
+  'fre',
+  'spa',
+  'ger',
+  'ita',
+  'por',
+  'dut',
+  'swe',
+  'nor',
+  'dan',
+  'fin',
+  'pol',
+  'rus',
+  'ukr',
+  'cze',
+  'gre',
+  'tur',
+  'ara',
+  'heb',
+  'hin',
+  'jpn',
+  'kor',
+  'chi',
+  'tha',
+  'vie',
+  'ind',
 ] as const
 
 function languageOptions(none: string) {
   const names = new Intl.DisplayNames([navigator.language || 'en'], { type: 'language' })
-  const two: Record<string, string> = { eng: 'en', fre: 'fr', spa: 'es', ger: 'de', ita: 'it', por: 'pt', dut: 'nl', swe: 'sv',
-    nor: 'no', dan: 'da', fin: 'fi', pol: 'pl', rus: 'ru', ukr: 'uk', cze: 'cs', gre: 'el', tur: 'tr', ara: 'ar', heb: 'he',
-    hin: 'hi', jpn: 'ja', kor: 'ko', chi: 'zh', tha: 'th', vie: 'vi', ind: 'id' }
+  const two: Record<string, string> = {
+    eng: 'en',
+    fre: 'fr',
+    spa: 'es',
+    ger: 'de',
+    ita: 'it',
+    por: 'pt',
+    dut: 'nl',
+    swe: 'sv',
+    nor: 'no',
+    dan: 'da',
+    fin: 'fi',
+    pol: 'pl',
+    rus: 'ru',
+    ukr: 'uk',
+    cze: 'cs',
+    gre: 'el',
+    tur: 'tr',
+    ara: 'ar',
+    heb: 'he',
+    hin: 'hi',
+    jpn: 'ja',
+    kor: 'ko',
+    chi: 'zh',
+    tha: 'th',
+    vie: 'vi',
+    ind: 'id',
+  }
   return [
     { value: '', label: none },
     ...defaultLanguageCodes
@@ -240,13 +289,6 @@ function Playback({ form, update, error, number, range, limits }: SectionFormApi
           help={s.nameHowVersionsPlayHelp}
           checked={form.nameHowVersionsPlay}
           onChange={(nameHowVersionsPlay) => update({ nameHowVersionsPlay })}
-        />
-        <SwitchRow
-          anchor="sync-addon-subtitles"
-          label={s.syncAddonSubtitles}
-          help={s.syncAddonSubtitlesHelp}
-          checked={form.syncAddonSubtitles}
-          onChange={(syncAddonSubtitles) => update({ syncAddonSubtitles })}
         />
         <FieldRow
           anchor="analysis-timeout"
@@ -435,13 +477,6 @@ function Playback({ form, update, error, number, range, limits }: SectionFormApi
           help={s.hideSpecialsHelp}
           checked={form.hideSpecials}
           onChange={(hideSpecials) => update({ hideSpecials })}
-        />
-        <SwitchRow
-          anchor="in-file-subtitles-only"
-          label={s.inFileSubtitlesOnly}
-          help={s.inFileSubtitlesOnlyHelp}
-          checked={form.inFileSubtitlesOnly}
-          onChange={(inFileSubtitlesOnly) => update({ inFileSubtitlesOnly })}
         />
         <SwitchRow
           anchor="exact-title-match"

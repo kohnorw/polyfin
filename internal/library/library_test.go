@@ -188,12 +188,6 @@ func newEnv(t *testing.T) env {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Addons' subtitles, off by default, are those most tests read.
-	offered := users.Settings()
-	offered.InFileSubtitlesOnly = false
-	if _, err := users.UpdateSettings(t.Context(), offered); err != nil {
-		t.Fatal(err)
-	}
 	admin, _ := users.CreateUser(t.Context(), accounts.NewUser{Name: "admin", Password: "correct horse", IsAdministrator: true})
 	member, _ := users.CreateUser(t.Context(), accounts.NewUser{Name: "member", Password: "correct horse"})
 	client := stremio.NewClient("test")

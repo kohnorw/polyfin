@@ -236,16 +236,15 @@ const settings: typeof en = {
     hiddenVersionCodecsHelp:
       'Les versions dont on sait qu’elles sont dans ces codecs ne sont listées nulle part.',
     hideSpecials: 'Masquer les épisodes spéciaux',
-    inFileSubtitlesOnly: 'Seulement les sous-titres des fichiers',
-    inFileSubtitlesOnlyHelp:
-      'Ne propose que les pistes de sous-titres des fichiers vidéo : ni ceux des addons, ni les fichiers à côté ou ajoutés, ni les copies texte (OCR) des sous-titres en images. Dans le lecteur web, la piste choisie est incrustée dans l’image. Activé par défaut.',
     exactTitleMatch: 'Titres exacts',
     exactTitleMatchHelp:
       'Retire les versions dont le nom de fichier commence par un autre titre que celui du film ou de la série : les sorties de Smiling Friends ne sont pas proposées pour Friends. « The », l’année et la ponctuation ne comptent pas. Les versions sans nom de fichier sont gardées. Activé par défaut.',
     defaultAudioLanguage: 'Langue audio par défaut',
-    defaultAudioLanguageHelp: 'La langue audio jouée pour les utilisateurs qui n’en ont choisi aucune.',
+    defaultAudioLanguageHelp:
+      'La langue audio jouée pour les utilisateurs qui n’en ont choisi aucune.',
     defaultSubtitleLanguage: 'Langue des sous-titres par défaut',
-    defaultSubtitleLanguageHelp: 'La langue des sous-titres affichée pour les utilisateurs qui n’en ont choisi aucune.',
+    defaultSubtitleLanguageHelp:
+      'La langue des sous-titres affichée pour les utilisateurs qui n’en ont choisi aucune.',
     defaultLanguageNone: 'Aucune',
     hideSpecialsHelp:
       'Retire les épisodes spéciaux des séries (saison 0) de leurs saisons, listes d’épisodes et de « À suivre ». Activé par défaut.',
@@ -262,9 +261,6 @@ const settings: typeof en = {
     hiddenVersionWords: 'Masquer les versions dont les libellés contiennent',
     hiddenVersionWordsHelp: (r: RangeText) =>
       `Un mot ou une expression par ligne, cherché sans tenir compte des majuscules dans le nom, la description et le nom de fichier d’une version : pour les addons qui disent dans leurs libellés qu’un fichier n’est pas encore prêt à être lu. Jusqu’à ${r.max} lignes ; aucun par défaut.`,
-    syncAddonSubtitles: 'Recaler les sous-titres des addons',
-    syncAddonSubtitlesHelp:
-      'Cale les sous-titres des addons sur la version lue, quand ils arrivent trop tôt, trop tard, ou défilent plus vite ou plus lentement qu’elle. À la première lecture d’une version, Polyfin repère en arrière-plan quand on y parle : grâce à un sous-titre texte du fichier, sinon dans trois passages de son audio, en lisant au plus 300 Mo du fichier d’un addon. Ensuite, un sous-titre qui colle nettement mieux décalé ou accéléré arrive recalé, son nom finissant par « (recalé) ».',
     remuxDb: 'Décrire les versions grâce à RemuxDB',
     remuxDbHelp:
       'Affiche les pistes audio, de sous-titres et vidéo d’une version avant sa première lecture, telles que RemuxDB les a trouvées dans le même fichier. Quand les détails d’un titre s’ouvrent, Polyfin interroge RemuxDB, une base communautaire, avec l’identifiant IMDb du titre, et retrouve les versions par le nom de leur fichier. La lecture analyse toujours chaque version.',
@@ -327,7 +323,6 @@ const settings: typeof en = {
         'Quand une application ne sait pas lire un fichier tel quel, Polyfin le convertit avec FFmpeg. Ces réglages disent comment, pour les films, les séries et la TV en direct. Les valeurs par défaut conviennent à la plupart des serveurs.',
       groups: {
         general: 'Général',
-        subtitles: 'Sous-titres en images',
         gpu: 'Carte graphique',
         video: 'Image',
         hdr: 'HDR',
@@ -335,17 +330,6 @@ const settings: typeof en = {
         audio: 'Son',
         performance: 'Performances',
       },
-      subtitleOcr: 'Lire en texte les sous-titres en images',
-      subtitleOcrHelp:
-        'Les sous-titres PGS et de DVD (VobSub) sont des images, et beaucoup d’applications ne prennent que du texte : pour elles, Polyfin incruste la piste dans l’image, ce qui demande une conversion. Activé, Tesseract lit une fois chaque piste en images, en arrière-plan, pour en faire une copie en texte, listée comme une piste de plus marquée « (OCR) », qui se lit sans conversion. Tant que la copie n’est pas prête, la piste est incrustée comme avant. La piste en images reste : l’italique, les couleurs et les positions sont perdus, et des polices travaillées peuvent être mal lues. « À la lecture » lit les pistes d’une version la première fois qu’une application qui ne sait pas les afficher la lit ; « Aussi après les analyses des bibliothèques » lit aussi les pistes des nouveaux fichiers locaux. Désactivé par défaut.',
-      subtitleOcrChoices: {
-        off: 'Désactivé',
-        played: 'À la lecture',
-        scans: 'Aussi après les analyses des bibliothèques',
-      },
-      subtitleOcrTracks: 'Pistes de sous-titres en images lues en même temps',
-      subtitleOcrTracksHelp: (r: RangeText) =>
-        `Chaque piste est lue par un processus Tesseract, sur un cœur du processeur. De ${r.min} à ${r.max} ; ${r.default} par défaut.`,
       hardwareAcceleration: 'Carte graphique pour convertir',
       hardwareAccelerationHelp:
         'Une carte graphique (GPU) convertit la vidéo bien plus vite que le processeur. Chaque système propose les siennes : NVIDIA et VAAPI sous Linux, VideoToolbox sous macOS, NVIDIA, Intel et AMD sous Windows. Sans carte qui fonctionne, le processeur convertit. Un changement s’applique dès l’enregistrement, sans redémarrer.',

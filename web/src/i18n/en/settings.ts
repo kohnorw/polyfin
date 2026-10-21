@@ -230,16 +230,15 @@ const settings = {
     hiddenVersionCodecs: 'Hide these video codecs',
     hiddenVersionCodecsHelp: 'Versions known to be in these codecs are listed nowhere.',
     hideSpecials: 'Hide specials',
-    inFileSubtitlesOnly: 'Only subtitles inside the files',
-    inFileSubtitlesOnlyHelp:
-      'Offers only the subtitle tracks the video files carry: no addon’s subtitles, no files beside them or added by users, and no text (OCR) copies of picture subtitles. In the web player, the track chosen is burned into the picture. On by default.',
     exactTitleMatch: 'Match titles exactly',
     exactTitleMatchHelp:
       'Leaves out the versions whose file name starts with a longer title holding the movie’s or the series’ own: Smiling Friends’ releases are not offered for Friends. A leading “The”, the year and punctuation do not count. Versions without a file name are kept. On by default.',
     defaultAudioLanguage: 'Default audio language',
-    defaultAudioLanguageHelp: 'The audio language played for users who chose none in their own settings.',
+    defaultAudioLanguageHelp:
+      'The audio language played for users who chose none in their own settings.',
     defaultSubtitleLanguage: 'Default subtitle language',
-    defaultSubtitleLanguageHelp: 'The subtitle language shown for users who chose none in their own settings.',
+    defaultSubtitleLanguageHelp:
+      'The subtitle language shown for users who chose none in their own settings.',
     defaultLanguageNone: 'None',
     hideSpecialsHelp:
       'Leaves series’ specials (season 0) out of their seasons, episode lists and Next Up. On by default.',
@@ -256,9 +255,6 @@ const settings = {
     hiddenVersionWords: 'Hide versions whose labels contain',
     hiddenVersionWordsHelp: (r: RangeText) =>
       `One word or phrase a line, matched in any letter case in a version’s name, description and file name: for addons that say in their labels that a file is not ready to play yet. Up to ${r.max} lines; none by default.`,
-    syncAddonSubtitles: 'Sync addon subtitles',
-    syncAddonSubtitlesHelp:
-      'Times the addons’ subtitles to the version played, when they run early, late, or faster or slower than it. At a version’s first play, Polyfin finds in the background when it has speech: from a text subtitle inside the file, else from three stretches of its audio, reading at most 300 MB of an addon’s file. From then on, a subtitle that fits clearly better shifted or sped up comes synced, its name ending with “(synced)”.',
     remuxDb: 'Describe versions from RemuxDB',
     remuxDbHelp:
       'Shows the audio, subtitle and video tracks of a version before it is first played, as RemuxDB found them in the same file. When a title’s details open, Polyfin asks RemuxDB, a community database, by the title’s IMDb identifier, and finds the versions by their file names. Playback still analyzes each version.',
@@ -320,7 +316,6 @@ const settings = {
         'When an app cannot play a file as it is, Polyfin converts it with FFmpeg. These settings choose how, for movies, series and Live TV alike. The defaults suit most servers.',
       groups: {
         general: 'General',
-        subtitles: 'Picture subtitles',
         gpu: 'Graphics card',
         video: 'Video',
         hdr: 'HDR',
@@ -328,17 +323,6 @@ const settings = {
         audio: 'Audio',
         performance: 'Performance',
       },
-      subtitleOcr: 'Turn picture subtitles into text',
-      subtitleOcrHelp:
-        'PGS and DVD (VobSub) subtitles are pictures, and many apps take only text: for them, Polyfin burns the track into the video, which needs a conversion. With this on, Tesseract reads each picture track once, in the background, into a text copy listed as one more track marked "(OCR)", which plays without conversion. Until a copy is ready, the track is burned in as before. The picture track stays: italics, colors and positions are lost, and stylized fonts can be misread. "When played" reads a version’s tracks the first time an app that cannot draw them plays it; "Also after library scans" also reads the tracks of new local files. Off by default.',
-      subtitleOcrChoices: {
-        off: 'Off',
-        played: 'When played',
-        scans: 'Also after library scans',
-      },
-      subtitleOcrTracks: 'Picture subtitle tracks read at once',
-      subtitleOcrTracksHelp: (r: RangeText) =>
-        `Each track is read by one Tesseract process using one processor core. From ${r.min} to ${r.max}; ${r.default} by default.`,
       hardwareAcceleration: 'Graphics card used to convert',
       hardwareAccelerationHelp:
         'A graphics card (GPU) converts video much faster than the processor. Each system offers its own: NVIDIA and VAAPI on Linux, VideoToolbox on macOS, NVIDIA, Intel and AMD on Windows. Without a card that works, the processor converts. A change applies once saved, without a restart.',

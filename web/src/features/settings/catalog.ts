@@ -132,13 +132,6 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'playback',
-    anchor: 'sync-addon-subtitles',
-    label: (t) => s(t).syncAddonSubtitles,
-    help: (t) => s(t).syncAddonSubtitlesHelp,
-    keywords: ['subtitles', 'sous-titres', 'sync', 'recaler'],
-  },
-  {
-    section: 'playback',
     anchor: 'analysis-timeout',
     label: (t) => s(t).analysisTimeout,
     help: (t, r) => s(t).analysisTimeoutHelp(r('analysisTimeout')),
@@ -241,12 +234,6 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'playback',
-    anchor: 'in-file-subtitles-only',
-    label: (t) => s(t).inFileSubtitlesOnly,
-    help: (t) => s(t).inFileSubtitlesOnlyHelp,
-  },
-  {
-    section: 'playback',
     anchor: 'exact-title-match',
     label: (t) => s(t).exactTitleMatch,
     help: (t) => s(t).exactTitleMatchHelp,
@@ -311,22 +298,6 @@ export const settingEntries: readonly SettingEntry[] = [
     label: (t) => s(t).convertedDownloads,
     help: (t) => s(t).convertedDownloadsHelp,
     keywords: ['download', 'offline', 'Streamyfin'],
-  },
-  {
-    section: 'conversion',
-    anchor: 'subtitle-ocr',
-    label: (t) => c(t).subtitleOcr,
-    help: (t) => c(t).subtitleOcrHelp,
-    keywords: ['OCR', 'Tesseract', 'PGS', 'VobSub', 'DVD', 'subtitles', 'sous-titres'],
-    codes: ['invalid_subtitle_ocr'],
-  },
-  {
-    section: 'conversion',
-    anchor: 'subtitle-ocr-tracks',
-    label: (t) => c(t).subtitleOcrTracks,
-    help: (t, r) => c(t).subtitleOcrTracksHelp(r('subtitleOcrTracks')),
-    keywords: ['OCR', 'Tesseract'],
-    codes: ['invalid_subtitle_ocr_tracks'],
   },
   {
     section: 'conversion',
