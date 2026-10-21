@@ -232,7 +232,7 @@ const settings = {
     hideSpecials: 'Hide specials',
     inFileSubtitlesOnly: 'Only subtitles inside the files',
     inFileSubtitlesOnlyHelp:
-      'Offers only the subtitle tracks the video files carry: no addon’s subtitles, nor files beside them or added by users. Burned in, they are drawn into the picture as the player’s “Burn in subtitles” setting asks. On by default.',
+      'Offers only the subtitle tracks the video files carry: no addon’s subtitles, no files beside them or added by users, and no text (OCR) copies of picture subtitles. In the web player, the track chosen is burned into the picture. On by default.',
     exactTitleMatch: 'Match titles exactly',
     exactTitleMatchHelp:
       'Leaves out the versions whose file name starts with a longer title holding the movie’s or the series’ own: Smiling Friends’ releases are not offered for Friends. A leading “The”, the year and punctuation do not count. Versions without a file name are kept. On by default.',

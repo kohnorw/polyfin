@@ -150,3 +150,21 @@ func WithoutRiskyVideo(profile *DeviceProfile) *DeviceProfile {
 	}
 	return &safe
 }
+
+// burnedFormats are the subtitle formats a profile that burns every
+// subtitle names.
+var burnedFormats = []string{"srt", "subrip", "ass", "ssa", "vtt", "webvtt", "mov_text", "ttml", "sub", "smi", "pgs", "pgssub", "dvdsub", "dvbsub", "vobsub"}
+
+// BurningSubtitles returns a copy of profile whose subtitles are all
+// burned into the picture (Encode), none sent beside the video.
+func BurningSubtitles(profile *DeviceProfile) *DeviceProfile {
+	if profile == nil {
+		return nil
+	}
+	out := *profile
+	out.SubtitleProfiles = make([]SubtitleProfile, 0, len(burnedFormats))
+	for _, format := range burnedFormats {
+		out.SubtitleProfiles = append(out.SubtitleProfiles, SubtitleProfile{Format: format, Method: "Encode"})
+	}
+	return &out
+}

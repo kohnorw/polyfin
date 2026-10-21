@@ -530,6 +530,11 @@ func (h *Handler) readPlaybackInfoBody(w http.ResponseWriter, r *http.Request, b
 		if webApp(r) && h.Accounts.Settings().WebSafeVideo {
 			request.DeviceProfile = playback.WithoutRiskyVideo(request.DeviceProfile)
 		}
+		// With only the files' own subtitles offered, the web player has
+		// them burned into the picture, whatever their format.
+		if webApp(r) && h.Accounts.Settings().InFileSubtitlesOnly {
+			request.DeviceProfile = playback.BurningSubtitles(request.DeviceProfile)
+		}
 	}
 	if posted.EnableDirectPlay != nil {
 		request.EnableDirectPlay = posted.EnableDirectPlay
@@ -853,6 +858,9 @@ func subtitleFiles(streams []playback.MediaStream) int {
 // next PlaybackInfo once read.
 func (h *Handler) queueTextCopies(ctx context.Context, p playable, decision playback.Decision, streams []playback.MediaStream,
 	version library.Version, analysis media.Analysis) {
+	if h.Accounts.Settings().InFileSubtitlesOnly {
+		return
+	}
 	cannot := false
 	for _, stream := range streams {
 		if stream.Type == "Subtitle" && stream.CopyOf == nil && playback.PictureSubtitle(stream.Codec) {
