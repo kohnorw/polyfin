@@ -373,12 +373,8 @@ export type Settings = {
   hideSpecials: boolean
   /** Leaves out the versions whose file name names another title. */
   exactTitleMatch: boolean
-  /** Offers only the subtitle tracks inside the files. */
-  inFileSubtitlesOnly: boolean
   /** Ends version names with how the app asking plays each, as its last playback decides it. */
   nameHowVersionsPlay: boolean
-  /** Times the addons' subtitles to the version played, against when it has speech. */
-  syncAddonSubtitles: boolean
   /** Playbacks whose video the server converts at once, 0 for no limit. */
   maxConversions: number
   /** Height converted video is scaled down to at most, 0 to keep the original's. */
@@ -387,13 +383,6 @@ export type Settings = {
   /** Offers the web player no HEVC, Dolby Vision or AV1 video, which browsers often show black. */
   webSafeVideo: boolean
   convertedDownloads: boolean
-  /**
-   * Reads picture subtitles (PGS, VobSub) into text tracks with Tesseract: never, when an app that
-   * cannot draw them plays a version, or also after the scans of local folders.
-   */
-  subtitleOcr: SubtitleOcr
-  /** Picture subtitle tracks read at once. */
-  subtitleOcrTracks: number
   /** Encoder speed against quality: auto (Polyfin's choice), then veryslow to ultrafast. */
   encoderPreset: EncoderPreset
   /** Quality factor of H.264 and HEVC conversions (CRF, CQ or QVBR's), 0 aiming for the bitrate alone. */
@@ -622,7 +611,6 @@ export type ToneMappingAlgorithm =
 export type DeinterlaceMethod = 'yadif' | 'bwdif'
 export type AdaptiveQuality = 'off' | 'remote' | 'always'
 export type DownmixAlgorithm = 'None' | 'Dave750' | 'NightmodeDialogue' | 'Rfc7845' | 'Ac4'
-export type SubtitleOcr = 'off' | 'played' | 'scans'
 
 /** A GPU conversions run on. */
 export type ConversionGPU = {

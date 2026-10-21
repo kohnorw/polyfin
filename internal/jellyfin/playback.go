@@ -530,9 +530,9 @@ func (h *Handler) readPlaybackInfoBody(w http.ResponseWriter, r *http.Request, b
 		if webApp(r) && h.Accounts.Settings().WebSafeVideo {
 			request.DeviceProfile = playback.WithoutRiskyVideo(request.DeviceProfile)
 		}
-		// With only the files' own subtitles offered, the web player has
+		// Only the files' own subtitles are offered, and the web player has
 		// them burned into the picture, whatever their format.
-		if webApp(r) && h.Accounts.Settings().InFileSubtitlesOnly {
+		if webApp(r) {
 			request.DeviceProfile = playback.BurningSubtitles(request.DeviceProfile)
 		}
 	}
@@ -594,7 +594,6 @@ func (h *Handler) decide(r *http.Request, p playable, index int, version library
 		return decided{}, false
 	}
 	source := h.baseSource(r, p, version, id, analysis, true)
-	source.MediaStreams = h.withTextCopies(r.Context(), p, version, analysis, source.MediaStreams)
 	decision, options, described := h.trackDecision(p, version, source.MediaStreams, analysis, request, allowed, named)
 	// Over HLS, a version is cut into segments: on its keyframes, or,
 	// for a file without an index such as MPEG-TS, every few seconds,
@@ -752,7 +751,6 @@ func (h *Handler) decidedSource(r *http.Request, p playable, d decided, request 
 			streamed = false
 		}
 	}
-	h.queueTextCopies(r.Context(), p, decision, streams, version, analysis)
 	h.deliverable(r.Context(), decision, streams, version, analysis, streamed)
 	h.prefetchSubtitle(r.Context(), decision, streams, version, analysis)
 
@@ -849,30 +847,6 @@ func subtitleFiles(streams []playback.MediaStream) int {
 		}
 	}
 	return files
-}
-
-// queueTextCopies has a version's picture subtitles read into text when
-// the app plays it and cannot draw them: when the decision would burn one
-// in, or leave one out, rather than have the app draw it. The track chosen
-// is read first. Nothing waits for them: the copies are listed from the
-// next PlaybackInfo once read.
-func (h *Handler) queueTextCopies(ctx context.Context, p playable, decision playback.Decision, streams []playback.MediaStream,
-	version library.Version, analysis media.Analysis) {
-	if h.Accounts.Settings().InFileSubtitlesOnly {
-		return
-	}
-	cannot := false
-	for _, stream := range streams {
-		if stream.Type == "Subtitle" && stream.CopyOf == nil && playback.PictureSubtitle(stream.Codec) {
-			if delivery, ok := decision.Subtitles[stream.Index]; ok && delivery.Method == "Encode" {
-				cannot = true
-			}
-		}
-	}
-	if !cannot {
-		return
-	}
-	h.Playback.QueueTextCopies(ctx, version, analysis, versionFiles(p.subtitles, version), decision.SubtitleStreamIndex)
 }
 
 // prefetchSubtitle starts reading whole the embedded track the app shows

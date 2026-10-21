@@ -456,15 +456,11 @@ func (h *Handler) adaptiveQuality(r *http.Request) bool {
 }
 
 // renditions are the text subtitles a remux offers in HLS, the one the
-// app chose shown by default: the text files, the embedded tracks FFmpeg
-// extracts, and the text copies of picture subtitles. The app's player can
-// switch between them.
+// app chose shown by default: the embedded tracks FFmpeg extracts, the only
+// subtitles offered. The app's player can switch between them.
 func (h *Handler) renditions(ctx context.Context, req remuxRequest, selected, rawQuery string) []hls.Rendition {
 	language := h.Accounts.Settings().Language
 	streams := playback.MediaStreams(req.analysis, externalStreams(req.files), language)
-	if !h.Accounts.Settings().InFileSubtitlesOnly {
-		streams = playback.AppendTextCopies(streams, h.Playback.TextCopies(ctx, req.remux.Version, req.analysis, req.files), language)
-	}
 	shown, err := strconv.Atoi(selected)
 	if err != nil {
 		shown = -1
