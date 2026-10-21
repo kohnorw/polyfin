@@ -721,6 +721,13 @@ func webApp(r *http.Request) bool {
 	return webClient(callerFrom(r.Context()).Device.Client)
 }
 
+// mpvApp reports whether the app asking is a desktop app drawing video and
+// subtitles with mpv: Jellyfin Media Player, or Jellyfin Desktop.
+func mpvApp(r *http.Request) bool {
+	client := callerFrom(r.Context()).Device.Client
+	return strings.EqualFold(client, "Jellyfin Media Player") || strings.EqualFold(client, "Jellyfin Desktop")
+}
+
 // webClient reports whether client, the app a device signed in with, is
 // jellyfin-web.
 func webClient(client string) bool {

@@ -205,14 +205,19 @@ func TrackEvents(cues []Cue) []byte {
 }
 
 // assHeader is a minimal Advanced SubStation Alpha script with one default
-// style.
+// style, the look Apple's players give subtitles, which the web player's
+// stylesheet copies: white Helvetica Neue on a translucent black box
+// (BorderStyle 3, the box in OutlineColour, 45% transparent), no shadow,
+// low on the picture.
 const assHeader = `[Script Info]
 ScriptType: v4.00+
+PlayResX: 384
+PlayResY: 288
 ScaledBorderAndShadow: Yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Default,Arial,20,&H00FFFFFF,&H0000FFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,1,2,10,10,10,1
+Style: Default,Helvetica Neue,15,&H00FFFFFF,&H0000FFFF,&H73000000,&H73000000,0,0,0,0,100,100,0,0,3,2.5,0,2,16,16,14,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

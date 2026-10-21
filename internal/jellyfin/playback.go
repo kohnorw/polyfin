@@ -530,6 +530,11 @@ func (h *Handler) readPlaybackInfoBody(w http.ResponseWriter, r *http.Request, b
 		if webApp(r) && h.Accounts.Settings().WebSafeVideo {
 			request.DeviceProfile = playback.WithoutRiskyVideo(request.DeviceProfile)
 		}
+		// Desktop apps draw subtitles with mpv, in its own style: they get
+		// text subtitles as ASS files, in the style every app shows.
+		if mpvApp(r) {
+			request.DeviceProfile = playback.TextSubtitlesAsASS(request.DeviceProfile)
+		}
 	}
 	if posted.EnableDirectPlay != nil {
 		request.EnableDirectPlay = posted.EnableDirectPlay

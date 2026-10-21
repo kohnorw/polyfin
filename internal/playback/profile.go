@@ -150,3 +150,24 @@ func WithoutRiskyVideo(profile *DeviceProfile) *DeviceProfile {
 	}
 	return &safe
 }
+
+// textSubtitleFormats are the text formats a device profile names.
+var textSubtitleFormats = []string{"srt", "subrip", "vtt", "webvtt", "ass", "ssa", "mov_text", "ttml", "smi", "sub"}
+
+// TextSubtitlesAsASS returns a copy of profile in which the app takes every
+// text subtitle as an ASS file, and picture subtitles as before: drawn by
+// libass with the style Polyfin writes (see subtitles.ASS), rather than in
+// the app's own style, as players built on mpv draw SubRip.
+func TextSubtitlesAsASS(profile *DeviceProfile) *DeviceProfile {
+	if profile == nil {
+		return nil
+	}
+	out := *profile
+	out.SubtitleProfiles = []SubtitleProfile{{Format: "ass", Method: "External"}}
+	for _, p := range profile.SubtitleProfiles {
+		if !slices.ContainsFunc(textSubtitleFormats, func(f string) bool { return strings.EqualFold(f, p.Format) }) {
+			out.SubtitleProfiles = append(out.SubtitleProfiles, p)
+		}
+	}
+	return &out
+}
