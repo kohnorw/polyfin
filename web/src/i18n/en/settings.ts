@@ -232,7 +232,7 @@ const settings = {
     hideSpecials: 'Hide specials',
     exactTitleMatch: 'Match titles exactly',
     exactTitleMatchHelp:
-      'Leaves out the versions whose file name starts with a longer title holding the movie’s or the series’ own: Smiling Friends’ releases are not offered for Friends. A leading “The”, the year and punctuation do not count. Versions without a file name are kept. On by default.',
+      'Leaves out the versions whose file is of another title: its name starts with another title (Smiling Friends for Friends, No Way Home for Brand New Day), a movie’s names a year more than one year off, an episode’s names another season or episode. A leading “The”, punctuation, spaces and country tags such as (US) do not count. Versions without a file name, or whose title cannot be read from it, are kept; releases named in another language are left out, as another title. On by default.',
     defaultAudioLanguage: 'Default audio language',
     defaultAudioLanguageHelp:
       'The audio language played for users who chose none in their own settings.',

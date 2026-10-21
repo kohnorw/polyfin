@@ -5,13 +5,18 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+
+	"github.com/moodiness/polyfin/internal/stremio"
 )
 
 // withoutMismatched leaves out, when Settings.ExactTitleMatch is on, the
-// versions of a movie or an episode whose file names a longer title
-// holding the movie's or the series' own: a search of Friends finds
-// Smiling Friends' releases too. Versions without a file name, or whose title
-// cannot be read from it, are kept.
+// versions of a movie or an episode whose file is of another title: its
+// name starts with a title that is not the movie's or the series' own,
+// Smiling Friends' for Friends or No Way Home's for Brand New Day; a
+// movie's names a year more than a year from the movie's; an episode's
+// names another season, or other episodes. Versions without a file name,
+// or whose title cannot be read from it, are kept, as is an episode's file
+// that names no episode, such as one counted from the first episode.
 func (s *Service) withoutMismatched(t target, versions []Version) []Version {
 	if !s.settings().ExactTitleMatch || t.name == "" || (t.kind != KindMovie && t.kind != KindEpisode) {
 		return versions
@@ -20,10 +25,163 @@ func (s *Service) withoutMismatched(t target, versions []Version) []Version {
 	if want == "" {
 		return versions
 	}
-	return slices.DeleteFunc(versions, func(v Version) bool {
-		got := releaseTitle(v.Filename)
-		return got != "" && otherTitleWith(got, want)
-	})
+	return slices.DeleteFunc(versions, func(v Version) bool { return mismatched(t, want, v.Filename) })
+}
+
+// mismatched reports whether a file is of another title than t, whose
+// name want is as matchKey reads it.
+func mismatched(t target, want, filename string) bool {
+	words := releaseWords(filename)
+	if len(words) == 0 {
+		return false
+	}
+	at, ok := titleEnd(words, want, t.kind == KindEpisode)
+	if !ok {
+		// A title read from the name that is not this one; a name whose
+		// title cannot be read is kept.
+		return releaseTitle(filename) != ""
+	}
+	rest := words[at:]
+	if t.kind == KindMovie && t.year > 0 {
+		for _, word := range rest {
+			if isYear(word) {
+				year := atoi(word)
+				if year < t.year-1 || year > t.year+1 {
+					return true
+				}
+				break
+			}
+		}
+	}
+	if t.kind == KindEpisode && t.season > 0 && t.episode > 0 {
+		for i, word := range rest {
+			if season, first, last, ok := episodeWord(word); ok {
+				if season != t.season {
+					return true
+				}
+				// S01E02-E03 reads as two words.
+				for _, next := range rest[i+1:] {
+					if len(next) < 2 || next[0] != 'e' || !allDigits(next[1:]) {
+						break
+					}
+					last = max(last, atoi(next[1:]))
+				}
+				return first > 0 && (t.episode < first || t.episode > last)
+			}
+		}
+	}
+	return false
+}
+
+// releaseWords are the words of a file's name, as matchKey reads them,
+// a leading [group] left out.
+func releaseWords(filename string) []string {
+	if filename == "" {
+		return nil
+	}
+	name := strings.TrimSpace(strings.TrimSuffix(path.Base(filename), path.Ext(filename)))
+	for strings.HasPrefix(name, "[") {
+		end := strings.Index(name, "]")
+		if end < 0 {
+			break
+		}
+		name = strings.TrimSpace(name[end+1:])
+	}
+	return strings.Fields(matchKey(name))
+}
+
+// countryTags are the countries release names add to a title, as in The
+// Office (US).
+var countryTags = map[string]bool{"us": true, "uk": true, "au": true, "nz": true, "ca": true}
+
+// titleEnd finds whether a release's words start with the title want and
+// where its title ends: the title is followed by the end of the name, a
+// word that follows titles (see endsTitle) or a country tag, and for an
+// episode by a number alone, as anime count episodes. A leading "the" and a
+// trailing year, on either side, and spaces, as in S.H.I.E.L.D., do not
+// count. The longest title that fits wins: Blade Runner 2049's, not Blade
+// Runner's.
+func titleEnd(words []string, want string, episode bool) (int, bool) {
+	wanted := compact(strings.Fields(want))
+	if fields := strings.Fields(want); len(fields) > 1 && isYear(fields[len(fields)-1]) {
+		wanted = []string{wanted[0], compact(fields[:len(fields)-1])[0]}
+	}
+	start := 0
+	if len(words) > 1 && words[0] == "the" {
+		start = 1
+	}
+	for _, from := range []int{0, start} {
+		for k := len(words); k > from; k-- {
+			joined := compact(words[from:k])[0]
+			if !slices.Contains(wanted, joined) {
+				continue
+			}
+			end := k
+			for end < len(words) && countryTags[words[end]] {
+				end++
+			}
+			if end == len(words) || endsTitle(words[end]) || episode && allDigits(words[end]) {
+				return end, true
+			}
+		}
+	}
+	return 0, false
+}
+
+// compact joins words without spaces, a leading "the" left out: a title
+// read for comparison.
+func compact(words []string) []string {
+	if len(words) > 1 && words[0] == "the" {
+		words = words[1:]
+	}
+	return []string{strings.Join(words, "")}
+}
+
+// episodeWord reads a release word naming a season and episodes: S01E02,
+// S01E02E03, S01E02-E03 read as two words, 1x02. first is 0 for a season
+// alone, S01.
+func episodeWord(word string) (season, first, last int, ok bool) {
+	if len(word) >= 3 && word[0] == 's' && allDigits(word[1:3]) {
+		rest := word[1:]
+		i := 0
+		for i < len(rest) && rest[i] >= '0' && rest[i] <= '9' {
+			i++
+		}
+		season = atoi(rest[:i])
+		rest = rest[i:]
+		if rest == "" {
+			return season, 0, 0, true
+		}
+		for rest != "" && rest[0] == 'e' {
+			j := 1
+			for j < len(rest) && rest[j] >= '0' && rest[j] <= '9' {
+				j++
+			}
+			if j == 1 {
+				return 0, 0, 0, false
+			}
+			n := atoi(rest[1:j])
+			if first == 0 {
+				first = n
+			}
+			last = max(last, n)
+			rest = rest[j:]
+		}
+		return season, first, last, rest == "" && first > 0
+	}
+	if x := strings.IndexByte(word, 'x'); x > 0 && x < len(word)-1 && allDigits(word[:x]) && allDigits(word[x+1:]) && len(word[:x]) <= 2 {
+		n := atoi(word[x+1:])
+		return atoi(word[:x]), n, n, true
+	}
+	return 0, 0, 0, false
+}
+
+func atoi(digits string) int {
+	n := 0
+	for _, r := range digits {
+		n = n*10 + int(r-'0')
+	}
+	return n
 }
 
 // otherTitleWith reports whether a release's title is another title that
@@ -154,4 +312,16 @@ func endsTitle(word string) bool {
 		return true
 	}
 	return false
+}
+
+// metaYear is a movie's year: its year, else the first year its release
+// info or release date starts with; 0 when none is.
+func metaYear(meta stremio.Meta) int {
+	for _, text := range []string{string(meta.Year), string(meta.ReleaseInfo), meta.Released} {
+		text = strings.TrimSpace(text)
+		if len(text) >= 4 && isYear(text[:4]) {
+			return atoi(text[:4])
+		}
+	}
+	return 0
 }

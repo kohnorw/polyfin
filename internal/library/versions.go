@@ -142,6 +142,10 @@ type target struct {
 	// name is the movie's or the series' name, whose words labels may
 	// repeat (see ReadLabels).
 	name string
+	// year is a movie's year, and season and episode an episode's
+	// numbers, 0 when unknown: file names must agree (see
+	// withoutMismatched).
+	year, season, episode int
 }
 
 type streamKey struct {
@@ -184,7 +188,8 @@ func (s *Service) target(ctx context.Context, user accounts.User, id accounts.ID
 		if full, _, ok := s.describedMeta(ctx, v, r, false, inDatabase); ok {
 			meta = &full
 		}
-		return target{item: id, kind: r.Kind, metaType: meta.Type, id: meta.ID, runtime: parseRuntime(string(meta.Runtime)), name: meta.Name}, v, nil
+		return target{item: id, kind: r.Kind, metaType: meta.Type, id: meta.ID, runtime: parseRuntime(string(meta.Runtime)), name: meta.Name,
+			year: metaYear(*meta)}, v, nil
 	case r.Kind == KindChannel && r.Meta != nil:
 		return target{item: id, kind: KindChannel, metaType: r.Meta.Type, id: r.Meta.ID}, v, nil
 	case r.Kind == KindReplay:
@@ -200,7 +205,7 @@ func (s *Service) target(ctx context.Context, user accounts.User, id accounts.ID
 			return target{}, view{}, ErrNotFound
 		}
 		return target{item: id, kind: KindEpisode, metaType: series.Meta.Type, id: r.Video.ID, runtime: parseRuntime(string(r.Video.Runtime)),
-			name: series.Meta.Name}, v, nil
+			name: series.Meta.Name, season: int(r.Video.Season), episode: r.Video.EpisodeNumber()}, v, nil
 	default:
 		return target{}, view{}, ErrNotFound
 	}
