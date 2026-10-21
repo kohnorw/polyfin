@@ -530,11 +530,6 @@ func (h *Handler) readPlaybackInfoBody(w http.ResponseWriter, r *http.Request, b
 		if webApp(r) && h.Accounts.Settings().WebSafeVideo {
 			request.DeviceProfile = playback.WithoutRiskyVideo(request.DeviceProfile)
 		}
-		// Only the files' own subtitles are offered, and the web player has
-		// them burned into the picture, whatever their format.
-		if webApp(r) {
-			request.DeviceProfile = playback.BurningSubtitles(request.DeviceProfile)
-		}
 	}
 	if posted.EnableDirectPlay != nil {
 		request.EnableDirectPlay = posted.EnableDirectPlay

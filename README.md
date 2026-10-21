@@ -28,7 +28,7 @@ See it on the [website](https://moodiness.github.io/polyfin/): the ad above, a s
 - **Live TV and IPTV:** TV catalogs, M3U playlists and Xtream Codes accounts become Live TV, with a programme guide and recordings. IPTV providers' archives of past programmes play from a Replay view. IPTV movies and series become libraries.
 - **Music, audiobooks and podcasts:** Eclipse music addons install like Stremio addons and become music and books libraries. Tracks play as they are, or are converted when the app needs it.
 - **Playback and transcoding:** direct play when the app supports the file. Otherwise a remux or a conversion to HLS, on an NVIDIA, AMD or Intel GPU, or VideoToolbox on macOS, when there is one, with HDR tone mapped on NVIDIA and Intel GPUs and VideoToolbox, else on the processor.
-- **Subtitles:** only the tracks inside the files, ASS styles with their fonts included; the web player has them burned in. Image subtitles are burned in when an app cannot show them.
+- **Subtitles:** only the tracks inside the files, ASS styles with their fonts included. Image subtitles are burned in when an app cannot show them.
 - **Multiple users:** each user has their own watched state, resume points, favorites and Next Up, with parental control and per-user limits. Invite links let people create their own account.
 - **Skip buttons:** intros, recaps, credits and previews to skip, from three community databases.
 - **Tracking:** each user can send what they watch to Trakt, Simkl, MDBList and PublicMetaDB, and import what they watched there, or in their Stremio or Nuvio account.

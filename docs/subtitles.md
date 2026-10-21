@@ -15,7 +15,7 @@ Apps can save the user's subtitle language and subtitle mode, which choose the d
 
 ### In the web player
 
-jellyfin-web has the track chosen burned into the picture, whatever its format, text or image. This is a video conversion, as for image subtitles (see [Image subtitles](#image-subtitles)). Other apps get text tracks as files or in HLS, in the format they ask for, and image tracks as they can draw them, else burned in.
+jellyfin-web, like other apps, draws text tracks itself: they come as files or in HLS, in the format it asks for, and switching needs no conversion. Image tracks it cannot draw are burned in (see [Image subtitles](#image-subtitles)).
 
 ## Text tracks inside files
 

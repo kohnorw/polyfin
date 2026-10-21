@@ -31,16 +31,3 @@ func TestWithoutRiskyVideo(t *testing.T) {
 		t.Error("the app's own profile changed")
 	}
 }
-
-func TestBurningSubtitlesEncodesEveryFormat(t *testing.T) {
-	profile := &DeviceProfile{SubtitleProfiles: []SubtitleProfile{{Format: "vtt", Method: "External"}}}
-	burned := BurningSubtitles(profile)
-	if len(profile.SubtitleProfiles) != 1 || profile.SubtitleProfiles[0].Method != "External" {
-		t.Fatal("the posted profile changed")
-	}
-	for _, p := range burned.SubtitleProfiles {
-		if p.Method != "Encode" {
-			t.Fatalf("%+v", p)
-		}
-	}
-}

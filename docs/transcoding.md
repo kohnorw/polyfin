@@ -9,7 +9,7 @@ Polyfin picks the lightest way an app can play a file:
 - **Direct play:** when the app supports the file, Polyfin redirects the app to the stream and stays out of the video path.
 - **Remux:** when the app can play the video but not the container, Polyfin repackages it into its own on-demand HLS, built on FFmpeg for remote sources.
 - **Audio conversion:** when the app cannot take the audio, Polyfin converts the audio.
-- **Video conversion:** when the app cannot take the video, or must have image subtitles (PGS, VobSub, DVB) burned in, Polyfin converts the video, HDR to SDR included. The web player has every subtitle track burned in. See [Subtitles](subtitles.md).
+- **Video conversion:** when the app cannot take the video, or must have image subtitles (PGS, VobSub, DVB) burned in, Polyfin converts the video, HDR to SDR included. See [Subtitles](subtitles.md).
 
 Video converts on a GPU when one is available, with the methods of the system Polyfin runs on (see [GPU methods per system](#gpu-methods-per-system)): an NVIDIA GPU through NVENC, or an AMD or Intel GPU through VAAPI, on Linux. Otherwise it converts on the processor. A GPU keeps the source's size, up to 4K; the processor converts to 1080p at most. For how apps choose between versions of a title, see [Playback](playback.md).
 
