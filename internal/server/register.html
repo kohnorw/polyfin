@@ -24,6 +24,10 @@
   .slot { grid-area: 1 / 1; backface-visibility: hidden; -webkit-backface-visibility: hidden; }
   .slot-b { transform: rotateY(180deg); }
   .card.on-b .slot-a, .card:not(.on-b) .slot-b { pointer-events: none; }
+  /* The side turned away is hidden outright: Chrome draws a focused field,
+     and other parts it gives layers of their own, through the card's back
+     despite backface-visibility, mirrored. */
+  .slot.away { visibility: hidden; }
   .code-input { text-align: center; letter-spacing: 0.25em; text-transform: uppercase; font-weight: 600; }
   label { display: block; color: var(--muted); font-size: 0.9rem; margin: 0 0 0.45rem; }
   .field { margin-bottom: 1.1rem; }
@@ -68,7 +72,7 @@
   </div>
   <div class="card" id="card" hidden>
     <div class="slot slot-a" id="slot-a"></div>
-    <div class="slot slot-b" id="slot-b"></div>
+    <div class="slot slot-b away" id="slot-b"></div>
   </div>
   <div hidden id="faces">
     <form class="face" id="code-form" novalidate>
@@ -133,7 +137,9 @@
   }
 
   // The steps flip 180° each, between the card's two sides: each step is
-  // put on the side turned away before the card turns to it.
+  // put on the side turned away before the card turns to it. That side is
+  // hidden until the card is edge on, halfway through the turn, when the
+  // sides swap: nothing of it shows through, mirrored.
   var card = document.getElementById('card')
   var codeForm = document.getElementById('code-form')
   var form = document.getElementById('form')
@@ -148,13 +154,21 @@
     place(i)
     card.style.transform = 'rotateY(' + (i * 180) + 'deg)'
     card.classList.toggle('on-b', i % 2 === 1)
-    setTimeout(function () { place(i + 1) }, 850)
+    var shown = slots[i % 2], left = slots[(i + 1) % 2]
+    setTimeout(function () {
+      if (step !== i) return
+      shown.classList.remove('away')
+      left.classList.add('away')
+    }, 250)
+    setTimeout(function () { if (step === i) place(i + 1) }, 850)
     var input = steps[i].querySelector('input')
     if (input) setTimeout(function () { input.focus() }, 300)
   }
   function start(codeRequired) {
     steps = codeRequired ? [codeForm, form, done] : [form, done]
     place(0); place(1)
+    slots[0].classList.remove('away')
+    slots[1].classList.add('away')
     card.hidden = false
     var input = steps[0].querySelector('input')
     if (input) input.focus()
