@@ -163,8 +163,8 @@ func episodeStreams(t *testing.T) string {
 	return server.URL + "/manifest.json"
 }
 
-// jellyfin-web plays an episode with its series' episodes from it on,
-// asked from startItemId: the episode, or the version the user picked.
+// Apps play an episode with its series' episodes from it on, asked from
+// startItemId: the episode, or the version the user picked.
 func TestEpisodeListsStartAtTheItemAsked(t *testing.T) {
 	t.Parallel()
 	tr := newTracking(t)
@@ -195,8 +195,17 @@ func TestEpisodeListsStartAtTheItemAsked(t *testing.T) {
 	if err != nil || len(versions) != 2 {
 		t.Fatalf("versions: %v %v", versions, err)
 	}
-	if page := list(versions[1].ID.String()); !slices.Equal(ids(page), tr.episodes[1:]) {
+	// From a version the user picked, the list starts with the episode as
+	// that version opens it: apps that play the list, such as Jellyfin for
+	// Android TV, play the source carrying the item's identifier.
+	picked := versions[1].ID.String()
+	if page := list(picked); !slices.Equal(ids(page), []string{picked, tr.episodes[2]}) {
 		t.Errorf("from the second episode's other version: %v", ids(page))
+	}
+	var page QueryResult
+	tr.get(t, "/Shows/"+tr.series+"/Episodes?startItemId="+picked+"&fields=MediaSources", tr.token, &page)
+	if len(page.Items) == 0 || page.Items[0].MediaSources == nil || !slices.ContainsFunc(*page.Items[0].MediaSources, func(s MediaSourceInfo) bool { return s.Id == picked }) {
+		t.Errorf("the version picked is not among the first episode's sources: %+v", page.Items)
 	}
 	if page := list(strings.Repeat("ab", 16)); len(page.Items) != 0 {
 		t.Errorf("from an item the list does not have: %v", ids(page))
