@@ -129,10 +129,28 @@ func (h *Handler) listDtos(r *http.Request, user accounts.User, items []library.
 }
 
 func (h *Handler) listDto(r *http.Request, user accounts.User, item library.Item, fields fieldSet, state userState) BaseItemDto {
+	return h.listDtoOpened(r, user, item, item.ID, fields, state)
+}
+
+// openAsVersion describes, in place of a listed episode's dto, the
+// episode as its version picked opens it: under the version's identifier,
+// with the sources and streams item details give it, as far as fields ask.
+func (h *Handler) openAsVersion(r *http.Request, user accounts.User, dto *BaseItemDto, item library.Item, picked accounts.ID, fields fieldSet) {
+	state, err := h.userState(r.Context(), user, []library.Item{item})
+	if err != nil {
+		return
+	}
+	*dto = h.listDtoOpened(r, user, item, picked, fields, state)
+	dto.Id = picked.String()
+}
+
+// listDtoOpened is listDto for the item as opened, its own identifier or
+// one of its versions'.
+func (h *Handler) listDtoOpened(r *http.Request, user accounts.User, item library.Item, opened accounts.ID, fields fieldSet, state userState) BaseItemDto {
 	dto := h.newItemDto(item, fields, false, state)
 	sources, streams := fields.has("MediaSources"), fields.has("MediaStreams")
 	if sources || streams {
-		h.addMediaSources(r, user, &dto, item, item.ID, false)
+		h.addMediaSources(r, user, &dto, item, opened, false)
 		if !sources {
 			dto.MediaSources = nil
 		}
@@ -141,16 +159,16 @@ func (h *Handler) listDto(r *http.Request, user accounts.User, item library.Item
 		}
 	} else if dto.Chapters != nil && versioned(item.Kind) {
 		// Only what is known: a listing never asks addons for streams.
-		h.setChapters(r.Context(), &dto, h.cachedPlayable(r.Context(), user, item).versions, item.ID)
+		h.setChapters(r.Context(), &dto, h.cachedPlayable(r.Context(), user, item).versions, opened)
 	}
 	if path := fields.has("Path"); (path || fields.has("CanDownload")) &&
 		versioned(item.Kind) {
 		// Only what is known, as MediaSources in the same listing: a listing
 		// never asks addons for streams.
-		h.setDownload(r, user, &dto, item, h.cachedPlayable(r.Context(), user, item).versions, item.ID, path)
+		h.setDownload(r, user, &dto, item, h.cachedPlayable(r.Context(), user, item).versions, opened, path)
 	}
 	if fields.has("Trickplay") && versioned(item.Kind) {
-		dto.Trickplay = h.trickplayManifest(r.Context(), user, item, h.cachedPlayable(r.Context(), user, item).versions, item.ID)
+		dto.Trickplay = h.trickplayManifest(r.Context(), user, item, h.cachedPlayable(r.Context(), user, item).versions, opened)
 	}
 	return dto
 }
@@ -826,9 +844,10 @@ func (h *Handler) episodes(w http.ResponseWriter, r *http.Request) {
 	// asks starting at the episode, or at the version the user picked: a
 	// version stands for its episode, as in Jellyfin. The list is empty
 	// when the start item is not in it.
+	var picked accounts.ID
 	if hasStartItem {
 		if owner, ok := h.Library.VersionOwner(startItem); ok {
-			startItem = owner
+			picked, startItem = startItem, owner
 		}
 		at := slices.IndexFunc(episodes, func(item library.Item) bool { return item.ID == startItem })
 		if at < 0 {
@@ -836,10 +855,19 @@ func (h *Handler) episodes(w http.ResponseWriter, r *http.Request) {
 		}
 		episodes = episodes[at:]
 	}
-	items, err := h.dtos(r, user, episodes, requestedFields(r), nil)
+	fields := requestedFields(r)
+	items, err := h.dtos(r, user, episodes, fields, nil)
 	if err != nil {
 		h.internalError(w, r, err)
 		return
+	}
+	// The list starting at a version the user picked starts with the
+	// episode as that version opens it, as item details describe it: under
+	// the version's identifier, its own source among the sources. Apps that
+	// play the list rather than the item they had, such as Jellyfin for
+	// Android TV, then play the version picked, not the episode's first.
+	if picked != (accounts.ID{}) && len(items) > 0 {
+		h.openAsVersion(r, user, &items[0], episodes[0], picked, fields)
 	}
 	if limit < 0 {
 		limit = len(items)
