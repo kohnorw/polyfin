@@ -153,6 +153,18 @@ func TestTheTitlesIdentifierFallsBackToTheNextVersion(t *testing.T) {
 	if asked := p.ask(t, p.token, p.movie, chrome, map[string]any{"MediaSourceId": p.versions[0].ID.String()}); !asked.refused() {
 		t.Errorf("the first version asked for: %+v", asked)
 	}
+	// A version analyzed before, whose host failed since, as one slow to
+	// answer once: asked for by its identifier, the user's pick, it is
+	// tried again, as Jellyfin plays the version asked; asked for by none,
+	// it stays passed over.
+	p.analyzed(t, p.versions[0], "h264-aac-mp4")
+	if asked := p.ask(t, p.token, p.movie, chrome, map[string]any{"MediaSourceId": p.versions[0].ID.String()}); len(asked.MediaSources) != 1 ||
+		asked.MediaSources[0].ETag != p.versions[0].ID.String() {
+		t.Errorf("the failed version picked: %+v", asked)
+	}
+	if asked := p.ask(t, p.token, p.movie, chrome, nil); len(asked.MediaSources) == 0 || asked.MediaSources[0].ETag == p.versions[0].ID.String() {
+		t.Errorf("no version picked: %+v", asked)
+	}
 }
 
 // A version whose keyframe index cannot be read cannot be streamed over

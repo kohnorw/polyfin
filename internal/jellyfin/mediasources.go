@@ -144,7 +144,15 @@ func (h *Handler) cachedPlayable(ctx context.Context, user accounts.User, item l
 // and, with the version rules or the user's quality group, those they
 // hide, ordering the others (see ordered).
 func (h *Handler) offered(ctx context.Context, user accounts.User, versions []library.Version) []library.Version {
-	versions = slices.DeleteFunc(versions, func(v library.Version) bool { return h.Playback.Failed(v.ID) })
+	return h.offeredKeeping(ctx, user, versions, accounts.ID{})
+}
+
+// offeredKeeping is offered, keeping the version kept even when it
+// recently failed: the version an app asks for by its own identifier,
+// which the user picked, is tried again, as Jellyfin plays the version
+// asked. A failure such as a host slow to answer once is often over.
+func (h *Handler) offeredKeeping(ctx context.Context, user accounts.User, versions []library.Version, kept accounts.ID) []library.Version {
+	versions = slices.DeleteFunc(versions, func(v library.Version) bool { return v.ID != kept && h.Playback.Failed(v.ID) })
 	if !h.reordered(user) {
 		return versions
 	}

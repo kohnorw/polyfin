@@ -346,6 +346,16 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 		h.browseError(w, r, err)
 		return
 	}
+	// A version the app asks for by its own identifier is tried even when
+	// it failed lately: the user picked it, and Jellyfin plays the version
+	// asked. Left out, the play would find nothing to play.
+	if picked, ok := parseGUID(request.MediaSourceId); ok && picked != item.ID && !slices.ContainsFunc(p.versions, func(v library.Version) bool { return v.ID == picked }) {
+		if versions, _, err := h.Library.VersionsToPlay(r.Context(), user, item.ID); err == nil {
+			if kept := h.offeredKeeping(r.Context(), user, versions, picked); slices.ContainsFunc(kept, func(v library.Version) bool { return v.ID == picked }) {
+				p.versions = kept
+			}
+		}
+	}
 	// A replay takes one of its provider's connections from now, as a
 	// channel does when it plays: with none free, no stream suits.
 	for _, version := range p.versions {
