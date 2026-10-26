@@ -2029,6 +2029,13 @@ func (s *Service) series(ctx context.Context, v view, id accounts.ID) (Item, str
 	if !ok || !v.allows(KindSeries, s.overriddenTraits(id, describedTraits(meta))) {
 		return Item{}, stremio.Meta{}, stremio.Meta{}, ErrNotFound
 	}
+	// The seasons' and episodes' identifiers, and the series their records
+	// lead back to, follow the series' own identifier: the one it was listed
+	// under. An addon may describe it under another, as metadata addons
+	// listing TMDB identifiers describe titles by their IMDb ones, or
+	// another addon may describe it when the first fails: seasons would
+	// then change identifiers, and those the apps were given open nothing.
+	meta.ID = r.Meta.ID
 	shown := s.shown(ctx, v, r.Meta.Type, r.Meta.ID, meta)
 	item := Item{ID: id, Kind: KindSeries, ParentID: deref(r.Parent), Available: true}
 	fromMeta(&item, shown)

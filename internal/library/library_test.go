@@ -740,3 +740,47 @@ func TestExpiredLinksAreRenewedWithTheSameFile(t *testing.T) {
 		t.Errorf("a file gone: %v", err)
 	}
 }
+
+// An addon may describe a series under another identifier than the one
+// its catalog lists, as metadata addons that list TMDB identifiers and
+// describe titles by their IMDb ones do. The series' seasons and episodes
+// still open from it: their identifiers follow the series' own.
+func TestSeasonsOpenWhenTheDescriptionNamesTheSeriesOtherwise(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	show := stremio.Meta{ID: "tt0903747", Type: "series", Name: "Show",
+		Videos: []stremio.Video{
+			{ID: "tt0903747:1:1", Title: "Pilot", Season: 1, Episode: 1, Released: "2020-01-01T00:00:00Z"},
+			{ID: "tt0903747:2:1", Title: "Second", Season: 2, Episode: 1, Released: "2021-01-01T00:00:00Z"},
+		}}
+	preview := stremio.Meta{ID: "tmdb:1396", Type: "series", Name: "Show"}
+	addon := &fakeAddon{
+		manifest: stremio.Manifest{ID: "a", Name: "A", Version: "1", Types: []string{"series"},
+			Resources: []stremio.Resource{{Name: "catalog"}, {Name: "meta", Types: []string{"series"}, IDPrefixes: []string{"tmdb:", "tt"}}},
+			Catalogs:  []stremio.Catalog{{Type: "series", ID: "top", Name: "Top"}}},
+		catalogs: map[string][]stremio.Meta{"series/top": {preview}},
+		metas:    map[string]stremio.Meta{"series/tmdb:1396": show},
+	}
+	e.install(addons.Shared(), addon)
+	top := e.library(e.member, "Top")
+	page, _ := e.service.Children(t.Context(), e.member, top.ID, 0, 10, "")
+	series := page.Items[0]
+	seasons, err := e.service.Seasons(t.Context(), e.member, series.ID)
+	if err != nil || len(seasons) != 2 {
+		t.Fatalf("seasons: %v %v", names(seasons), err)
+	}
+	second := seasons[1]
+	if item, err := e.service.Item(t.Context(), e.member, second.ID); err != nil || item.Name != "Season 2" {
+		t.Errorf("season by identifier: %+v %v", item, err)
+	}
+	episodes, err := e.service.Episodes(t.Context(), e.member, series.ID, &second.ID)
+	if err != nil || !slices.Equal(names(episodes), []string{"Second"}) {
+		t.Fatalf("season 2's episodes: %v %v", names(episodes), err)
+	}
+	if episodes[0].SeasonID != second.ID || episodes[0].SeriesID != series.ID {
+		t.Errorf("episode's season %s, series %s", episodes[0].SeasonID, episodes[0].SeriesID)
+	}
+	if item, err := e.service.Item(t.Context(), e.member, episodes[0].ID); err != nil || item.Name != "Second" {
+		t.Errorf("episode by identifier: %+v %v", item, err)
+	}
+}
