@@ -8,19 +8,20 @@
       "codec_type": "video",
       "codec_tag_string": "[0][0][0][0]",
       "codec_tag": "0x0000",
-      "mime_codec_string": "avc1.64001e",
       "width": 640,
       "height": 360,
       "coded_width": 640,
       "coded_height": 360,
+      "closed_captions": 0,
+      "film_grain": 0,
       "has_b_frames": 2,
       "sample_aspect_ratio": "1:1",
       "display_aspect_ratio": "16:9",
       "pix_fmt": "yuv420p",
       "level": 30,
-      "color_range": "tv",
       "chroma_location": "left",
       "field_order": "progressive",
+      "refs": 1,
       "is_avc": "true",
       "nal_length_size": "4",
       "r_frame_rate": "24/1",
@@ -48,11 +49,10 @@
         "descriptions": 0,
         "metadata": 0,
         "dependent": 0,
-        "still_image": 0,
-        "multilayer": 0
+        "still_image": 0
       },
       "tags": {
-        "ENCODER": "Lavc63.1.102 libx264",
+        "ENCODER": "Lavc60.31.102 libx264",
         "DURATION": "00:00:10.000000000"
       }
     },
@@ -64,7 +64,6 @@
       "codec_type": "audio",
       "codec_tag_string": "[0][0][0][0]",
       "codec_tag": "0x0000",
-      "mime_codec_string": "mp4a.40.2",
       "sample_fmt": "fltp",
       "sample_rate": "44100",
       "channels": 1,
@@ -74,8 +73,8 @@
       "r_frame_rate": "0/0",
       "avg_frame_rate": "0/0",
       "time_base": "1/1000",
-      "start_pts": 0,
-      "start_time": "0.000000",
+      "start_pts": -23,
+      "start_time": "-0.023000",
       "extradata_size": 5,
       "disposition": {
         "default": 0,
@@ -95,11 +94,10 @@
         "descriptions": 0,
         "metadata": 0,
         "dependent": 0,
-        "still_image": 0,
-        "multilayer": 0
+        "still_image": 0
       },
       "tags": {
-        "ENCODER": "Lavc63.1.102 aac",
+        "ENCODER": "Lavc60.31.102 aac",
         "DURATION": "00:00:10.023000000"
       }
     }
@@ -108,16 +106,15 @@
     "filename": "remote-h264-aac-mkv.mkv",
     "nb_streams": 2,
     "nb_programs": 0,
-    "nb_stream_groups": 0,
     "format_name": "matroska,webm",
     "format_long_name": "Matroska / WebM",
-    "start_time": "0.000000",
+    "start_time": "-0.023000",
     "duration": "10.023000",
-    "size": "1382563",
-    "bit_rate": "1103512",
+    "size": "1386115",
+    "bit_rate": "1106347",
     "probe_score": 100,
     "tags": {
-      "ENCODER": "Lavf63.1.102"
+      "ENCODER": "Lavf60.16.100"
     }
   }
 }

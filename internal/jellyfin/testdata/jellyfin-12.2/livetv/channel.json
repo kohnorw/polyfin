@@ -6,21 +6,21 @@
   "ChannelNumber": "7",
   "ChannelType": "TV",
   "Chapters": [],
-  "DateCreated": "2026-10-06T16:27:43.148948Z",
+  "DateCreated": "2026-10-27T15:33:03.0732177Z",
   "DisplayPreferencesId": "b5f10d1557c81848cb2d3b2fda19134d",
   "EnableMediaSourceDisplay": true,
-  "Etag": "0a11400b704dbedf266ff5b8a983ead9",
+  "Etag": "d2f0fc95c3c45caf5d7ee95d1cc91e1f",
   "ExternalUrls": [],
   "GenreItems": [],
   "Genres": [],
-  "Id": "1389fe91b085df332d82d93f2de0e153",
+  "Id": "3dedbf8263f0f3482817e69be8a33830",
   "ImageBlurHashes": {
     "Primary": {
-      "4fea2b591b7976292041a2f8f09f945d": "e20036fYfQfYfQfYfRfQfRfQfQfQfQfQfQfYfRfQfRfQfQfQfQfQfQ"
+      "d0e115ca5fa72237bcab22660b0a3534": "e20035fYfQfYfQfYfRfQfRfQfQfQfQfQfQfYfRfQfRfQfQfQfQfQfQ"
     }
   },
   "ImageTags": {
-    "Primary": "4fea2b591b7976292041a2f8f09f945d"
+    "Primary": "d0e115ca5fa72237bcab22660b0a3534"
   },
   "IsFolder": false,
   "LocalTrailerCount": 0,
@@ -32,7 +32,7 @@
       "Formats": [],
       "GenPtsInput": false,
       "HasSegments": false,
-      "Id": "1389fe91b085df332d82d93f2de0e153",
+      "Id": "3dedbf8263f0f3482817e69be8a33830",
       "IgnoreDts": false,
       "IgnoreIndex": false,
       "IsInfiniteStream": true,
@@ -67,7 +67,7 @@
     "ExternalServiceId": "Emby"
   },
   "RemoteTrailers": [],
-  "ServerId": "574a53f8e8e74e61a31e8432e0d356dc",
+  "ServerId": "d23936e33a664075a26c62ba1917da08",
   "SortName": "0000000007.00000-Fixture One",
   "SpecialFeatureCount": 0,
   "Studios": [],
@@ -76,8 +76,8 @@
   "Type": "TvChannel",
   "UserData": {
     "IsFavorite": false,
-    "ItemId": "1389fe91b085df332d82d93f2de0e153",
-    "Key": "1389fe91-b085-df33-2d82-d93f2de0e153",
+    "ItemId": "3dedbf8263f0f3482817e69be8a33830",
+    "Key": "3dedbf82-63f0-f348-2817-e69be8a33830",
     "PlayCount": 0,
     "PlaybackPositionTicks": 0,
     "Played": false

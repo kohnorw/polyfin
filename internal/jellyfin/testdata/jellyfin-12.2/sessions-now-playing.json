@@ -43,15 +43,11 @@
       "Id": "",
       "ImageBlurHashes": {
         "Primary": {
-          "19b5322b120a15d2d04ca9120e42e14e": ""
-        },
-        "Thumb": {
-          "4db83b5d482d9ccdfb4dd3548fecd961": ""
+          "c93f6aa967c19d44e7c54f62d0fb3174": ""
         }
       },
       "ImageTags": {
-        "Primary": "",
-        "Thumb": ""
+        "Primary": ""
       },
       "IsFolder": false,
       "LocalTrailerCount": 0,
@@ -92,7 +88,6 @@
       ],
       "MediaType": "",
       "Name": "",
-      "OfficialRating": "",
       "OriginalLanguage": "",
       "OriginalTitle": "",
       "Overview": "",
@@ -108,12 +103,7 @@
       "RunTimeTicks": 0,
       "ServerId": "",
       "SpecialFeatureCount": 0,
-      "Studios": [
-        {
-          "Id": "",
-          "Name": ""
-        }
-      ],
+      "Studios": [],
       "Taglines": [],
       "Trickplay": {},
       "Type": "",

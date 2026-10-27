@@ -5,35 +5,35 @@
       "ChannelNumber": "7",
       "ChannelType": "TV",
       "CurrentProgram": {
-        "ChannelId": "1389fe91b085df332d82d93f2de0e153",
-        "EndDate": "2026-10-06T17:27:47.0000000Z",
-        "Id": "c44bb03b8da28cae10254e411d416ce3",
+        "ChannelId": "3dedbf8263f0f3482817e69be8a33830",
+        "EndDate": "2026-10-27T16:33:07.0000000Z",
+        "Id": "08430b7e138d42790b4a8c2b6050d72c",
         "ImageBlurHashes": {},
         "ImageTags": {},
         "IsNews": true,
         "MediaType": "Unknown",
         "Name": "Fixture News",
         "RunTimeTicks": 72000000000,
-        "ServerId": "574a53f8e8e74e61a31e8432e0d356dc",
-        "StartDate": "2026-10-06T15:27:47.0000000Z",
+        "ServerId": "d23936e33a664075a26c62ba1917da08",
+        "StartDate": "2026-10-27T14:33:07.0000000Z",
         "Type": "Program",
         "UserData": {
           "IsFavorite": false,
-          "ItemId": "c44bb03b8da28cae10254e411d416ce3",
-          "Key": "c44bb03b-8da2-8cae-1025-4e411d416ce3",
+          "ItemId": "08430b7e138d42790b4a8c2b6050d72c",
+          "Key": "08430b7e-138d-4279-0b4a-8c2b6050d72c",
           "PlayCount": 0,
           "PlaybackPositionTicks": 0,
           "Played": false
         }
       },
-      "Id": "1389fe91b085df332d82d93f2de0e153",
+      "Id": "3dedbf8263f0f3482817e69be8a33830",
       "ImageBlurHashes": {
         "Primary": {
-          "41ee58389f2c20f09015623c9276ed41": "e20036fYfQfYfQfYfRfQfRfQfQfQfQfQfQfYfRfQfRfQfQfQfQfQfQ"
+          "d3f563186164109c2cb0f9bc995ac047": "e20035fYfQfYfQfYfRfQfRfQfQfQfQfQfQfYfRfQfRfQfQfQfQfQfQ"
         }
       },
       "ImageTags": {
-        "Primary": "41ee58389f2c20f09015623c9276ed41"
+        "Primary": "d3f563186164109c2cb0f9bc995ac047"
       },
       "IsFolder": false,
       "LocationType": "Remote",
@@ -41,12 +41,12 @@
       "Name": "Fixture One",
       "Number": "7",
       "PrimaryImageAspectRatio": 1,
-      "ServerId": "574a53f8e8e74e61a31e8432e0d356dc",
+      "ServerId": "d23936e33a664075a26c62ba1917da08",
       "Type": "TvChannel",
       "UserData": {
         "IsFavorite": false,
-        "ItemId": "1389fe91b085df332d82d93f2de0e153",
-        "Key": "1389fe91-b085-df33-2d82-d93f2de0e153",
+        "ItemId": "3dedbf8263f0f3482817e69be8a33830",
+        "Key": "3dedbf82-63f0-f348-2817-e69be8a33830",
         "PlayCount": 0,
         "PlaybackPositionTicks": 0,
         "Played": false

@@ -23,7 +23,7 @@ See it on the [website](https://moodiness.github.io/polyfin/): the ad above, a s
 
 ## Features
 
-- **Works with Jellyfin apps:** sign in with a password or Quick Connect, then browse, search and play. Polyfin targets the Jellyfin 12.2 API.
+- **Works with Jellyfin apps:** sign in with a password or Quick Connect, then browse, search and play. Polyfin targets the Jellyfin 12.4 API.
 - **Stremio addons as libraries:** catalogs become libraries and collections, and streams become versions of a title.
 - **Live TV and IPTV:** TV catalogs, M3U playlists and Xtream Codes accounts become Live TV, with a programme guide and recordings. IPTV providers' archives of past programmes play from a Replay view. IPTV movies and series become libraries.
 - **Music, audiobooks and podcasts:** Eclipse music addons install like Stremio addons and become music and books libraries. Tracks play as they are, or are converted when the app needs it.

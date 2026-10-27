@@ -1,9 +1,9 @@
 {
   "MediaSources": [
     {
-      "Bitrate": 130752,
+      "Bitrate": 106524,
       "Container": "flac",
-      "ETag": "a5cbc553968c15870c6192636408d95a",
+      "ETag": "8cda243c220ccf69be773a52ebe67102",
       "Formats": [],
       "GenPtsInput": false,
       "HasSegments": false,
@@ -17,7 +17,7 @@
         {
           "AudioSpatialFormat": "None",
           "BitDepth": 16,
-          "BitRate": 130752,
+          "BitRate": 106524,
           "ChannelLayout": "stereo",
           "Channels": 2,
           "Codec": "flac",
@@ -50,7 +50,7 @@
       "RequiresLooping": false,
       "RequiresOpening": false,
       "RunTimeTicks": 100000000,
-      "Size": 163441,
+      "Size": 133155,
       "SupportsDirectPlay": true,
       "SupportsDirectStream": true,
       "SupportsProbing": true,
@@ -60,5 +60,5 @@
       "UseMostCompatibleTranscodingProfile": false
     }
   ],
-  "PlaySessionId": "eace67f656674eac8dbe205182c3c43f"
+  "PlaySessionId": "c357b0ad7b224888a63979117890e279"
 }
