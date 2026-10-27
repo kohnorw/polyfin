@@ -288,6 +288,7 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 	settings := store.Settings()
 	segments.SelectHardware(settings.HardwareAcceleration, settings.VAAPIDevice)
 	lib := library.New(pool, addonStore, addonClient, logger, store.Settings)
+	lib.SearchFallback(library.CinemetaManifest)
 	channels := iptv.New(pool, addonStore, addonClient, logger, store.Settings)
 	lib.UseIPTV(channels)
 	channels.OnChange(lib.LineupChanged)

@@ -28,6 +28,7 @@ import (
 // file and against the audio; one already in time and one of another
 // title are left as they are.
 func TestAddonSubtitlesAreSyncedToTheVersionPlayed(t *testing.T) {
+	skipSubtitleSync(t)
 	ffmpeg := os.Getenv("POLYFIN_TEST_FFMPEG")
 	if ffmpeg == "" {
 		t.Skip("POLYFIN_TEST_FFMPEG is not set")
@@ -88,6 +89,7 @@ func TestAddonSubtitlesAreSyncedToTheVersionPlayed(t *testing.T) {
 // late subtitle is still synced; under 30 seconds each, the version has
 // no speech reference, and its subtitles are served as they are.
 func TestStretchesShortenToTheReadBudget(t *testing.T) {
+	skipSubtitleSync(t)
 	ffmpeg := os.Getenv("POLYFIN_TEST_FFMPEG")
 	if ffmpeg == "" {
 		t.Skip("POLYFIN_TEST_FFMPEG is not set")

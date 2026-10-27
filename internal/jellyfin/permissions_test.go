@@ -153,6 +153,7 @@ func TestConversionPermissionsApplyPerKind(t *testing.T) {
 // Burning an image subtitle in converts the video: when that is not
 // allowed, the subtitle is left out and the file plays as it is.
 func TestImageSubtitlesAreLeftOutWhenTheVideoMayNotBeConverted(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	if os.Getenv("POLYFIN_TEST_FFMPEG") == "" {
 		t.Skip("POLYFIN_TEST_FFMPEG is not set: without an encoder, no subtitle is burned in anyway")

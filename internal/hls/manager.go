@@ -290,6 +290,14 @@ func filterValue(value string) string {
 	return strings.NewReplacer("\\", "\\\\", "'", "\\'", ":", "\\:", ",", "\\,", ";", "\\;", "[", "\\[", "]", "\\]").Replace(value)
 }
 
+// filterOption escapes a filter option's value, a path, for a filter graph:
+// once as an option value, then again as part of the graph, as FFmpeg reads
+// them in turn. A Windows path's drive colon and backslashes need both.
+func filterOption(value string) string {
+	value = strings.NewReplacer("\\", "\\\\", "'", "\\'", ":", "\\:").Replace(value)
+	return strings.NewReplacer("\\", "\\\\", "'", "\\'", "[", "\\[", "]", "\\]", ",", "\\,", ";", "\\;").Replace(value)
+}
+
 // textBurnGraph is burnGraph for a text subtitle: libass draws it on the
 // converted frames, whose timestamps are the source's (FFmpeg runs with
 // -copyts), so that it keeps time after a seek.
@@ -298,9 +306,9 @@ func (v *VideoEncoding) textBurnGraph(video int, skip string) string {
 	if v.pipeline() == throughDevice {
 		converted = v.deviceToneMapping() + ",hwdownload,format=nv12"
 	}
-	options := "filename=" + filterValue(v.BurnText)
+	options := "filename=" + filterOption(v.BurnText)
 	if v.FontsDir != "" {
-		options += ":fontsdir=" + filterValue(v.FontsDir)
+		options += ":fontsdir=" + filterOption(v.FontsDir)
 	}
 	if !v.StyledText {
 		options += ":force_style=" + filterValue(textBurnStyle)

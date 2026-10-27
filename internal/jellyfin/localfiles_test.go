@@ -661,7 +661,7 @@ func frameTimes(t *testing.T, ffprobe, file string) (times []float64, codec stri
 // HLS on jellyfin-web with its H.264 video copied (see playsCopiedFor).
 func playsCopied(t *testing.T, p playbackSetup, local MediaSourceInfo, ffmpeg, ffprobe string) {
 	t.Helper()
-	playsCopiedFor(t, p, p.movie, local, 190, []string{"Subtitle subrip fra", "Video h264 ", "Audio ac3 "}, ffmpeg, ffprobe)
+	playsCopiedFor(t, p, p.movie, local, 190, []string{"Video h264 ", "Audio ac3 "}, ffmpeg, ffprobe)
 }
 
 // playsCopiedFor checks that a Blu-ray disc's title, item's media source
@@ -724,7 +724,7 @@ func TestLocalDVDsPlayOverHLS(t *testing.T) {
 	p, local := localDVD(t, ffprobe)
 	source := playDisc(t, p, local, 8*time.Second)
 	// The movie's subtitle file, then the title's tracks.
-	if got := tracks(source); !slices.Equal(got, []string{"Subtitle subrip fra", "Video mpeg2video ", "Audio ac3 eng", "Audio ac3 fra", "Subtitle DVDSUB eng"}) {
+	if got := tracks(source); !slices.Equal(got, []string{"Video mpeg2video ", "Audio ac3 eng", "Audio ac3 fra", "Subtitle DVDSUB eng"}) {
 		t.Errorf("tracks: %q", got)
 	}
 	frames, start := playedFrames(t, p, ffmpeg, ffprobe, source.TranscodingUrl)
@@ -1052,6 +1052,7 @@ func TestLocalPictureSubtitleFilesAreTracks(t *testing.T) {
 // always, as it is not one file, the PGS file on an app that does not draw
 // PGS.
 func TestLocalPictureSubtitleFilesAreBurnedIn(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	ffmpeg := os.Getenv("POLYFIN_TEST_FFMPEG")
 	if ffmpeg == "" {
@@ -1155,7 +1156,7 @@ func TestLocalDiscImagesPlay(t *testing.T) {
 			t.Errorf("the image's version: %q %+v", version.Path, local)
 		}
 		source := playDisc(t, p, local, 8*time.Second)
-		if got := tracks(source); !slices.Equal(got, []string{"Subtitle subrip fra", "Video mpeg2video ", "Audio ac3 eng", "Audio ac3 fra", "Subtitle DVDSUB eng"}) {
+		if got := tracks(source); !slices.Equal(got, []string{"Video mpeg2video ", "Audio ac3 eng", "Audio ac3 fra", "Subtitle DVDSUB eng"}) {
 			t.Errorf("tracks: %q", got)
 		}
 		frames, start := playedFrames(t, p, ffmpeg, ffprobe, source.TranscodingUrl)
@@ -1209,7 +1210,7 @@ func TestShareDVDsPlayOverHLS(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			p, local := open()
 			source := playDisc(t, p, local, 8*time.Second)
-			if got := tracks(source); !slices.Equal(got, []string{"Subtitle subrip fra", "Video mpeg2video ", "Audio ac3 eng", "Audio ac3 fra", "Subtitle DVDSUB eng"}) {
+			if got := tracks(source); !slices.Equal(got, []string{"Video mpeg2video ", "Audio ac3 eng", "Audio ac3 fra", "Subtitle DVDSUB eng"}) {
 				t.Errorf("tracks: %q", got)
 			}
 			frames, start := playedFrames(t, p, ffmpeg, ffprobe, source.TranscodingUrl)

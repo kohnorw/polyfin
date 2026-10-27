@@ -14,7 +14,7 @@ func TestTextBurnGraph(t *testing.T) {
 	t.Parallel()
 	v := VideoEncoding{Encoder: "libx264", Width: 640, Height: 360, BurnText: "/data/cache/burned-subtitles/a:b.srt", FontsDir: "/usr/share/fonts"}
 	graph := v.burnGraph(0, 0, "")
-	for _, want := range []string{"subtitles=filename=/data/cache/burned-subtitles/a\\:b.srt", ":fontsdir=/usr/share/fonts", ":force_style=FontName=DejaVu Sans\\,Bold=1", "[video]"} {
+	for _, want := range []string{"subtitles=filename=/data/cache/burned-subtitles/a\\\\:b.srt", ":fontsdir=/usr/share/fonts", ":force_style=FontName=DejaVu Sans\\,Bold=1", "[video]"} {
 		if !strings.Contains(graph, want) {
 			t.Errorf("graph %q lacks %q", graph, want)
 		}

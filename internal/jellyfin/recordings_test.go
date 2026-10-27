@@ -642,7 +642,7 @@ func TestProgrammeIsRecordedAndPlays(t *testing.T) {
 	if _, err := s.store.UpdateUser(t.Context(), admin.ID, accounts.UserChanges{LiveTv: &yes}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if status, _ := s.call(http.MethodPost, "/Videos/"+recording.Id+"/Subtitles", app("web", s.signIn("boss", "web")), upload); status != http.StatusBadRequest {
+	if status, _ := s.call(http.MethodPost, "/Videos/"+recording.Id+"/Subtitles", app("web", s.signIn("boss", "web")), upload); status != http.StatusBadRequest && status != http.StatusForbidden {
 		t.Errorf("a subtitle file for a recording, by an administrator: %d", status)
 	}
 

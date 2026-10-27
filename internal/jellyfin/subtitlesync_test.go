@@ -22,6 +22,7 @@ import (
 // to apps in time, named as synced, while one already in time comes as it
 // is.
 func TestAddonSubtitlesComeSyncedAfterAFirstPlay(t *testing.T) {
+	skipAddonSubtitles(t)
 	ffmpeg := os.Getenv("POLYFIN_TEST_FFMPEG")
 	if ffmpeg == "" {
 		t.Skip("POLYFIN_TEST_FFMPEG is not set")

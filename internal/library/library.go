@@ -51,12 +51,15 @@ var ErrSeasonNotFound = errors.New("season not found")
 
 // Service browses the libraries of users.
 type Service struct {
-	db       *pgxpool.Pool
-	addons   *addons.Store
-	client   *stremio.Client
-	logger   *slog.Logger
-	now      func() time.Time
-	settings func() accounts.Settings
+	// fallbackManifest is the manifest URL of the addon searches fall back
+	// on (see fallbackSearch); empty, they fall back on none.
+	fallbackManifest string
+	db               *pgxpool.Pool
+	addons           *addons.Store
+	client           *stremio.Client
+	logger           *slog.Logger
+	now              func() time.Time
+	settings         func() accounts.Settings
 
 	// pages, metas and libraryImages keep what addons answered, with when
 	// (see kept.go); searchPages, the pages of searches, briefly; sizes,
@@ -2650,12 +2653,24 @@ func (s *Service) artworkView(ctx context.Context, r record) (view, error) {
 // search asks for the kinds of title the user's own search catalogs found
 // nothing of, as some addons' series searches always answer empty. Its
 // titles are IMDb's, which the user's addons describe and stream.
-var fallbackAddon = installed{addon: addons.Addon{
-	ID:          accounts.ID{0xc1, 0x4e, 0x3e, 0x7a, 0x5e, 0xa7, 0xc4, 0x00, 0x80, 0x00, 0, 0, 0, 0, 0, 1},
-	Kind:        addons.KindStremio,
-	ManifestURL: "https://v3-cinemeta.strem.io/manifest.json",
-	Enabled:     true,
-}}
+// It is off until SearchFallback names it, so that tests reach no outside
+// server.
+const CinemetaManifest = "https://v3-cinemeta.strem.io/manifest.json"
+
+func fallbackAddon(manifest string) installed {
+	return installed{addon: addons.Addon{
+		ID:          accounts.ID{0xc1, 0x4e, 0x3e, 0x7a, 0x5e, 0xa7, 0xc4, 0x00, 0x80, 0x00, 0, 0, 0, 0, 0, 1},
+		Kind:        addons.KindStremio,
+		ManifestURL: manifest,
+		Enabled:     true,
+	}}
+}
+
+// SearchFallback makes searches fall back on the addon of manifest, such
+// as CinemetaManifest; empty, on none. It is set before the service runs.
+func (s *Service) SearchFallback(manifest string) {
+	s.fallbackManifest = manifest
+}
 
 func fallbackCatalog(kind Kind) stremio.Catalog {
 	return stremio.Catalog{Type: string(kind), ID: "top", Extra: []stremio.Extra{{Name: "search", IsRequired: true}}}
@@ -2665,6 +2680,11 @@ func fallbackCatalog(kind Kind) stremio.Catalog {
 // that found shows none of, when one of the user's addons describes IMDb
 // titles of that kind.
 func (s *Service) fallbackSearch(ctx context.Context, v view, term string, kinds []Kind, found []listed, need int) []listed {
+	// Its titles come without the ratings and genres a restricted user's
+	// filters judge, so such a user gets none of them.
+	if s.fallbackManifest == "" || v.parental.Restricted() || len(v.genres) > 0 {
+		return nil
+	}
 	var sources []source
 	for _, kind := range []Kind{KindMovie, KindSeries} {
 		if !slices.Contains(kinds, kind) || slices.ContainsFunc(found, func(l listed) bool {
@@ -2679,7 +2699,7 @@ func (s *Service) fallbackSearch(ctx context.Context, v view, term string, kinds
 		if !described {
 			continue
 		}
-		sources = append(sources, source{addon: fallbackAddon, catalog: fallbackCatalog(kind), search: term, first: true})
+		sources = append(sources, source{addon: fallbackAddon(s.fallbackManifest), catalog: fallbackCatalog(kind), search: term, first: true})
 	}
 	if len(sources) == 0 {
 		return nil
