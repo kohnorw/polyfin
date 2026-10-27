@@ -33,9 +33,14 @@ if [ -z "$new_full" ]; then
 	new_full="$(api repos/jellyfin/jellyfin/releases/latest | jq -r .tag_name)"
 fi
 new_full="${new_full#v}"
+# Jellyfin tags some releases with two numbers (v12.4): those are x.y.0.
+if [[ "$new_full" =~ ^[0-9]+\.[0-9]+$ ]]; then
+	new_full="$new_full.0"
+fi
 if ! [[ "$new_full" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-	echo "not a stable Jellyfin release: '$new_full'" >&2
-	exit 1
+	# A prerelease or an odd tag: nothing to follow, which is no failure.
+	echo "not a stable Jellyfin release: '$new_full', nothing to do" >&2
+	exit 0
 fi
 new_minor="${new_full%.*}"
 

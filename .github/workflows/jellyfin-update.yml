@@ -43,11 +43,17 @@ jobs:
 
       - name: Move the pins to the new Jellyfin
         id: update
+        # Never fails the run, which would email on every scheduled try:
+        # a problem shows as a warning on the run's page instead.
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           VERSION: ${{ inputs.version }}
         run: |
-          version="$(scripts/update-jellyfin.sh "$VERSION")"
+          if ! version="$(scripts/update-jellyfin.sh "$VERSION")"; then
+            echo "::warning title=Jellyfin update::The update script failed; see this step's log."
+            exit 0
+          fi
           echo "version=$version" >> "$GITHUB_OUTPUT"
           if [ -z "$version" ]; then
             echo "Already on the latest Jellyfin."
@@ -73,6 +79,7 @@ jobs:
 
       - name: Open a pull request
         if: steps.update.outputs.version != '' && steps.update.outputs.exists != 'true'
+        continue-on-error: true
         env:
           GH_TOKEN: ${{ secrets.JELLYFIN_UPDATE_TOKEN || github.token }}
           VERSION: ${{ steps.update.outputs.version }}
