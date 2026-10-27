@@ -561,6 +561,9 @@ type decided struct {
 	analysis media.Analysis
 	source   MediaSourceInfo
 	decision playback.Decision
+	// burns holds the subtitle tracks the app takes only burned in that
+	// the video may be converted with, should the app pick one.
+	burns map[int]bool
 }
 
 // unconverted reports whether the app plays a version without conversion:
@@ -623,7 +626,17 @@ func (h *Handler) decide(r *http.Request, p playable, index int, version library
 	if unplayable(request, analysis, decision, allowed) {
 		return decided{}, false
 	}
-	return decided{index: index, version: version, id: id, analysis: analysis, source: source, decision: decision}, true
+	burns := map[int]bool{}
+	for _, stream := range source.MediaStreams {
+		if stream.Type != "Subtitle" || decision.Subtitles[stream.Index].Method != "Encode" || !allowed.Video || request.DeviceProfile == nil {
+			continue
+		}
+		burn := options
+		burn.SubtitleStreamIndex, burn.ConvertVideo = new(stream.Index), true
+		burned := playback.Decide(request.DeviceProfile, described, burn)
+		burns[stream.Index] = burned.Streamed() && burned.Video != nil && permitted(allowed, burned)
+	}
+	return decided{index: index, version: version, id: id, analysis: analysis, source: source, decision: decision, burns: burns}, true
 }
 
 // trackDecision decides how a version plays on the app, for its device
@@ -751,7 +764,7 @@ func (h *Handler) decidedSource(r *http.Request, p playable, d decided, request 
 			streamed = false
 		}
 	}
-	h.deliverable(r.Context(), decision, streams, version, analysis, streamed)
+	h.deliverable(r.Context(), decision, streams, version, analysis, streamed, d.burns)
 	h.prefetchSubtitle(r.Context(), decision, streams, version, analysis)
 
 	source.Container = decision.Container
@@ -802,8 +815,11 @@ func (h *Handler) decidedSource(r *http.Request, p playable, d decided, request 
 // remuxes extracted whole or that the version's index lists block by block,
 // and the PGS tracks it lists so, as external files; text subtitles as HLS
 // renditions; and the pictures chosen, an image track or a picture file,
-// burned into converted video. Any other is left out.
-func (h *Handler) deliverable(ctx context.Context, decision playback.Decision, streams []playback.MediaStream, version library.Version, analysis media.Analysis, streamed bool) {
+// burned into converted video. A track not chosen that the app takes only
+// burned in stays so when burns has it, the video converted with it: the app
+// asks again for it when picked, as Jellyfin for Android TV does, rather
+// than dropping it. Any other is left out.
+func (h *Handler) deliverable(ctx context.Context, decision playback.Decision, streams []playback.MediaStream, version library.Version, analysis media.Analysis, streamed bool, burns map[int]bool) {
 	files := subtitleFiles(streams)
 	whole := h.Playback.SubtitlesExtracted(ctx, version.ID, analysis.Duration)
 	// The index is read only when an embedded track would go out as a file.
@@ -841,6 +857,7 @@ func (h *Handler) deliverable(ctx context.Context, decision playback.Decision, s
 		case delivery.Method == "Hls" && streamed && (stream.IsExternal || extractable):
 		case delivery.Method == "Encode" && streamed && decision.Video != nil && stream.Index == decision.SubtitleStreamIndex &&
 			burnable(streams, analysis, stream.Index):
+		case delivery.Method == "Encode" && burns[stream.Index] && stream.Index != decision.SubtitleStreamIndex && burnable(streams, analysis, stream.Index):
 		default:
 			decision.Subtitles[stream.Index] = playback.SubtitleDelivery{Method: "Drop"}
 		}

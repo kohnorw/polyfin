@@ -783,3 +783,41 @@ var playbackShapes = shapeRules{
 		"CommunityRating": {"item-media-sources", "sessions-now-playing"}, "OfficialRating": {"item-media-sources"},
 	},
 }
+
+func TestTextSubtitlesTakenOnlyBurnedInStayOfferedWhenNotChosen(t *testing.T) {
+	t.Parallel()
+	p := playing(t)
+	// An English ASS track, after the addon's file: stream 3 for Jellyfin.
+	// Jellyfin for Android TV takes ASS only burned in.
+	p.remuxable(t, media.Stream{Index: 2, Type: "subtitle", Codec: "ass", Language: "eng"})
+	track := func(source MediaSourceInfo) string {
+		if i := slices.IndexFunc(source.MediaStreams, func(s playback.MediaStream) bool { return s.Index == 3 }); i >= 0 {
+			return source.MediaStreams[i].DeliveryMethod
+		}
+		return ""
+	}
+	request := map[string]any{"MediaSourceId": p.movie, "SubtitleStreamIndex": -1}
+	androidTV := p.profile(t, "androidtv")
+	// Playing without subtitles, the track stays one to burn in: the app
+	// asks again for it when picked, and drops a track marked Drop.
+	answer := p.ask(t, p.token, p.movie, androidTV, request)
+	if len(answer.MediaSources) != 1 {
+		t.Fatalf("%+v", answer)
+	}
+	source := answer.MediaSources[0]
+	if os.Getenv("POLYFIN_TEST_FFMPEG") == "" {
+		// Without an encoder, nothing is burned in: the track is left out.
+		if !source.SupportsDirectPlay || track(source) != "Drop" {
+			t.Errorf("without FFmpeg: direct play %v, track %s", source.SupportsDirectPlay, track(source))
+		}
+		return
+	}
+	if !source.SupportsDirectPlay || track(source) != "Encode" {
+		t.Errorf("direct play %v, track %s", source.SupportsDirectPlay, track(source))
+	}
+	// A user who may not have the video converted cannot have it burned in.
+	p.permit(t, p.user, false, true, true)
+	if source := p.ask(t, p.token, p.movie, androidTV, request).MediaSources[0]; track(source) != "Drop" {
+		t.Errorf("burning not allowed: track %s", track(source))
+	}
+}
