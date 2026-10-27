@@ -71,7 +71,7 @@ export async function signInToWebClient(
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
-      Authorization: `MediaBrowser Client="Jellyfin Web", Device="${device}", DeviceId="${encodeURIComponent(deviceId)}", Version="12.2.0"`,
+      Authorization: `MediaBrowser Client="Jellyfin Web", Device="${device}", DeviceId="${encodeURIComponent(deviceId)}", Version="12.4.0"`,
     },
     body: JSON.stringify({ Username: name, Pw: password }),
   })

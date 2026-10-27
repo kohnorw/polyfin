@@ -41,7 +41,7 @@ import (
 
 const (
 	// Version is the Jellyfin server version Polyfin reproduces.
-	Version = "12.2.0"
+	Version = "12.4.0"
 	// productName identifies a Jellyfin-compatible server to apps; it is a
 	// protocol value, not a claim to be Jellyfin.
 	productName = "Jellyfin Server"

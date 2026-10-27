@@ -10,7 +10,7 @@
         "Formats": [],
         "GenPtsInput": false,
         "HasSegments": false,
-        "Id": "97bf5354c4b8ea8d37076c54ec5d7e35",
+        "Id": "fa2ca3832b55c9aa7d3f3e16d6af5dd2",
         "IgnoreDts": true,
         "IgnoreIndex": false,
         "IsInfiniteStream": true,
@@ -75,7 +75,7 @@
             "VideoRangeType": "Unknown"
           }
         ],
-        "Path": "http://polyfin-jellyfin-fixtures-29311-files:8000/live/channel.m3u8",
+        "Path": "http://polyfin-jellyfin-fixtures-4108-files:8000/live/channel.m3u8",
         "Protocol": "Http",
         "ReadAtNativeFramerate": false,
         "RequiredHttpHeaders": {
@@ -91,7 +91,7 @@
         "SupportsTranscoding": true,
         "TranscodingContainer": "ts",
         "TranscodingSubProtocol": "hls",
-        "TranscodingUrl": "/videos/1389fe91-b085-df33-2d82-d93f2de0e153/master.m3u8?DeviceId=polyfin-fixtures&MediaSourceId=97bf5354c4b8ea8d37076c54ec5d7e35&VideoCodec=h264&AudioCodec=aac,mp3&AudioStreamIndex=-1&VideoBitrate=119808000&AudioBitrate=192000&MaxFramerate=24&SegmentContainer=ts&MinSegments=2&PlaySessionId=<redacted>&ApiKey=<redacted>&LiveStreamId=<redacted>&TranscodingMaxAudioChannels=2&RequireAvc=false&EnableAudioVbrEncoding=true&h264-level=30&h264-videobitdepth=8&h264-profile=high&h264-rangetype=SDR&h264-deinterlace=true&TranscodeReasons=AudioCodecNotSupported",
+        "TranscodingUrl": "/videos/3dedbf82-63f0-f348-2817-e69be8a33830/master.m3u8?DeviceId=polyfin-fixtures&MediaSourceId=fa2ca3832b55c9aa7d3f3e16d6af5dd2&VideoCodec=h264&AudioCodec=aac,mp3&AudioStreamIndex=-1&VideoBitrate=119808000&AudioBitrate=192000&MaxFramerate=24&SegmentContainer=ts&MinSegments=2&PlaySessionId=<redacted>&ApiKey=<redacted>&LiveStreamId=<redacted>&TranscodingMaxAudioChannels=2&RequireAvc=false&EnableAudioVbrEncoding=true&h264-level=30&h264-videobitdepth=8&h264-profile=high&h264-rangetype=SDR&h264-deinterlace=true&TranscodeReasons=AudioCodecNotSupported",
         "Type": "Default",
         "UseMostCompatibleTranscodingProfile": true
       }
@@ -107,7 +107,7 @@
         "Formats": [],
         "GenPtsInput": false,
         "HasSegments": false,
-        "Id": "97bf5354c4b8ea8d37076c54ec5d7e35",
+        "Id": "fa2ca3832b55c9aa7d3f3e16d6af5dd2",
         "IgnoreDts": true,
         "IgnoreIndex": false,
         "IsInfiniteStream": true,
@@ -148,7 +148,7 @@
           }
         ],
         "OpenToken": "<redacted>",
-        "Path": "http://polyfin-jellyfin-fixtures-29311-files:8000/live/channel.m3u8",
+        "Path": "http://polyfin-jellyfin-fixtures-4108-files:8000/live/channel.m3u8",
         "Protocol": "Http",
         "ReadAtNativeFramerate": false,
         "RequiredHttpHeaders": {
@@ -163,7 +163,7 @@
         "SupportsTranscoding": true,
         "TranscodingContainer": "ts",
         "TranscodingSubProtocol": "hls",
-        "TranscodingUrl": "/videos/1389fe91-b085-df33-2d82-d93f2de0e153/master.m3u8?DeviceId=polyfin-fixtures&MediaSourceId=97bf5354c4b8ea8d37076c54ec5d7e35&VideoCodec=h264&AudioCodec=aac,mp3&AudioStreamIndex=-1&VideoBitrate=119616000&AudioBitrate=384000&SegmentContainer=ts&MinSegments=2&PlaySessionId=<redacted>&ApiKey=<redacted>&TranscodingMaxAudioChannels=2&RequireAvc=false&EnableAudioVbrEncoding=true&h264-profile=high,main,baseline,constrainedbaseline,high10&h264-rangetype=SDR&h264-level=52&h264-deinterlace=true&TranscodeReasons=ContainerNotSupported,VideoCodecNotSupported,AudioCodecNotSupported",
+        "TranscodingUrl": "/videos/3dedbf82-63f0-f348-2817-e69be8a33830/master.m3u8?DeviceId=polyfin-fixtures&MediaSourceId=fa2ca3832b55c9aa7d3f3e16d6af5dd2&VideoCodec=h264&AudioCodec=aac,mp3&AudioStreamIndex=-1&VideoBitrate=119616000&AudioBitrate=384000&SegmentContainer=ts&MinSegments=2&PlaySessionId=<redacted>&ApiKey=<redacted>&TranscodingMaxAudioChannels=2&RequireAvc=false&EnableAudioVbrEncoding=true&h264-profile=high,main,baseline,constrainedbaseline,high10&h264-rangetype=SDR&h264-level=52&h264-deinterlace=true&TranscodeReasons=ContainerNotSupported,VideoCodecNotSupported,AudioCodecNotSupported",
         "Type": "Default",
         "UseMostCompatibleTranscodingProfile": true
       }

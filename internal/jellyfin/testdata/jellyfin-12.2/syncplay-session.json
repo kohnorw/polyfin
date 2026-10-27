@@ -834,7 +834,7 @@
             "EmittedAt": "date",
             "GroupId": "group",
             "PlaylistItemId": "playlist-item-1",
-            "PositionTicks": 18720200,
+            "PositionTicks": 18605947,
             "When": "date"
           },
           "MessageId": "message-id",
@@ -875,7 +875,7 @@
               "Reason": "NewPlaylist",
               "RepeatMode": "RepeatNone",
               "ShuffleMode": "Sorted",
-              "StartPositionTicks": 18720200
+              "StartPositionTicks": 18605947
             },
             "GroupId": "group",
             "Type": "PlayQueue"
@@ -908,7 +908,7 @@
             "EmittedAt": "date",
             "GroupId": "group",
             "PlaylistItemId": "playlist-item-1",
-            "PositionTicks": 18720200,
+            "PositionTicks": 18605947,
             "When": "date"
           },
           "MessageId": "message-id",
@@ -934,7 +934,7 @@
             "EmittedAt": "date",
             "GroupId": "group",
             "PlaylistItemId": "playlist-item-1",
-            "PositionTicks": 18720200,
+            "PositionTicks": 18605947,
             "When": "date"
           },
           "MessageId": "message-id",
@@ -990,7 +990,7 @@
               "Reason": "Queue",
               "RepeatMode": "RepeatNone",
               "ShuffleMode": "Sorted",
-              "StartPositionTicks": 18720200
+              "StartPositionTicks": 18605947
             },
             "GroupId": "group",
             "Type": "PlayQueue"
@@ -1019,7 +1019,7 @@
               "Reason": "Queue",
               "RepeatMode": "RepeatNone",
               "ShuffleMode": "Sorted",
-              "StartPositionTicks": 18720200
+              "StartPositionTicks": 18605947
             },
             "GroupId": "group",
             "Type": "PlayQueue"
@@ -1069,7 +1069,7 @@
               "Reason": "QueueNext",
               "RepeatMode": "RepeatNone",
               "ShuffleMode": "Sorted",
-              "StartPositionTicks": 27508442
+              "StartPositionTicks": 27483765
             },
             "GroupId": "group",
             "Type": "PlayQueue"
@@ -1102,7 +1102,7 @@
               "Reason": "QueueNext",
               "RepeatMode": "RepeatNone",
               "ShuffleMode": "Sorted",
-              "StartPositionTicks": 27508442
+              "StartPositionTicks": 27483765
             },
             "GroupId": "group",
             "Type": "PlayQueue"
@@ -1150,7 +1150,7 @@
               "Reason": "MoveItem",
               "RepeatMode": "RepeatNone",
               "ShuffleMode": "Sorted",
-              "StartPositionTicks": 36909846
+              "StartPositionTicks": 36796992
             },
             "GroupId": "group",
             "Type": "PlayQueue"
@@ -1183,7 +1183,7 @@
               "Reason": "MoveItem",
               "RepeatMode": "RepeatNone",
               "ShuffleMode": "Sorted",
-              "StartPositionTicks": 36909846
+              "StartPositionTicks": 36796992
             },
             "GroupId": "group",
             "Type": "PlayQueue"
@@ -1230,7 +1230,7 @@
               "Reason": "RepeatMode",
               "RepeatMode": "RepeatAll",
               "ShuffleMode": "Sorted",
-              "StartPositionTicks": 46453008
+              "StartPositionTicks": 46110782
             },
             "GroupId": "group",
             "Type": "PlayQueue"
@@ -1263,7 +1263,7 @@
               "Reason": "RepeatMode",
               "RepeatMode": "RepeatAll",
               "ShuffleMode": "Sorted",
-              "StartPositionTicks": 46453008
+              "StartPositionTicks": 46110782
             },
             "GroupId": "group",
             "Type": "PlayQueue"
@@ -1299,18 +1299,18 @@
                   "PlaylistItemId": "playlist-item-1"
                 },
                 {
-                  "ItemId": "title-2",
-                  "PlaylistItemId": "playlist-item-2"
-                },
-                {
                   "ItemId": "title-3",
                   "PlaylistItemId": "playlist-item-3"
+                },
+                {
+                  "ItemId": "title-2",
+                  "PlaylistItemId": "playlist-item-2"
                 }
               ],
               "Reason": "ShuffleMode",
               "RepeatMode": "RepeatAll",
               "ShuffleMode": "Shuffle",
-              "StartPositionTicks": 55901807
+              "StartPositionTicks": 55483555
             },
             "GroupId": "group",
             "Type": "PlayQueue"
@@ -1332,18 +1332,18 @@
                   "PlaylistItemId": "playlist-item-1"
                 },
                 {
-                  "ItemId": "title-2",
-                  "PlaylistItemId": "playlist-item-2"
-                },
-                {
                   "ItemId": "title-3",
                   "PlaylistItemId": "playlist-item-3"
+                },
+                {
+                  "ItemId": "title-2",
+                  "PlaylistItemId": "playlist-item-2"
                 }
               ],
               "Reason": "ShuffleMode",
               "RepeatMode": "RepeatAll",
               "ShuffleMode": "Shuffle",
-              "StartPositionTicks": 55901807
+              "StartPositionTicks": 55483555
             },
             "GroupId": "group",
             "Type": "PlayQueue"
@@ -1390,7 +1390,7 @@
               "Reason": "ShuffleMode",
               "RepeatMode": "RepeatAll",
               "ShuffleMode": "Sorted",
-              "StartPositionTicks": 65177593
+              "StartPositionTicks": 64733217
             },
             "GroupId": "group",
             "Type": "PlayQueue"
@@ -1423,7 +1423,7 @@
               "Reason": "ShuffleMode",
               "RepeatMode": "RepeatAll",
               "ShuffleMode": "Sorted",
-              "StartPositionTicks": 65177593
+              "StartPositionTicks": 64733217
             },
             "GroupId": "group",
             "Type": "PlayQueue"

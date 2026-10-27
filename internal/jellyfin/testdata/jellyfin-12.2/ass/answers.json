@@ -59,7 +59,7 @@
     "body": {
       "status": 404,
       "title": "Not Found",
-      "traceId": "00-41c52f8de3562c1e9fbbd3fce843fe20-7eebf741f60c62ea-00",
+      "traceId": "00-0f7a6a83a1539ac03d6e9ed515f28f94-78f1a2bc73f50a70-00",
       "type": "https://tools.ietf.org/html/rfc9110#section-15.5.5"
     },
     "contentType": "application/json; charset=utf-8",

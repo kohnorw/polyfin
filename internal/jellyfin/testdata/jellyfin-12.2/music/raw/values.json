@@ -95,7 +95,7 @@
     "SongCount": null,
     "SongStream": {
       "BitDepth": 16,
-      "BitRate": 130752,
+      "BitRate": 106524,
       "Channels": 2,
       "Codec": "flac",
       "DisplayTitle": "FLAC - Stereo",

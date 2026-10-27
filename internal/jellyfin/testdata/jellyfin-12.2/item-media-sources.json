@@ -29,7 +29,7 @@
   "Id": "",
   "ImageBlurHashes": {
     "Primary": {
-      "55e2b6114227cd459fcd5767e7d3ae06": ""
+      "37cf01f0a0d22dd194c0bc64b387eb6f": ""
     }
   },
   "ImageTags": {
@@ -136,6 +136,7 @@
   ],
   "MediaType": "",
   "Name": "",
+  "OfficialRating": "",
   "OriginalLanguage": "",
   "OriginalTitle": "",
   "Overview": "",
@@ -144,13 +145,7 @@
   "People": [
     {
       "Id": "",
-      "ImageBlurHashes": {
-        "Primary": {
-          "5089966a07aaa6f1610fd5387f662f7f": ""
-        }
-      },
       "Name": "",
-      "PrimaryImageTag": "",
       "Role": "",
       "Type": ""
     }

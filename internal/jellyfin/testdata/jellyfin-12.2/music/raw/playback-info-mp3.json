@@ -1,9 +1,9 @@
 {
   "MediaSources": [
     {
-      "Bitrate": 128713,
+      "Bitrate": 128714,
       "Container": "mp3",
-      "ETag": "d1a52280287de8640a169e53ee1e31d9",
+      "ETag": "786b4b81cc700b7d2d853a83994f6e8e",
       "Formats": [],
       "GenPtsInput": false,
       "HasSegments": false,
@@ -49,7 +49,7 @@
       "RequiresLooping": false,
       "RequiresOpening": false,
       "RunTimeTicks": 100000000,
-      "Size": 160892,
+      "Size": 160893,
       "SupportsDirectPlay": true,
       "SupportsDirectStream": true,
       "SupportsProbing": true,
@@ -59,5 +59,5 @@
       "UseMostCompatibleTranscodingProfile": false
     }
   ],
-  "PlaySessionId": "f20dcb81f379497eb210ba6bf92506cf"
+  "PlaySessionId": "68b148d1b0974703adda2150dbb8a131"
 }

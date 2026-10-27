@@ -36,7 +36,7 @@ for tool in docker curl jq ffmpeg ffprobe; do
 	command -v "$tool" >/dev/null || { echo "$tool is required" >&2; exit 1; }
 done
 
-image='jellyfin/jellyfin:12.2@sha256:357724bf0ae27a672c7cbaa899db2d9abeb13dbd8657ccce750258a4c059d037'
+image='jellyfin/jellyfin:12.4@sha256:fea863d0cd9ec445985d9c75fc6ed64e38a1d2766cf0c250a33d553f4fc1b771'
 out="$(cd "$(dirname "$0")/.." && pwd)/internal/jellyfin/testdata/jellyfin-12.2"
 container="polyfin-jellyfin-fixtures-$$"
 # The .strm movie's file server, reachable from Jellyfin by name on a network

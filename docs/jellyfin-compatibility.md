@@ -1,6 +1,6 @@
 # Jellyfin compatibility
 
-Polyfin targets the Jellyfin 12.2 API, so standard Jellyfin apps sign in, browse, search and play. This page lists the compatible apps, what they get from Polyfin, and the Jellyfin features Polyfin does without.
+Polyfin targets the Jellyfin 12.4 API, so standard Jellyfin apps sign in, browse, search and play. This page lists the compatible apps, what they get from Polyfin, and the Jellyfin features Polyfin does without.
 
 ## Compatible apps
 

@@ -4,14 +4,14 @@
       "ChannelId": null,
       "ChannelNumber": "7",
       "ChannelType": "TV",
-      "Id": "1389fe91b085df332d82d93f2de0e153",
+      "Id": "3dedbf8263f0f3482817e69be8a33830",
       "ImageBlurHashes": {
         "Primary": {
-          "4fea2b591b7976292041a2f8f09f945d": "e20036fYfQfYfQfYfRfQfRfQfQfQfQfQfQfYfRfQfRfQfQfQfQfQfQ"
+          "d0e115ca5fa72237bcab22660b0a3534": "e20035fYfQfYfQfYfRfQfRfQfQfQfQfQfQfYfRfQfRfQfQfQfQfQfQ"
         }
       },
       "ImageTags": {
-        "Primary": "4fea2b591b7976292041a2f8f09f945d"
+        "Primary": "d0e115ca5fa72237bcab22660b0a3534"
       },
       "IsFolder": false,
       "LocationType": "Remote",
@@ -19,12 +19,12 @@
       "Name": "Fixture One",
       "Number": "7",
       "PrimaryImageAspectRatio": 1,
-      "ServerId": "574a53f8e8e74e61a31e8432e0d356dc",
+      "ServerId": "d23936e33a664075a26c62ba1917da08",
       "Type": "TvChannel",
       "UserData": {
         "IsFavorite": false,
-        "ItemId": "1389fe91b085df332d82d93f2de0e153",
-        "Key": "1389fe91-b085-df33-2d82-d93f2de0e153",
+        "ItemId": "3dedbf8263f0f3482817e69be8a33830",
+        "Key": "3dedbf82-63f0-f348-2817-e69be8a33830",
         "PlayCount": 0,
         "PlaybackPositionTicks": 0,
         "Played": false
