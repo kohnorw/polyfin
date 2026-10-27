@@ -120,7 +120,11 @@ jobs:
           echo "POLYFIN_TEST_TESSERACT=/usr/bin/tesseract" >> "$GITHUB_ENV"
       - name: Build admin app, check formatting, vet and test
         # internal/jellyfin's tests run meanwhile, in the job of their own.
-        run: make web lint test-others bounds
+        run: set -o pipefail; make web lint test-others bounds 2>&1 | tee -a "$RUNNER_TEMP/test.log"
+      - &annotate-failures
+        name: Show the failures as annotations
+        if: failure()
+        run: scripts/ci-annotate.sh "$RUNNER_TEMP/test.log"
       - name: Test the torrents' network interface route
         # A dummy interface with an address, which the tests set down and
         # up (NET_ADMIN, so as root); the build cache of root's run is its
@@ -163,7 +167,8 @@ jobs:
       - *install-ffmpeg
       - *install-postgresql-client
       - name: Test internal/jellyfin
-        run: make test-jellyfin
+        run: set -o pipefail; make test-jellyfin 2>&1 | tee -a "$RUNNER_TEMP/test.log"
+      - *annotate-failures
 
   windows:
     # polyfin serve on Windows, as the desktop version runs it: the per-system
@@ -217,10 +222,14 @@ jobs:
           go vet ./...
       - name: Test the per-system code and local folders
         run: |
-          go test -p 2 ./cmd/polyfin ./internal/process ./internal/diskspace ./internal/media ./internal/localfiles \
-            ./internal/hls ./internal/thumbnails ./internal/accounts ./internal/config ./internal/playback
-          go test ./internal/admin -run '^(TestStatusTellsTheSystem|TestUnwatchedFolderText)$'
-          go test ./internal/database -run '^TestMigrationsEndTheirLinesWithLF$'
+          set -o pipefail
+          {
+            go test -p 2 ./cmd/polyfin ./internal/process ./internal/diskspace ./internal/media ./internal/localfiles \
+              ./internal/hls ./internal/thumbnails ./internal/accounts ./internal/config ./internal/playback
+            go test ./internal/admin -run '^(TestStatusTellsTheSystem|TestUnwatchedFolderText)$'
+            go test ./internal/database -run '^TestMigrationsEndTheirLinesWithLF$'
+          } 2>&1 | tee -a "$RUNNER_TEMP/test.log"
+      - *annotate-failures
 
   macos:
     # polyfin serve on an Apple silicon Mac, as the desktop version runs it:
@@ -254,7 +263,8 @@ jobs:
         # TestLargeLineupsStayFast times IPTV listings against bounds set for
         # the Linux runner, which the check job holds; a macOS runner is
         # slower at them without anything being wrong.
-        run: go test -p 2 -skip '^TestLargeLineupsStayFast$' ./...
+        run: set -o pipefail; go test -p 2 -skip '^TestLargeLineupsStayFast$' ./... 2>&1 | tee -a "$RUNNER_TEMP/test.log"
+      - *annotate-failures
 
   image:
     name: Build and smoke test the image without publishing
