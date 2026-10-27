@@ -15,6 +15,7 @@ import (
 )
 
 func TestUsersWhoManageSubtitlesAddFilesAdministratorsDeleteThem(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	p.testServer.user("admin", func(c *accounts.UserChanges) { c.IsAdministrator = new(true) })

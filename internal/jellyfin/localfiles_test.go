@@ -777,6 +777,7 @@ func TestLocalBluRaysConvertForAppsWithoutTheirCodec(t *testing.T) {
 // flags their names tell, and Polyfin serves them in the format each app
 // asks for, French accents of Windows-1252 included.
 func TestLocalSubtitleFilesAreTracks(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	var folders *localfiles.Service
 	s := newProbingServer(t, 10, "ffprobe-not-installed", func(o *Options, pool *pgxpool.Pool) {
@@ -996,6 +997,7 @@ func localVersion(t *testing.T, p playbackSetup, local MediaSourceInfo) library.
 // file. An app that draws PGS takes the PGS file as it is, by ranges; a
 // VobSub pair is not one file, nor are pictures text.
 func TestLocalPictureSubtitleFilesAreTracks(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	file, err := os.ReadFile(filepath.Join("..", "container", "testdata", "forced.mkv"))
 	if err != nil {

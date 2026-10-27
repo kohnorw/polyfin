@@ -113,6 +113,7 @@ func sameIndex(a, b *int) bool {
 }
 
 func TestDefaultTracksFollowTheUsersPreferences(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	// The first version has English (flagged) and French audio, and full

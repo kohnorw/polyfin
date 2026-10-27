@@ -723,6 +723,12 @@ func (h *Handler) trackDecision(p playable, version library.Version, streams []p
 			without := options
 			without.SubtitleStreamIndex = new(-1)
 			if retry := playback.Decide(request.DeviceProfile, described, without); retry.DirectPlay || (retry.Streamed() && !decision.Streamed()) {
+				// A text track the app plays the file with stays chosen:
+				// it goes out as a file in fallback (see deliverable)
+				// rather than leaving the app with no subtitles.
+				if retry.DirectPlay && fallbackServable(streams, analysis, *selected) {
+					retry.SubtitleStreamIndex = *selected
+				}
 				decision = retry
 			}
 		}
@@ -764,7 +770,7 @@ func (h *Handler) decidedSource(r *http.Request, p playable, d decided, request 
 			streamed = false
 		}
 	}
-	h.deliverable(r.Context(), decision, streams, version, analysis, streamed, d.burns)
+	h.deliverable(r.Context(), decision, streams, version, analysis, streamed, d.burns, fallbackSubtitleFormat(request.DeviceProfile))
 	h.prefetchSubtitle(r.Context(), decision, streams, version, analysis)
 
 	source.Container = decision.Container
@@ -818,8 +824,12 @@ func (h *Handler) decidedSource(r *http.Request, p playable, d decided, request 
 // burned into converted video. A track not chosen that the app takes only
 // burned in stays so when burns has it, the video converted with it: the app
 // asks again for it when picked, as Jellyfin for Android TV does, rather
-// than dropping it. Any other is left out.
-func (h *Handler) deliverable(ctx context.Context, decision playback.Decision, streams []playback.MediaStream, version library.Version, analysis media.Analysis, streamed bool, burns map[int]bool) {
+// than dropping it. A text subtitle that none of those can deliver, as when
+// the app declares no way to take it and the video may not be converted to
+// burn it in, goes out as a file in fallback, the text format the app names
+// first, so that it still has subtitles to show (see
+// fallbackSubtitleFormat). Any other is left out.
+func (h *Handler) deliverable(ctx context.Context, decision playback.Decision, streams []playback.MediaStream, version library.Version, analysis media.Analysis, streamed bool, burns map[int]bool, fallback string) {
 	files := subtitleFiles(streams)
 	whole := h.Playback.SubtitlesExtracted(ctx, version.ID, analysis.Duration)
 	// The index is read only when an embedded track would go out as a file.
@@ -858,10 +868,55 @@ func (h *Handler) deliverable(ctx context.Context, decision playback.Decision, s
 		case delivery.Method == "Encode" && streamed && decision.Video != nil && stream.Index == decision.SubtitleStreamIndex &&
 			burnable(streams, analysis, stream.Index):
 		case delivery.Method == "Encode" && burns[stream.Index] && stream.Index != decision.SubtitleStreamIndex && burnable(streams, analysis, stream.Index):
+		case fallback != "" && stream.IsTextSubtitleStream && (stream.IsExternal || (extractable && (whole || locate(stream.Index-files)))):
+			decision.Subtitles[stream.Index] = playback.SubtitleDelivery{Method: "External", Format: fallback}
+		case fallback != "" && stream.IsTextSubtitleStream && extractable && stream.Index == decision.SubtitleStreamIndex:
+			// As for a file the app asked for: read whole first.
+			if !wholeAsked {
+				h.Playback.ExtractSubtitlesWhole(version, analysis)
+				wholeAsked = true
+			}
+			decision.Subtitles[stream.Index] = playback.SubtitleDelivery{Method: "External", Format: fallback}
 		default:
 			decision.Subtitles[stream.Index] = playback.SubtitleDelivery{Method: "Drop"}
 		}
 	}
+}
+
+// fallbackServable reports whether the subtitle stream of Jellyfin index
+// index is text Polyfin can serve as a file: a subtitle file, or a text
+// track inside the version it reads out.
+func fallbackServable(streams []playback.MediaStream, analysis media.Analysis, index int) bool {
+	files := subtitleFiles(streams)
+	for _, stream := range streams {
+		if stream.Type != "Subtitle" || stream.Index != index || !stream.IsTextSubtitleStream {
+			continue
+		}
+		return stream.IsExternal || playback.ExtractableSubtitle(analysis, index-files)
+	}
+	return false
+}
+
+// fallbackSubtitleFormats are the text formats Polyfin writes a subtitle
+// file in (see subtitleText.write), in the order a fallback picks them
+// when the app names none: SubRip is the one nearly every player reads.
+var fallbackSubtitleFormats = []string{"srt", "subrip", "vtt", "webvtt", "ass", "ssa"}
+
+// fallbackSubtitleFormat is the format a text subtitle goes out in as a
+// file when the app's profile gives no other way to deliver it: the first
+// text format the profile names, by any method, that Polyfin writes, else
+// SubRip. Players built on ExoPlayer, AVFoundation through VLCKit, mpv,
+// libVLC and browsers all load a subtitle file given as External, even
+// from a profile that omits it, which is better than the track vanishing.
+func fallbackSubtitleFormat(profile *playback.DeviceProfile) string {
+	if profile != nil {
+		for _, p := range profile.SubtitleProfiles {
+			if slices.ContainsFunc(fallbackSubtitleFormats, func(f string) bool { return strings.EqualFold(f, p.Format) }) {
+				return strings.ToLower(p.Format)
+			}
+		}
+	}
+	return "srt"
 }
 
 // subtitleFiles counts a version's subtitle files, which come first among

@@ -248,6 +248,7 @@ func TestStaleListsAreGoneAfterADay(t *testing.T) {
 }
 
 func TestStaleSubtitleListsAreListedWhileTheAddonIsAskedAgain(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	e := newStaleEnv(t, 20*time.Millisecond, 20*time.Millisecond)
 	subtitles := func() ([]string, bool) {

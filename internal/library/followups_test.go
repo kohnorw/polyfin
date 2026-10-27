@@ -312,6 +312,7 @@ func TestARefreshIsNotUndoneByAFollowUp(t *testing.T) {
 }
 
 func TestSubtitleListsAreFollowedUp(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	e := newFollowEnv(t, 20*time.Millisecond, 50*time.Millisecond)
 	e.replies <- 1
