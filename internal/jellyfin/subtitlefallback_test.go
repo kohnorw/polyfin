@@ -3,7 +3,6 @@ package jellyfin
 import (
 	"testing"
 
-	"github.com/moodiness/polyfin/internal/media"
 	"github.com/moodiness/polyfin/internal/playback"
 )
 
@@ -27,21 +26,3 @@ func TestFallbackSubtitleFormatFollowsTheProfile(t *testing.T) {
 		}
 	}
 }
-
-// Only text that Polyfin can serve as a file falls back to one.
-func TestFallbackServableIsTextOnly(t *testing.T) {
-	t.Parallel()
-	streams := []playback.MediaStream{
-		{Type: "Subtitle", Index: 0, IsExternal: true, IsTextSubtitleStream: true, Codec: "subrip"},
-		{Type: "Subtitle", Index: 1, IsExternal: true, Codec: "pgssub"},
-		{Type: "Video", Index: 2},
-	}
-	if !fallbackServable(streams, mediaAnalysisNone, 0) {
-		t.Error("a SubRip file is not servable")
-	}
-	if fallbackServable(streams, mediaAnalysisNone, 1) || fallbackServable(streams, mediaAnalysisNone, 2) || fallbackServable(streams, mediaAnalysisNone, 9) {
-		t.Error("pictures, video or a missing stream are servable")
-	}
-}
-
-var mediaAnalysisNone media.Analysis

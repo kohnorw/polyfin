@@ -723,12 +723,6 @@ func (h *Handler) trackDecision(p playable, version library.Version, streams []p
 			without := options
 			without.SubtitleStreamIndex = new(-1)
 			if retry := playback.Decide(request.DeviceProfile, described, without); retry.DirectPlay || (retry.Streamed() && !decision.Streamed()) {
-				// A text track the app plays the file with stays chosen:
-				// it goes out as a file in fallback (see deliverable)
-				// rather than leaving the app with no subtitles.
-				if retry.DirectPlay && fallbackServable(streams, analysis, *selected) {
-					retry.SubtitleStreamIndex = *selected
-				}
 				decision = retry
 			}
 		}
@@ -827,8 +821,11 @@ func (h *Handler) decidedSource(r *http.Request, p playable, d decided, request 
 // than dropping it. A text subtitle that none of those can deliver, as when
 // the app declares no way to take it and the video may not be converted to
 // burn it in, goes out as a file in fallback, the text format the app names
-// first, so that it still has subtitles to show (see
-// fallbackSubtitleFormat). Any other is left out.
+// first, when it is ready to serve at once: a subtitle file, or a track the
+// version's index or a whole read already gives (see
+// fallbackSubtitleFormat). One that would need the whole version read
+// first is left out, as the app would wait on it for minutes. Any other is
+// left out.
 func (h *Handler) deliverable(ctx context.Context, decision playback.Decision, streams []playback.MediaStream, version library.Version, analysis media.Analysis, streamed bool, burns map[int]bool, fallback string) {
 	files := subtitleFiles(streams)
 	whole := h.Playback.SubtitlesExtracted(ctx, version.ID, analysis.Duration)
@@ -870,31 +867,10 @@ func (h *Handler) deliverable(ctx context.Context, decision playback.Decision, s
 		case delivery.Method == "Encode" && burns[stream.Index] && stream.Index != decision.SubtitleStreamIndex && burnable(streams, analysis, stream.Index):
 		case fallback != "" && stream.IsTextSubtitleStream && (stream.IsExternal || (extractable && (whole || locate(stream.Index-files)))):
 			decision.Subtitles[stream.Index] = playback.SubtitleDelivery{Method: "External", Format: fallback}
-		case fallback != "" && stream.IsTextSubtitleStream && extractable && stream.Index == decision.SubtitleStreamIndex:
-			// As for a file the app asked for: read whole first.
-			if !wholeAsked {
-				h.Playback.ExtractSubtitlesWhole(version, analysis)
-				wholeAsked = true
-			}
-			decision.Subtitles[stream.Index] = playback.SubtitleDelivery{Method: "External", Format: fallback}
 		default:
 			decision.Subtitles[stream.Index] = playback.SubtitleDelivery{Method: "Drop"}
 		}
 	}
-}
-
-// fallbackServable reports whether the subtitle stream of Jellyfin index
-// index is text Polyfin can serve as a file: a subtitle file, or a text
-// track inside the version it reads out.
-func fallbackServable(streams []playback.MediaStream, analysis media.Analysis, index int) bool {
-	files := subtitleFiles(streams)
-	for _, stream := range streams {
-		if stream.Type != "Subtitle" || stream.Index != index || !stream.IsTextSubtitleStream {
-			continue
-		}
-		return stream.IsExternal || playback.ExtractableSubtitle(analysis, index-files)
-	}
-	return false
 }
 
 // fallbackSubtitleFormats are the text formats Polyfin writes a subtitle
