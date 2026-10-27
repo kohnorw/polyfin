@@ -1,0 +1,99 @@
+# Follows Jellyfin releases: once a day, when a newer stable Jellyfin is
+# out, moves Polyfin's pins to it (scripts/update-jellyfin.sh), records
+# the new server's answers as fixtures, and opens a pull request. CI then
+# tests Polyfin against it; merge once it passes, or fix what it shows.
+#
+# Pull requests opened with the workflow's own token do not start other
+# workflows, so CI would not run on them. Add a fine-grained token with
+# Contents and Pull requests write access as the JELLYFIN_UPDATE_TOKEN
+# secret to have CI run on them; without one, close and reopen the pull
+# request to start CI. Under Settings › Actions › General, "Allow GitHub
+# Actions to create and approve pull requests" must be on.
+name: Jellyfin update
+
+on:
+  schedule:
+    - cron: "17 9 * * *"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Jellyfin version (e.g. 12.3.0); empty for the latest release
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: jellyfin-update
+  cancel-in-progress: false
+
+jobs:
+  update:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6.0.3
+        with:
+          token: ${{ secrets.JELLYFIN_UPDATE_TOKEN || github.token }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Move the pins to the new Jellyfin
+        id: update
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+        run: |
+          version="$(scripts/update-jellyfin.sh "$VERSION")"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          if [ -z "$version" ]; then
+            echo "Already on the latest Jellyfin."
+            exit 0
+          fi
+          branch="jellyfin-update/$version"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          if git ls-remote --exit-code --heads origin "$branch" >/dev/null; then
+            echo "A pull request for Jellyfin $version is already open."
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Record the new server's answers as fixtures
+        # Best effort: the diff of the fixtures shows what the new
+        # Jellyfin answers differently. A failure leaves the pins moved.
+        if: steps.update.outputs.version != '' && steps.update.outputs.exists != 'true'
+        id: fixtures
+        continue-on-error: true
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends ffmpeg jq
+          scripts/jellyfin-fixtures.sh
+
+      - name: Open a pull request
+        if: steps.update.outputs.version != '' && steps.update.outputs.exists != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.JELLYFIN_UPDATE_TOKEN || github.token }}
+          VERSION: ${{ steps.update.outputs.version }}
+          BRANCH: ${{ steps.update.outputs.branch }}
+          FIXTURES: ${{ steps.fixtures.outcome }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898333+github-actions[bot]@users.noreply.github.com"
+          git switch -c "$BRANCH"
+          git add -A
+          git commit -m "Follow Jellyfin $VERSION"
+          git push origin "$BRANCH"
+          if [ "$FIXTURES" = success ]; then
+            fixtures="The fixtures were recorded again from Jellyfin $VERSION: their diff shows what it answers differently."
+          else
+            fixtures="Recording the fixtures from Jellyfin $VERSION failed; run \`scripts/jellyfin-fixtures.sh\` locally."
+          fi
+          gh pr create --base "${{ github.event.repository.default_branch }}" --head "$BRANCH" \
+            --title "Follow Jellyfin $VERSION" \
+            --body "Jellyfin $VERSION is out. This moves the version Polyfin reports, the jellyfin-web it serves and the image the fixtures come from to it.
+
+          $fixtures
+
+          Merge once CI passes. Release notes: https://github.com/jellyfin/jellyfin/releases/tag/v$VERSION"
