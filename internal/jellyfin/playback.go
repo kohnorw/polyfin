@@ -366,8 +366,17 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	// for that version alone.
 	requested, _ := parseGUID(request.MediaSourceId)
 	explicit := request.MediaSourceId != "" && requested != item.ID
+	// An item opened by a version's own identifier is that version picked:
+	// apps open the version the user chose in their version menu, and
+	// Jellyfin for Android TV then names the title, or nothing, as the
+	// source. It is played as if named, waiting for its analysis, rather
+	// than passed over for a version analyzed sooner or played as it is.
+	picked := !explicit && opened != item.ID
 	plan := func(versions []library.Version) candidates {
 		at := openedIndex(opened, versions)
+		if picked && len(versions) > 0 && versions[at].ID == opened {
+			return candidates{order: []int{at}, analyzed: 1, named: at}
+		}
 		if explicit {
 			for i, version := range versions {
 				if version.ID == requested || sourceID(opened, version, i == at) == requested {
@@ -397,7 +406,7 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	// with its tracks copied, among those analyzed now; else the first that
 	// plays at all. Jellyfin 12.2 keeps the version opened first however
 	// it plays: the setting departs from it, and is off by default.
-	prefer := settings.PreferDirectPlay && !explicit
+	prefer := settings.PreferDirectPlay && !explicit && !picked
 	c := plan(p.versions)
 	choice := h.choose(r, user, p, opened, request, c, prefer)
 	if choice.decided == nil && !complete && r.Context().Err() == nil {

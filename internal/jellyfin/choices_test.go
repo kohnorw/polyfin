@@ -212,6 +212,16 @@ func TestPreferDirectPlayChoosesAVersionThatNeedsNoConversion(t *testing.T) {
 		!strings.HasSuffix(source.TranscodingUrl, "&allowAudioStreamCopy=false") {
 		t.Errorf("the version asked for: %+v", source)
 	}
+	// So does the version the app opened, as Jellyfin for Android TV opens
+	// the version picked in its menu, naming the title or nothing as the
+	// source.
+	picked := p.versions[0].ID.String()
+	for _, named := range []map[string]any{nil, {"MediaSourceId": p.movie}} {
+		if source := firstSource(t, p.ask(t, p.token, picked, minimal, named)); source.Id != picked ||
+			!strings.HasSuffix(source.TranscodingUrl, "&allowAudioStreamCopy=false") {
+			t.Errorf("the version opened, naming %v: %+v", named, source)
+		}
+	}
 	// When every version needs a conversion, the first plays, as without
 	// the setting.
 	if source := firstSource(t, p.ask(t, p.token, p.movie, minimal, map[string]any{"EnableDirectPlay": false, "AllowAudioStreamCopy": false})); source.Id != p.movie {
