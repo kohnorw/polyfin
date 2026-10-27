@@ -518,3 +518,24 @@ func TestHDRIsToneMappedOnTheGPUWithoutTheProcessorsLimits(t *testing.T) {
 		}
 	}
 }
+
+func TestWebVTTInMatroskaGoesOutAsAFile(t *testing.T) {
+	profile := readDeviceProfile(t, "androidtv")
+	webvtt := MediaStream{Type: "Subtitle", Codec: "webvtt", IsTextSubtitleStream: true, SupportsExternalStream: true}
+	subrip := MediaStream{Type: "Subtitle", Codec: "subrip", IsTextSubtitleStream: true, SupportsExternalStream: true}
+	for _, test := range []struct {
+		stream    MediaStream
+		container string
+		want      SubtitleDelivery
+	}{
+		{webvtt, "mkv", SubtitleDelivery{Method: "External", Format: "webvtt"}},
+		{webvtt, "matroska,webm", SubtitleDelivery{Method: "External", Format: "webvtt"}},
+		{webvtt, "webm", SubtitleDelivery{Method: "External", Format: "webvtt"}},
+		{webvtt, "mp4", SubtitleDelivery{Method: "Embed", Format: "webvtt"}},
+		{subrip, "mkv", SubtitleDelivery{Method: "Embed", Format: "subrip"}},
+	} {
+		if got := subtitleDelivery(profile.SubtitleProfiles, &test.stream, false, test.container, "http"); got != test.want {
+			t.Errorf("%s in %s: %+v, want %+v", test.stream.Codec, test.container, got, test.want)
+		}
+	}
+}

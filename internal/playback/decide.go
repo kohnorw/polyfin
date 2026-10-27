@@ -597,7 +597,8 @@ func subtitleDelivery(profiles []SubtitleProfile, stream *MediaStream, transcode
 	if language == "" {
 		language = "und"
 	}
-	embeddable := !stream.IsExternal && (!transcode || (!strings.EqualFold(protocol, "hls") && embedsSubtitles(container)))
+	embeddable := !stream.IsExternal && (!transcode || (!strings.EqualFold(protocol, "hls") && embedsSubtitles(container))) &&
+		!webMWebVTT(stream, container)
 	for convert := range 2 {
 		if !embeddable {
 			break
@@ -630,6 +631,16 @@ func subtitleDelivery(profiles []SubtitleProfile, stream *MediaStream, transcode
 		}
 	}
 	return SubtitleDelivery{Method: "Encode", Format: stream.Codec}
+}
+
+// webMWebVTT reports whether stream is a WebVTT track in a Matroska or
+// WebM container. FFmpeg reads and writes those as WebM's D_WEBVTT tracks,
+// which ExoPlayer's Matroska extractor leaves out, so an app told to find
+// one embedded shows nothing (Jellyfin for Android TV logs "Failed to find
+// correct subtitle group for method Embed"). Such a track goes out as a
+// file instead: the version's index reads it block by block.
+func webMWebVTT(stream *MediaStream, container string) bool {
+	return strings.EqualFold(stream.Codec, "webvtt") && listMeets("mkv,matroska,webm", container)
 }
 
 // embedsSubtitles reports whether a transcode to container keeps subtitle
