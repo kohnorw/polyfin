@@ -195,6 +195,7 @@ func TestPreferDirectPlayLooksNoFurtherThanTheVersionsReadAtOnce(t *testing.T) {
 // PlaybackInfo waits for the addons' subtitles a second at most once the
 // versions are in: those that come later reach the next PlaybackInfo.
 func TestPlaybackInfoWaitsForSubtitlesASecondAtMost(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	subtitles := make(chan struct{})
 	p := manyOn(t, newTestServer(t, 10), manyVersionsAddon(t, 1, subtitles))

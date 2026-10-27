@@ -51,7 +51,7 @@ func newHeldAddon(t *testing.T, name string, broken bool) *heldAddon {
 				return
 			}
 			stream := func(height string, size int64) stremio.Stream {
-				file := name + "." + height + ".mkv"
+				file := "Movie.2008." + height + ".WEB-" + name + ".mkv"
 				return stremio.Stream{Name: name + " " + height, URL: server.URL + "/files/" + file,
 					BehaviorHints: stremio.StreamBehavior{Filename: file, VideoSize: stremio.Number(size)}}
 			}

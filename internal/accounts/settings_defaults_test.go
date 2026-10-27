@@ -61,6 +61,11 @@ func TestSettingsBoundsAreThoseChecked(t *testing.T) {
 	// The host names of Known proxies share the bounds of knownProxies,
 	// the admin API's list of both.
 	named["knownproxynames"] = true
+	// Retired from the admin API when this fork kept to the subtitles
+	// inside the files: stored, always off, and never served.
+	for _, retired := range []string{"syncaddonsubtitles", "subtitleocr", "subtitleocrtracks"} {
+		named[retired] = true
+	}
 	for i := range fields.NumField() {
 		if name := fields.Field(i).Name; !named[strings.ToLower(name)] {
 			t.Errorf("no bounds for %s", name)

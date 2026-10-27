@@ -131,6 +131,7 @@ func textCopies(source MediaSourceInfo) []playback.MediaStream {
 // out when asked. With no track asked, the copy stands for its original
 // on an app that cannot draw it, and the original stays on one that can.
 func TestPictureSubtitlesHaveTextCopies(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	p, local, converts := localPictureCopies(t)
 	chrome := p.profile(t, "jellyfin-web-chrome")

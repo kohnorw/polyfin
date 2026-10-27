@@ -140,6 +140,7 @@ func versionSourcesOn(t *testing.T) sourcesSetup {
 // versions labeled with the user's language even with its folder placed
 // first.
 func TestVersionSourceOrder(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	p := versionSourcesOn(t)
 	french, frenchToken := p.another(t, "french", "fre")

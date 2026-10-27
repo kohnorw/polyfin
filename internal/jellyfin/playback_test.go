@@ -52,11 +52,17 @@ func streamingAddon(t *testing.T) string {
 		case path == "/meta/movie/tt2000.json":
 			_ = json.NewEncoder(w).Encode(map[string]any{"meta": movie("tt2000", "Remote")})
 		case strings.HasPrefix(path, "/stream/movie/"):
+			// Each title's files carry its own name, as exact title
+			// matching keeps only those.
+			title := "Movie"
+			if strings.HasPrefix(path, "/stream/movie/tt2000") {
+				title = "Remote"
+			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"streams": []stremio.Stream{
 				{Name: "Source 2160p", Description: "REMUX\nHEVC", URL: server.URL + "/files/remux.mkv",
-					BehaviorHints: stremio.StreamBehavior{Filename: "Movie.2160p.mkv", VideoSize: 80_000_000_000}},
+					BehaviorHints: stremio.StreamBehavior{Filename: title + ".2160p.mkv", VideoSize: 80_000_000_000}},
 				{Name: "Source 1080p", Description: "WEB-DL", URL: server.URL + "/files/web.mp4",
-					BehaviorHints: stremio.StreamBehavior{Filename: "Movie.1080p.mp4", VideoSize: 3_000_000_000}},
+					BehaviorHints: stremio.StreamBehavior{Filename: title + ".1080p.mp4", VideoSize: 3_000_000_000}},
 				{Name: "Statistics", ExternalURL: "https://addon.example/"},
 			}})
 		case path == "/subtitles/movie/tt1000.json":
@@ -156,6 +162,7 @@ func (p playbackSetup) profile(t *testing.T, name string) json.RawMessage {
 }
 
 func TestItemDetailsListVersions(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	var movie BaseItemDto
@@ -203,6 +210,7 @@ func TestItemDetailsListVersions(t *testing.T) {
 }
 
 func TestPlaybackInfoDecidesForTheDevice(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	ask := func(profile string, mediaSourceID string) playbackInfoResponse {
@@ -313,6 +321,7 @@ func (p playbackSetup) remuxable(t *testing.T, more ...media.Stream) media.Analy
 }
 
 func TestAppsThatCannotPlayAVersionGetARemux(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	p.remuxable(t)
@@ -470,6 +479,7 @@ func TestVideoTheAppCannotTakeIsConverted(t *testing.T) {
 }
 
 func TestImageSubtitlesBrowsersCannotShowAreBurnedIn(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	// An English PGS track, after the addon's file: stream 3 for Jellyfin.
@@ -526,6 +536,7 @@ func fetchText(t *testing.T, target string) (int, http.Header, string) {
 }
 
 func TestRemuxesOfferSubtitlesAsRenditions(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	p.remuxable(t)
@@ -583,6 +594,7 @@ func TestRemuxesOfferSubtitlesAsRenditions(t *testing.T) {
 }
 
 func TestWholeExtractedTracksAreExternalSubtitles(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	p.remuxable(t, media.Stream{Index: 2, Type: "subtitle", Codec: "subrip", Language: "eng"})
@@ -664,6 +676,7 @@ func TestStreamsNeedAGrant(t *testing.T) {
 }
 
 func TestSubtitlesNeedNoCredentials(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	p.get(t, "/Items/"+p.movie, p.token, nil)
@@ -719,6 +732,7 @@ func TestSessionsShowWhatDevicesPlay(t *testing.T) {
 // recorded from Jellyfin 12.2 by scripts/jellyfin-fixtures.sh, for versions
 // analyzed as the clips Jellyfin played.
 func TestPlaybackResponsesMatchJellyfin(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	user := p.user.ID.String()
@@ -785,6 +799,7 @@ var playbackShapes = shapeRules{
 }
 
 func TestTextSubtitlesTakenOnlyBurnedInStayOfferedWhenNotChosen(t *testing.T) {
+	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	// An English ASS track, after the addon's file: stream 3 for Jellyfin.
