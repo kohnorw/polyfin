@@ -775,7 +775,7 @@ func (h *Handler) decidedSource(r *http.Request, p playable, d decided, request 
 		}
 	}
 	h.deliverable(r.Context(), decision, streams, version, analysis, streamed, d.burns, fallbackSubtitleFormat(request.DeviceProfile))
-	h.prefetchSubtitle(r.Context(), decision, streams, version, analysis)
+	h.prefetchSubtitles(r.Context(), decision, streams, version, analysis, p.tracks)
 
 	source.Container = decision.Container
 	source.SupportsDirectPlay, source.SupportsDirectStream = decision.DirectPlay, decision.DirectPlay
@@ -917,22 +917,59 @@ func subtitleFiles(streams []playback.MediaStream) int {
 	return files
 }
 
-// prefetchSubtitle starts reading whole the embedded track the app shows
-// by default when it goes out as a file, so that it is ready when the app
-// asks for it a moment later.
-func (h *Handler) prefetchSubtitle(ctx context.Context, decision playback.Decision, streams []playback.MediaStream, version library.Version, analysis media.Analysis) {
+// prefetchSubtitles starts reading whole the embedded tracks that go out
+// as files and the app may show soon, so that they are ready when it asks
+// for them: the one it shows by default, and the text tracks in the user's
+// subtitle language, which a user picks among. Through the version's index
+// a track's blocks alone are read, which costs little; a version whose
+// remuxes extracted its text tracks has them kept already. Without a
+// preferred language, only the default track is read.
+func (h *Handler) prefetchSubtitles(ctx context.Context, decision playback.Decision, streams []playback.MediaStream, version library.Version, analysis media.Analysis, preferences trackPreferences) {
 	files := subtitleFiles(streams)
-	delivery, ok := decision.Subtitles[decision.SubtitleStreamIndex]
-	if !ok || delivery.Method != "External" || decision.SubtitleStreamIndex < files {
+	wanted := prefetched(decision, streams, analysis, preferences)
+	if len(wanted) == 0 {
 		return
 	}
 	// Remuxes extract text tracks whole, never PGS ones.
-	if !playback.PGSSubtitle(analysis, decision.SubtitleStreamIndex-files) && h.Playback.SubtitlesExtracted(ctx, version.ID, analysis.Duration) {
-		return
+	extracted := h.Playback.SubtitlesExtracted(ctx, version.ID, analysis.Duration)
+	var located map[int]bool
+	for _, index := range wanted {
+		stream := index - files
+		if extracted && !playback.PGSSubtitle(analysis, stream) {
+			continue
+		}
+		if located == nil {
+			located = h.Playback.SubtitlesLocated(ctx, version, analysis)
+		}
+		if located[stream] {
+			h.Playback.PrefetchSubtitle(version, analysis, stream)
+		}
 	}
-	if stream := decision.SubtitleStreamIndex - files; h.Playback.SubtitlesLocated(ctx, version, analysis)[stream] {
-		h.Playback.PrefetchSubtitle(version, analysis, stream)
+}
+
+// prefetched are the Jellyfin indexes of the embedded tracks
+// prefetchSubtitles reads: the one the app shows by default, and the text
+// tracks in the user's subtitle language, when they go out as files.
+func prefetched(decision playback.Decision, streams []playback.MediaStream, analysis media.Analysis, preferences trackPreferences) []int {
+	files := subtitleFiles(streams)
+	external := func(index int) bool {
+		delivery, ok := decision.Subtitles[index]
+		return ok && delivery.Method == "External" && index >= files
 	}
+	var wanted []int
+	if external(decision.SubtitleStreamIndex) {
+		wanted = append(wanted, decision.SubtitleStreamIndex)
+	}
+	if preferences.subtitleLanguage == "" {
+		return wanted
+	}
+	for _, stream := range streams {
+		if stream.Type == "Subtitle" && stream.CopyOf == nil && stream.Index != decision.SubtitleStreamIndex && external(stream.Index) &&
+			playback.ExtractableSubtitle(analysis, stream.Index-files) && preferences.matches(stream) {
+			wanted = append(wanted, stream.Index)
+		}
+	}
+	return wanted
 }
 
 // burnable reports whether the subtitle stream of Jellyfin index index can

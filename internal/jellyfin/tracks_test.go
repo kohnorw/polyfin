@@ -3,8 +3,10 @@ package jellyfin
 import (
 	"encoding/json"
 	"net/http"
+	"slices"
 	"testing"
 
+	"github.com/moodiness/polyfin/internal/media"
 	"github.com/moodiness/polyfin/internal/playback"
 )
 
@@ -167,4 +169,44 @@ func TestDefaultTracksFollowTheUsersPreferences(t *testing.T) {
 		t.Fatalf("saving: %d", status)
 	}
 	check("PlaybackInfo without subtitles", playbackInfo(), audioEnglish, -1)
+}
+
+func TestTracksInTheSubtitleLanguageArePrefetched(t *testing.T) {
+	// FFmpeg indexes, which are Jellyfin's without subtitle files: video,
+	// audio, then an English ASS track shown by default, French SubRip,
+	// English SubRip, English PGS and an English track burned in.
+	analysis := media.Analysis{Streams: []media.Stream{
+		{Index: 0, Type: "video", Codec: "h264"},
+		{Index: 1, Type: "audio", Codec: "aac"},
+		{Index: 2, Type: "subtitle", Codec: "ass", Language: "eng"},
+		{Index: 3, Type: "subtitle", Codec: "subrip", Language: "fre"},
+		{Index: 4, Type: "subtitle", Codec: "subrip", Language: "eng"},
+		{Index: 5, Type: "subtitle", Codec: "hdmv_pgs_subtitle", Language: "eng"},
+		{Index: 6, Type: "subtitle", Codec: "subrip", Language: "eng"},
+	}}
+	var streams []playback.MediaStream
+	for _, s := range analysis.Streams[2:] {
+		streams = append(streams, playback.MediaStream{Index: s.Index, Type: "Subtitle", Codec: s.Codec, Language: s.Language})
+	}
+	file := playback.SubtitleDelivery{Method: "External", Format: "vtt"}
+	decision := playback.Decision{SubtitleStreamIndex: 2, Subtitles: map[int]playback.SubtitleDelivery{
+		2: file, 3: file, 4: file, 5: {Method: "External", Format: "sup"}, 6: {Method: "Encode", Format: "subrip"},
+	}}
+	for _, test := range []struct {
+		language string
+		want     []int
+	}{
+		{"eng", []int{2, 4}},
+		{"fre", []int{2, 3}},
+		{"", []int{2}},
+	} {
+		if got := prefetched(decision, streams, analysis, trackPreferences{subtitleLanguage: test.language}); !slices.Equal(got, test.want) {
+			t.Errorf("language %q: %v, want %v", test.language, got, test.want)
+		}
+	}
+	// Nothing shown by default: the tracks in the language alone.
+	decision.SubtitleStreamIndex = -1
+	if got := prefetched(decision, streams, analysis, trackPreferences{subtitleLanguage: "eng"}); !slices.Equal(got, []int{2, 4}) {
+		t.Errorf("none shown: %v", got)
+	}
 }
