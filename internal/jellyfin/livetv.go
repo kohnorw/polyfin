@@ -839,6 +839,8 @@ func (h *Handler) liveSource(r *http.Request, channel library.Item, version libr
 		}
 		source.SupportsTranscoding = true
 		source.TranscodingUrl = transcodingURL(r, channel.ID, id, version, analysis, streams, decision, limit, session)
+		// Not remote, for Jellyfin for Roku (see decidedSource).
+		source.IsRemote = false
 		source.TranscodingSubProtocol = "hls"
 		source.TranscodingContainer = decision.Transcoding.Container
 		describeConverted(request, analysis, source.MediaStreams, decision.Video)
