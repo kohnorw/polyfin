@@ -222,6 +222,25 @@ func TestPreferDirectPlayChoosesAVersionThatNeedsNoConversion(t *testing.T) {
 			t.Errorf("the version opened, naming %v: %+v", named, source)
 		}
 	}
+	// An app playing the first version that asks again for the title, as
+	// Jellyfin for Android TV does to have a subtitle burned in, keeps that
+	// version: its play session tells it.
+	first := p.ask(t, p.token, p.movie, minimal, map[string]any{"MediaSourceId": p.versions[0].ID.String()})
+	if status, data := p.call(http.MethodPost, "/Sessions/Playing", app("tv", p.token),
+		map[string]any{"ItemId": p.movie, "MediaSourceId": p.movie, "PlaySessionId": first.PlaySessionId}); status != http.StatusNoContent {
+		t.Fatalf("Sessions/Playing: %d %s", status, data)
+	}
+	if source := firstSource(t, p.ask(t, p.token, p.movie, minimal, map[string]any{"MediaSourceId": p.movie, "SubtitleStreamIndex": -1})); source.Id != p.movie {
+		t.Errorf("asked again while playing the first version: %+v", source)
+	}
+	// Once it stopped, the version preferred plays again.
+	if status, data := p.call(http.MethodPost, "/Sessions/Playing/Stopped", app("tv", p.token),
+		map[string]any{"ItemId": p.movie, "MediaSourceId": p.movie, "PlaySessionId": first.PlaySessionId}); status != http.StatusNoContent {
+		t.Fatalf("Sessions/Playing/Stopped: %d %s", status, data)
+	}
+	if source := firstSource(t, p.ask(t, p.token, p.movie, minimal, map[string]any{"MediaSourceId": p.movie})); source.Id != p.versions[1].ID.String() {
+		t.Errorf("asked again once stopped: %+v", source)
+	}
 	// When every version needs a conversion, the first plays, as without
 	// the setting.
 	if source := firstSource(t, p.ask(t, p.token, p.movie, minimal, map[string]any{"EnableDirectPlay": false, "AllowAudioStreamCopy": false})); source.Id != p.movie {

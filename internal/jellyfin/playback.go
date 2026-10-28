@@ -372,10 +372,20 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	// source. It is played as if named, waiting for its analysis, rather
 	// than passed over for a version analyzed sooner or played as it is.
 	picked := !explicit && opened != item.ID
+	// An app asking again for the title it plays switches its tracks in the
+	// version it plays: Jellyfin for Android TV starts again so to have a
+	// subtitle burned in, naming the title, which is also the identifier of
+	// a title's first version. That version stays, as its play session
+	// tells, rather than another chosen anew, where the track asked for is
+	// another or none.
+	playing := h.playingVersion(r, user, item)
 	plan := func(versions []library.Version) candidates {
 		at := openedIndex(opened, versions)
 		if picked && len(versions) > 0 && versions[at].ID == opened {
 			return candidates{order: []int{at}, analyzed: 1, named: at}
+		}
+		if i := slices.IndexFunc(versions, func(v library.Version) bool { return v.ID == playing }); !explicit && !picked && i >= 0 {
+			return candidates{order: []int{i}, analyzed: 1, named: i}
 		}
 		if explicit {
 			for i, version := range versions {
@@ -747,6 +757,23 @@ func (h *Handler) trackDecision(p playable, version library.Version, streams []p
 		return h.trackDecision(p, version, streams, analysis, request, allowed, named)
 	}
 	return decision, options, described
+}
+
+// playingVersion is the version of item the calling device plays now, as
+// the play session it reports tells, the zero ID when it plays none of it.
+func (h *Handler) playingVersion(r *http.Request, user accounts.User, item library.Item) accounts.ID {
+	now, ok := h.sessions.Playing(callerFrom(r.Context()).Device.ID)
+	if !ok || now.User != user.ID || now.PlaySessionID == "" {
+		return accounts.ID{}
+	}
+	grant, err := h.Playback.Signer().Verify(now.PlaySessionID)
+	if err != nil || grant.User != user.ID {
+		return accounts.ID{}
+	}
+	if owner, ok := h.Library.VersionOwner(grant.Version); !ok || owner != item.ID {
+		return accounts.ID{}
+	}
+	return grant.Version
 }
 
 // unplayable reports whether a decision does not play a version on the app:
