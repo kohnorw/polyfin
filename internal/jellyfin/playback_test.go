@@ -119,16 +119,21 @@ func playingOn(t *testing.T, s testServer) playbackSetup {
 	p.versions = p.versionsOf(t, p.movie)
 	p.listed(t, user, p.movie)
 	p.analyzed(t, p.versions[1], "h264-aac-mp4")
-	// The movie's French subtitle, downloaded from its addon into the
-	// title's folder, as Jellyfin keeps a provider's subtitle.
-	folder := s.handler.subtitleManager.MetadataFolder(p.movie)
+	return p
+}
+
+// frenchSubtitle saves the movie's French subtitle, downloaded from its
+// addon into the title's folder, as Jellyfin keeps a provider's subtitle.
+// As a file, it is the subtitle shown by default (see tracks.subtitle).
+func (p playbackSetup) frenchSubtitle(t *testing.T) {
+	t.Helper()
+	folder := p.handler.subtitleManager.MetadataFolder(p.movie)
 	if err := os.MkdirAll(folder, 0o755); err != nil {
 		t.Fatal(err)
 	}
 	if err := os.WriteFile(filepath.Join(folder, subtitleFileBase+".fre.srt"), []byte("1\r\n00:00:01,000 --> 00:00:04,000\r\nBonjour\r\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	return p
 }
 
 func (p playbackSetup) versionsOf(t *testing.T, item string) []library.Version {
@@ -172,6 +177,7 @@ func (p playbackSetup) profile(t *testing.T, name string) json.RawMessage {
 func TestItemDetailsListVersions(t *testing.T) {
 	t.Parallel()
 	p := playing(t)
+	p.frenchSubtitle(t)
 	var movie BaseItemDto
 	if status := p.get(t, "/Users/"+p.user.ID.String()+"/Items/"+p.movie, p.token, &movie); status != http.StatusOK {
 		t.Fatalf("detail: %d", status)
@@ -220,6 +226,7 @@ func TestItemDetailsListVersions(t *testing.T) {
 func TestPlaybackInfoDecidesForTheDevice(t *testing.T) {
 	t.Parallel()
 	p := playing(t)
+	p.frenchSubtitle(t)
 	ask := func(profile string, mediaSourceID string) playbackInfoResponse {
 		t.Helper()
 		body := map[string]any{"UserId": p.user.ID.String(), "MaxStreamingBitrate": 120_000_000, "DeviceProfile": p.profile(t, profile),
@@ -330,6 +337,7 @@ func (p playbackSetup) remuxable(t *testing.T, more ...media.Stream) media.Analy
 func TestAppsThatCannotPlayAVersionGetARemux(t *testing.T) {
 	t.Parallel()
 	p := playing(t)
+	p.frenchSubtitle(t)
 	p.remuxable(t)
 	// jellyfin-web asks again without direct play when the file failed to
 	// play as it is.
@@ -487,6 +495,7 @@ func TestVideoTheAppCannotTakeIsConverted(t *testing.T) {
 func TestImageSubtitlesBrowsersCannotShowAreBurnedIn(t *testing.T) {
 	t.Parallel()
 	p := playing(t)
+	p.frenchSubtitle(t)
 	// An English PGS track, after the addon's file: stream 3 for Jellyfin.
 	p.remuxable(t, media.Stream{Index: 2, Type: "subtitle", Codec: "hdmv_pgs_subtitle", Language: "eng", Width: 64, Height: 64})
 	status, data := p.call(http.MethodPost, "/Items/"+p.movie+"/PlaybackInfo", app("tv", p.token), map[string]any{
@@ -543,6 +552,7 @@ func fetchText(t *testing.T, target string) (int, http.Header, string) {
 func TestRemuxesOfferSubtitlesAsRenditions(t *testing.T) {
 	t.Parallel()
 	p := playing(t)
+	p.frenchSubtitle(t)
 	p.remuxable(t)
 	// A player that takes subtitles from the playlist only, as Swiftfin's
 	// native player does, with jellyfin-web's codecs.
@@ -646,6 +656,7 @@ func TestStreamsNeedAGrant(t *testing.T) {
 func TestSubtitlesNeedNoCredentials(t *testing.T) {
 	t.Parallel()
 	p := playing(t)
+	p.frenchSubtitle(t)
 	p.get(t, "/Items/"+p.movie, p.token, nil)
 	for format, want := range map[string]string{
 		// Converted by libse's writers; the file itself when asked in its
@@ -703,6 +714,7 @@ func TestSessionsShowWhatDevicesPlay(t *testing.T) {
 func TestPlaybackResponsesMatchJellyfin(t *testing.T) {
 	t.Parallel()
 	p := playing(t)
+	p.frenchSubtitle(t)
 	user := p.user.ID.String()
 	p.analyzed(t, p.versions[0], "h264-ac3-srt-mkv")
 	remote := p.versionsOf(t, p.remote)[0]
@@ -769,6 +781,7 @@ var playbackShapes = shapeRules{
 func TestTextSubtitlesTakenOnlyBurnedInStayOfferedWhenNotChosen(t *testing.T) {
 	t.Parallel()
 	p := playing(t)
+	p.frenchSubtitle(t)
 	// An English ASS track, after the addon's file: stream 3 for Jellyfin.
 	// Jellyfin for Android TV takes ASS only burned in.
 	p.remuxable(t, media.Stream{Index: 2, Type: "subtitle", Codec: "ass", Language: "eng"})

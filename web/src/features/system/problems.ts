@@ -162,4 +162,3 @@ export function problemText(t: Messages, language: string, problem: HealthProble
         : text.trackingStopped(serviceNames[problem.name], problem.owner.name)
   }
 }
-

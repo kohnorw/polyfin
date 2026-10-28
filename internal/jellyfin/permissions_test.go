@@ -158,6 +158,7 @@ func TestImageSubtitlesAreLeftOutWhenTheVideoMayNotBeConverted(t *testing.T) {
 		t.Skip("POLYFIN_TEST_FFMPEG is not set: without an encoder, no subtitle is burned in anyway")
 	}
 	p := playing(t)
+	p.frenchSubtitle(t)
 	// An English PGS track, after the addon's file: stream 3 for Jellyfin.
 	p.remuxable(t, media.Stream{Index: 2, Type: "subtitle", Codec: "hdmv_pgs_subtitle", Language: "eng", Width: 64, Height: 64})
 	request := map[string]any{"MediaSourceId": p.movie, "SubtitleStreamIndex": 3}
@@ -191,7 +192,7 @@ func TestHLSRefusesConversionsThatAreNotAllowed(t *testing.T) {
 	t.Parallel()
 	p := playing(t)
 	p.remuxable(t)
-	audio := p.ask(t, p.token, p.movie, p.profile(t, "minimal"), map[string]any{"MediaSourceId": p.movie}).MediaSources[0].TranscodingUrl
+	audio := p.ask(t, p.token, p.movie, p.profile(t, "minimal"), map[string]any{"MediaSourceId": p.movie, "SubtitleStreamIndex": -1}).MediaSources[0].TranscodingUrl
 	copied := p.ask(t, p.token, p.movie, p.profile(t, "jellyfin-web-chrome"), map[string]any{"MediaSourceId": p.movie, "EnableDirectPlay": false}).MediaSources[0].TranscodingUrl
 	if !strings.Contains(audio, "allowAudioStreamCopy=false") || copied == "" || strings.Contains(copied, "StreamCopy=false") {
 		t.Fatalf("TranscodingUrls: %q, %q", audio, copied)

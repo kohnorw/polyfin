@@ -787,6 +787,7 @@ func TestLocalSubtitleFilesAreTracks(t *testing.T) {
 		folders.UseFiles(o.Playback.LocalFiles(folders.Open), o.Playback.LocalInputs(folders))
 	})
 	p := playingOn(t, s)
+	p.frenchSubtitle(t)
 	file, err := os.ReadFile(filepath.Join("..", "container", "testdata", "forced.mkv"))
 	if err != nil {
 		t.Fatal(err)
@@ -929,6 +930,7 @@ func localPictureFiles(t *testing.T, ffprobe string, video []byte) (playbackSetu
 		folders.UseFiles(o.Playback.LocalFiles(folders.Open), o.Playback.LocalInputs(folders))
 	})
 	p := playingOn(t, s)
+	p.frenchSubtitle(t)
 	rectangle := testsubtitles.Rectangle{CanvasWidth: 320, CanvasHeight: 180, X: 60, Y: 120, Width: 200, Height: 40,
 		Shown: [][2]time.Duration{{time.Second, 3 * time.Second}, {5 * time.Second, 7 * time.Second}}}
 	pgs := rectangle.PGS()

@@ -50,6 +50,7 @@ func TestItemDetailsDescribeVersionsFromRemuxDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := playingOn(t, s)
+	p.frenchSubtitle(t)
 
 	for range 2 {
 		var movie BaseItemDto

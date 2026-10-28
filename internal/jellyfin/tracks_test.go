@@ -119,6 +119,7 @@ func sameIndex(a, b *int) bool {
 func TestDefaultTracksFollowTheUsersPreferences(t *testing.T) {
 	t.Parallel()
 	p := playing(t)
+	p.frenchSubtitle(t)
 	// The first version has English (flagged) and French audio, and full
 	// and forced English subtitles, after the addon's French file.
 	p.analyzed(t, p.versions[0], "h264-ac3-srt-mkv")
