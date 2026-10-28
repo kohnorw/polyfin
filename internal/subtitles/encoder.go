@@ -38,6 +38,10 @@ type Source struct {
 	// IsInfiniteStream marks a live stream, whose subtitles are never
 	// given as files.
 	IsInfiniteStream bool
+	// Indexed, when set, reads tracks inside the media file without
+	// reading all of it, by their Stream.Index: each file it gives is the
+	// one FFmpeg's extraction would make. The others are extracted.
+	Indexed func(ctx context.Context, streams []Stream) map[int][]byte
 }
 
 // Stream is what the encoder needs of a subtitle stream, Jellyfin's
@@ -139,8 +143,10 @@ type Encoder struct {
 	// Timeout is how long an extraction may take, Jellyfin's
 	// SubtitleExtractionTimeoutMinutes; nil or zero allows 30 minutes.
 	Timeout func() time.Duration
+	locks   keyedLocks
 
-	locks keyedLocks
+	jobsMu sync.Mutex
+	jobs   map[string]chan struct{}
 }
 
 func (e *Encoder) logger() *slog.Logger {
@@ -299,10 +305,12 @@ func remote(path string) bool {
 // as it is.
 func (e *Encoder) ReadableFile(ctx context.Context, source Source, stream Stream) (Info, error) {
 	if !stream.IsExternal || stream.mks() {
-		e.ExtractAll(ctx, source)
 		path, ok := e.cachePath(source, stream.Index, "."+extractableExtension(stream))
 		if !ok {
 			return Info{}, fmt.Errorf("media source %s has no subtitle cache", source.ID)
+		}
+		if err := e.extractStream(ctx, source, stream, path); err != nil {
+			return Info{}, err
 		}
 		format := extractableFormat(stream)
 		return Info{Path: path, Format: format, IsExternal: IsVobSubFormat(format)}, nil
@@ -445,7 +453,92 @@ func (e *Encoder) writeCacheMeta(cachePath, sourcePath string) {
 // ExtractAllExtractableSubtitles: its text, PGS and VobSub tracks, and
 // those of its MKS files. It logs, rather than returns, what fails: a track
 // missing after is reported by those who read it.
+//
+// The extraction outlives the request that started it, unlike Jellyfin's:
+// reading a whole addon stream takes longer than players wait for a
+// subtitle, and a player giving up would otherwise stop it, losing what
+// was read, for the next request to start over. A request waits for the
+// extraction under way, as long as it is there.
 func (e *Encoder) ExtractAll(ctx context.Context, source Source) {
+	e.run1(ctx, source.ID, func(ctx context.Context) { e.extractAll(ctx, source) })
+}
+
+// run1 runs work once under key, outliving ctx, and waits for it while ctx
+// lasts: a call while it runs joins it.
+func (e *Encoder) run1(ctx context.Context, key string, work func(ctx context.Context)) {
+	e.jobsMu.Lock()
+	if e.jobs == nil {
+		e.jobs = map[string]chan struct{}{}
+	}
+	done, running := e.jobs[key]
+	if !running {
+		done = make(chan struct{})
+		e.jobs[key] = done
+		go func() {
+			defer func() {
+				e.jobsMu.Lock()
+				delete(e.jobs, key)
+				e.jobsMu.Unlock()
+				close(done)
+			}()
+			work(context.WithoutCancel(ctx))
+		}()
+	}
+	e.jobsMu.Unlock()
+	select {
+	case <-done:
+	case <-ctx.Done():
+	}
+}
+
+// extractStream has a track extracted, and returns as soon as it is in
+// the cache, even while the extraction of the other tracks goes on.
+func (e *Encoder) extractStream(ctx context.Context, source Source, stream Stream, path string) error {
+	sourcePath := source.Path
+	if stream.Path != "" {
+		sourcePath = stream.Path
+	}
+	if fresh(path, sourcePath) {
+		return nil
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		e.ExtractAll(ctx, source)
+	}()
+	tick := time.NewTicker(250 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		select {
+		case <-done:
+			return ctx.Err()
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+			if fresh(path, sourcePath) {
+				return nil
+			}
+		}
+	}
+}
+
+// ReadIndexed reads into the cache, in the background, the tracks of a
+// media source its Indexed reader gives, which takes seconds; the others
+// wait for an extraction.
+func (e *Encoder) ReadIndexed(ctx context.Context, source Source) {
+	if source.Indexed == nil {
+		return
+	}
+	e.run1(ctx, "indexed "+source.ID, func(ctx context.Context) { e.extractTracks(ctx, source, false) })
+}
+
+func (e *Encoder) extractAll(ctx context.Context, source Source) {
+	e.extractTracks(ctx, source, true)
+}
+
+// extractTracks reads the tracks of a media source not cached: through
+// its index first, then, with ffmpeg, those left by extraction.
+func (e *Encoder) extractTracks(ctx context.Context, source Source, ffmpeg bool) {
 	var releases []func()
 	defer func() {
 		for _, release := range releases {
@@ -478,6 +571,10 @@ func (e *Encoder) ExtractAll(ctx context.Context, source Source) {
 		streams = append(streams, stream)
 	}
 	if len(streams) == 0 {
+		return
+	}
+	streams = e.readIndexed(ctx, source, streams)
+	if !ffmpeg {
 		return
 	}
 	if err := e.extractInternal(ctx, source, streams); err != nil {
@@ -521,8 +618,10 @@ func (e *Encoder) extractInternal(ctx context.Context, source Source, streams []
 		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 			return err
 		}
-		outputs = append(outputs, path)
-		args = append(args, outputArgs(stream.FFmpegIndex, stream, path)...)
+		// Written aside, then moved in place whole: a request finds the
+		// track once it is complete (see ReadableFile).
+		outputs = append(outputs, partPath(path))
+		args = append(args, outputArgs(stream.FFmpegIndex, stream, partPath(path))...)
 	}
 	if len(outputs) == 0 {
 		return nil
@@ -536,10 +635,68 @@ func (e *Encoder) extractInternal(ctx context.Context, source Source, streams []
 	if err != nil {
 		return err
 	}
-	for _, path := range outputs {
+	for _, part := range outputs {
+		path := strings.Replace(part, ".part.", ".", 1)
+		if err := os.Rename(part, path); err != nil {
+			return err
+		}
 		e.writeCacheMeta(path, source.Path)
 	}
 	return nil
+}
+
+// partPath is where a track is extracted before it is complete:
+// <index>.part.<extension>, which FFmpeg writes in the same format.
+func partPath(path string) string {
+	dir, name := filepath.Split(path)
+	index, extension, _ := strings.Cut(name, ".")
+	return filepath.Join(dir, index+".part."+extension)
+}
+
+// readIndexed saves the tracks Indexed reads into the cache, and returns
+// the streams left to extract.
+func (e *Encoder) readIndexed(ctx context.Context, source Source, streams []Stream) []Stream {
+	if source.Indexed == nil {
+		return streams
+	}
+	var internal []Stream
+	for _, stream := range streams {
+		if !stream.IsExternal {
+			internal = append(internal, stream)
+		}
+	}
+	if len(internal) == 0 {
+		return streams
+	}
+	files := source.Indexed(ctx, internal)
+	var left []Stream
+	for _, stream := range streams {
+		data, ok := files[stream.Index]
+		path, cached := e.cachePath(source, stream.Index, "."+extractableExtension(stream))
+		if !ok || !cached || len(data) == 0 {
+			left = append(left, stream)
+			continue
+		}
+		part := partPath(path)
+		err := os.MkdirAll(filepath.Dir(path), 0o755)
+		if err == nil {
+			err = os.WriteFile(part, data, 0o644)
+		}
+		if err == nil && strings.HasSuffix(path, ".ass") {
+			e.setAssFont(part)
+		}
+		if err == nil {
+			err = os.Rename(part, path)
+		}
+		if err != nil {
+			e.logger().Warn("Could not save a subtitle track read through the index", "path", path, "error", err)
+			_ = os.Remove(part)
+			left = append(left, stream)
+			continue
+		}
+		e.writeCacheMeta(path, source.Path)
+	}
+	return left
 }
 
 func (e *Encoder) extractMKS(ctx context.Context, source Source, streams []Stream) error {

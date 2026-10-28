@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -271,5 +272,49 @@ func TestEncoderExtractsTracksOnceAndConverts(t *testing.T) {
 	encoder.FFmpeg = "/nonexistent"
 	if _, err := encoder.Subtitles(t.Context(), source, 1, "srt", 0, 0, false); err != nil {
 		t.Fatalf("cached track: %v", err)
+	}
+}
+
+// A player that stops waiting for a subtitle leaves its extraction
+// running: the next request finds it under way or done, and the file is
+// read once.
+func TestExtractionOutlivesTheRequestThatStartedIt(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("no FFmpeg")
+	}
+	dir := t.TempDir()
+	srt := filepath.Join(dir, "in.srt")
+	if err := os.WriteFile(srt, []byte(sampleSRT), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	video := filepath.Join(dir, "video.mkv")
+	if out, err := exec.Command(ffmpeg, "-loglevel", "error", "-f", "lavfi", "-i", "color=c=black:s=64x64:d=5", "-i", srt,
+		"-map", "0", "-map", "1", "-c:v", "mpeg4", "-c:s", "copy", video).CombinedOutput(); err != nil {
+		t.Fatalf("make video: %v: %s", err, out)
+	}
+	var reads atomic.Int32
+	read := func(ctx context.Context, read func(ctx context.Context, input string, options []string) error) error {
+		reads.Add(1)
+		time.Sleep(500 * time.Millisecond) // a slow host
+		return read(ctx, video, nil)
+	}
+	source := Source{ID: "fedcba9876543210fedcba9876543210", Path: video, Read: read, Streams: []Stream{
+		{Index: 1, Codec: "subrip", SupportsExternalStream: true, FFmpegIndex: 1}}}
+	e := &Encoder{FFmpeg: ffmpeg, Dir: filepath.Join(dir, "cache")}
+	impatient, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	if _, err := e.ReadableFile(impatient, source, source.Streams[0]); err == nil {
+		t.Fatal("the impatient request got the track")
+	}
+	info, err := e.ReadableFile(t.Context(), source, source.Streams[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	if data, err := os.ReadFile(info.Path); err != nil || !strings.Contains(string(data), "-->") {
+		t.Errorf("the track: %v %q", err, data)
+	}
+	if n := reads.Load(); n != 1 {
+		t.Errorf("the file was read %d times", n)
 	}
 }
