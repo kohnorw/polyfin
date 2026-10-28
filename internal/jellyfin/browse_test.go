@@ -238,6 +238,9 @@ func TestEpisodesAdjacentToAnEpisodeAreItsNeighbours(t *testing.T) {
 		{"/Shows/" + tr.series + "/Episodes?adjacentTo=" + strings.Repeat("ab", 16), []string{}},
 		{"/Items?parentId=" + tr.series + "&adjacentTo=" + tr.episodes[1], tr.episodes[:3]},
 		{"/Items?adjacentTo=" + tr.episodes[2], tr.episodes[1:]},
+		// jellyfin-web plays what follows among the episodes not missing.
+		{"/Shows/" + tr.series + "/Episodes?isMissing=false&startItemId=" + tr.episodes[1], tr.episodes[1:]},
+		{"/Shows/" + tr.series + "/Episodes?isMissing=true", []string{}},
 	} {
 		var page QueryResult
 		if status := tr.get(t, c.path, tr.token, &page); status != http.StatusOK || !slices.Equal(ids(page), c.want) {
@@ -253,7 +256,7 @@ func TestEpisodesAdjacentToAnEpisodeAreItsNeighbours(t *testing.T) {
 	}
 	var page QueryResult
 	tr.get(t, "/Shows/"+tr.series+"/Episodes?adjacentTo="+versions[1].ID.String(), tr.token, &page)
-	if !slices.Equal(ids(page), tr.episodes[:3]) {
+	if !slices.Equal(ids(page), []string{tr.episodes[0], versions[1].ID.String(), tr.episodes[2]}) {
 		t.Errorf("adjacent to a version: %v", ids(page))
 	}
 }

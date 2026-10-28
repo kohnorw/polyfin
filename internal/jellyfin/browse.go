@@ -820,6 +820,7 @@ func (h *Handler) episodes(w http.ResponseWriter, r *http.Request) {
 	number, hasNumber := b.int32(r, "season")
 	startItem, hasStartItem := b.guid(r, "startItemId")
 	adjacent, hasAdjacent := b.guid(r, "adjacentTo")
+	missing, hasMissing := b.bool(r, "isMissing")
 	start, limit := b.paging(r, -1)
 	user, ok := h.viewer(w, r, b, notFoundProblem)
 	if !ok {
@@ -844,11 +845,16 @@ func (h *Handler) episodes(w http.ResponseWriter, r *http.Request) {
 	if hasNumber && !hasSeasonID {
 		episodes = slices.DeleteFunc(episodes, func(item library.Item) bool { return item.ParentIndexNumber != number })
 	}
+	// Filtered after the fact as in Jellyfin: an episode is missing when
+	// it has no file, which jellyfin-web leaves out of what it plays next.
+	if hasMissing {
+		episodes = slices.DeleteFunc(episodes, func(item library.Item) bool { return !item.Available != missing })
+	}
 	// jellyfin-web plays an episode with the episodes from it on, which it
 	// asks starting at the episode, or at the version the user picked: a
 	// version stands for its episode, as in Jellyfin. The list is empty
 	// when the start item is not in it.
-	var picked accounts.ID
+	var picked, adjacentOwner accounts.ID
 	if hasStartItem {
 		if owner, ok := h.Library.VersionOwner(startItem); ok {
 			picked, startItem = startItem, owner
@@ -863,6 +869,12 @@ func (h *Handler) episodes(w http.ResponseWriter, r *http.Request) {
 	// that plays as its neighbours, the last filter as in Jellyfin.
 	if hasAdjacent {
 		episodes = h.adjacentItems(episodes, adjacent)
+		// Adjacent to a version the user picked, the episode is that
+		// version, as the start item is: apps find the item that plays
+		// among its neighbours by its identifier.
+		if owner, ok := h.Library.VersionOwner(adjacent); ok && picked == (accounts.ID{}) {
+			picked, adjacentOwner = adjacent, owner
+		}
 	}
 	fields := requestedFields(r)
 	items, err := h.dtos(r, user, episodes, fields, nil)
@@ -875,8 +887,14 @@ func (h *Handler) episodes(w http.ResponseWriter, r *http.Request) {
 	// the version's identifier, its own source among the sources. Apps that
 	// play the list rather than the item they had, such as Jellyfin for
 	// Android TV, then play the version picked, not the episode's first.
-	if picked != (accounts.ID{}) && len(items) > 0 {
-		h.openAsVersion(r, user, &items[0], episodes[0], picked, fields)
+	if picked != (accounts.ID{}) {
+		owner := startItem
+		if adjacentOwner != (accounts.ID{}) {
+			owner = adjacentOwner
+		}
+		if at := slices.IndexFunc(episodes, func(item library.Item) bool { return item.ID == owner }); at >= 0 {
+			h.openAsVersion(r, user, &items[at], episodes[at], picked, fields)
+		}
 	}
 	if limit < 0 {
 		limit = len(items)
