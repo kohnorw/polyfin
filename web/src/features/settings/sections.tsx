@@ -1409,8 +1409,6 @@ function Tracking({ form, update, error }: SectionFormApi) {
   )
 }
 
-
-
 function Backups({ form, update, error, number, range, limits }: SectionFormApi) {
   const { language, t } = useI18n()
   const s = t.settings
