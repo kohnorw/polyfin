@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"math"
 	"net/http"
 	"slices"
 	"strings"
@@ -430,7 +431,7 @@ func (h *Handler) newItemDto(item library.Item, fields fieldSet, detail bool, st
 		// Other items show an end date once an administrator sets one.
 		dto.EndDate = new(Time(*end))
 	}
-	if item.CommunityRating > 0 {
+	if finite(item.CommunityRating) && item.CommunityRating > 0 {
 		dto.CommunityRating = new(item.CommunityRating)
 	}
 	if item.Runtime > 0 {
@@ -568,7 +569,7 @@ func describeEdited(dto *BaseItemDto, item library.Item, fields fieldSet, detail
 	if detail && item.OriginalTitle != "" {
 		dto.OriginalTitle = item.OriginalTitle
 	}
-	if item.CriticRating != nil {
+	if item.CriticRating != nil && finite(*item.CriticRating) {
 		dto.CriticRating = new(*item.CriticRating)
 	}
 	if detail || fields.has("CustomRating") {
@@ -753,3 +754,8 @@ func audioItem(kind library.Kind) bool {
 func song(kind library.Kind) bool {
 	return kind == library.KindTrack || kind == library.KindThemeSong
 }
+
+// finite reports whether a rating or gain is a finite number: Jellyfin
+// 12.4 treats any other as no value (BaseItem.FiniteOrNull), and JSON
+// cannot carry NaN or infinity.
+func finite(f float64) bool { return !math.IsNaN(f) && !math.IsInf(f, 0) }

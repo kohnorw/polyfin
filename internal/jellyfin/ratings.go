@@ -36,7 +36,7 @@ func (h *Handler) titleRatings(w http.ResponseWriter, r *http.Request) {
 	scores, pending, known := h.Library.Scores(item)
 	if known {
 		answer.Pending = pending
-		if item.CommunityRating > 0 {
+		if finite(item.CommunityRating) && item.CommunityRating > 0 {
 			answer.CommunityRating = new(item.CommunityRating)
 		}
 		answer.CriticsScore, answer.AudienceScore = scores.Critics, scores.Audience

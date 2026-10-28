@@ -172,12 +172,6 @@ function sectionLede(
       return ledes.security
     case 'tracking':
       return s.tracking.description
-    case 'live-tv':
-      return ledes.liveTv
-    case 'recordings':
-      return settings?.recording
-        ? s.recordingsFolder(settings.recordingsFolder || settings.recordingsFolderDefault)
-        : undefined
     case 'dlna':
       return s.dlna.description
     case 'torrents':

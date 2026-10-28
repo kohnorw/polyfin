@@ -1,6 +1,6 @@
 import { ArrowSquareOutIcon, PlayIcon } from '@phosphor-icons/react'
 import { useQuery } from '@tanstack/react-query'
-import { useId, useState, type ReactNode } from 'react'
+import { useState, type ReactNode } from 'react'
 import {
   fetchStatus,
   queryKeys,
@@ -88,8 +88,6 @@ export const sectionFields: Record<SettingsSectionId, (api: SectionFormApi) => R
     </>
   ),
   tracking: (api) => <Tracking {...api} />,
-  'live-tv': (api) => <LiveTv {...api} />,
-  recordings: (api) => <Recordings {...api} />,
   dlna: (api) => <DlnaSection {...api} />,
   torrents: (api) => <TorrentsSection {...api} />,
   backups: (api) => <Backups {...api} />,
@@ -1411,170 +1409,7 @@ function Tracking({ form, update, error }: SectionFormApi) {
   )
 }
 
-function LiveTv({ form, update, error, number, range, limits }: SectionFormApi) {
-  const { t } = useI18n()
-  const s = t.settings
-  return (
-    <SettingsGroup>
-      <FieldRow
-        anchor="live-tv-refresh-hours"
-        label={s.liveTvRefreshHours}
-        help={s.liveTvRefreshHoursHelp(range('liveTvRefreshHours'))}
-        error={error('live-tv-refresh-hours')}
-      >
-        <NumberInput
-          {...limits('liveTvRefreshHours')}
-          step={1}
-          {...number('live-tv-refresh-hours', form.liveTvRefreshHours, (value) =>
-            update({ liveTvRefreshHours: Math.trunc(value) }),
-          )}
-        />
-      </FieldRow>
-    </SettingsGroup>
-  )
-}
 
-function Recordings({ form, update, error, number, range, limits }: SectionFormApi) {
-  const { language, t } = useI18n()
-  const s = t.settings
-  const host = computer(useServerSystem())
-  const untilId = useId()
-  const hours = Array.from({ length: 24 }, (_, hour) => ({
-    value: hour,
-    label: formatHour(hour, language),
-  }))
-  return (
-    <>
-      <SettingsGroup>
-        <SwitchRow
-          anchor="recording"
-          label={s.recording}
-          help={s.recordingHelp}
-          checked={form.recording}
-          onChange={(recording) => update({ recording })}
-        />
-        <FieldRow
-          anchor="recordings-folder"
-          label={s.recordingsFolderLabel}
-          help={s.recordingsFolderHelp[host]}
-          error={error('recordings-folder')}
-        >
-          <TextInput
-            value={form.recordingsFolder}
-            onValue={(recordingsFolder) => update({ recordingsFolder })}
-            placeholder={form.recordingsFolderDefault}
-            disabled={!form.recording}
-            maxLength={limits('recordingsFolder').max}
-            autoComplete="off"
-            spellCheck={false}
-            mono
-            className="max-w-md"
-          />
-        </FieldRow>
-        <FieldRow
-          anchor="recording-pre-padding"
-          label={s.recordingPrePadding}
-          help={s.recordingPrePaddingHelp(range('recordingPrePadding', 1 / 60))}
-          error={error('recording-pre-padding')}
-        >
-          <NumberInput
-            {...limits('recordingPrePadding', 1 / 60)}
-            step={1}
-            {...number(
-              'recording-pre-padding',
-              Math.round(form.recordingPrePadding / 60),
-              (value) => update({ recordingPrePadding: Math.trunc(value) * 60 }),
-            )}
-          />
-        </FieldRow>
-        <FieldRow
-          anchor="recording-post-padding"
-          label={s.recordingPostPadding}
-          help={s.recordingPostPaddingHelp(range('recordingPostPadding', 1 / 60))}
-          error={error('recording-post-padding')}
-        >
-          <NumberInput
-            {...limits('recordingPostPadding', 1 / 60)}
-            step={1}
-            {...number(
-              'recording-post-padding',
-              Math.round(form.recordingPostPadding / 60),
-              (value) => update({ recordingPostPadding: Math.trunc(value) * 60 }),
-            )}
-          />
-        </FieldRow>
-        <FieldRow
-          anchor="recording-retention-days"
-          label={s.recordingRetentionDays}
-          help={s.recordingRetentionDaysHelp(range('recordingRetentionDays'))}
-          error={error('recording-retention-days')}
-        >
-          <NumberInput
-            {...limits('recordingRetentionDays')}
-            step={1}
-            {...number('recording-retention-days', form.recordingRetentionDays, (value) =>
-              update({ recordingRetentionDays: Math.trunc(value) }),
-            )}
-          />
-        </FieldRow>
-        <SwitchRow
-          anchor="recording-commercials"
-          label={s.recordingCommercials}
-          help={s.recordingCommercialsHelp}
-          checked={form.recordingCommercials}
-          onChange={(recordingCommercials) => update({ recordingCommercials })}
-        />
-      </SettingsGroup>
-      <SettingsGroup>
-        <SwitchRow
-          anchor="convert-recordings"
-          label={s.convertRecordings}
-          help={s.convertRecordingsHelp}
-          checked={form.convertRecordings}
-          onChange={(convertRecordings) => update({ convertRecordings })}
-        />
-        <FieldRow
-          anchor="convert-recordings-between"
-          label={s.convertRecordingsBetween}
-          help={s.convertRecordingsBetweenHelp(
-            formatHour(Number(form.bounds.convertRecordingsFrom?.default), language),
-            formatHour(Number(form.bounds.convertRecordingsUntil?.default), language),
-          )}
-          error={error('convert-recordings-between')}
-        >
-          <div className="flex flex-wrap items-center gap-3">
-            <Select
-              value={form.convertRecordingsFrom}
-              options={hours}
-              onValue={(convertRecordingsFrom) => update({ convertRecordingsFrom })}
-              disabled={!form.convertRecordings}
-              aria-label={s.convertRecordingsFrom}
-              className="max-w-[10rem]"
-            />
-            <span className="text-small text-ink-2">{s.convertRecordingsAnd}</span>
-            <Select
-              id={untilId}
-              value={form.convertRecordingsUntil}
-              options={hours}
-              onValue={(convertRecordingsUntil) => update({ convertRecordingsUntil })}
-              disabled={!form.convertRecordings}
-              aria-label={s.convertRecordingsUntil}
-              className="max-w-[10rem]"
-            />
-          </div>
-        </FieldRow>
-        <SwitchRow
-          anchor="convert-recordings-on-processor"
-          label={s.convertRecordingsOnProcessor}
-          help={s.convertRecordingsOnProcessorHelp}
-          checked={form.convertRecordingsOnProcessor}
-          onChange={(convertRecordingsOnProcessor) => update({ convertRecordingsOnProcessor })}
-          disabled={!form.convertRecordings}
-        />
-      </SettingsGroup>
-    </>
-  )
-}
 
 function Backups({ form, update, error, number, range, limits }: SectionFormApi) {
   const { language, t } = useI18n()

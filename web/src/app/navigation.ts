@@ -18,13 +18,11 @@ import {
   PlayCircleIcon,
   PuzzlePieceIcon,
   QrCodeIcon,
-  RecordIcon,
   ScrollIcon,
   ShareNetworkIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
   StethoscopeIcon,
-  TelevisionSimpleIcon,
   UserCircleIcon,
   UsersIcon,
   type Icon,
@@ -52,7 +50,6 @@ export type NavSection = NavPage & {
 export const contentPages: readonly NavPage[] = [
   { id: 'sources', to: '/sources', label: (t) => t.nav.sources, icon: PuzzlePieceIcon },
   { id: 'libraries', to: '/libraries', label: (t) => t.nav.libraries, icon: FilmStripIcon },
-  { id: 'live-tv', to: '/live-tv', label: (t) => t.nav.liveTv, icon: TelevisionSimpleIcon },
 ]
 
 export const systemPages: readonly NavPage[] = [
@@ -78,8 +75,6 @@ export const settingsSections = [
   { id: 'thumbnails', key: 'thumbnails', icon: ImagesSquareIcon },
   { id: 'security', key: 'security', icon: ShieldCheckIcon },
   { id: 'tracking', key: 'tracking', icon: ListChecksIcon },
-  { id: 'live-tv', key: 'liveTv', icon: TelevisionSimpleIcon },
-  { id: 'recordings', key: 'recordings', icon: RecordIcon },
   { id: 'dlna', key: 'dlna', icon: ShareNetworkIcon },
   { id: 'torrents', key: 'torrents', icon: MagnetIcon },
   { id: 'backups', key: 'backups', icon: ArchiveIcon },
@@ -110,7 +105,7 @@ export const adminSections: readonly NavSection[] = [
   {
     id: 'content',
     to: '/sources',
-    match: ['/sources', '/libraries', '/live-tv'],
+    match: ['/sources', '/libraries'],
     label: (t) => t.nav.content,
     icon: PuzzlePieceIcon,
     pages: contentPages,

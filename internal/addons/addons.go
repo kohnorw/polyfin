@@ -280,6 +280,10 @@ type LibraryChoice struct {
 // served from a snapshot of every scope, kept while Watch follows the
 // changes made to them (see current).
 type Store struct {
+	// NoMusicAddons refuses to install or replace Eclipse music addons
+	// (Polyfin beta).
+	NoMusicAddons bool
+
 	db     *pgxpool.Pool
 	client *stremio.Client
 
@@ -459,6 +463,10 @@ func (s *Store) fetch(ctx context.Context, rawURL string, confined bool) (fetche
 		return fetched{}, err
 	}
 	if eclipse.Detect(body) {
+		// Polyfin beta takes Stremio addons and local folders only.
+		if s.NoMusicAddons {
+			return fetched{}, fmt.Errorf("%w: music addons are not supported in Polyfin beta", stremio.ErrInvalidManifest)
+		}
 		music, err := eclipse.ParseManifest(body)
 		if err != nil {
 			return fetched{}, fmt.Errorf("%w: %w", stremio.ErrInvalidManifest, err)

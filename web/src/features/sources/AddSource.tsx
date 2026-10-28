@@ -1,10 +1,4 @@
-import {
-  BroadcastIcon,
-  CellTowerIcon,
-  FolderIcon,
-  MusicNotesIcon,
-  PuzzlePieceIcon,
-} from '@phosphor-icons/react'
+import { FolderIcon, PuzzlePieceIcon } from '@phosphor-icons/react'
 import { useState, type FormEvent } from 'react'
 import { useMutation } from '@tanstack/react-query'
 import { installAddon, queryClient, queryKeys, type Addon, type Scope } from '@/api'
@@ -69,14 +63,9 @@ export function AddSourceModal({
           onChange={setKind}
           options={[
             { value: 'stremio', label: text.kinds.stremio, icon: PuzzlePieceIcon },
-            { value: 'music', label: text.kinds.music, icon: MusicNotesIcon },
-            { value: 'iptv', label: text.kinds.iptv, icon: BroadcastIcon },
-            // Tuners and local folders are the server's: a member's own sources have none.
+            // Polyfin beta: Stremio addons and, for the server, local folders.
             ...(scope === 'shared'
-              ? [
-                  { value: 'tuner' as const, label: text.kinds.tuner, icon: CellTowerIcon },
-                  { value: 'local' as const, label: text.kinds.local, icon: FolderIcon },
-                ]
+              ? [{ value: 'local' as const, label: text.kinds.local, icon: FolderIcon }]
               : []),
           ]}
           className="self-start max-sm:self-stretch"

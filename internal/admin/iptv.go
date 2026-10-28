@@ -52,6 +52,11 @@ func (h *handler) addSource(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
+	// Polyfin beta has no IPTV sources and no tuners.
+	if h.NoIPTVSources {
+		writeError(w, http.StatusBadRequest, "invalid_source_address")
+		return
+	}
 	if body.Kind == addons.KindHDHomeRun && tunerRefused(w, r, scope) {
 		return
 	}

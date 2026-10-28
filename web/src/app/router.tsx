@@ -13,8 +13,6 @@ import HomeRoute from '@/features/home/HomeRoute'
 import QuickConnectRoute from '@/features/home/QuickConnectRoute'
 import LibrariesRoute from '@/features/libraries/LibrariesRoute'
 import SmartListRoute from '@/features/libraries/SmartListRoute'
-import CatalogGuidesRoute from '@/features/livetv/CatalogGuidesRoute'
-import LiveTvRoute from '@/features/livetv/LiveTvRoute'
 import SettingsRoute from '@/features/settings/SettingsRoute'
 import MySourcesRoute from '@/features/sources/MySourcesRoute'
 import SourceRoute from '@/features/sources/SourceRoute'
@@ -75,7 +73,8 @@ const moved: RouteObject[] = [
   { path: 'schedule', element: <Moved to="/system/schedule" /> },
   { path: 'logs', element: <Moved to="/system/logs" /> },
   { path: 'api-keys', element: <Moved to="/system/api-keys" /> },
-  { path: 'guides/*', element: <Moved to="/live-tv/guides" /> },
+  { path: 'guides/*', element: <Moved to="/sources" /> },
+  { path: 'live-tv/*', element: <Moved to="/sources" /> },
 ]
 
 /**
@@ -129,16 +128,11 @@ export const router = createBrowserRouter(
           children: [
             { path: 'sources/:scope/:id/:section?', element: <SourceRoute /> },
             {
-              path: 'live-tv/guides/:scope/:addonId/:catalogId/:section?',
-              element: <CatalogGuidesRoute />,
-            },
-            {
               element: <AdminOnly />,
               children: [
                 { path: 'sources', element: <SourcesRoute /> },
                 { path: 'libraries', element: <LibrariesRoute /> },
                 { path: 'libraries/smart/:id', element: <SmartListRoute scope="shared" /> },
-                { path: 'live-tv', element: <LiveTvRoute /> },
               ],
             },
           ],

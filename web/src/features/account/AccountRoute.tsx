@@ -116,6 +116,8 @@ export default function AccountRoute() {
   const reminders = useQuery({
     queryKey: queryKeys.ownReminders,
     queryFn: ({ signal }) => fetchOwnReminders(signal),
+    // Live TV, and so programme reminders, are not part of Polyfin beta.
+    enabled: false,
   })
   const reminding = reminders.data?.available === true
   const { hash } = useLocation()

@@ -5,6 +5,7 @@ package library
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"math"
 	"regexp"
 	"slices"
 	"strconv"
@@ -417,7 +418,12 @@ func fromMeta(item *Item, meta stremio.Meta) {
 		item.EndDate = &end
 	}
 	item.Runtime = parseRuntime(string(meta.Runtime))
-	item.CommunityRating, _ = strconv.ParseFloat(strings.TrimSpace(string(meta.ImdbRating)), 64)
+	// strconv reads "NaN" and "Inf" too: a rating that is not a finite
+	// number is none, as Jellyfin 12.4's BaseItem.FiniteOrNull has it,
+	// since JSON cannot carry it.
+	if rating, err := strconv.ParseFloat(strings.TrimSpace(string(meta.ImdbRating)), 64); err == nil && !math.IsNaN(rating) && !math.IsInf(rating, 0) {
+		item.CommunityRating = rating
+	}
 	item.OfficialRating = certification(meta)
 	switch strings.ToLower(meta.Status) {
 	case "ended", "canceled", "cancelled":

@@ -59,13 +59,15 @@ type Pinger interface {
 
 // Options are the dependencies of the admin API.
 type Options struct {
-	Version      string
-	ServerID     string
-	Database     Pinger
-	Accounts     *accounts.Store
-	Addons       *addons.Store
-	QuickConnect *quickconnect.Store
-	SignIns      *throttle.Failures
+	// NoIPTVSources refuses to add IPTV sources and tuners (Polyfin beta).
+	NoIPTVSources bool
+	Version       string
+	ServerID      string
+	Database      Pinger
+	Accounts      *accounts.Store
+	Addons        *addons.Store
+	QuickConnect  *quickconnect.Store
+	SignIns       *throttle.Failures
 	// SetupCode authorizes creating the first administrator. It is printed
 	// in the server log at startup while no administrator exists.
 	SetupCode string

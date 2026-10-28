@@ -255,6 +255,8 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 	secure := newHTTPS(cfg, store, pool, box, logger)
 	addonClient := stremio.NewClient(version)
 	addonStore := addons.New(pool, addonClient)
+	// Polyfin beta: Stremio addons and local folders only.
+	addonStore.NoMusicAddons = true
 	// Addons and libraries are answered from memory while their changes
 	// are followed.
 	go addonStore.Watch(ctx, logger)
@@ -527,6 +529,7 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 		Logger:   logger,
 	})
 	adminOptions := admin.Options{
+		NoIPTVSources: true,
 		Version:       version,
 		ServerID:      serverID,
 		Database:      pool,
@@ -814,7 +817,6 @@ func registerLocalFoldersTask(registry *tasks.Registry, folders *localfiles.Serv
 		Run:      func(ctx context.Context) error { return folders.ScanDue(ctx, tasks.ByHand(ctx)) },
 	})
 }
-
 
 // registerBackupTask registers the daily database backup: it runs every
 // day while backups are on, and by hand only, failing, while they are off.

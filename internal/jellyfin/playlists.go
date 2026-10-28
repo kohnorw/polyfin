@@ -933,7 +933,7 @@ func (h *Handler) playlistDtos(r *http.Request, user accounts.User, lists []play
 			dto.RunTimeTicks = new(int64(runtime / 100))
 		}
 		dto.OfficialRating = item.OfficialRating
-		if item.CommunityRating > 0 {
+		if finite(item.CommunityRating) && item.CommunityRating > 0 {
 			dto.CommunityRating = new(item.CommunityRating)
 		}
 		if item.PremiereDate != nil {

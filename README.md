@@ -1,3 +1,6 @@
+> [!IMPORTANT]
+> **Beta branch.** This branch is Polyfin beta: a Jellyfin 12.4 server in Go with only Stremio addons and local folders (and SMB) as sources, collections, the AIOStreams theme and user creation by invite. **Live TV is removed**: its routes answer as a Jellyfin server with no tuner. IPTV sources and Eclipse music addons can no longer be added. Every push publishes `ghcr.io/kohnorw/polyfin:beta`; set `POLYFIN_IMAGE=ghcr.io/kohnorw/polyfin:beta` in `.env`, then `docker compose pull && docker compose up -d`. Back up the database first: beta and `main` share it.
+
 <p align="center"><a href="https://moodiness.github.io/polyfin/videos/polyfin-ad.mp4"><img src="assets/polyfin-social.png" alt="Polyfin"></a></p>
 
 > [!NOTE]
