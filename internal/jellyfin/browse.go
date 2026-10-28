@@ -463,6 +463,9 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 		h.rootChildren(w, r, user, start, limit)
 		return
 	}
+	if h.adjacentListing(w, r, user, parent, hasParent, fields, keep, start, limit) {
+		return
+	}
 	if h.playlistListing(w, r, user, parent, hasParent, start, limit) {
 		return
 	}
@@ -816,6 +819,7 @@ func (h *Handler) episodes(w http.ResponseWriter, r *http.Request) {
 	seasonID, hasSeasonID := b.guid(r, "seasonId")
 	number, hasNumber := b.int32(r, "season")
 	startItem, hasStartItem := b.guid(r, "startItemId")
+	adjacent, hasAdjacent := b.guid(r, "adjacentTo")
 	start, limit := b.paging(r, -1)
 	user, ok := h.viewer(w, r, b, notFoundProblem)
 	if !ok {
@@ -855,6 +859,11 @@ func (h *Handler) episodes(w http.ResponseWriter, r *http.Request) {
 		}
 		episodes = episodes[at:]
 	}
+	// Apps such as Swiftfin and Streamyfin find the episode after the one
+	// that plays as its neighbours, the last filter as in Jellyfin.
+	if hasAdjacent {
+		episodes = h.adjacentItems(episodes, adjacent)
+	}
 	fields := requestedFields(r)
 	items, err := h.dtos(r, user, episodes, fields, nil)
 	if err != nil {
@@ -873,6 +882,56 @@ func (h *Handler) episodes(w http.ResponseWriter, r *http.Request) {
 		limit = len(items)
 	}
 	writeJSON(w, http.StatusOK, pageOf(items, start, limit, len(items)))
+}
+
+// adjacentItems is Jellyfin's FilterForAdjacency: the item of list that
+// id names, a version standing for its title, with the items before and
+// after it; none when it is not in list.
+func (h *Handler) adjacentItems(list []library.Item, id accounts.ID) []library.Item {
+	if owner, ok := h.Library.VersionOwner(id); ok {
+		id = owner
+	}
+	at := slices.IndexFunc(list, func(item library.Item) bool { return item.ID == id })
+	if at < 0 {
+		return nil
+	}
+	return list[max(at-1, 0):min(at+2, len(list))]
+}
+
+// adjacentListing answers /Items asked for the neighbours of an episode,
+// as apps find the episode before and after the one that plays: among the
+// episodes of its season when that is the folder asked, else of its
+// series, from one season to the next. It reports whether it answered.
+func (h *Handler) adjacentListing(w http.ResponseWriter, r *http.Request, user accounts.User, parent accounts.ID, hasParent bool,
+	fields map[string]bool, keep func(library.Item) bool, start, limit int) bool {
+	id, ok := parseGUID(query(r, "adjacentTo"))
+	if !ok {
+		return false
+	}
+	target := id
+	if owner, found := h.Library.VersionOwner(id); found {
+		target = owner
+	}
+	item, err := h.Library.Item(r.Context(), user, target)
+	if err != nil || item.Kind != library.KindEpisode {
+		return false
+	}
+	var season *accounts.ID
+	if hasParent && parent == item.SeasonID {
+		season = &item.SeasonID
+	}
+	episodes, err := h.Library.Episodes(r.Context(), user, item.SeriesID, season)
+	if err != nil {
+		h.browseError(w, r, err)
+		return true
+	}
+	items, err := h.dtos(r, user, h.adjacentItems(episodes, target), fields, keep)
+	if err != nil {
+		h.internalError(w, r, err)
+		return true
+	}
+	writeJSON(w, http.StatusOK, pageOf(items, start, limit, len(items)))
+	return true
 }
 
 // libraryGenres returns the genres a library's catalog offers. Other

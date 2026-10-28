@@ -212,6 +212,52 @@ func TestEpisodeListsStartAtTheItemAsked(t *testing.T) {
 	}
 }
 
+// Apps such as Swiftfin find the episode after the one that plays as its
+// neighbours, from the series' episodes or from /Items, as Jellyfin
+// answers adjacentTo: the episode with the ones before and after it.
+func TestEpisodesAdjacentToAnEpisodeAreItsNeighbours(t *testing.T) {
+	t.Parallel()
+	tr := newTracking(t)
+	if _, err := tr.addons.Install(t.Context(), addons.Shared(), episodeStreams(t), false); err != nil {
+		t.Fatal(err)
+	}
+	ids := func(page QueryResult) []string {
+		result := []string{}
+		for _, item := range page.Items {
+			result = append(result, item.Id)
+		}
+		return result
+	}
+	for _, c := range []struct {
+		path string
+		want []string
+	}{
+		{"/Shows/" + tr.series + "/Episodes?adjacentTo=" + tr.episodes[0], tr.episodes[:2]},
+		{"/Shows/" + tr.series + "/Episodes?adjacentTo=" + tr.episodes[1], tr.episodes[:3]},
+		{"/Shows/" + tr.series + "/Episodes?adjacentTo=" + tr.episodes[2], tr.episodes[1:]},
+		{"/Shows/" + tr.series + "/Episodes?adjacentTo=" + strings.Repeat("ab", 16), []string{}},
+		{"/Items?parentId=" + tr.series + "&adjacentTo=" + tr.episodes[1], tr.episodes[:3]},
+		{"/Items?adjacentTo=" + tr.episodes[2], tr.episodes[1:]},
+	} {
+		var page QueryResult
+		if status := tr.get(t, c.path, tr.token, &page); status != http.StatusOK || !slices.Equal(ids(page), c.want) {
+			t.Errorf("%s: %d %v, want %v", c.path, status, ids(page), c.want)
+		}
+	}
+	// A version stands for its episode.
+	member, _ := tr.store.Authenticate(t.Context(), "member", "correct horse")
+	second, _ := accounts.ParseID(tr.episodes[1])
+	versions, err := tr.library.Versions(t.Context(), member, second)
+	if err != nil || len(versions) != 2 {
+		t.Fatalf("versions: %v %v", versions, err)
+	}
+	var page QueryResult
+	tr.get(t, "/Shows/"+tr.series+"/Episodes?adjacentTo="+versions[1].ID.String(), tr.token, &page)
+	if !slices.Equal(ids(page), tr.episodes[:3]) {
+		t.Errorf("adjacent to a version: %v", ids(page))
+	}
+}
+
 // The web player's menus leave out the libraries marked so, one of the
 // server's and one of the user's own, which /UserViews still lists for
 // their home rows. /Polyfin/UserViews lists the caller's views as
