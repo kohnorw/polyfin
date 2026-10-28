@@ -235,6 +235,9 @@ func (h *Handler) addMediaSources(r *http.Request, user accounts.User, dto *Base
 		if err != nil && r.Context().Err() == nil {
 			h.Logger.Warn("The versions of a title could not be listed", "error", err)
 		}
+		// NZB versions list their subtitle tracks once analyzed: the
+		// details wait a moment for them (see usenet.go).
+		waitUsenet(r.Context(), h.prepareUsenet(r.Context(), p.versions, opened))
 		sources = h.mediaSources(r, p, opened)
 		if len(sources) == 0 {
 			sources = []MediaSourceInfo{h.placeholderSource(r, item)}

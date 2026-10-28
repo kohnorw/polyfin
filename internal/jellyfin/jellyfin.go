@@ -175,6 +175,9 @@ type Handler struct {
 	syncPlay *syncPlay
 	// preparations bounds the preparations of playback made ahead of it.
 	preparations *preparations
+	// usenet runs the analyses and subtitle extractions of NZB versions
+	// (see usenet.go).
+	usenet *usenetWork
 	// listings lists the versions of home rows' titles ahead of a play.
 	listings *listings
 	// watched are the title pages that follow their versions as addons
@@ -222,6 +225,7 @@ func New(options Options) *Handler {
 		configurations: cache.New[accounts.ID, UserConfiguration](1000, 12*time.Hour),
 		sockets:        newSockets(),
 		preparations:   newPreparations(options.Logger),
+		usenet:         newUsenetWork(),
 		watched:        newWatchedPages(),
 		now:            time.Now,
 		viewing:        cache.New[accounts.ID, accounts.ID](5000, 12*time.Hour),

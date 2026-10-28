@@ -755,3 +755,9 @@ func publicAddress(ip netip.Addr) bool {
 	ip = ip.Unmap()
 	return ip.IsGlobalUnicast() && !ip.IsPrivate() && !sharedAddressSpace.Contains(ip)
 }
+
+// Usenet reports whether a version plays a Usenet release, an NZB an
+// addon streams.
+func Usenet(version library.Version) bool {
+	return version.Torrent == nil && usenetLink(version.URL)
+}

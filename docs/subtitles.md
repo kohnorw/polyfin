@@ -30,6 +30,10 @@ Each track goes out as Jellyfin's `StreamBuilder` decides, from the app's subtit
 
 A track inside the file is extracted by FFmpeg the first time it is asked for, every text track of the file at once, and kept in `<data>/subtitles/`. For an addon stream, FFmpeg reads the addon's link itself when the addon allows it, else through Polyfin. **Allow subtitle extraction on the fly** is Jellyfin's `EnableSubtitleExtraction`.
 
+### NZB versions
+
+An addon announces none of the subtitles inside an NZB release, so Polyfin finds them itself. Opening a title analyzes its NZB versions (8 at most, 3 at a time), waiting up to 8 seconds so that the version picker lists their subtitle tracks; a version still being read lists them the next time the title opens. The subtitles of the first NZB version are then extracted in the background, and a play extracts those of the version it plays as it starts, so that the player finds them ready, or waits for the extraction under way.
+
 A track that could only be burned in is left out when the user may not have the video converted.
 
 ## ASS styles and fonts
