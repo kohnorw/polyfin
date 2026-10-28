@@ -73,6 +73,11 @@ type MediaStream struct {
 	PixelFormat            string   `json:",omitempty"`
 	Level                  *float64 `json:",omitempty"`
 	IsAnamorphic           *bool    `json:",omitempty"`
+	// NotReady marks an embedded text subtitle that would have to be read
+	// out of the file while the app waits, when the server extracts none on
+	// the fly (see accounts.Settings.SubtitleExtraction): no app is given
+	// it as a file. Polyfin's own, never sent.
+	NotReady bool `json:"-"`
 	// MasteringDisplay is the analysis's media.Stream.MasteringDisplay,
 	// which Intel's tone mapping needs: Polyfin's own, never sent.
 	MasteringDisplay *bool `json:"-"`

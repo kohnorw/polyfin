@@ -236,6 +236,9 @@ const settings = {
     prefetchSubtitles: 'Read subtitles ahead',
     prefetchSubtitlesHelp:
       'When a play starts, reads the subtitles inside the file in the background, and those of the next episode, so that they show at once when turned on. Files whose subtitles cannot be found through their index are downloaded a second time for it. On by default.',
+    subtitleExtraction: 'Extract subtitles on the fly',
+    subtitleExtractionHelp:
+      'Reads the subtitles inside a file out of it when an app asks for them, which can keep the app waiting (“Fetching additional data”). Turned off, subtitles inside a file are offered as files only once they were read, ahead of time or by an earlier play; until then, apps that cannot show them from the video get them burned into it, or not at all. On by default.',
     defaultAudioLanguage: 'Default audio language',
     defaultAudioLanguageHelp:
       'The audio language played for users who chose none in their own settings.',

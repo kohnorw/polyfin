@@ -1344,6 +1344,13 @@ type Settings struct {
 	// would wait for, so that they are ready when turned on. It costs a
 	// second download of each such version. On by default.
 	PrefetchSubtitles bool
+	// SubtitleExtraction extracts, while an app waits, the text subtitles
+	// inside a file that go out as files, as Jellyfin's "Allow subtitle
+	// extraction on the fly" does. Off, a track inside a file goes out as a
+	// file only once Polyfin kept it, read ahead or by a remux, so that no
+	// app waits for it (jellyfin-web's "Fetching additional data"); one an
+	// app takes no other way is burned in, or left out. On by default.
+	SubtitleExtraction bool
 	// NameHowVersionsPlay ends the names of a movie's or an episode's
 	// versions with how the app asking plays each, as the device profile of
 	// its last PlaybackInfo decides it.
@@ -1793,7 +1800,7 @@ const settingsColumns = "server_name, quick_connect_enabled, legacy_authorizatio
 	"two_step_administrators, " +
 	"https_mode, https_port, https_redirect, https_certificate, https_private_key, acme_hosts, acme_email, acme_terms, acme_challenge, detailed_log, " +
 	"analysis_timeout, version_attempts, prefer_direct_play, " +
-	"version_order, version_codec_order, version_source_order, hide_versions_larger_gb, hidden_version_codecs, hidden_version_words, hidden_rip_types, hide_specials, exact_title_match, prefetch_subtitles, name_how_versions_play, " +
+	"version_order, version_codec_order, version_source_order, hide_versions_larger_gb, hidden_version_codecs, hidden_version_words, hidden_rip_types, hide_specials, exact_title_match, prefetch_subtitles, subtitle_extraction, name_how_versions_play, " +
 	"sync_addon_subtitles, max_conversions, max_conversion_height, converted_downloads, web_safe_video, subtitle_ocr, subtitle_ocr_tracks, " +
 	"encoder_preset, h264_quality, hevc_quality, allow_hevc_encoding, hardware_acceleration, hardware_decoding_codecs, " +
 	"adaptive_quality, " +
@@ -1840,7 +1847,7 @@ func (settings *Settings) fields() []any {
 		&settings.ACMEHosts, &settings.ACMEEmail, &settings.ACMETerms, &settings.ACMEChallenge, &settings.DetailedLog,
 		&settings.AnalysisTimeout, &settings.VersionAttempts, &settings.PreferDirectPlay,
 		&settings.VersionOrder, &settings.VersionCodecOrder, &settings.VersionSourceOrder, &settings.HideVersionsLargerGB, &settings.HiddenVersionCodecs,
-		&settings.HiddenVersionWords, &settings.HiddenRipTypes, &settings.HideSpecials, &settings.ExactTitleMatch, &settings.PrefetchSubtitles,
+		&settings.HiddenVersionWords, &settings.HiddenRipTypes, &settings.HideSpecials, &settings.ExactTitleMatch, &settings.PrefetchSubtitles, &settings.SubtitleExtraction,
 		&settings.NameHowVersionsPlay,
 		&settings.SyncAddonSubtitles, &settings.MaxConversions, &settings.MaxConversionHeight, &settings.ConvertedDownloads, &settings.WebSafeVideo, &settings.SubtitleOCR, &settings.SubtitleOCRTracks,
 		&settings.EncoderPreset, &settings.H264Quality, &settings.HevcQuality, &settings.AllowHevcEncoding, &settings.HardwareAcceleration, &settings.HardwareDecodingCodecs,

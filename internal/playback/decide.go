@@ -586,7 +586,8 @@ func singleContainer(source string, matched *DirectPlayProfile, profiles []Direc
 //   - embedded in the stream, in its own format, then in another text
 //     format, unless the stream is a sidecar or the output cannot carry it;
 //   - as a file or in the HLS playlist (HLS only when transcoding), in its
-//     own format, then converted to another text format;
+//     own format, then converted to another text format; as a file only
+//     when it is ready (see MediaStream.NotReady);
 //   - otherwise burned into the video.
 //
 // A VobSub file is a pair, an .idx and a .sub file, which no app takes as
@@ -617,7 +618,8 @@ func subtitleDelivery(profiles []SubtitleProfile, stream *MediaStream, transcode
 		for i := range profiles {
 			p := &profiles[i]
 			switch {
-			case p.Method == "External" && stream.IsTextSubtitleStream == textSubtitle(p.Format) && !(stream.IsExternal && strings.EqualFold(stream.Codec, "DVDSUB")):
+			case p.Method == "External" && stream.IsTextSubtitleStream == textSubtitle(p.Format) && !(stream.IsExternal && strings.EqualFold(stream.Codec, "DVDSUB")) &&
+				!stream.NotReady:
 			case p.Method == "Hls" && transcode && stream.IsTextSubtitleStream:
 			default:
 				continue

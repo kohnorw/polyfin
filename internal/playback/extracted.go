@@ -300,6 +300,25 @@ func (s *Service) ExtractedTrack(ctx context.Context, versionID accounts.ID, dur
 	return x.cues(stream, 0, 0), true
 }
 
+// KeptSubtitleTracks are the subtitle streams of a version, by FFmpeg
+// index, read whole through its index and kept (see SubtitleTrack): they go
+// out as files at once.
+func (s *Service) KeptSubtitleTracks(ctx context.Context, versionID accounts.ID) map[int]bool {
+	kept := map[int]bool{}
+	rows, err := s.db.Query(ctx, "SELECT stream FROM media_subtitle_tracks WHERE version_id = $1", versionID)
+	if err != nil {
+		return kept
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var stream int
+		if rows.Scan(&stream) == nil {
+			kept[stream] = true
+		}
+	}
+	return kept
+}
+
 // SubtitlesExtracted reports whether remuxes have extracted all of a
 // version's text subtitles.
 func (s *Service) SubtitlesExtracted(ctx context.Context, versionID accounts.ID, duration time.Duration) bool {

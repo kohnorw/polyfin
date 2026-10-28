@@ -375,6 +375,8 @@ export type Settings = {
   exactTitleMatch: boolean
   /** Reads the subtitles inside the version played, and the next episode's, ahead in the background. */
   prefetchSubtitles: boolean
+  /** Extracts the subtitles inside a file while an app waits; off, only those kept already go out as files. */
+  subtitleExtraction: boolean
   /** Ends version names with how the app asking plays each, as its last playback decides it. */
   nameHowVersionsPlay: boolean
   /** Playbacks whose video the server converts at once, 0 for no limit. */

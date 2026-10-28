@@ -617,6 +617,9 @@ func (h *Handler) decide(r *http.Request, p playable, index int, version library
 		return decided{}, false
 	}
 	source := h.baseSource(r, p, version, id, analysis, true)
+	if !h.Accounts.Settings().SubtitleExtraction {
+		h.markUnready(r.Context(), version, analysis, source.MediaStreams)
+	}
 	decision, options, described := h.trackDecision(p, version, source.MediaStreams, analysis, request, allowed, named)
 	// Over HLS, a version is cut into segments: on its keyframes, or,
 	// for a file without an index such as MPEG-TS, every few seconds,
@@ -657,6 +660,29 @@ func (h *Handler) decide(r *http.Request, p playable, index int, version library
 		burns[stream.Index] = burned.Streamed() && burned.Video != nil && permitted(allowed, burned)
 	}
 	return decided{index: index, version: version, id: id, analysis: analysis, source: source, decision: decision, burns: burns}, true
+}
+
+// markUnready marks the text subtitles inside a version that are not kept,
+// read whole ahead or by a remux, when the server extracts none on the fly:
+// none of them goes out as a file, which an app would wait for (see
+// playback.MediaStream.NotReady). Subtitle files and the text copies of
+// picture subtitles are ready.
+func (h *Handler) markUnready(ctx context.Context, version library.Version, analysis media.Analysis, streams []playback.MediaStream) {
+	if h.Playback.SubtitlesExtracted(ctx, version.ID, analysis.Duration) {
+		return
+	}
+	files := subtitleFiles(streams)
+	var kept map[int]bool
+	for i := range streams {
+		stream := &streams[i]
+		if stream.Type != "Subtitle" || stream.IsExternal || stream.CopyOf != nil || !stream.IsTextSubtitleStream {
+			continue
+		}
+		if kept == nil {
+			kept = h.Playback.KeptSubtitleTracks(ctx, version.ID)
+		}
+		stream.NotReady = !kept[stream.Index-files]
+	}
 }
 
 // trackDecision decides how a version plays on the app, for its device

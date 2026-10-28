@@ -242,6 +242,9 @@ const settings: typeof en = {
     prefetchSubtitles: 'Lire les sous-titres à l’avance',
     prefetchSubtitlesHelp:
       'Au début d’une lecture, lit en arrière-plan les sous-titres du fichier, et ceux de l’épisode suivant, pour qu’ils s’affichent dès qu’on les active. Les fichiers dont l’index ne donne pas les sous-titres sont téléchargés une seconde fois pour cela. Activé par défaut.',
+    subtitleExtraction: 'Extraire les sous-titres à la volée',
+    subtitleExtractionHelp:
+      'Lit les sous-titres d’un fichier quand une application les demande, ce qui peut la faire attendre (« Fetching additional data »). Désactivé, les sous-titres d’un fichier ne sont proposés comme fichiers qu’une fois lus, à l’avance ou par une lecture précédente ; d’ici là, les applications qui ne peuvent pas les afficher depuis la vidéo les reçoivent incrustés, ou pas du tout. Activé par défaut.',
     defaultAudioLanguage: 'Langue audio par défaut',
     defaultAudioLanguageHelp:
       'La langue audio jouée pour les utilisateurs qui n’en ont choisi aucune.',

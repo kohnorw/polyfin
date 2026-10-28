@@ -246,6 +246,12 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'playback',
+    anchor: 'subtitle-extraction',
+    label: (t) => s(t).subtitleExtraction,
+    help: (t) => s(t).subtitleExtractionHelp,
+  },
+  {
+    section: 'playback',
     anchor: 'default-audio-language',
     label: (t) => s(t).defaultAudioLanguage,
     help: (t) => s(t).defaultAudioLanguageHelp,

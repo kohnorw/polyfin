@@ -539,3 +539,24 @@ func TestWebVTTInMatroskaGoesOutAsAFile(t *testing.T) {
 		}
 	}
 }
+
+func TestSubtitlesNotReadyAreNeverFiles(t *testing.T) {
+	web, androidTV := readDeviceProfile(t, "jellyfin-web-chrome"), readDeviceProfile(t, "androidtv")
+	subrip := func(notReady bool) MediaStream {
+		return MediaStream{Type: "Subtitle", Codec: "subrip", IsTextSubtitleStream: true, SupportsExternalStream: true, NotReady: notReady}
+	}
+	for _, test := range []struct {
+		name    string
+		profile *DeviceProfile
+		stream  MediaStream
+		want    string
+	}{
+		{"jellyfin-web, ready", web, subrip(false), "External"},
+		{"jellyfin-web, not ready", web, subrip(true), "Encode"},
+		{"Android TV, not ready, read from the video", androidTV, subrip(true), "Embed"},
+	} {
+		if got := subtitleDelivery(test.profile.SubtitleProfiles, &test.stream, false, "mkv", "http"); got.Method != test.want {
+			t.Errorf("%s: %+v, want %s", test.name, got, test.want)
+		}
+	}
+}

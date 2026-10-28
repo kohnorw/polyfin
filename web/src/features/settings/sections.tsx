@@ -492,6 +492,13 @@ function Playback({ form, update, error, number, range, limits }: SectionFormApi
           checked={form.prefetchSubtitles}
           onChange={(prefetchSubtitles) => update({ prefetchSubtitles })}
         />
+        <SwitchRow
+          anchor="subtitle-extraction"
+          label={s.subtitleExtraction}
+          help={s.subtitleExtractionHelp}
+          checked={form.subtitleExtraction}
+          onChange={(subtitleExtraction) => update({ subtitleExtraction })}
+        />
         <FieldRow
           anchor="default-audio-language"
           label={s.defaultAudioLanguage}
