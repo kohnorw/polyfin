@@ -640,9 +640,6 @@ func (h *Handler) taggedArtwork(w http.ResponseWriter, r *http.Request, tag stri
 		}
 	}
 	if errors.Is(err, library.ErrNotFound) {
-		found, err = h.recordingArtwork(r.Context(), id, r.PathValue("imageType"))
-	}
-	if errors.Is(err, library.ErrNotFound) {
 		found = library.Artwork{}
 		found.URL, found.Confined, err = h.Library.ProgramArtwork(r.Context(), id, imageType)
 	}

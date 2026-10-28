@@ -17,7 +17,6 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/library"
-	"github.com/moodiness/polyfin/internal/recordings"
 	"github.com/moodiness/polyfin/internal/secrets"
 	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/testdb/migrated"
@@ -327,7 +326,7 @@ func TestTargetsReceiveTheirFormat(t *testing.T) {
 		Token: new("tk_ntfy"), Events: events})
 
 	recording := accounts.ID{0x42}
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: recording, User: &h.member.ID, Channel: accounts.ID{9}, Name: "Late Show",
+	h.RecordingEnded(t.Context(), Ended{Recording: recording, User: &h.member.ID, Channel: accounts.ID{9}, Name: "Late Show",
 		Start: time.Date(2026, 10, 9, 20, 0, 0, 0, time.UTC), End: time.Date(2026, 10, 9, 21, 0, 0, 0, time.UTC), Partial: true})
 	link := "https://media.example.org/web/#/details?id=" + recording.String() + "&serverId=fedcba9876543210fedcba9876543210"
 
@@ -374,7 +373,7 @@ func TestTargetsReceiveTheirFormat(t *testing.T) {
 	if _, err := h.store.UpdateSettings(t.Context(), settings); err != nil {
 		t.Fatal(err)
 	}
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: recording, User: &h.member.ID, Name: "Late Show", Failed: true})
+	h.RecordingEnded(t.Context(), Ended{Recording: recording, User: &h.member.ID, Name: "Late Show", Failed: true})
 	failed := h.targets.wait(t, "/ntfy/", 2)[1]
 	if _, ok := failed.body["click"]; ok || failed.body["priority"] != 4.0 {
 		t.Errorf("failed recording without an address: %v", failed.body)
@@ -415,7 +414,7 @@ func TestChatServicesReceiveTheirFormat(t *testing.T) {
 	_, _, pushover := h.chatServices(t, RecordingFinished, RecordingFailed)
 
 	recording := accounts.ID{0x42}
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: recording, User: &h.member.ID, Channel: accounts.ID{9}, Name: "Late <Show> & Co"})
+	h.RecordingEnded(t.Context(), Ended{Recording: recording, User: &h.member.ID, Channel: accounts.ID{9}, Name: "Late <Show> & Co"})
 	link := "https://media.example.org/web/#/details?id=" + recording.String() + "&serverId=fedcba9876543210fedcba9876543210"
 	telegram := h.targets.wait(t, telegramPath, 1)[0].body
 	preview, _ := telegram["link_preview_options"].(map[string]any)
@@ -439,7 +438,7 @@ func TestChatServicesReceiveTheirFormat(t *testing.T) {
 	}
 
 	// A failure is urgent, and links nowhere.
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: recording, User: &h.member.ID, Name: "Empty Show", Failed: true})
+	h.RecordingEnded(t.Context(), Ended{Recording: recording, User: &h.member.ID, Name: "Empty Show", Failed: true})
 	if failed := h.targets.wait(t, "/gotify/message", 2)[1].body; failed["priority"] != 8.0 || failed["extras"] != nil {
 		t.Errorf("a failure to Gotify: %v", failed)
 	}
@@ -496,7 +495,7 @@ func TestChatServicesRefusingAndRateLimiting(t *testing.T) {
 	h.targets.then(telegramPath, reply(http.StatusTooManyRequests,
 		`{"ok":false,"error_code":429,"description":"Too Many Requests: retry after 1","parameters":{"retry_after":1}}`))
 	h.targets.then(pushoverPath, reply(http.StatusTooManyRequests, `{"status":0,"errors":["too many messages"]}`))
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Show"})
+	h.RecordingEnded(t.Context(), Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Show"})
 	got := h.targets.wait(t, telegramPath, sent+2)
 	h.targets.wait(t, pushoverPath, posted+2)
 	h.idle(t)
@@ -519,7 +518,7 @@ func TestChatServiceTokensAreSealedNeverShownNorLogged(t *testing.T) {
 	h.chatServices(t, RecordingFinished)
 	h.Service.telegramAPI = "http://127.0.0.1:1"
 	h.targets.always("/gotify/message", status(http.StatusUnauthorized))
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Show"})
+	h.RecordingEnded(t.Context(), Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Show"})
 	h.targets.wait(t, "/gotify/message", 1)
 	h.targets.wait(t, pushoverPath, 1)
 	h.idle(t)
@@ -643,8 +642,8 @@ func TestRecordingsEndedReachTheirOwnerAndTheServer(t *testing.T) {
 	// A target that did not choose recordings hears nothing of them.
 	h.add(t, &h.member, h.webhook("/episodes", NewEpisode))
 
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Finished Show"})
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: accounts.ID{2}, User: &h.member.ID, Name: "Empty Show", Failed: true})
+	h.RecordingEnded(t.Context(), Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Finished Show"})
+	h.RecordingEnded(t.Context(), Ended{Recording: accounts.ID{2}, User: &h.member.ID, Name: "Empty Show", Failed: true})
 	h.targets.wait(t, "/member", 2)
 	h.targets.wait(t, "/server", 2)
 	h.idle(t)
@@ -834,7 +833,7 @@ func TestDeliveryRetriesWaitsAndGivesUp(t *testing.T) {
 	h.timing.giveUp = 2 * time.Second
 	h.add(t, nil, h.webhook("/flaky", RecordingFinished))
 	h.targets.then("/flaky", status(http.StatusServiceUnavailable), status(http.StatusBadGateway), status(http.StatusTooManyRequests, "Retry-After", "1"))
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Show"})
+	h.RecordingEnded(t.Context(), Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Show"})
 	got := h.targets.wait(t, "/flaky", 4)
 	h.idle(t)
 	if len(got) != 4 {
@@ -855,7 +854,7 @@ func TestDeliveryRetriesWaitsAndGivesUp(t *testing.T) {
 	h.add(t, nil, h.webhook("/down", RecordingFailed))
 	h.targets.always("/down", status(http.StatusInternalServerError))
 	start := time.Now()
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: accounts.ID{2}, User: &h.member.ID, Name: "Show", Failed: true})
+	h.RecordingEnded(t.Context(), Ended{Recording: accounts.ID{2}, User: &h.member.ID, Name: "Show", Failed: true})
 	h.targets.wait(t, "/down", 2)
 	h.idle(t)
 	if elapsed := time.Since(start); elapsed < 1500*time.Millisecond || elapsed > 4*time.Second {
@@ -882,7 +881,7 @@ func TestRefusingTargetsAreMarkedFailing(t *testing.T) {
 	h := newHarness(t)
 	target := h.add(t, nil, h.webhook("/gone", RecordingFinished))
 	h.targets.then("/gone", status(http.StatusNotFound))
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Show"})
+	h.RecordingEnded(t.Context(), Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Show"})
 	h.targets.wait(t, "/gone", 1)
 	h.idle(t)
 	if got := len(h.targets.at("/gone")); got != 1 {
@@ -923,7 +922,7 @@ func TestSecretsAreSealedNeverShownNorLogged(t *testing.T) {
 		Token: new("tk_very-secret-ntfy-token"), Events: []string{RecordingFinished}})
 	h.targets.then(discordPath, status(http.StatusTooManyRequests, "Retry-After", "0"), status(http.StatusNotFound))
 	h.targets.always("/ntfy/", status(http.StatusUnauthorized))
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: accounts.ID{1}, User: &h.admin.ID, Name: "Show"})
+	h.RecordingEnded(t.Context(), Ended{Recording: accounts.ID{1}, User: &h.admin.ID, Name: "Show"})
 	h.targets.wait(t, discordPath, 2)
 	h.targets.wait(t, "/ntfy/", 1)
 	h.idle(t)
@@ -973,7 +972,7 @@ func TestMembersTargetsStayOnPublicAddresses(t *testing.T) {
 	}
 	h.add(t, &h.admin, h.webhook("/admin", NewEpisode))
 
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Show"})
+	h.RecordingEnded(t.Context(), Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Show"})
 	time.Sleep(50 * time.Millisecond)
 	h.idle(t)
 	if result, err := h.Test(t.Context(), &h.member, moved.ID); err != nil || result.Delivered || result.Target.Problem != ProblemUnreachable {

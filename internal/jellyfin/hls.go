@@ -360,7 +360,7 @@ func (h *Handler) servePlaylist(w http.ResponseWriter, r *http.Request, name str
 		h.sizes.Put(req.remux.Session, video.Size)
 	}
 	if req.live {
-		h.livePlaylist(w, r, req.remux, name)
+		processingError(w, http.StatusNotFound)
 		return
 	}
 	if strings.EqualFold(name, "live") {

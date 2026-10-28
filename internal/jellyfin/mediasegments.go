@@ -82,9 +82,7 @@ func (h *Handler) mediaSegments(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var segments []mediasegments.Segment
-	if item.Kind == library.KindRecording {
-		segments = h.Commercials.Segments(r.Context(), item.ID)
-	} else if h.Segments.Asks() {
+	if h.Segments.Asks() {
 		title, err := h.segmentTitle(r.Context(), user, item)
 		if err != nil {
 			h.browseError(w, r, err)

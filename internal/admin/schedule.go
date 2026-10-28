@@ -7,9 +7,7 @@ import (
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
-	"github.com/moodiness/polyfin/internal/iptv"
 	"github.com/moodiness/polyfin/internal/library"
-	"github.com/moodiness/polyfin/internal/recordings"
 	"github.com/moodiness/polyfin/internal/tasks"
 )
 
@@ -152,53 +150,6 @@ func tunersShort(result []timerJSON, timers []tunerTimer) {
 // none when recording is off. Those that would need more tuners than
 // their tuner has are marked. Converted tells the recordings converted to
 // HEVC, and the bytes their conversion saved.
-func (h *handler) timers(w http.ResponseWriter, r *http.Request) {
-	result := []timerJSON{}
-	if h.Recordings == nil || !h.Recordings.Available() {
-		writeJSON(w, http.StatusOK, map[string]any{"available": false, "timers": result})
-		return
-	}
-	list, err := h.Recordings.Timers(r.Context())
-	if err != nil {
-		h.internalError(w, r, err)
-		return
-	}
-	users := map[accounts.ID]accounts.User{}
-	var tuned []tunerTimer
-	for _, t := range list {
-		if t.Status == recordings.StatusCancelled {
-			continue
-		}
-		user, ok := users[t.User]
-		if !ok {
-			if user, err = h.Accounts.User(r.Context(), t.User); err != nil && !errors.Is(err, accounts.ErrNotFound) {
-				h.internalError(w, r, err)
-				return
-			}
-			users[t.User] = user
-		}
-		timer := timerJSON{ID: t.ID.String(), Name: t.Name, UserID: t.User.String(), UserName: user.Name, Start: t.Start, End: t.End,
-			From: t.From(), Until: t.Until(), Status: string(t.Status), Series: t.SeriesTimer != nil}
-		// The channel is named as the user who scheduled it sees it.
-		if h.Library != nil && user.ID == t.User {
-			if channel, err := h.Library.Item(r.Context(), user, t.Channel); err == nil {
-				timer.Channel = channel.Name
-				if source, ok := iptv.SourceOfChannel(channel.StremioID); ok && h.IPTV != nil && (t.Status == recordings.StatusNew || t.Status == recordings.StatusInProgress) {
-					if limit, err := h.IPTV.Connections(r.Context(), source); err == nil && limit.Tuners && limit.Connections > 0 {
-						tuned = append(tuned, tunerTimer{index: len(result), source: source, channel: t.Channel, tuners: limit.Connections,
-							from: timer.From, until: timer.Until})
-					}
-				}
-			}
-		}
-		result = append(result, timer)
-	}
-	tunersShort(result, tuned)
-	converted, saved, err := h.Recordings.SpaceSaved(r.Context())
-	if err != nil {
-		h.internalError(w, r, err)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"available": true, "timers": result,
-		"converted": map[string]any{"recordings": converted, "saved": saved}})
+func (h *handler) timers(w http.ResponseWriter, _ *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{"available": false, "timers": []timerJSON{}})
 }

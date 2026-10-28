@@ -232,66 +232,6 @@ func TestHLSRefusesConversionsThatAreNotAllowed(t *testing.T) {
 	}
 }
 
-func TestLiveConversionsFollowThePermissions(t *testing.T) {
-	t.Parallel()
-	addon := newTVAddon(t, false, "")
-	s, token, user := tuned(t, addon)
-	var channels QueryResult
-	s.get(t, "/LiveTv/Channels", token, &channels)
-	channel := channels.Items[0].Id
-	liveAnalysis(t, s, user, channel)
-	profile, err := os.ReadFile(playbackFixtures + "/profiles/minimal.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	chrome, err := os.ReadFile(playbackFixtures + "/profiles/jellyfin-web-chrome.json")
-	if err != nil {
-		t.Fatal(err)
-	}
-	// The minimal profile takes no HLS as it is: the H.264 and AAC stream
-	// is remuxed into MPEG-TS, its audio converted when the app asks.
-	convert := map[string]any{"AllowAudioStreamCopy": false}
-	converted := s.ask(t, token, channel, profile, convert)
-	copied := s.ask(t, token, channel, profile, nil)
-	if len(converted.MediaSources) != 1 || !strings.HasSuffix(converted.MediaSources[0].TranscodingUrl, "&allowAudioStreamCopy=false") ||
-		len(copied.MediaSources) != 1 || copied.MediaSources[0].TranscodingUrl == "" || strings.Contains(copied.MediaSources[0].TranscodingUrl, "StreamCopy=false") {
-		t.Fatalf("live sources: %+v, %+v", converted, copied)
-	}
-	master := func(target string) int {
-		status, _ := s.call(http.MethodGet, target, "", nil)
-		return status
-	}
-	if status := master(converted.MediaSources[0].TranscodingUrl); status != http.StatusOK {
-		t.Fatalf("live conversion allowed: %d", status)
-	}
-	for _, off := range []struct {
-		name string
-		set  func(on bool)
-	}{
-		{"server", func(on bool) { s.switches(t, on) }},
-		{"user", func(on bool) { s.permit(t, user, true, on, true) }},
-	} {
-		off.set(false)
-		if answer := s.ask(t, token, channel, profile, convert); !answer.refused() {
-			t.Errorf("%s off, live conversion asked: %+v", off.name, answer)
-		}
-		if answer := s.ask(t, token, channel, profile, nil); len(answer.MediaSources) != 1 || answer.MediaSources[0].TranscodingUrl == "" {
-			t.Errorf("%s off, live remux: %+v", off.name, answer)
-		}
-		if status := master(converted.MediaSources[0].TranscodingUrl); status != http.StatusBadRequest {
-			t.Errorf("%s off, live conversion: %d", off.name, status)
-		}
-		if status := master(copied.MediaSources[0].TranscodingUrl); status != http.StatusOK {
-			t.Errorf("%s off, live remux: %d", off.name, status)
-		}
-		// A stream the app plays as it is stays.
-		if answer := s.ask(t, token, channel, chrome, nil); len(answer.MediaSources) != 1 || !answer.MediaSources[0].SupportsDirectPlay {
-			t.Errorf("%s off, live direct play: %+v", off.name, answer)
-		}
-		off.set(true)
-	}
-}
-
 func TestDownloadsFollowThePermissions(t *testing.T) {
 	t.Parallel()
 	p := playing(t)

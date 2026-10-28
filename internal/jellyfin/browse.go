@@ -250,13 +250,10 @@ func (h *Handler) views(w http.ResponseWriter, r *http.Request) {
 }
 
 // userViews describes the views user sees, in the order apps list them:
-// their libraries and Polyfin's Live TV, Replay, Playlists, Collections
+// their libraries and Polyfin's Replay, Playlists, Collections
 // and Watchlist views, those they hide included when includeHidden is set.
 func (h *Handler) userViews(r *http.Request, user accounts.User, includeHidden bool) ([]BaseItemDto, error) {
 	items, err := h.libraryViews(r, user)
-	if err == nil {
-		items, err = h.addLiveTvView(r, user, items)
-	}
 	if err == nil {
 		items, err = h.addReplayView(r, user, items)
 	}
@@ -379,8 +376,6 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 	b := bindErrors{}
 	start, limit := b.paging(r, defaultPageSize)
 	parent, hasParent := b.guid(r, "parentId")
-	var categories programQuery
-	readCategories(b, r, &categories)
 	user, ok := h.viewer(w, r, b, unknownListingUser)
 	if !ok {
 		return
@@ -420,20 +415,16 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 		// What the user's music addons find comes after the titles, then
 		// the channels and programmes of their Live TV; all are asked at
 		// once.
-		var music, live []library.Item
-		var musicErr, liveErr error
+		var music []library.Item
+		var musicErr error
 		var searches sync.WaitGroup
 		if kinds := musicSearchKinds(keep); len(kinds) > 0 {
 			searches.Go(func() { music, musicErr = h.Library.SearchMusic(r.Context(), user, term, kinds, max(start, 0)+limit) })
 		}
-		searches.Go(func() { live, liveErr = h.searchLiveTv(r, user, term, keep, categories, max(start, 0)+limit) })
 		found, err := h.Library.Search(r.Context(), user, term, searchKinds(keep), max(start, 0)+limit)
 		searches.Wait()
 		if err == nil {
 			found, err = append(found, music...), musicErr
-		}
-		if err == nil {
-			found, err = append(found, live...), liveErr
 		}
 		if err != nil {
 			h.browseError(w, r, err)
@@ -444,8 +435,6 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 			h.internalError(w, r, err)
 			return
 		}
-		h.addCurrentPrograms(r, user, items, fields)
-		h.addTimers(r.Context(), items)
 		writeJSON(w, http.StatusOK, pageOf(items, start, limit, len(items)))
 		return
 	}
@@ -473,12 +462,6 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.collectionListing(w, r, user, parent, hasParent, start, limit) {
-		return
-	}
-	if h.channelListing(w, r, user, parent, hasParent, start, limit) {
-		return
-	}
-	if h.recordingListing(w, r, user, parent, hasParent, start, limit) {
 		return
 	}
 	if filter, ok := stateFilterOf(r); ok {
@@ -715,14 +698,8 @@ func (h *Handler) item(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, library.ErrNotFound) && h.describeCollection(w, r, user, id) {
 		return
 	}
-	if errors.Is(err, library.ErrNotFound) && id == liveTvViewID && h.describeLiveTvView(w, r, user) {
-		return
-	}
 	if errors.Is(err, library.ErrNotFound) && id == rootFolderID {
 		h.writeRootFolder(w, r, user)
-		return
-	}
-	if errors.Is(err, library.ErrNotFound) && h.describeRecording(w, r, user, id) {
 		return
 	}
 	if errors.Is(err, library.ErrNotFound) && h.describeCustomRow(w, r, user, id) {
@@ -734,9 +711,6 @@ func (h *Handler) item(w http.ResponseWriter, r *http.Request) {
 	}
 	if item.Kind == library.KindPerson {
 		h.writePerson(w, r, user, item)
-		return
-	}
-	if item.Kind == library.KindRecording && h.describeRecording(w, r, user, item.ID) {
 		return
 	}
 	if track, ok := lyricsTrack(item); ok && !item.Lyrics {
@@ -752,16 +726,6 @@ func (h *Handler) item(w http.ResponseWriter, r *http.Request) {
 	dto := h.newItemDto(item, requestedFields(r), true, state)
 	h.addMediaSources(r, user, &dto, item, id, true)
 	h.setExtraCounts(r, user, &dto, item)
-	if item.Kind == library.KindChannel {
-		dtos := []BaseItemDto{dto}
-		h.addCurrentPrograms(r, user, dtos, nil)
-		dto = dtos[0]
-	}
-	if item.Kind == library.KindProgram {
-		dtos := []BaseItemDto{dto}
-		h.addTimers(r.Context(), dtos)
-		dto = dtos[0]
-	}
 	writeJSON(w, http.StatusOK, dto)
 }
 

@@ -10,7 +10,6 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/library"
-	"github.com/moodiness/polyfin/internal/recordings"
 )
 
 // EventVersion is the version of Event's JSON. Fields may be added within a
@@ -266,7 +265,7 @@ func (s *Service) episodeEvent(user *accounts.User, episode library.Item) Event 
 
 // recordingEvent tells that a recording of user, nil once deleted, on
 // channel ended.
-func (s *Service) recordingEvent(ended recordings.Ended, user *accounts.User, channel string) Event {
+func (s *Service) recordingEvent(ended Ended, user *accounts.User, channel string) Event {
 	kind := RecordingFinished
 	if ended.Failed {
 		kind = RecordingFailed
@@ -407,7 +406,7 @@ func (s *Service) UserJoined(ctx context.Context, user accounts.User, invite acc
 // RecordingEnded tells the targets of the user who made a recording, and
 // the server's, that it finished or failed. It returns at once: the
 // message is prepared and sent in the background.
-func (s *Service) RecordingEnded(_ context.Context, ended recordings.Ended) {
+func (s *Service) RecordingEnded(_ context.Context, ended Ended) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.spawn(func() {

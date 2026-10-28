@@ -34,8 +34,6 @@ import (
 	"github.com/moodiness/polyfin/internal/plays"
 	"github.com/moodiness/polyfin/internal/quickconnect"
 	"github.com/moodiness/polyfin/internal/ratings"
-	"github.com/moodiness/polyfin/internal/recordings"
-	"github.com/moodiness/polyfin/internal/reminders"
 	"github.com/moodiness/polyfin/internal/smartlists"
 	"github.com/moodiness/polyfin/internal/tasks"
 	"github.com/moodiness/polyfin/internal/throttle"
@@ -115,8 +113,6 @@ type Options struct {
 	Tasks *tasks.Registry
 	// Logs keeps the recent log lines, redacted; nil keeps none.
 	Logs *logs.Ring
-	// Recordings schedules Live TV recordings; nil records nothing.
-	Recordings *recordings.Service
 	// Library names the channels of recordings.
 	Library ItemReader
 	// LibraryImages finds and keeps the images of libraries; nil shows
@@ -149,9 +145,6 @@ type Options struct {
 	// Notifications keeps the server's and users' notification targets;
 	// nil offers none.
 	Notifications *notifications.Service
-	// Reminders keeps the users' programme reminders, which My account
-	// lists; nil offers none.
-	Reminders *reminders.Service
 	// Plays keeps the history of the videos played, which the statistics
 	// sum; nil offers none.
 	Plays *plays.History
@@ -235,10 +228,6 @@ func New(options Options) http.Handler {
 	mux.Handle("PATCH /admin/api/account/notifications/targets/{id}", h.signedIn(own.update))
 	mux.Handle("DELETE /admin/api/account/notifications/targets/{id}", h.signedIn(own.remove))
 	mux.Handle("POST /admin/api/account/notifications/targets/{id}/test", h.signedIn(own.test))
-	mux.Handle("GET /admin/api/account/reminders", h.signedIn(h.ownReminders))
-	mux.Handle("DELETE /admin/api/account/reminders/{id}", h.signedIn(h.deleteOwnReminder))
-	mux.Handle("GET /admin/api/account/reminders/settings", h.signedIn(h.ownReminderSettings))
-	mux.Handle("PUT /admin/api/account/reminders/settings", h.signedIn(h.updateOwnReminderSettings))
 	mux.Handle("GET /admin/api/account/metadata-language", h.signedIn(h.ownMetadataLanguage))
 	mux.Handle("PUT /admin/api/account/metadata-language", h.signedIn(h.setOwnMetadataLanguage))
 	mux.Handle("GET /admin/api/metadata-languages", h.signedIn(h.metadataLanguages))

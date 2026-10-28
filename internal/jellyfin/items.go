@@ -203,14 +203,6 @@ type BaseItemDto struct {
 // A channel's details describe its streams as a placeholder, as Jellyfin's
 // do: PlaybackInfo describes them once the channel plays.
 func (h *Handler) addMediaSources(r *http.Request, user accounts.User, dto *BaseItemDto, item library.Item, opened accounts.ID, detail bool) {
-	if item.Kind == library.KindChannel && detail {
-		dto.MediaSources = &[]MediaSourceInfo{channelPlaceholder(item)}
-		dto.MediaStreams = &[]playback.MediaStream{}
-		if sources := h.lineupSources(r, user, item, opened); len(sources) > 0 {
-			dto.MediaSources = &sources
-		}
-		return
-	}
 	if audioItem(item.Kind) {
 		h.addAudioSources(r, user, dto, item, detail)
 		return
@@ -547,7 +539,6 @@ func (h *Handler) newItemDto(item library.Item, fields fieldSet, detail bool, st
 			}
 		}
 	}
-	describeLive(&dto, item, fields, detail)
 	var gain *float64
 	if g, known := state.gains[item.ID]; known {
 		gain = &g

@@ -75,10 +75,6 @@ type playable struct {
 // have them (see offered); so are subtitles that cannot be listed.
 func (h *Handler) playable(ctx context.Context, user accounts.User, item library.Item) (playable, error) {
 	p := playable{item: item, tracks: h.trackPreferences(ctx, user)}
-	if item.Kind == library.KindRecording {
-		p.versions = h.recordingVersions(ctx, item)
-		return p, nil
-	}
 	var versionsErr error
 	var wg sync.WaitGroup
 	wg.Go(func() { p.versions, versionsErr = h.Library.Versions(ctx, user, item.ID) })
@@ -119,10 +115,6 @@ func (h *Handler) knownPlayable(ctx context.Context, user accounts.User, item li
 // user's group have them.
 func (h *Handler) cachedPlayable(ctx context.Context, user accounts.User, item library.Item) playable {
 	p := playable{item: item, tracks: h.trackPreferences(ctx, user)}
-	if item.Kind == library.KindRecording {
-		p.versions = h.recordingVersions(ctx, item)
-		return p
-	}
 	if versions, ok := h.Library.CachedVersions(ctx, user, item.ID); ok {
 		p.versions = h.offered(ctx, user, versions)
 	}
@@ -261,8 +253,6 @@ func (h *Handler) baseSource(r *http.Request, p playable, version library.Versio
 	case library.KindMovie, library.KindEpisode:
 		source.HasSegments = h.Accounts.Settings().SkipButtons && (h.Segments.Asks() || known && len(chapterSegments(analysis)) > 0 ||
 			p.item.Kind == library.KindEpisode && h.foundInAudio(r.Context(), version))
-	case library.KindRecording:
-		source.HasSegments = h.Commercials.Has(r.Context(), p.item.ID)
 	}
 	size, runtime := version.Size, version.Runtime
 	if known {

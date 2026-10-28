@@ -13,7 +13,6 @@ import (
 	"github.com/moodiness/polyfin/internal/backup"
 	"github.com/moodiness/polyfin/internal/cache"
 	"github.com/moodiness/polyfin/internal/collections"
-	"github.com/moodiness/polyfin/internal/commercials"
 	"github.com/moodiness/polyfin/internal/homerows"
 	"github.com/moodiness/polyfin/internal/iptv"
 	"github.com/moodiness/polyfin/internal/library"
@@ -26,8 +25,6 @@ import (
 	"github.com/moodiness/polyfin/internal/plays"
 	"github.com/moodiness/polyfin/internal/preferences"
 	"github.com/moodiness/polyfin/internal/quickconnect"
-	"github.com/moodiness/polyfin/internal/recordings"
-	"github.com/moodiness/polyfin/internal/reminders"
 	"github.com/moodiness/polyfin/internal/remuxdb"
 	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/subtitles"
@@ -128,12 +125,6 @@ type Options struct {
 	// Thumbnails makes and keeps the scrubbing thumbnails and chapter
 	// images of the versions played; nil makes none.
 	Thumbnails *thumbnails.Service
-	// Recordings schedules and keeps Live TV recordings; nil, or one
-	// without a folder, records nothing.
-	Recordings *recordings.Service
-	// Commercials gives the commercial breaks found in recordings; nil
-	// gives none.
-	Commercials *commercials.Service
 	// Backups backs the database up into the folder the settings give, and
 	// restores a backup; nil, or one while backups are off, lists none.
 	Backups *backup.Service
@@ -146,8 +137,6 @@ type Options struct {
 	// SharePlayed is told of a guest's playback through a share link, at
 	// most once an hour per link; nil tells nothing.
 	SharePlayed func(accounts.ShareLink)
-	// Reminders keeps the users' programme reminders; nil keeps none.
-	Reminders *reminders.Service
 }
 
 // Handler serves the Jellyfin API.

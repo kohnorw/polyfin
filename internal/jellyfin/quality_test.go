@@ -395,68 +395,6 @@ func TestQualityGroupsRefuseTallerVersionsWithoutConversion(t *testing.T) {
 	}
 }
 
-// A channel's stream taller than the group is converted down to it, once
-// analyzed.
-func TestQualityGroupsConvertLiveTvDown(t *testing.T) {
-	t.Parallel()
-	addon := newTVAddon(t, false, "")
-	s, token, user := tuned(t, addon)
-	var channels QueryResult
-	s.get(t, "/LiveTv/Channels", token, &channels)
-	channel := channels.Items[0].Id
-	liveAnalysis(t, s, user, channel)
-	id, _ := accounts.ParseID(channel)
-	versions, _ := s.library.Versions(t.Context(), user, id)
-	var analysis media.Analysis
-	var data []byte
-	if err := s.pool.QueryRow(t.Context(), "SELECT analysis FROM media_analyses WHERE version_id = $1", versions[0].ID).Scan(&data); err != nil {
-		t.Fatal(err)
-	}
-	if err := json.Unmarshal(data, &analysis); err != nil {
-		t.Fatal(err)
-	}
-	for i := range analysis.Streams {
-		if analysis.Streams[i].Type == "video" {
-			analysis.Streams[i].Width, analysis.Streams[i].Height = 1920, 1080
-		}
-	}
-	data, _ = json.Marshal(analysis)
-	if _, err := s.pool.Exec(t.Context(), "UPDATE media_analyses SET analysis = $2 WHERE version_id = $1", versions[0].ID, data); err != nil {
-		t.Fatal(err)
-	}
-	chrome, err := os.ReadFile(filepath.Join(playbackFixtures, "profiles", "jellyfin-web-chrome.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	stream := s.url + "/Videos/" + channel + "/stream?static=true&ApiKey=" + token
-	s.group(t, user, 1080)
-	if answer := s.ask(t, token, channel, chrome, nil); len(answer.MediaSources) != 1 || !answer.MediaSources[0].SupportsDirectPlay {
-		t.Fatalf("1080p: %+v", answer)
-	}
-	// Under 720p, the stream is never sent as it is, and the user who may
-	// not convert is refused it.
-	s.group(t, user, 720)
-	if status := fetchStatus(t, stream); status != http.StatusForbidden {
-		t.Errorf("the stream as it is under 720p: %d", status)
-	}
-	s.permit(t, user, false, true, true)
-	if answer := s.ask(t, token, channel, chrome, nil); !answer.refused() {
-		t.Errorf("720p without conversion: %+v", answer)
-	}
-	// With the conversion allowed, it is converted down to 720 lines.
-	needsEncoders(t)
-	s.permit(t, user, true, true, true)
-	answer := s.ask(t, token, channel, chrome, nil)
-	if len(answer.MediaSources) != 1 {
-		t.Fatalf("720p: %+v", answer)
-	}
-	source := answer.MediaSources[0]
-	if source.SupportsDirectPlay || !strings.Contains(source.TranscodingUrl, "VideoResolutionNotSupported") ||
-		!strings.HasSuffix(source.TranscodingUrl, "&allowVideoStreamCopy=false") || videoHeightOf(source) != 720 {
-		t.Errorf("720p: direct play %v, height %d, %s", source.SupportsDirectPlay, videoHeightOf(source), source.TranscodingUrl)
-	}
-}
-
 // Downloads are never converted: only versions that fit download.
 func TestQualityGroupsLimitDownloads(t *testing.T) {
 	t.Parallel()

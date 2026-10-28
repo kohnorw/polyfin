@@ -1616,16 +1616,6 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		(settings.HardwareAcceleration != current.HardwareAcceleration || settings.VAAPIDevice != current.VAAPIDevice) {
 		encoder.SelectHardware(settings.HardwareAcceleration, settings.VAAPIDevice)
 	}
-	// Recording turned on, or moved, has the scheduler look at its timers.
-	if settings.RecordingsDir(h.DataDir) != current.RecordingsDir(h.DataDir) {
-		h.Recordings.Wake()
-	}
-	// The conversion of recordings applies its settings at once.
-	if settings.ConvertRecordings != current.ConvertRecordings || settings.ConvertRecordingsFrom != current.ConvertRecordingsFrom ||
-		settings.ConvertRecordingsUntil != current.ConvertRecordingsUntil ||
-		settings.ConvertRecordingsOnProcessor != current.ConvertRecordingsOnProcessor {
-		h.Recordings.WakeConversions()
-	}
 	answer, err := h.settingsJSON(r.Context(), settings)
 	if err != nil {
 		h.internalError(w, r, err)

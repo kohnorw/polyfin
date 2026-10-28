@@ -77,15 +77,7 @@ func (h *Handler) absentRoutes(rt *router) {
 		writeJSON(w, http.StatusOK, defaultMetadataOptions())
 	})
 
-	// Live TV tuners are the server's HDHomeRun tuners (tuners.go); its
-	// listing providers are absent: Polyfin's guides are the catalogs'
-	// XMLTV guides, never a listing provider's.
-	administrator(http.MethodPost, "/LiveTv/TunerHosts", h.saveTunerHost)
-	administrator(http.MethodDelete, "/LiveTv/TunerHosts", h.deleteTunerHost)
-	liveTv(http.MethodGet, "/LiveTv/TunerHosts/Types", h.tunerHostTypes)
-	administrator(http.MethodGet, "/LiveTv/Tuners/Discover", h.discoverTuners)
-	administrator(http.MethodGet, "/LiveTv/Tuners/Discvover", h.discoverTuners)
-	administrator(http.MethodPost, "/LiveTv/Tuners/{tunerId}/Reset", jellyfinError(http.StatusBadRequest))
+	// Live TV listing providers: none (see livetv.go for tuners).
 	administrator(http.MethodPost, "/LiveTv/ListingProviders", jellyfinError(http.StatusNotFound))
 	administrator(http.MethodDelete, "/LiveTv/ListingProviders", noContent)
 	liveTv(http.MethodGet, "/LiveTv/ListingProviders/Default", func(w http.ResponseWriter, _ *http.Request) {

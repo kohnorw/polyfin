@@ -27,7 +27,6 @@ import (
 	"github.com/moodiness/polyfin/internal/audiosegments"
 	"github.com/moodiness/polyfin/internal/backup"
 	"github.com/moodiness/polyfin/internal/collections"
-	"github.com/moodiness/polyfin/internal/commercials"
 	"github.com/moodiness/polyfin/internal/config"
 	"github.com/moodiness/polyfin/internal/database"
 	"github.com/moodiness/polyfin/internal/discovery"
@@ -44,7 +43,6 @@ import (
 	"github.com/moodiness/polyfin/internal/logs"
 	"github.com/moodiness/polyfin/internal/loudness"
 	"github.com/moodiness/polyfin/internal/lyrics"
-	"github.com/moodiness/polyfin/internal/media"
 	"github.com/moodiness/polyfin/internal/mediasegments"
 	"github.com/moodiness/polyfin/internal/metrics"
 	"github.com/moodiness/polyfin/internal/notifications"
@@ -55,8 +53,6 @@ import (
 	"github.com/moodiness/polyfin/internal/process"
 	"github.com/moodiness/polyfin/internal/quickconnect"
 	"github.com/moodiness/polyfin/internal/ratings"
-	"github.com/moodiness/polyfin/internal/recordings"
-	"github.com/moodiness/polyfin/internal/reminders"
 	"github.com/moodiness/polyfin/internal/remuxdb"
 	"github.com/moodiness/polyfin/internal/secrets"
 	"github.com/moodiness/polyfin/internal/server"
@@ -371,31 +367,10 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 		Logger:      logger,
 	})
 	defer images.Close()
-	// Recording and backups follow the settings, which turn them on and
-	// choose their folders. Recordings that end are told to the
-	// notifications, made below, before any recording starts, and have
-	// their commercial breaks looked for in the background. Finished
-	// recordings are converted to HEVC as the settings ask, on the GPU
-	// conversions use, a recording being played replaced once the
-	// playbacks followed below and its encodings stop.
+	// Backups follow the settings, which turn them on and choose their
+	// folder. Live TV recording is not part of Polyfin beta.
 	var notifier *notifications.Service
-	var breaks *commercials.Service
 	var playbacks *plays.Tracker
-	recorder := recordings.New(recordings.Config{DB: pool, Folder: func() string { return store.Settings().RecordingsDir(cfg.DataDir) },
-		Guide: lib, Recorder: player, Users: store, Logger: logger,
-		Ended: func(ctx context.Context, ended recordings.Ended) {
-			notifier.RecordingEnded(ctx, ended)
-			breaks.Ended(ctx, ended)
-		},
-		Converter: segments, Prober: media.Prober{Path: cfg.FFprobe, Timeout: time.Minute},
-		InUse: func(id accounts.ID) bool { return player.FileInUse(id) || playbacks.Playing(id) }})
-	if recorder.Available() {
-		logger.Info("Live TV recording is on", "folder", recorder.Dir())
-	}
-	breaks = commercials.New(commercials.Options{DB: pool, FFmpeg: cfg.FFmpeg, FFprobe: cfg.FFprobe, Recordings: recorder,
-		Settings: store.Settings, Logger: logger})
-	defer breaks.Close()
-	registerRecordingTasks(registry, recorder, breaks)
 	// The destinations' passwords and keys are sealed as the other secrets.
 	backups := backup.New(backup.Config{Folder: func() string { return store.Settings().BackupDir(cfg.DataDir) }, DatabaseURL: cfg.DatabaseURL,
 		DB: pool, Secrets: box, Settings: store.Settings, Logger: logger})
@@ -526,8 +501,6 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 		FontsDir:       cfg.FontsDir,
 		FFmpeg:         cfg.FFmpeg,
 		DataDir:        cfg.DataDir,
-		Recordings:     recorder,
-		Commercials:    breaks,
 		Backups:        backups,
 		Trackers:       tracking,
 		Plays:          playbacks,
@@ -577,7 +550,6 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 		Watching:      jellyfinAPI,
 		Tasks:         registry,
 		Logs:          recent,
-		Recordings:    recorder,
 		Library:       lib,
 		LibraryImages: lib,
 		SmartLists:    smartlists.New(pool),
@@ -624,24 +596,16 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 	defer notifier.Close()
 	adminOptions.Notifications = notifier
 	registerSummaryTasks(registry, notifier)
-	// Programme reminders tell users, on their own targets and on their
-	// apps when they choose it, that a programme they chose starts soon.
-	// They are sent once the notifications read their targets.
-	programmeReminders := reminders.New(reminders.Config{DB: pool, Guide: lib, Users: store, Teller: notifier, Apps: jellyfinAPI,
-		Reaches: func(user accounts.ID) bool { return notifier.Receives(user, notifications.ProgrammeReminder) },
-		Ready:   notifier.Loaded(), Logger: logger})
-	jellyfinAPI.Reminders = programmeReminders
 	// Subtitle files users added before subtitles were kept as Jellyfin
 	// keeps them move to their titles' folders.
 	if err := jellyfinAPI.MoveUploadedSubtitles(ctx); err != nil {
 		logger.Warn("The subtitle files users added could not be moved to their titles' folders", "error", err)
 	}
-	adminOptions.Reminders = programmeReminders
 	// Playbacks under way when Polyfin stops are kept in the history, as
 	// ended at their last report.
 	defer playbacks.Close()
 	registerMetrics(addonStore, jellyfinAPI, segments, pool, []metricFolder{{"cache", func() string { return cfg.CacheDir }},
-		{"recordings", recorder.Dir}, {"backups", backups.Dir}})
+		{"backups", backups.Dir}})
 	httpServer := &http.Server{
 		Handler: server.New(server.Options{
 			Database:      pool,
@@ -667,17 +631,12 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 	// Jellyfin's handler, created above, closes the sockets of the devices
 	// the device sweep signs out. The guides due are fetched at start too.
 	registry.Start(ctx)
-	// Recordings in progress when ctx ends are finished, as partial, when
-	// Polyfin starts again.
-	go recorder.Run(ctx)
-	go recorder.RunConversions(ctx)
 	// What was left to send to tracking services is sent again.
 	go tracking.Run(ctx)
 	// The app connections due are imported, then as often as the settings
 	// say.
 	go fromApps.Run(ctx)
 	go notifier.Run(ctx)
-	go programmeReminders.Run(ctx)
 	go updateCheck.Run(ctx)
 	go playbacks.Run(ctx)
 	served := make(chan error, 1)
@@ -856,44 +815,6 @@ func registerLocalFoldersTask(registry *tasks.Registry, folders *localfiles.Serv
 	})
 }
 
-// registerRecordingTasks registers the periodic jobs of Live TV recording,
-// which do nothing while it is off, and the reading of the recordings not
-// read yet for their commercials, which does nothing while that is off:
-// the scheduler itself runs on its own (see recordings.Service.Run).
-func registerRecordingTasks(registry *tasks.Registry, recorder *recordings.Service, breaks *commercials.Service) {
-	registry.Register(tasks.Task{
-		Key:      "DeleteOldRecordings",
-		Category: tasks.CategoryLiveTV,
-		Text: map[string]tasks.Text{
-			"en": {Name: "Delete old recordings", Description: "Deletes the Live TV recordings older than the number of days the settings keep them."},
-			"fr": {Name: "Supprimer les anciens enregistrements", Description: "Supprime les enregistrements de TV en direct plus anciens que le nombre de jours choisi dans les paramètres."},
-		},
-		Interval: recordings.SweepInterval,
-		AtStart:  true,
-		Run:      recorder.SweepRecordings,
-	})
-	registry.Register(tasks.Task{
-		Key:      "ScheduleSeriesRecordings",
-		Category: tasks.CategoryLiveTV,
-		Text: map[string]tasks.Text{
-			"en": {Name: "Schedule series recordings", Description: "Looks in the guide for the new programmes of each series recording and schedules them."},
-			"fr": {Name: "Programmer les enregistrements de séries", Description: "Cherche dans le guide les nouvelles émissions de chaque série enregistrée et les programme."},
-		},
-		Interval: recordings.SeriesRefreshInterval,
-		AtStart:  true,
-		Run:      recorder.RefreshSeriesTimers,
-	})
-	registry.Register(tasks.Task{
-		Key:      "FindCommercials",
-		Category: tasks.CategoryLiveTV,
-		Text: map[string]tasks.Text{
-			"en": {Name: "Find commercials in recordings", Description: "Reads the finished recordings not read yet for their commercial breaks, one at a time, while Find commercials in recordings is on under Settings › Recordings. Each recording is otherwise read once it ends."},
-			"fr": {Name: "Trouver les publicités des enregistrements", Description: "Lit les enregistrements terminés pas encore lus pour trouver leurs coupures publicitaires, un à la fois, quand Trouver les publicités des enregistrements est activé dans Paramètres › Enregistrements. Chaque enregistrement est sinon lu dès qu’il se termine."},
-		},
-		Interval: commercials.RunInterval,
-		Run:      breaks.Run,
-	})
-}
 
 // registerBackupTask registers the daily database backup: it runs every
 // day while backups are on, and by hand only, failing, while they are off.

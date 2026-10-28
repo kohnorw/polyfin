@@ -218,8 +218,6 @@ func (h *Handler) played(ctx context.Context, user accounts.User, opened account
 	if errors.Is(err, library.ErrNotFound) {
 		if owner, ok := h.Library.VersionOwner(opened); ok {
 			item, err = h.Library.Item(ctx, user, owner)
-		} else if recording, ok := h.recordingTitle(ctx, user, opened); ok {
-			return recording, nil
 		}
 	}
 	if err != nil {
@@ -326,10 +324,6 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	item, err := h.played(r.Context(), user, opened)
 	if err != nil {
 		h.browseError(w, r, err)
-		return
-	}
-	if item.Kind == library.KindChannel {
-		h.livePlaybackInfo(w, r, user, item, opened, request)
 		return
 	}
 	if audioItem(item.Kind) {
@@ -949,10 +943,6 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 	// A player that authenticates with a header might send it to the
 	// source too: relay instead of redirecting it.
 	relay := grant.Relay || strings.Contains(r.Header.Get("Authorization"), "Token=")
-	if item.Kind == library.KindChannel {
-		h.serveChannel(w, r, user, item, version, relay)
-		return
-	}
 	// PlaybackInfo never offers a version above the user's bitrate limit,
 	// or taller than their quality group, as it is: this guards URLs kept
 	// from before the limit was set, or made up.
@@ -967,10 +957,6 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	contentType := mimeTypes[strings.ToLower(extension)]
-	if item.Kind == library.KindRecording {
-		h.serveRecording(w, r, version, contentType)
-		return
-	}
 	if contentType == "" {
 		contentType = mimeTypes[containerOfName(version.Filename)]
 	}

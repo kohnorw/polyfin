@@ -347,11 +347,6 @@ func (h *Handler) versionedItem(w http.ResponseWriter, r *http.Request, user acc
 			item, err = h.Library.Item(r.Context(), user, owner)
 		}
 	}
-	if errors.Is(err, library.ErrNotFound) {
-		if rec, channel, recErr := h.visibleRecording(r.Context(), user, id); recErr == nil {
-			item, err = recordingItem(rec, channel), nil
-		}
-	}
 	if err != nil {
 		h.browseError(w, r, err)
 		return library.Item{}, false

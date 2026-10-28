@@ -315,7 +315,7 @@ func (h *handler) health(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	for _, folder := range []struct{ name, path string }{{"cache", h.Health.CacheDir}, {"recordings", h.Recordings.Dir()}, {"backups", h.Backups.Dir()}} {
+	for _, folder := range []struct{ name, path string }{{"cache", h.Health.CacheDir}, {"backups", h.Backups.Dir()}} {
 		if folder.path == "" {
 			continue
 		}

@@ -161,7 +161,7 @@ func (h *handler) healthProblems(ctx context.Context, language string) ([]health
 		return []healthProblemJSON{{Key: "database", Code: problemDatabase, Tone: notifications.SeverityError, To: "/system/health#database"}}, nil
 	}
 
-	for _, folder := range []struct{ name, path string }{{"cache", h.Health.CacheDir}, {"recordings", h.Recordings.Dir()}, {"backups", h.Backups.Dir()}} {
+	for _, folder := range []struct{ name, path string }{{"cache", h.Health.CacheDir}, {"backups", h.Backups.Dir()}} {
 		if folder.path == "" {
 			continue
 		}

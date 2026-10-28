@@ -63,12 +63,6 @@ func (h *Handler) serveFile(w http.ResponseWriter, r *http.Request, attachment b
 		}
 	}
 	if errors.Is(err, library.ErrNotFound) {
-		// A finished recording is a file of Polyfin's own, served as it
-		// is, under the same permissions.
-		if recording, ok := h.recordingTitle(r.Context(), user, opened); ok {
-			h.serveRecordingFile(w, r, user, recording, attachment)
-			return
-		}
 		notFoundProblem(w)
 		return
 	}

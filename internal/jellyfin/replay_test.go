@@ -14,7 +14,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/iptv"
 )
@@ -143,71 +142,6 @@ func replayProgrammes(t *testing.T, s testServer, token string) (folders, progra
 	}
 	s.get(t, "/Items?ParentId="+listed.Items[0].Id+"&fields=Path", token, &inside)
 	return listed.Items, inside.Items
-}
-
-// Replay lists a folder per channel whose provider keeps an archive, with
-// the programmes of its guide that ended within that channel's archive
-// days, the latest first, each a video of its programme's length; a user
-// without Live TV has no Replay. A replay with a resume point is in
-// Continue Watching.
-func TestReplayListsTheArchivedProgrammes(t *testing.T) {
-	t.Parallel()
-	provider := newReplayProvider(t, "")
-	s := newTestServer(t, 10)
-	s.user("member", nil)
-	token := s.signIn("member", "tv")
-	addReplaySource(t, s, provider)
-
-	folders, programmes := replayProgrammes(t, s, token)
-	if len(folders) != 2 || folders[0].Name != "Zeb One" || folders[1].Name != "Quill" || folders[0].Type != "Folder" || !folders[0].IsFolder {
-		t.Fatalf("Replay folders: %+v", folders)
-	}
-	titles := func(items []BaseItemDto) []string {
-		var names []string
-		for _, p := range items {
-			names = append(names, p.Name)
-		}
-		return names
-	}
-	if names := titles(programmes); !slices.Equal(names, []string{"Latest", "Earlier", "Yesterday"}) {
-		t.Fatalf("programmes: %q", names)
-	}
-	// The same guide channel, from a channel whose archive reaches further.
-	var longer QueryResult
-	s.get(t, "/Items?ParentId="+folders[1].Id, token, &longer)
-	if names := titles(longer.Items); !slices.Equal(names, []string{"Latest", "Earlier", "Yesterday", "Too Old"}) {
-		t.Errorf("programmes of a week's archive: %q", names)
-	}
-	latest := programmes[0]
-	if latest.Type != "Video" || latest.RunTimeTicks == nil || *latest.RunTimeTicks != int64(3*time.Minute/100) ||
-		latest.StartDate == nil || !time.Time(*latest.StartDate).Equal(provider.now.Add(-18*time.Minute)) {
-		t.Errorf("a replay: %+v", latest)
-	}
-	if provider.paths() != nil {
-		t.Errorf("listing asked the archive: %q", provider.paths())
-	}
-
-	// A replay played halfway is resumed from Continue Watching.
-	earlier := programmes[1]
-	if status, data := s.call(http.MethodPost, "/Sessions/Playing/Stopped", app("tv", token),
-		map[string]any{"ItemId": earlier.Id, "PositionTicks": int64(30 * time.Minute / 100)}); status != http.StatusNoContent {
-		t.Fatalf("stopping halfway: %d %s", status, data)
-	}
-	var resume QueryResult
-	s.get(t, "/UserItems/Resume?mediaTypes=Video", token, &resume)
-	if len(resume.Items) != 1 || resume.Items[0].Id != earlier.Id {
-		t.Errorf("Continue Watching: %+v", resume.Items)
-	}
-
-	s.user("nolive", func(c *accounts.UserChanges) { c.LiveTv = new(false) })
-	noLive := s.signIn("nolive", "tv")
-	if view, ok := replayView(t, s, noLive); ok {
-		t.Errorf("Replay of a user without Live TV: %+v", view)
-	}
-	if status, body := s.call(http.MethodGet, "/Items?ParentId="+latest.ParentId, app("tv", noLive), nil); status == http.StatusOK &&
-		strings.Contains(string(body), "Latest") {
-		t.Errorf("a Replay folder listed to a user without Live TV: %s", body)
-	}
 }
 
 // A replay plays from the provider's timeshift: PlaybackInfo describes

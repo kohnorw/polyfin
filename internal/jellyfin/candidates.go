@@ -187,10 +187,6 @@ func pick(states []*tried, prefer, patient bool) (int, bool) {
 // addons' new answers when none of their versions plays.
 func (h *Handler) playableToPlay(ctx context.Context, user accounts.User, item library.Item) (playable, bool, error) {
 	p := playable{item: item, tracks: h.trackPreferences(ctx, user)}
-	if item.Kind == library.KindRecording {
-		p.versions = h.recordingVersions(ctx, item)
-		return p, true, nil
-	}
 	versions, complete, err := h.Library.VersionsToPlay(ctx, user, item.ID)
 	p.versions = h.offered(ctx, user, versions)
 	p.subtitles = h.titleSubtitles(item.ID)

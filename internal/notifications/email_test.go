@@ -19,7 +19,6 @@ import (
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
-	"github.com/moodiness/polyfin/internal/recordings"
 )
 
 // sunkMail is a message the SMTP sink received: who signed in, whether
@@ -270,7 +269,7 @@ func TestEmailTargetsReceiveMessagesInPlainTextAndHTML(t *testing.T) {
 	target := h.add(t, nil, inbox)
 
 	recording := accounts.ID{0x42}
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: recording, User: &h.member.ID, Channel: accounts.ID{9}, Name: "Late <Show>"})
+	h.RecordingEnded(t.Context(), Ended{Recording: recording, User: &h.member.ID, Channel: accounts.ID{9}, Name: "Late <Show>"})
 	link := "https://media.example.org/web/#/details?id=" + recording.String() + "&serverId=fedcba9876543210fedcba9876543210"
 	got := sink.wait(1)[0]
 	if !got.tls || got.user != "polyfin" || got.from != "polyfin@example.org" || got.to != "sam@example.org" {
@@ -348,7 +347,7 @@ func TestEmailRefusedSignInAndBusyServer(t *testing.T) {
 	if err != nil || result.Delivered || result.Status != 535 || result.Target.Problem != ProblemRefused {
 		t.Errorf("a refused password: %+v, %v", result, err)
 	}
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Show"})
+	h.RecordingEnded(t.Context(), Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Show"})
 	// The message is prepared in the background: its sign-in tells it was
 	// sent.
 	sink.waitSignIns(2)
@@ -363,7 +362,7 @@ func TestEmailRefusedSignInAndBusyServer(t *testing.T) {
 
 	h.useSMTP(t, sink, sink.password)
 	sink.then("451 4.7.1 Too many messages, slow down")
-	h.RecordingEnded(t.Context(), recordings.Ended{Recording: accounts.ID{2}, User: &h.member.ID, Name: "Show"})
+	h.RecordingEnded(t.Context(), Ended{Recording: accounts.ID{2}, User: &h.member.ID, Name: "Show"})
 	sink.wait(1)
 	h.idle(t)
 	if _, tries, _ := sink.received(); tries != 2 {

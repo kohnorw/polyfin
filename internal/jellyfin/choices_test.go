@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
-	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/playback"
 	"github.com/moodiness/polyfin/internal/stremio"
 )
@@ -131,39 +130,6 @@ func threeStreamsTV(t *testing.T) string {
 	}))
 	t.Cleanup(server.Close)
 	return server.URL + "/manifest.json"
-}
-
-// A channel's streams are tried as a title's versions are.
-func TestVersionAttemptsBoundTheStreamsOfAChannel(t *testing.T) {
-	t.Parallel()
-	chrome, err := os.ReadFile(filepath.Join(playbackFixtures, "profiles", "jellyfin-web-chrome.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	for _, attempts := range []int{1, 2} {
-		probe := scriptedProbe(t, unreadableFirst)
-		s := newProbingServer(t, 10, probe.path)
-		s.user("member", nil)
-		if _, err := s.addons.Install(t.Context(), addons.Shared(), threeStreamsTV(t), false); err != nil {
-			t.Fatal(err)
-		}
-		token := s.signIn("member", "tv")
-		s.setting(t, func(settings *accounts.Settings) { settings.VersionAttempts = attempts })
-		var channels QueryResult
-		s.get(t, "/LiveTv/Channels", token, &channels)
-		if len(channels.Items) != 1 {
-			t.Fatalf("channels: %+v", channels.Items)
-		}
-		answer := s.ask(t, token, channels.Items[0].Id, chrome, nil)
-		switch {
-		case probe.runs() != attempts:
-			t.Errorf("%d attempts: %d streams analyzed", attempts, probe.runs())
-		case attempts == 1 && !answer.refused():
-			t.Errorf("one attempt, on a stream that cannot be read: %+v", answer)
-		case attempts == 2 && (len(answer.MediaSources) != 1 || !strings.HasSuffix(answer.MediaSources[0].Name, "1")):
-			t.Errorf("two attempts: %+v", answer)
-		}
-	}
 }
 
 // firstSource is the version PlaybackInfo chose.
@@ -290,91 +256,6 @@ func TestPreferDirectPlayKeepsUnderTheUsersBitrateLimit(t *testing.T) {
 	q.limit(t, q.user, func(c *accounts.UserChanges) { c.MaxBitrate = new(2_000_000) })
 	if source := firstSource(t, q.playbackInfo(t, "tv", q.token, q.movie, nil)); source.Id != q.versions[1].ID.String() {
 		t.Errorf("without a device profile, under a limit: %+v", source)
-	}
-}
-
-func TestConversionsAtOnceAreLimited(t *testing.T) {
-	t.Parallel()
-	if os.Getenv("POLYFIN_TEST_FFMPEG") == "" {
-		t.Skip("POLYFIN_TEST_FFMPEG is not set: Polyfin converts video with the encoders FFmpeg has")
-	}
-	p := playing(t)
-	p.remuxable(t)
-	guest := p.testServer.user("guest", nil)
-	guestToken := p.signIn("guest", "phone")
-	if _, err := p.addons.Install(t.Context(), addons.Shared(), newTVAddon(t, false, "").url, false); err != nil {
-		t.Fatal(err)
-	}
-	var channels QueryResult
-	p.get(t, "/LiveTv/Channels", guestToken, &channels)
-	if len(channels.Items) == 0 {
-		t.Fatal("no channel")
-	}
-	channel := channels.Items[0].Id
-	liveAnalysis(t, p.testServer, guest, channel)
-	chrome, minimal := p.profile(t, "jellyfin-web-chrome"), p.profile(t, "minimal")
-	video := map[string]any{"MediaSourceId": p.movie, "EnableDirectPlay": false, "AllowVideoStreamCopy": false}
-	liveVideo := map[string]any{"AllowVideoStreamCopy": false}
-	converted := func(token, item string, profile json.RawMessage, more map[string]any) (string, bool) {
-		t.Helper()
-		answer := p.ask(t, token, item, profile, more)
-		if len(answer.MediaSources) == 0 {
-			return "", false
-		}
-		target := answer.MediaSources[0].TranscodingUrl
-		return target, strings.Contains(target, "allowVideoStreamCopy=false")
-	}
-	segment := func(target string, n int) int {
-		t.Helper()
-		base, query, _ := strings.Cut(target, "master.m3u8?")
-		status, _, _ := fetchText(t, p.url+base+"hls1/main/"+strconv.Itoa(n)+".mp4?"+query)
-		return status
-	}
-
-	p.setting(t, func(settings *accounts.Settings) { settings.MaxConversions = 1 })
-	// Planned while no video is converted, so before the limit is reached.
-	guestURL, guestConverted := converted(guestToken, p.movie, chrome, video)
-	memberURL, memberConverted := converted(p.token, p.movie, chrome, video)
-	if _, live := converted(guestToken, channel, minimal, liveVideo); !guestConverted || !memberConverted || !live {
-		t.Fatalf("below the limit: %q, %q, live %v", guestURL, memberURL, live)
-	}
-	if status := segment(memberURL, 0); status != http.StatusOK {
-		t.Fatalf("the member's first segment: %d", status)
-	}
-
-	// At the limit, no other video conversion is planned, files and live
-	// alike, and none starts.
-	if answer := p.ask(t, guestToken, p.movie, chrome, video); !answer.refused() {
-		t.Errorf("a file at the limit: %+v", answer)
-	}
-	if answer := p.ask(t, guestToken, channel, minimal, liveVideo); !answer.refused() {
-		t.Errorf("a channel at the limit: %+v", answer)
-	}
-	if status := segment(guestURL, 0); status != http.StatusServiceUnavailable {
-		t.Errorf("a conversion starting past the limit: %d", status)
-	}
-	// Copies go on.
-	if target, convertedVideo := converted(guestToken, p.movie, chrome, map[string]any{"MediaSourceId": p.movie, "EnableDirectPlay": false}); target == "" || convertedVideo {
-		t.Errorf("a copy at the limit: %q", target)
-	}
-	if target, convertedVideo := converted(guestToken, channel, minimal, nil); target == "" || convertedVideo {
-		t.Errorf("a live copy at the limit: %q", target)
-	}
-	// The playback running goes on: its next segments, a seek, and the
-	// title asked again, as apps do to switch tracks.
-	for _, n := range []int{1, 2, 0} {
-		if status := segment(memberURL, n); status != http.StatusOK {
-			t.Errorf("the member's segment %d at the limit: %d", n, status)
-		}
-	}
-	if _, again := converted(p.token, p.movie, chrome, video); !again {
-		t.Error("the member's title asked again at the limit is not converted")
-	}
-
-	// A higher limit applies at once.
-	p.setting(t, func(settings *accounts.Settings) { settings.MaxConversions = 2 })
-	if status := segment(guestURL, 0); status != http.StatusOK {
-		t.Errorf("a conversion below a raised limit: %d", status)
 	}
 }
 
