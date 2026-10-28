@@ -50,8 +50,9 @@ func TestDownloadsStreamAsOneFile(t *testing.T) {
 		!slices.Equal(tall.Reasons, []string{"VideoResolutionNotSupported"}) {
 		t.Errorf("under a 1080p group: %+v, video %+v", tall, tall.Video)
 	}
-	// The picture subtitle is burned in; the text one is a file beside.
-	if subtitles := decide(Options{MaxStreamingBitrate: 2_000_000, SubtitleStreamIndex: new(2), Progressive: true}).Subtitles; subtitles[2].Method != "Encode" ||
+	// The picture subtitle is burned in; the text one is a file beside,
+	// extracted on the fly as Jellyfin's EnableSubtitleExtraction does.
+	if subtitles := decide(Options{MaxStreamingBitrate: 2_000_000, SubtitleStreamIndex: new(2), Progressive: true, SubtitleExtraction: true}).Subtitles; subtitles[2].Method != "Encode" ||
 		subtitles[3].Method != "External" {
 		t.Errorf("subtitles: %+v", subtitles)
 	}

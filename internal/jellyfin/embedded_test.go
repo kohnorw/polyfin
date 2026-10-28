@@ -93,8 +93,9 @@ func playingFile(t *testing.T, file string) (s testServer, user accounts.User, t
 }
 
 // TestBrowsersGetTheTracksInsideFilesWithTheirFonts plays the file as
-// jellyfin-web does: its tracks go out as files, read whole through the
-// file's index, the ASS one as its script, with the font it uses.
+// jellyfin-web does: its tracks go out as files, extracted by FFmpeg from
+// the addon's link into the subtitle cache, as Jellyfin's SubtitleEncoder
+// extracts them, the ASS one as its script, with the font it uses.
 func TestBrowsersGetTheTracksInsideFilesWithTheirFonts(t *testing.T) {
 	t.Parallel()
 	s, user, token, id := playingFile(t, subtitledFile)
@@ -134,16 +135,27 @@ func TestBrowsersGetTheTracksInsideFilesWithTheirFonts(t *testing.T) {
 	// jellyfin-web downloads a text track as JSON, by swapping .vtt for .js.
 	status, _, events := fetchText(t, s.url+strings.Replace(srt.DeliveryUrl, ".vtt", ".js", 1))
 	original, _ := os.ReadFile(filepath.Join("..", "container", "testdata", "subtitles.srt"))
-	cues, _ := subtitles.Parse(original)
-	if status != http.StatusOK || events != string(subtitles.TrackEvents(cues)) {
+	parsed, err := subtitles.Parser{}.Parse(strings.NewReader(string(original)), "srt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != http.StatusOK || events != (subtitles.JSONWriter{}).ToText(parsed, "") {
 		t.Errorf("SRT track as JSON: %d %s", status, events)
 	}
 	// The ASS track comes as its script, which libass renders.
 	status, header, script := fetchText(t, s.url+ass.DeliveryUrl)
 	want, _ := os.ReadFile(filepath.Join("..", "container", "testdata", "subtitles.ass"))
-	wantScript, _ := subtitles.ParseScript(want)
-	if status != http.StatusOK || header.Get("Content-Type") != "text/x-ssa" || script != string(wantScript.Bytes()) {
-		t.Errorf("ASS track: %d %s\n%s\nwant\n%s", status, header.Get("Content-Type"), script, wantScript.Bytes())
+	wanted, err := subtitles.Parser{}.Parse(strings.NewReader(string(want)), "ass")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if status != http.StatusOK || header.Get("Content-Type") != "text/x-ssa" || !strings.Contains(script, "[V4+ Styles]") {
+		t.Errorf("ASS track: %d %s\n%s", status, header.Get("Content-Type"), script)
+	}
+	for _, p := range wanted.Paragraphs {
+		if !strings.Contains(script, strings.ReplaceAll(p.Text, "\n", "\\N")) {
+			t.Errorf("ASS track lacks %q:\n%s", p.Text, script)
+		}
 	}
 	// Apps that cannot render ASS get its text.
 	if status, _, text := fetchText(t, s.url+strings.Replace(ass.DeliveryUrl, ".ass", ".vtt", 1)); status != http.StatusOK || strings.Contains(text, `{\`) {
@@ -186,8 +198,7 @@ func TestBrowsersGetTheTracksInsideFilesWithTheirFonts(t *testing.T) {
 
 // TestBrowsersDrawingPGSGetItsRawFile plays a file with a PGS track as
 // jellyfin-web does when it draws PGS itself: the track goes out as a SUP
-// file, read whole through the file's index, served by ranges as Jellyfin
-// 12.2 serves its raw file.
+// file, extracted by FFmpeg, served by ranges as Jellyfin 12.4 serves it.
 func TestBrowsersDrawingPGSGetItsRawFile(t *testing.T) {
 	t.Parallel()
 	file := filepath.Join("..", "container", "testdata", "pgs.mkv")

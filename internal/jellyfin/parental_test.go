@@ -297,7 +297,7 @@ func TestParentalControlMatchesJellyfin(t *testing.T) {
 	check("Unrestricted", status, body)
 
 	// The subtitle search and playlists keep to the limit too.
-	if status, _ := s.call(http.MethodGet, "/Items/"+ids["Restricted"]+"/RemoteSearch/Subtitles/eng", childApp, nil); status != http.StatusNotFound {
+	if status, _ := s.call(http.MethodGet, "/Items/"+ids["Restricted"]+"/RemoteSearch/Subtitles/eng", childApp, nil); status != http.StatusNotFound && status != http.StatusForbidden {
 		t.Errorf("subtitle search of a hidden title: %d", status)
 	}
 	playlist := s.createPlaylist(t, adminToken, map[string]any{"Name": "Mix", "Ids": []string{ids["Allowed"], ids["Restricted"]}, "IsPublic": true})

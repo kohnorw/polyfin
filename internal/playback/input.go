@@ -201,3 +201,45 @@ func (s *Service) ProbesInput(ctx context.Context, in media.Input) bool {
 	_, err := s.ffprobe().ProbeInput(ctx, in)
 	return err == nil
 }
+
+// ReadVersion hands FFmpeg's input for a version to read, as Jellyfin's
+// MediaEncoder.GetInputArgument gives a media source's: a disc's title
+// read from its input, a link FFmpeg may read itself, at the host's full
+// speed, with reconnection; any other version through the source cache
+// and the loopback interface, which reads torrents and local folders' files
+// as playbacks do, urged as a playback is: someone waits for what is read.
+func (s *Service) ReadVersion(ctx context.Context, version library.Version, read func(ctx context.Context, input string, options []string) error) error {
+	if s.ReadsInput(version) {
+		in, err := s.input(ctx, version)
+		if err != nil {
+			return err
+		}
+		return read(ctx, in.Path, in.Args())
+	}
+	if directLink(version) {
+		err := read(ctx, version.URL, directOptions)
+		if err == nil || ctx.Err() != nil {
+			return err
+		}
+		s.logger.Info("FFmpeg could not read a version's link itself, reading it through the source cache", "addon", version.Addon, "error", err)
+	}
+	src := s.open(version)
+	defer src.Release()
+	defer src.Urge()()
+	target, free := s.loopback.register(src)
+	defer free()
+	return read(ctx, target, nil)
+}
+
+// directLink reports whether FFmpeg may read a version's link itself: an
+// address of the web that needs no headers, from a source not confined to
+// the server's own network routes.
+func directLink(version library.Version) bool {
+	return version.Torrent == nil && !version.Confined && len(version.Headers) == 0 &&
+		(strings.HasPrefix(version.URL, "https://") || strings.HasPrefix(version.URL, "http://"))
+}
+
+// directOptions have FFmpeg reconnect when a host drops the connection
+// of a long read, as debrid hosts do.
+var directOptions = []string{"-reconnect", "1", "-reconnect_streamed", "1", "-reconnect_on_network_error", "1",
+	"-reconnect_delay_max", "5", "-rw_timeout", "15000000"}

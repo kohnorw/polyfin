@@ -323,7 +323,7 @@ func (h *Handler) analyzeAhead(ctx context.Context, version library.Version) {
 	}
 	ctx = playback.Background(ctx)
 	started := time.Now()
-	analysis, err := h.Playback.Analyze(ctx, version)
+	_, err := h.Playback.Analyze(ctx, version)
 	if err != nil {
 		h.Logger.Debug("A version could not be analyzed ahead of playback", "addon", version.Addon, "error", err)
 		return
@@ -334,6 +334,5 @@ func (h *Handler) analyzeAhead(ctx context.Context, version library.Version) {
 	if _, err := h.Playback.Plan(ctx, version); err != nil {
 		h.Logger.Debug("A version's keyframe index could not be read ahead of playback", "addon", version.Addon, "error", err)
 	}
-	h.Playback.SubtitlesLocated(ctx, version, analysis)
 	h.Logger.Debug("Prepared a version ahead of playback", "addon", version.Addon, "duration", time.Since(started))
 }

@@ -170,7 +170,7 @@
     "-loglevel",
     "error",
     "-progress",
-    "pipe:4",
+    "pipe:3",
     "-copyts",
     "-i",
     "http://127.0.0.1:1/a.mkv",
@@ -222,16 +222,7 @@
     "0",
     "-f",
     "mpegts",
-    "pipe:1",
-    "-map",
-    "0:2",
-    "-c:s",
-    "webvtt",
-    "-flush_packets",
-    "1",
-    "-f",
-    "webvtt",
-    "pipe:3"
+    "pipe:1"
   ],
   "live cpu": [
     "-hide_banner",

@@ -140,7 +140,6 @@ func versionSourcesOn(t *testing.T) sourcesSetup {
 // versions labeled with the user's language even with its folder placed
 // first.
 func TestVersionSourceOrder(t *testing.T) {
-	skipAddonSubtitles(t)
 	t.Parallel()
 	p := versionSourcesOn(t)
 	french, frenchToken := p.another(t, "french", "fre")
@@ -174,19 +173,15 @@ func TestVersionSourceOrder(t *testing.T) {
 	})
 	check("the criterion after the language", french, frenchToken, "TwoFrench", "OneFrench", "Shelf", "TwoEnglish", "OneEnglish")
 
-	// Descriptions aside, the addons' subtitles keep the order of
+	// Descriptions aside, the subtitle providers keep the order of
 	// Content › Sources.
 	movie, _ := accounts.ParseID(p.movie)
-	subtitles, err := p.library.Subtitles(t.Context(), french, movie)
+	from, err := p.library.SubtitleAddons(t.Context(), french, movie)
 	if err != nil {
 		t.Fatal(err)
 	}
-	var from []string
-	for _, subtitle := range subtitles {
-		from = append(from, subtitle.Addon)
-	}
 	if !slices.Equal(from, []string{"Relay One", "Relay Two"}) {
-		t.Errorf("subtitles: %v", from)
+		t.Errorf("subtitle providers: %v", from)
 	}
 }
 

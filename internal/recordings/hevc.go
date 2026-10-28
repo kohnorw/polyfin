@@ -489,7 +489,6 @@ func (s *Service) replace(ctx context.Context, dir string, id accounts.ID) {
 	for _, query := range []string{
 		"DELETE FROM media_analyses WHERE version_id = $1",
 		"DELETE FROM media_keyframes WHERE version_id = $1",
-		"DELETE FROM media_subtitle_index WHERE version_id = $1",
 	} {
 		if _, err := s.db.Exec(ctx, query, id); err != nil {
 			s.logger.Warn("What was learned of a converted recording could not be forgotten", "error", err)

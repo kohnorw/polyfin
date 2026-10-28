@@ -101,8 +101,6 @@ Environment:
   POLYFIN_LISTEN        HTTP address (default :8096)
   POLYFIN_FFPROBE       ffprobe executable (default ffprobe, from PATH)
   POLYFIN_FFMPEG        FFmpeg executable (default ffmpeg, from PATH)
-  POLYFIN_TESSERACT     Tesseract executable picture subtitles are read into text with (default tesseract, from PATH)
-  POLYFIN_TESSDATA_DIR  folder of Tesseract .traineddata files for languages Tesseract's own data lacks (default: none)
   POLYFIN_FONTS_DIR     fallback fonts for subtitles and generated images (default /usr/share/fonts)
   POLYFIN_WEB_DIR       jellyfin-web, served at /web/ (default /usr/share/polyfin/jellyfin-web)
 
@@ -526,6 +524,8 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 		Logs:           recent,
 		CacheDir:       cfg.CacheDir,
 		FontsDir:       cfg.FontsDir,
+		FFmpeg:         cfg.FFmpeg,
+		DataDir:        cfg.DataDir,
 		Recordings:     recorder,
 		Commercials:    breaks,
 		Backups:        backups,
@@ -588,22 +588,21 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 		HomeRowChoices: jellyfinAPI,
 		Sharing:        lib,
 		Health: admin.HealthSources{
-			Addons:           addonClient,
-			Cache:            sources,
-			CacheDir:         cfg.CacheDir,
-			Encoder:          segments,
-			Thumbnails:       images,
-			DatabaseSize:     func(ctx context.Context) (int64, error) { return database.Size(ctx, pool) },
-			Started:          started,
-			SecretKey:        box.Enabled(),
-			Secrets:          func(ctx context.Context) (secrets.Report, error) { return box.Inspect(ctx, pool) },
-			Updates:          updateCheck,
-			Proxies:          proxies,
-			Discovery:        localDiscovery.Status,
-			DLNA:             sharing.Status,
-			HTTPS:            secure.Status,
-			MissingLanguages: player.MissingLanguages,
-			Torrents:         torrents,
+			Addons:       addonClient,
+			Cache:        sources,
+			CacheDir:     cfg.CacheDir,
+			Encoder:      segments,
+			Thumbnails:   images,
+			DatabaseSize: func(ctx context.Context) (int64, error) { return database.Size(ctx, pool) },
+			Started:      started,
+			SecretKey:    box.Enabled(),
+			Secrets:      func(ctx context.Context) (secrets.Report, error) { return box.Inspect(ctx, pool) },
+			Updates:      updateCheck,
+			Proxies:      proxies,
+			Discovery:    localDiscovery.Status,
+			DLNA:         sharing.Status,
+			HTTPS:        secure.Status,
+			Torrents:     torrents,
 		},
 		Variables:      config.Variables(os.Environ(), cfg),
 		Trackers:       tracking,
@@ -632,6 +631,11 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 		Reaches: func(user accounts.ID) bool { return notifier.Receives(user, notifications.ProgrammeReminder) },
 		Ready:   notifier.Loaded(), Logger: logger})
 	jellyfinAPI.Reminders = programmeReminders
+	// Subtitle files users added before subtitles were kept as Jellyfin
+	// keeps them move to their titles' folders.
+	if err := jellyfinAPI.MoveUploadedSubtitles(ctx); err != nil {
+		logger.Warn("The subtitle files users added could not be moved to their titles' folders", "error", err)
+	}
 	adminOptions.Reminders = programmeReminders
 	// Playbacks under way when Polyfin stops are kept in the history, as
 	// ended at their last report.

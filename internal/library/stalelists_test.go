@@ -3,7 +3,6 @@ package library
 import (
 	"net/http"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 )
@@ -244,55 +243,5 @@ func TestStaleListsAreGoneAfterADay(t *testing.T) {
 	}
 	if versions, complete := e.service.CachedVersions(t.Context(), e.member, e.movie); complete || len(versions) != 0 {
 		t.Errorf("cached a minute after the day ended: %d versions, complete %v", len(versions), complete)
-	}
-}
-
-func TestStaleSubtitleListsAreListedWhileTheAddonIsAskedAgain(t *testing.T) {
-	skipAddonSubtitles(t)
-	t.Parallel()
-	e := newStaleEnv(t, 20*time.Millisecond, 20*time.Millisecond)
-	subtitles := func() ([]string, bool) {
-		t.Helper()
-		subtitles, complete, err := e.service.SubtitlesNow(t.Context(), e.member, e.movie)
-		if err != nil {
-			t.Fatal(err)
-		}
-		files := make([]string, len(subtitles))
-		for i, subtitle := range subtitles {
-			files[i] = subtitle.URL[strings.LastIndex(subtitle.URL, "/")+1:]
-		}
-		return files, complete
-	}
-	e.numbers <- []int{1, 2, 3}
-	e.numbers <- []int{1, 2, 3}
-	if listed, err := e.service.Subtitles(t.Context(), e.member, e.movie); err != nil || len(listed) != 3 {
-		t.Fatalf("first answer: %+v %v", listed, err)
-	}
-	e.settles("subtitles", 2)
-	e.wait(11 * time.Minute)
-	if got, complete := subtitles(); complete || !slices.Equal(got, []string{"1.srt", "2.srt", "3.srt"}) {
-		t.Fatalf("opened again: %q, complete %v", got, complete)
-	}
-	e.eventually("the addon to be asked again", func() bool { return e.asked("subtitles") == 3 })
-	e.numbers <- []int{3}
-	e.eventually("the follow-up", func() bool { return e.asked("subtitles") == 4 })
-	if got, complete := subtitles(); !complete || !slices.Equal(got, []string{"3.srt", "1.srt", "2.srt"}) {
-		t.Errorf("while followed up: %q, complete %v", got, complete)
-	}
-	e.numbers <- []int{3}
-	e.settles("subtitles", 4)
-	if got, _ := subtitles(); !slices.Equal(got, []string{"3.srt"}) {
-		t.Errorf("once the follow-ups ended: %q", got)
-	}
-}
-
-// Only the subtitles inside the files are offered: the addons' are
-// neither listed nor asked for.
-func TestInFileSubtitlesOnlyListsNoAddonsSubtitles(t *testing.T) {
-	t.Parallel()
-	e := newStaleEnv(t, 20*time.Millisecond, 20*time.Millisecond)
-	listed, err := e.service.Subtitles(t.Context(), e.member, e.movie)
-	if err != nil || len(listed) != 0 || e.asked("subtitles") != 0 {
-		t.Fatalf("%+v %v, asked %d times", listed, err, e.asked("subtitles"))
 	}
 }

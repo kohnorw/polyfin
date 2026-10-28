@@ -55,16 +55,15 @@ type Remux struct {
 	// burned in instead, which FFmpeg reads beside the version.
 	Burn     *int
 	BurnFile string
-	// BurnText is a text subtitle file burned in instead, a local path
-	// Polyfin wrote (see hls.VideoEncoding.BurnText); StyledText tells an
-	// ASS or SSA one.
-	BurnText   string
-	StyledText bool
+	// BurnText is a text subtitle file burned in instead, the file
+	// Jellyfin's subtitle encoder gives (see hls.VideoEncoding.BurnText);
+	// BurnCharset is its character set, empty for UTF-8, and BurnFonts the
+	// folder of the fonts the version carries, which libass draws it with,
+	// as Jellyfin's attachments folder.
+	BurnText    string
+	BurnCharset string
+	BurnFonts   string
 }
-
-// textBurnFonts holds the fonts libass draws burned-in text subtitles
-// with: the Docker image's DejaVu fonts.
-const textBurnFonts = "/usr/share/fonts/truetype/dejavu"
 
 // Plan returns how a version is cut into segments, reading its keyframe
 // index on first use. An MPEG-TS file, which has no index, is cut every
@@ -438,30 +437,6 @@ func (s *Service) RemuxSegment(ctx context.Context, remux Remux, n int) (*os.Fil
 	return s.segments.Segment(ctx, remux.key(), s.remuxOpener(remux), n)
 }
 
-// RemuxSubtitle returns segment n of an embedded text subtitle track of a
-// remux, stream being its FFmpeg index: cut from the track when it was read
-// whole through the version's index, else once FFmpeg has extracted it. A
-// track the index locates is read whole meanwhile, for the segments after,
-// unless remuxes have extracted the version's tracks whole already.
-func (s *Service) RemuxSubtitle(ctx context.Context, remux Remux, stream, n int) ([]byte, error) {
-	plan, err := s.Plan(ctx, remux.Version)
-	if err != nil {
-		return nil, err
-	}
-	if cues, ok := s.keptCues(ctx, trackKey{remux.Version.ID, stream}); ok {
-		return hls.SubtitleSegment(cues, plan, n), nil
-	}
-	if analysis, err := s.Analyze(ctx, remux.Version); err == nil && !s.SubtitlesExtracted(ctx, remux.Version.ID, analysis.Duration) &&
-		s.SubtitlesLocated(ctx, remux.Version, analysis)[stream] {
-		s.PrefetchSubtitle(remux.Version, analysis, stream)
-	}
-	if err := s.segments.Subtitles(ctx, remux.key(), s.remuxOpener(remux), n); err != nil {
-		return nil, err
-	}
-	x := s.extractedOf(ctx, remux.Version.ID)
-	return hls.SubtitleSegment(x.cues(stream, plan.Start(n), plan.End(n)), plan, n), nil
-}
-
 // StopRemux stops the remuxes of a play session.
 func (s *Service) StopRemux(session string) {
 	s.segments.Stop(session)
@@ -507,9 +482,7 @@ func (r Remux) videoConversion() string {
 }
 
 // remuxOpener reads the version through the source cache, which keeps
-// what FFmpeg reads for the next seek. FFmpeg extracts the version's text
-// subtitles at the same time, until the version's are all extracted. A
-// source failing meanwhile has the version kept as failed, so that the
+// what FFmpeg reads for the next seek. A source failing meanwhile has the version kept as failed, so that the
 // next PlaybackInfo plays another. A version that holds one of its
 // source's connections takes it while FFmpeg reads (see Hold). A version
 // read from its input is read there by FFmpeg itself (see LocalInputs).
@@ -534,12 +507,7 @@ func (s *Service) remuxOpener(remux Remux) hls.Opener {
 		}
 		video, _ := videoOf(analysis)
 		audio := audioOf(analysis, remux.Audio)
-		x := s.extractedOf(ctx, remux.Version.ID)
-		var streams []int
-		if !x.Covers(0, analysis.Duration) {
-			streams = textSubtitles(analysis)
-		}
-		r := hls.Remux{Video: video.Index, Audio: audio, Format: remux.Format, Plan: plan, Subtitles: streams, Extracted: x}
+		r := hls.Remux{Video: video.Index, Audio: audio, Format: remux.Format, Plan: plan}
 		if plan.IsSearched() {
 			s.useLookback(ctx, &r, remux.Version)
 		}
@@ -554,10 +522,7 @@ func (s *Service) remuxOpener(remux Remux) hls.Opener {
 			// the plan's times do.
 			r.Input, r.InputOptions = in.Path, append(in.Args(), "-start_at_zero")
 			remux.convert(&r, video, TuningOf(s.settings()))
-			return r, func() {
-				hold()
-				s.saveExtracted(context.Background(), remux.Version.ID, x)
-			}, nil
+			return r, hold, nil
 		}
 		// A remux is a playback: its reads never wait behind background
 		// ones of the host.
@@ -572,7 +537,6 @@ func (s *Service) remuxOpener(remux Remux) hls.Opener {
 			unurge()
 			src.Release()
 			hold()
-			s.saveExtracted(context.Background(), remux.Version.ID, x)
 		}
 		// The encoding stops as soon as the source fails, rather than
 		// taking a body cut short for the end of the file.
@@ -622,12 +586,9 @@ func (remux Remux) convert(r *hls.Remux, video media.Stream, t Tuning) {
 		}
 		r.Encode = &hls.VideoEncoding{Encoder: c.Encoder, Level: c.Level(rate), Width: c.Width, Height: c.Height, Bitrate: c.Bitrate,
 			FrameRate: rate, ToneMap: c.ToneMap, ToneMapOnCPU: c.ToneMapOnCPU, Deinterlace: c.Deinterlace, Burn: remux.Burn, BurnFile: remux.BurnFile,
-			BurnText: remux.BurnText, StyledText: remux.StyledText,
+			BurnText: remux.BurnText, BurnCharset: remux.BurnCharset, FontsDir: remux.BurnFonts,
 			Hardware: c.Hardware, Preset: t.Preset, Quality: t.quality(c.Codec), ToneMapCurve: t.ToneMapCurve, ToneMapPeak: t.ToneMapPeak,
 			ToneMapDesat: t.ToneMapDesat, Deinterlacer: t.Deinterlacer, DoubleRate: double, DecodeOnCPU: !t.DecodesOnGPU(video.Codec, video.BitDepth)}
-		if remux.BurnText != "" {
-			r.Encode.FontsDir = textBurnFonts
-		}
 	}
 	if c := remux.ConvertAudio; c != nil && r.Audio >= 0 {
 		r.AudioCodec, r.AudioChannels, r.AudioBitrate, r.AudioFilter = c.Codec, c.Channels, c.Bitrate, c.Filter

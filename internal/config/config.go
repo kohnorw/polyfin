@@ -48,11 +48,6 @@ type Config struct {
 	// PATH.
 	FFprobe string
 	FFmpeg  string
-	// Tesseract is the executable picture subtitles are read into text
-	// with; TessdataDir a folder of .traineddata files for the languages
-	// Tesseract's own data lacks, empty for none.
-	Tesseract   string
-	TessdataDir string
 	// DataDir is the folder Polyfin keeps its files in, an absolute path:
 	// the cache, and the default recordings and backups folders.
 	DataDir string
@@ -127,8 +122,6 @@ func Load(getenv func(string) string) (Config, error) {
 		Listen:        strings.TrimSpace(getenv("POLYFIN_LISTEN")),
 		FFprobe:       strings.TrimSpace(getenv("POLYFIN_FFPROBE")),
 		FFmpeg:        strings.TrimSpace(getenv("POLYFIN_FFMPEG")),
-		Tesseract:     strings.TrimSpace(getenv("POLYFIN_TESSERACT")),
-		TessdataDir:   strings.TrimSpace(getenv("POLYFIN_TESSDATA_DIR")),
 		DataDir:       strings.TrimSpace(getenv("POLYFIN_DATA_DIR")),
 		FontsDir:      strings.TrimSpace(getenv("POLYFIN_FONTS_DIR")),
 		WebDir:        strings.TrimSpace(getenv("POLYFIN_WEB_DIR")),
@@ -146,9 +139,6 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if cfg.FFmpeg == "" {
 		cfg.FFmpeg = "ffmpeg"
-	}
-	if cfg.Tesseract == "" {
-		cfg.Tesseract = "tesseract"
 	}
 	var errs []error
 	if cfg.DatabaseURL == "" {

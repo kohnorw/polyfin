@@ -488,7 +488,6 @@ type settingsJSON struct {
 	DefaultAudioLanguage    *string `json:"defaultAudioLanguage"`
 	DefaultSubtitleLanguage *string `json:"defaultSubtitleLanguage"`
 	ExactTitleMatch         *bool   `json:"exactTitleMatch"`
-	PrefetchSubtitles       *bool   `json:"prefetchSubtitles"`
 	SubtitleExtraction      *bool   `json:"subtitleExtraction"`
 	LoginAttempts           *int    `json:"loginAttempts"`
 	InactiveDeviceDays      *int    `json:"inactiveDeviceDays"`
@@ -778,7 +777,6 @@ func newSettingsJSON(settings accounts.Settings) settingsJSON {
 		DefaultAudioLanguage:    &settings.DefaultAudioLanguage,
 		DefaultSubtitleLanguage: &settings.DefaultSubtitleLanguage,
 		ExactTitleMatch:         &settings.ExactTitleMatch,
-		PrefetchSubtitles:       &settings.PrefetchSubtitles,
 		SubtitleExtraction:      &settings.SubtitleExtraction,
 		LoginAttempts:           &settings.LoginAttempts,
 		TwoStepAdministrators:   &settings.TwoStepAdministrators,
@@ -1456,7 +1454,6 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		DefaultAudioLanguage:    valueOr(body.DefaultAudioLanguage, current.DefaultAudioLanguage),
 		DefaultSubtitleLanguage: valueOr(body.DefaultSubtitleLanguage, current.DefaultSubtitleLanguage),
 		ExactTitleMatch:         valueOr(body.ExactTitleMatch, current.ExactTitleMatch),
-		PrefetchSubtitles:       valueOr(body.PrefetchSubtitles, current.PrefetchSubtitles),
 		SubtitleExtraction:      valueOr(body.SubtitleExtraction, current.SubtitleExtraction),
 		LoginAttempts:           valueOr(body.LoginAttempts, current.LoginAttempts),
 		TwoStepAdministrators:   valueOr(body.TwoStepAdministrators, current.TwoStepAdministrators),
@@ -1485,13 +1482,10 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		HiddenRipTypes:          valueOr(body.HiddenRipTypes, current.HiddenRipTypes),
 		HideSpecials:            valueOr(body.HideSpecials, current.HideSpecials),
 		NameHowVersionsPlay:     valueOr(body.NameHowVersionsPlay, current.NameHowVersionsPlay),
-		SyncAddonSubtitles:      current.SyncAddonSubtitles,
 		MaxConversions:          valueOr(body.MaxConversions, current.MaxConversions),
 		MaxConversionHeight:     valueOr(body.MaxConversionHeight, current.MaxConversionHeight),
 		ConvertedDownloads:      valueOr(body.ConvertedDownloads, current.ConvertedDownloads),
 		WebSafeVideo:            valueOr(body.WebSafeVideo, current.WebSafeVideo),
-		SubtitleOCR:             current.SubtitleOCR,
-		SubtitleOCRTracks:       current.SubtitleOCRTracks,
 
 		EncoderPreset:              valueOr(body.EncoderPreset, current.EncoderPreset),
 		H264Quality:                valueOr(body.H264Quality, current.H264Quality),

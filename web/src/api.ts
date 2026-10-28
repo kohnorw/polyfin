@@ -374,7 +374,6 @@ export type Settings = {
   /** Leaves out the versions whose file name names another title. */
   exactTitleMatch: boolean
   /** Reads the subtitles inside the version played, and the next episode's, ahead in the background. */
-  prefetchSubtitles: boolean
   /** Extracts the subtitles inside a file while an app waits; off, only those kept already go out as files. */
   subtitleExtraction: boolean
   /** Ends version names with how the app asking plays each, as its last playback decides it. */
@@ -3544,7 +3543,6 @@ export type HealthProblem = {
   | { code: 'https_files'; failure: 'missing' | 'unreadable' | 'mismatch'; file: string }
   | { code: 'https_renewal'; error: string }
   | { code: 'https_expiry'; expires: string }
-  | { code: 'subtitle_ocr_language'; name: string; file: string }
   /** Every metadata addon of the server has a language: `name` is the first one's. */
   | { code: 'metadata_languages'; name: string }
   | { code: 'connection_stopped'; kind: 'app'; name: AppKind; owner: NonNullable<Owner> }

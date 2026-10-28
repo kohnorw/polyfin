@@ -14,59 +14,40 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/playback"
 	"github.com/moodiness/polyfin/internal/stremio"
+	"github.com/moodiness/polyfin/internal/subtitles"
 )
 
-// Subtitle files beside a video, as Jellyfin reads them: SubRip, ASS, SSA
-// or WebVTT files, PGS files (.sup) and VobSub pairs (an .idx file and the
-// .sub file of the same name) in the video's folder whose name begins with
-// the video's, then tells their language, title and flags, as in
+// Subtitle files beside a video, as Jellyfin 12.4 lists them: the files of
+// its subtitle extensions in the video's folder whose name is the video's
+// or begins with it and a dot, read by its ExternalPathParser, as in
 // "Movie (2001).srt", "Movie (2001).fr.srt", "Movie (2001).en.forced.sup"
-// or "Movie (2001).en.sdh.idx". A disc's are in its disc folder, named
-// after the folder. A scan stores them with their video; the folder's
-// streams offer them as the video's subtitle files (see Streams), read
-// from the folder or the share as its videos are (see Open).
+// or "Movie (2001).en.sdh.idx" (see subtitles.ParseExternalPath). A VobSub
+// pair, an .idx file and the .sub file of the same name, is listed by its
+// .idx file; a .sub file alone is a MicroDVD file. A disc's are in its
+// disc folder, named after the folder. A scan stores them with their
+// video; the folder's streams offer them as the video's subtitle files
+// (see Streams), read from the folder or the share as its videos are (see
+// Open).
 
 // subtitleFormats are the subtitle files a scan lists, by their extension,
-// and their format. A VobSub pair is listed by its .idx file, whose .sub
-// file is its pair.
-var subtitleFormats = map[string]string{".srt": "srt", ".ass": "ass", ".ssa": "ssa", ".vtt": "vtt", ".sup": "sup", ".idx": "idx"}
+// and their format: Jellyfin's subtitle extensions, and VobSub's .idx.
+var subtitleFormats = map[string]string{".srt": "srt", ".ass": "ass", ".ssa": "ssa", ".vtt": "vtt", ".sup": "sup", ".idx": "idx",
+	".sub": "sub", ".smi": "smi", ".sami": "sami", ".mks": "mks"}
 
 // subtitleTags is what a subtitle file's name tells past its video's: its
-// language as written ("fr", "fre", "French"), its title (the words that
-// are neither a language nor a flag), and whether it is forced, for the
-// hearing impaired, or the one to show by default.
+// language, its title, and whether it is forced, for the hearing impaired,
+// or the one to show by default.
 type subtitleTags struct {
 	language, title                    string
 	forced, hearingImpaired, isDefault bool
 }
 
-// readSubtitleTags reads the words of a subtitle file's name past its
-// video's, separated by dots, in any order and letter case: "forced" or
-// "foreign", "sdh", "hi" or "cc" for the hearing impaired, "default", and
-// the first word naming a language; the others make its title.
+// readSubtitleTags reads what a subtitle file's name holds past its
+// video's, such as ".en.forced", as Jellyfin's ExternalPathParser does.
 func readSubtitleTags(rest string) subtitleTags {
-	var tags subtitleTags
-	var title []string
-	for word := range strings.SplitSeq(rest, ".") {
-		word = strings.TrimSpace(word)
-		switch strings.ToLower(word) {
-		case "":
-		case "forced", "foreign":
-			tags.forced = true
-		case "sdh", "hi", "cc":
-			tags.hearingImpaired = true
-		case "default":
-			tags.isDefault = true
-		default:
-			if tags.language == "" && playback.KnownLanguage(word) {
-				tags.language = word
-			} else {
-				title = append(title, word)
-			}
-		}
-	}
-	tags.title = strings.Join(title, " ")
-	return tags
+	info, _ := subtitles.ParseExternalPath("x.srt", rest, playback.FindLanguage)
+	return subtitleTags{language: info.Language, title: info.Title, forced: info.IsForced, hearingImpaired: info.IsHearingImpaired,
+		isDefault: info.IsDefault}
 }
 
 // sidecar is a subtitle file found beside a video: the video's path, the
@@ -120,6 +101,10 @@ func sidecars(kind, root string, entries map[string]entry, sides map[string]foun
 		if format == "" {
 			continue
 		}
+		// A VobSub pair's .sub file is listed by its .idx file.
+		if format == "sub" && pairedIdx(sides, rel) {
+			continue
+		}
 		name := stem(rel)
 		var owner video
 		for _, v := range videos[path.Dir(rel)] {
@@ -145,6 +130,18 @@ func sidecars(kind, root string, entries map[string]entry, sides map[string]foun
 		result[rel] = side
 	}
 	return result
+}
+
+// pairedIdx reports whether a .sub file has the .idx file of the same
+// name beside it, in any case, with which it is a VobSub pair.
+func pairedIdx(sides map[string]found, sub string) bool {
+	stem := strings.ToLower(strings.TrimSuffix(sub, path.Ext(sub)))
+	for rel := range sides {
+		if strings.EqualFold(path.Ext(rel), ".idx") && strings.ToLower(strings.TrimSuffix(rel, path.Ext(rel))) == stem {
+			return true
+		}
+	}
+	return false
 }
 
 // storedSubtitle is a subtitle file a scan stored: its video's identifier
@@ -256,8 +253,8 @@ func idxLanguage(ctx context.Context, list listing, rel string) string {
 	for lines.Scan() {
 		if value, ok := strings.CutPrefix(strings.TrimSpace(lines.Text()), "id:"); ok {
 			code, _, _ := strings.Cut(value, ",")
-			if code = strings.TrimSpace(code); playback.KnownLanguage(code) {
-				return code
+			if language, ok := playback.FindLanguage(strings.TrimSpace(code)); ok {
+				return language
 			}
 			return ""
 		}

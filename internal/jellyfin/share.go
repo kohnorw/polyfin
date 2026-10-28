@@ -628,7 +628,8 @@ func (h *Handler) guestRemuxer(play guestPlay, sharer accounts.User) remuxer {
 		params := r.Clone(r.Context())
 		params.URL = &url.URL{Path: r.URL.Path, RawQuery: play.params}
 		req, ok := h.remuxFor(w, params, shareUser(sharer), play.item.ID, play.version, play.id)
-		req.uris, req.renditions = "", true
+		// Guests reach no subtitle controller: no subtitle is listed.
+		req.uris, req.renditions = "", false
 		return req, ok
 	}
 }

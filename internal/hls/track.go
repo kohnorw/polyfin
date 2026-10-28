@@ -74,7 +74,7 @@ type trackJob struct {
 // it: its input, and its audio, copied or converted. The video is left
 // to the kept video's FFmpeg.
 func (m *Manager) newTrack(key Key, remux Remux, release func()) (*track, error) {
-	remux.Encode, remux.Subtitles, remux.Extracted, remux.VideoTag = nil, nil, nil, ""
+	remux.Encode, remux.VideoTag = nil, ""
 	dir, err := os.MkdirTemp(m.dir, "audio-")
 	if err != nil {
 		return nil, err

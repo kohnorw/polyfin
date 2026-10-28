@@ -537,11 +537,5 @@ func (h *Handler) refreshItem(w http.ResponseWriter, r *http.Request) {
 		h.browseError(w, r, err)
 		return
 	}
-	if files, ok := h.subtitleFiles.Get(id); ok {
-		for _, file := range files {
-			h.subtitleCache.Delete(file.ID)
-		}
-		h.subtitleFiles.Delete(id)
-	}
 	w.WriteHeader(http.StatusNoContent)
 }

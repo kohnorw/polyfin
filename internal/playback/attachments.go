@@ -3,6 +3,8 @@ package playback
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"slices"
 	"time"
 
@@ -108,4 +110,34 @@ func (s *Service) attachedFiles(ctx context.Context, version library.Version, an
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
+}
+
+// WriteAttachments writes the files attached to a version into dir, once,
+// as Jellyfin's attachment extractor fills a media source's attachments
+// folder, where libass finds the fonts of a subtitle burned in. A version
+// that is no Matroska file has none.
+func (s *Service) WriteAttachments(ctx context.Context, version library.Version, analysis media.Analysis, dir string) error {
+	if !matroska(analysis) || !slices.ContainsFunc(analysis.Streams, Attached) {
+		return nil
+	}
+	if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
+		return nil
+	}
+	files, err := s.attachedFiles(ctx, version, analysis)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for _, file := range files {
+		name := filepath.Base(filepath.Clean("/" + file.FileName))
+		if name == "/" || name == "." {
+			continue
+		}
+		if err := os.WriteFile(filepath.Join(dir, name), file.Data, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
 }

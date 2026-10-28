@@ -239,9 +239,6 @@ const settings: typeof en = {
     exactTitleMatch: 'Titres exacts',
     exactTitleMatchHelp:
       'Retire les versions dont le fichier est d’un autre titre : son nom commence par un autre titre (Smiling Friends pour Friends, No Way Home pour Brand New Day), celui d’un film donne une année à plus d’un an près, celui d’un épisode une autre saison ou un autre épisode. « The », la ponctuation, les espaces et les pays comme (US) ne comptent pas. Les versions sans nom de fichier, ou dont le titre ne s’y lit pas, sont gardées ; les sorties nommées dans une autre langue sont retirées comme un autre titre. Activé par défaut.',
-    prefetchSubtitles: 'Lire les sous-titres à l’avance',
-    prefetchSubtitlesHelp:
-      'Au début d’une lecture, lit en arrière-plan les sous-titres du fichier, et ceux de l’épisode suivant, pour qu’ils s’affichent dès qu’on les active. Les fichiers dont l’index ne donne pas les sous-titres sont téléchargés une seconde fois pour cela. Activé par défaut.',
     subtitleExtraction: 'Extraire les sous-titres à la volée',
     subtitleExtractionHelp:
       'Lit les sous-titres d’un fichier quand une application les demande, ce qui peut la faire attendre (« Fetching additional data »). Désactivé, les sous-titres d’un fichier ne sont proposés comme fichiers qu’une fois lus, à l’avance ou par une lecture précédente ; d’ici là, les applications qui ne peuvent pas les afficher depuis la vidéo les reçoivent incrustés, ou pas du tout. Activé par défaut.',

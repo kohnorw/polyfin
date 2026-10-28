@@ -36,7 +36,7 @@ func defaultCases() []struct {
 				Encode: &VideoEncoding{Encoder: "libx264", Level: "4.1", Width: 1280, Height: 720, Bitrate: 5_000_000, FrameRate: 23.976, Deinterlace: true}}.args(1, 0)
 		}},
 		{"cpu hevc tone mapped", func() []string {
-			return Remux{Input: "http://127.0.0.1:1/a.mkv", Video: 0, Audio: 1, Format: TS, Plan: plan, Subtitles: []int{2},
+			return Remux{Input: "http://127.0.0.1:1/a.mkv", Video: 0, Audio: 1, Format: TS, Plan: plan,
 				AudioCodec: "ac3", AudioChannels: 6, AudioBitrate: 384_000,
 				Encode: &VideoEncoding{Encoder: "libx265", Level: "4.1", Width: 1280, Height: 720, Bitrate: 5_000_000, FrameRate: 24, ToneMap: true}}.args(0, 0)
 		}},

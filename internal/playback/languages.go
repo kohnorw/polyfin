@@ -121,6 +121,32 @@ func KnownLanguage(word string) bool {
 	return ok
 }
 
+// FindLanguage finds a language as Jellyfin's
+// LocalizationManager.FindLanguageInfo does, by its ISO 639-2 or 639-1
+// code or its English name, in any letter case, and returns the code
+// Jellyfin's ExternalPathParser keeps of it: the culture's name when it has
+// a region ("pt-br"), else its ISO 639-2/T code ("fra").
+func FindLanguage(word string) (string, bool) {
+	i, ok := languageLookup().jellyfin[strings.ToLower(strings.TrimSpace(word))]
+	if !ok {
+		return "", false
+	}
+	if base, region, ok := strings.Cut(languages[i].short, "-"); ok {
+		return base + "-" + strings.ToUpper(region), true
+	}
+	return languages[i].code, true
+}
+
+// TwoLetterLanguage is a language's ISO 639-1 code, Jellyfin's culture
+// TwoLetterISOLanguageName, empty when it has none.
+func TwoLetterLanguage(language string) string {
+	i, ok := addonIndex(strings.TrimSpace(language))
+	if !ok {
+		return ""
+	}
+	return languages[i].short
+}
+
 // SameLanguage reports whether two languages, as apps and addons give them,
 // are the same: ISO 639-2/B and /T codes, ISO 639-1 codes and names of one
 // language are ("fre", "fra", "fr" and "French" are). Languages the list

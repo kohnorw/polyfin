@@ -120,7 +120,7 @@ hls1/main/2.mp4?a=b
 	}
 }
 
-func TestSubtitleRenditionsFollowHLSRules(t *testing.T) {
+func TestSubtitleRenditionsAreJellyfins(t *testing.T) {
 	var master bytes.Buffer
 	err := WriteMaster(&master, []Variant{{Bandwidth: 1_000_000, URI: "main.m3u8"}}, []Rendition{
 		{Name: "French", Language: "fr", URI: "s0.m3u8"},
@@ -131,13 +131,13 @@ func TestSubtitleRenditionsFollowHLSRules(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// Names differ within the group; a default track is autoselected, and
-	// so is a forced one.
+	// As Jellyfin's DynamicHlsHelper.AddSubtitles writes them: every track
+	// autoselected, names as they are.
 	want := `#EXTM3U
-#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="French",LANGUAGE="fr",DEFAULT=NO,AUTOSELECT=NO,FORCED=NO,URI="s0.m3u8"
-#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="French 2",LANGUAGE="fr",DEFAULT=NO,AUTOSELECT=NO,FORCED=NO,URI="s1.m3u8"
-#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="Forced 'signs'",LANGUAGE="fr",DEFAULT=NO,AUTOSELECT=YES,FORCED=YES,URI="s2.m3u8"
-#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO,URI="s3.m3u8"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="French",DEFAULT=NO,FORCED=NO,AUTOSELECT=YES,URI="s0.m3u8",LANGUAGE="fr"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="French",DEFAULT=NO,FORCED=NO,AUTOSELECT=YES,URI="s1.m3u8",LANGUAGE="fr"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="Forced "signs"",DEFAULT=NO,FORCED=YES,AUTOSELECT=YES,URI="s2.m3u8",LANGUAGE="fr"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",DEFAULT=YES,FORCED=NO,AUTOSELECT=YES,URI="s3.m3u8",LANGUAGE="en"
 #EXT-X-STREAM-INF:BANDWIDTH=1000000,AVERAGE-BANDWIDTH=1000000,SUBTITLES="subs"
 main.m3u8
 `
@@ -160,7 +160,7 @@ func TestVariantsAreListedInOrder(t *testing.T) {
 	}
 	want := `#EXTM3U
 #EXT-X-INDEPENDENT-SEGMENTS
-#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",LANGUAGE="en",DEFAULT=NO,AUTOSELECT=NO,FORCED=NO,URI="s0.m3u8"
+#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",NAME="English",DEFAULT=NO,FORCED=NO,AUTOSELECT=YES,URI="s0.m3u8",LANGUAGE="en"
 #EXT-X-STREAM-INF:BANDWIDTH=15640000,AVERAGE-BANDWIDTH=15640000,VIDEO-RANGE=SDR,CODECS="avc1.640028,mp4a.40.2",RESOLUTION=1920x1080,FRAME-RATE=24,SUBTITLES="subs"
 main.m3u8?a=b
 #EXT-X-STREAM-INF:BANDWIDTH=8140000,AVERAGE-BANDWIDTH=8140000,VIDEO-RANGE=SDR,CODECS="avc1.64001f,mp4a.40.2",RESOLUTION=1280x720,FRAME-RATE=24,SUBTITLES="subs"
