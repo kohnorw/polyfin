@@ -439,7 +439,11 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 			shown = -1
 		}
 	}
-	go h.extractAhead(context.WithoutCancel(r.Context()), chosen.version, shown)
+	// A converted download reads the whole file itself, and carries no
+	// subtitle the player asks for while it plays.
+	if !chosen.decision.Progressive {
+		go h.extractAhead(context.WithoutCancel(r.Context()), chosen.version, shown)
+	}
 	session := h.Playback.Signer().Sign(playback.Grant{Version: chosen.version.ID, User: user.ID, Relay: mustRelay(r, chosen.version)})
 	chosenSource := h.decidedSource(r, p, *chosen, request, session)
 	// Every version listed is named for the profile sent: the one chosen
