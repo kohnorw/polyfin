@@ -6,6 +6,7 @@ package playback
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -241,10 +242,50 @@ func (s *Service) storedLocation(version library.Version) (source.Location, bool
 
 // locationOf is where a version's bytes are, with the size its addon
 // announced: the source cache refuses another file at the first byte once
-// the addon's sizes prove right.
+// the addon's sizes prove right. An addon's Usenet streams have a record of
+// their own (see sizeAnnouncer).
 func locationOf(version library.Version) source.Location {
 	return source.Location{URL: version.URL, Headers: version.Headers, Confined: version.Confined, Size: version.Size,
-		Announcer: version.Addon}
+		Announcer: sizeAnnouncer(version)}
+}
+
+// sizeAnnouncer names whose announced sizes a version's are counted with:
+// its addon's, or for a Usenet stream its addon's Usenet streams'. The size
+// an addon announces for a Usenet stream is the release's as its indexer
+// lists it, archives and recovery files included, never the video's; an
+// addon whose other streams have their files' sizes would otherwise refuse
+// every Usenet stream as another file.
+func sizeAnnouncer(version library.Version) string {
+	if usenetLink(version.URL) {
+		return version.Addon + " (Usenet)"
+	}
+	return version.Addon
+}
+
+// usenetLink reports whether a link plays a Usenet release: AIOStreams'
+// playback links describe their file in a segment of URL-safe Base64 JSON,
+// whose type is "usenet" for an NZB.
+func usenetLink(link string) bool {
+	u, err := url.Parse(link)
+	if err != nil {
+		return false
+	}
+	for segment := range strings.SplitSeq(u.Path, "/") {
+		if !strings.HasPrefix(segment, "eyJ") { // {" in Base64
+			continue
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(strings.TrimRight(segment, "="))
+		if err != nil {
+			continue
+		}
+		var file struct {
+			Type string `json:"type"`
+		}
+		if json.Unmarshal(raw, &file) == nil && strings.EqualFold(file.Type, "usenet") {
+			return true
+		}
+	}
+	return false
 }
 
 // Torrents has the source cache read the versions that are torrents'
