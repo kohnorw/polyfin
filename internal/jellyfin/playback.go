@@ -810,6 +810,10 @@ func (h *Handler) decidedSource(r *http.Request, p playable, d decided, request 
 			source.TranscodingSubProtocol = "http"
 		}
 		source.TranscodingContainer = decision.Transcoding.Container
+		// A source to stream is not a remote file to play as it is:
+		// Jellyfin for Roku plays the Path of a remote source rather than
+		// its TranscodingUrl, so nothing it needed converted played.
+		source.IsRemote = false
 		describeConverted(request, analysis, source.MediaStreams, decision.Video)
 	}
 	if decision.AudioStreamIndex >= 0 {

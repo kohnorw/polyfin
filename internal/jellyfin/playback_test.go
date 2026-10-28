@@ -422,6 +422,11 @@ func TestAudioTheAppCannotTakeIsConverted(t *testing.T) {
 	// The app takes H.264, and AAC only: the Opus audio becomes AAC.
 	source := ask("minimal", nil)
 	target := source.TranscodingUrl
+	// Jellyfin for Roku plays the Path of a remote source as it is, rather
+	// than its TranscodingUrl: a source to convert is not remote.
+	if source.IsRemote {
+		t.Errorf("a source to convert is remote: Jellyfin for Roku would play it unconverted")
+	}
 	if source.SupportsDirectPlay || !source.SupportsTranscoding || source.TranscodingContainer != "ts" ||
 		!strings.HasSuffix(target, "&TranscodeReasons=ContainerNotSupported,AudioCodecNotSupported&allowAudioStreamCopy=false") ||
 		strings.Contains(target, "AudioSampleRate") {
