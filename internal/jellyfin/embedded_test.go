@@ -98,6 +98,7 @@ func playingFile(t *testing.T, file string) (s testServer, user accounts.User, t
 // extracts them, the ASS one as its script, with the font it uses.
 func TestBrowsersGetTheTracksInsideFilesWithTheirFonts(t *testing.T) {
 	t.Parallel()
+	needFFmpeg(t)
 	s, user, token, id := playingFile(t, subtitledFile)
 	movie := id.String()
 
@@ -201,6 +202,7 @@ func TestBrowsersGetTheTracksInsideFilesWithTheirFonts(t *testing.T) {
 // file, extracted by FFmpeg, served by ranges as Jellyfin 12.4 serves it.
 func TestBrowsersDrawingPGSGetItsRawFile(t *testing.T) {
 	t.Parallel()
+	needFFmpeg(t)
 	file := filepath.Join("..", "container", "testdata", "pgs.mkv")
 	s, user, token, id := playingFile(t, file)
 	raw, err := os.ReadFile(filepath.Join(playbackFixtures, "profiles", "jellyfin-web-chrome.json"))
@@ -274,5 +276,13 @@ func TestAttachedFilesOtherThanFontsAreDownloads(t *testing.T) {
 	_ = json.Unmarshal([]byte(served), &message)
 	if status != recorded.Status || !strings.HasPrefix(message, "Attachment with stream index 5 can't be extracted for MediaSource ") {
 		t.Errorf("cover art: %d %q, want %d", status, message, recorded.Status)
+	}
+}
+
+// needFFmpeg skips a test that has FFmpeg extract subtitles without one.
+func needFFmpeg(t *testing.T) {
+	t.Helper()
+	if os.Getenv("POLYFIN_TEST_FFMPEG") == "" {
+		t.Skip("POLYFIN_TEST_FFMPEG is not set: FFmpeg extracts the tracks inside files")
 	}
 }

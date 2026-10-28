@@ -58,9 +58,7 @@ func TestNZBVersionsListAndServeTheirSubtitles(t *testing.T) {
 	if err != nil {
 		t.Skip("ffprobe is not installed")
 	}
-	if _, err := exec.LookPath("ffmpeg"); err != nil {
-		t.Skip("ffmpeg is not installed")
-	}
+	needFFmpeg(t)
 	s := newProbingServer(t, 10, ffprobe)
 	user := s.user("member", nil)
 	if _, err := s.addons.Install(t.Context(), addons.Shared(), usenetAddon(t, subtitledFile), false); err != nil {

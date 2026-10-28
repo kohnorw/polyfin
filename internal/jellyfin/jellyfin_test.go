@@ -186,7 +186,8 @@ func newProbingServer(t *testing.T, failures int, ffprobe string, configure ...f
 		Logs:          ring,
 		CacheDir:      t.TempDir(),
 		DataDir:       t.TempDir(),
-		FFmpeg:        "ffmpeg",
+		// Subtitles are extracted by the FFmpeg tests are given, if any.
+		FFmpeg: os.Getenv("POLYFIN_TEST_FFMPEG"),
 	}
 	for _, c := range configure {
 		c(&options, pool)

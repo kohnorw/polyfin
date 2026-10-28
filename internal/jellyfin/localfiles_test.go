@@ -1026,6 +1026,10 @@ func TestLocalPictureSubtitleFilesAreTracks(t *testing.T) {
 	addonFile := track{"subrip", "French - SUBRIP - External", false, false, true, "External", "vtt"}
 	pgsFile := track{"PGSSUB", "English - Forced - PGSSUB - External", true, false, false, "External", "pgssub"}
 	vobSub := track{"DVDSUB", "English - Hearing Impaired - DVDSUB - External", false, true, false, "Encode", ""}
+	if os.Getenv("POLYFIN_TEST_FFMPEG") == "" {
+		// Nothing can burn it in: it is left out.
+		vobSub.delivery = "Drop"
+	}
 	if got := files(pictureInfo(t, p, local, pictureProfile(t, p), -1)); !slices.Equal(got, []track{addonFile, pgsFile, vobSub}) {
 		t.Errorf("the files, for an app that draws PGS: %+v", got)
 	}

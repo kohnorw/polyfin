@@ -800,7 +800,12 @@ func TestTextSubtitlesTakenOnlyBurnedInStayOfferedWhenNotChosen(t *testing.T) {
 		t.Fatalf("%+v", answer)
 	}
 	source := answer.MediaSources[0]
-	if !source.SupportsDirectPlay || track(source) != "Encode" {
+	// Without FFmpeg, nothing can burn it in: the track is left out.
+	want := "Encode"
+	if os.Getenv("POLYFIN_TEST_FFMPEG") == "" {
+		want = "Drop"
+	}
+	if !source.SupportsDirectPlay || track(source) != want {
 		t.Errorf("direct play %v, track %s", source.SupportsDirectPlay, track(source))
 	}
 	// A user who may not have the video converted cannot have it burned in.
