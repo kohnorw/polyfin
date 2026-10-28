@@ -3,7 +3,7 @@ import type en from '../en/sources'
 const sources: typeof en = {
   sources: {
     title: 'Sources',
-    lede: 'Addons Stremio, addons Eclipse, sources IPTV et dossiers locaux, réunis dans une seule liste. Les sources du serveur servent à tous ; celles d’un membre ne servent qu’à lui.',
+    lede: 'Vos addons Stremio. Les sources du serveur servent à tous ; celles d’un membre ne servent qu’à lui.',
     add: 'Ajouter une source',
     listLabel: 'Sources',
     listNote: 'Les sources personnelles des membres ne servent qu’à leur propriétaire.',

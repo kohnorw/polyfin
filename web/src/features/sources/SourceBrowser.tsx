@@ -106,7 +106,7 @@ type Query = {
  * on narrower screens). The choice is kept in the address (`?source=`), so it survives a reload.
  */
 export function SourceBrowser({
-  entries,
+  entries: allEntries,
   queries,
   selfId,
   emptyText,
@@ -126,9 +126,12 @@ export function SourceBrowser({
 }) {
   const { language, t } = useI18n()
   const text = t.sources
+  // Only Stremio addons are shown: Eclipse addons, IPTV sources, tuners and local folders are kept,
+  // but left out of the list.
+  const entries = allEntries.filter((entry) => kindOf(entry.addon) === 'stremio')
   const wide = useWide()
   const [params, setParams] = useSearchParams()
-  const [kind, setKind] = useState<KindFilter | 'all'>('all')
+  const [kind, setKind] = useState<KindFilter | 'all'>('stremio')
   const [owner, setOwner] = useState('all')
   const [search, setSearch] = useState('')
   const shared = useMoveSource('shared')
@@ -199,10 +202,7 @@ export function SourceBrowser({
     iptv: byOwner.filter((e) => isIptv(e.addon)).length,
     local: byOwner.filter((e) => kindOf(e.addon) === 'local').length,
   }
-  // Only the server has local folders: their filter shows once it has one.
-  const kindFilters = (['all', 'stremio', 'eclipse', 'iptv', 'local'] as const).filter(
-    (value) => value !== 'local' || counts.local > 0,
-  )
+  const kindFilters = ['stremio'] as const
 
   const chosenKey = params.get('source')
   const chosen = entries.find((entry) => entry.key === chosenKey) ?? (wide ? visible[0] : undefined)
@@ -264,7 +264,7 @@ export function SourceBrowser({
                     : 'border-transparent text-ink-2 hover:bg-s2 hover:text-ink',
                 )}
               >
-                {value === 'all' ? text.all : text.kinds[value]}
+                {text.kinds[value]}
                 <span className="font-mono text-micro text-ink-3">{counts[value]}</span>
               </button>
             ))}
@@ -309,7 +309,7 @@ export function SourceBrowser({
               <Button
                 size="sm"
                 onClick={() => {
-                  setKind('all')
+                  setKind('stremio')
                   setOwner('all')
                   setSearch('')
                 }}
