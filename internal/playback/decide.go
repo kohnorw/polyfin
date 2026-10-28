@@ -47,6 +47,13 @@ type Options struct {
 	Progressive bool
 	// Can is what the installed FFmpeg converts with.
 	Can Capabilities
+	// SubtitleExtraction is Jellyfin's EnableSubtitleExtraction, its
+	// transcoder's CanExtractSubtitles: a transcode gives the text tracks
+	// inside the file as files or in HLS, extracted while the app waits.
+	SubtitleExtraction bool
+	// InfiniteStream is Jellyfin's MediaSourceInfo.IsInfiniteStream: a live
+	// stream's subtitles are not converted to files.
+	InfiniteStream bool
 }
 
 // MediaSource is a version as the decision sees it.
@@ -198,7 +205,7 @@ func (r reason) names() []string {
 // profiles, the one with the fewest failures, first in order, gives the
 // container and codec reasons.
 func Decide(profile *DeviceProfile, source MediaSource, options Options) Decision {
-	d := decider{profile: profile, source: source}
+	d := decider{profile: profile, source: source, options: options}
 	d.locate(options)
 	decision := Decision{AudioStreamIndex: -1, SubtitleStreamIndex: -1, Transcoding: d.transcoding()}
 	if d.played != nil {
@@ -255,9 +262,9 @@ func Decide(profile *DeviceProfile, source MediaSource, options Options) Decisio
 			decision.Subtitles = map[int]SubtitleDelivery{}
 		}
 		if t := decision.Transcoding; !decision.DirectPlay && t != nil {
-			decision.Subtitles[stream.Index] = subtitleDelivery(profile.SubtitleProfiles, stream, true, t.Container, t.Protocol)
+			decision.Subtitles[stream.Index] = subtitleDelivery(profile.SubtitleProfiles, stream, true, t.Container, t.Protocol, options)
 		} else {
-			decision.Subtitles[stream.Index] = subtitleDelivery(profile.SubtitleProfiles, stream, false, source.Container, "")
+			decision.Subtitles[stream.Index] = subtitleDelivery(profile.SubtitleProfiles, stream, false, source.Container, "", options)
 		}
 	}
 	return decision
@@ -266,6 +273,7 @@ func Decide(profile *DeviceProfile, source MediaSource, options Options) Decisio
 // decider holds what a decision looks at.
 type decider struct {
 	profile *DeviceProfile
+	options Options
 	source  MediaSource
 	video   *MediaStream
 	// played is the audio track that plays: asked for, flagged default or
@@ -338,8 +346,8 @@ func (d *decider) taller(height int) bool {
 func (d *decider) directPlay() (*DirectPlayProfile, reason) {
 	shared := d.codecReasons(d.source.Container) | d.containerReasons()
 	if d.subtitle != nil {
-		switch subtitleDelivery(d.profile.SubtitleProfiles, d.subtitle, false, d.source.Container, "").Method {
-		case "Embed", "External":
+		switch subtitleDelivery(d.profile.SubtitleProfiles, d.subtitle, false, d.source.Container, "", d.options).Method {
+		case "Embed", "External", "Drop":
 		default:
 			shared |= subtitleCodecNotSupported
 		}
@@ -582,92 +590,147 @@ func singleContainer(source string, matched *DirectPlayProfile, profiles []Direc
 }
 
 // subtitleDelivery is how stream reaches the app, when direct playing
-// container or when transcoding to container over protocol:
-//   - embedded in the stream, in its own format, then in another text
-//     format, unless the stream is a sidecar or the output cannot carry it;
+// container or when transcoding to container over protocol, as Jellyfin
+// 12.4's StreamBuilder.GetSubtitleProfile chooses it:
+//   - embedded, in its own format, then in another text format it converts
+//     to, when it may be (see canConsiderEmbed);
 //   - as a file or in the HLS playlist (HLS only when transcoding), in its
-//     own format, then converted to another text format; as a file only
-//     when it is ready (see MediaStream.NotReady);
+//     own format, then converted to another text format; a track inside
+//     the file goes out so while transcoding only when the server extracts
+//     subtitles on the fly (Options.SubtitleExtraction), or is PGS or
+//     VobSub; VobSub goes out as a file only extracted as Matroska, to a
+//     profile naming "mks" among its containers;
 //   - otherwise burned into the video.
-//
-// A VobSub file is a pair, an .idx and a .sub file, which no app takes as
-// one file: Jellyfin 12.2 gives VobSub as a file only extracted as
-// Matroska (.mks), and burns such a pair in.
-func subtitleDelivery(profiles []SubtitleProfile, stream *MediaStream, transcode bool, container, protocol string) SubtitleDelivery {
-	language := stream.Language
-	if language == "" {
-		language = "und"
-	}
-	embeddable := !stream.IsExternal && (!transcode || (!strings.EqualFold(protocol, "hls") && embedsSubtitles(container))) &&
-		!webMWebVTT(stream, container)
-	for convert := range 2 {
-		if !embeddable {
-			break
-		}
-		for i := range profiles {
-			p := &profiles[i]
-			if p.Method != "Embed" || !listHas(p.Language, language) || !listMeets(p.Container, container) || stream.IsTextSubtitleStream != textSubtitle(p.Format) {
-				continue
-			}
-			if strings.EqualFold(p.Format, stream.Codec) || (convert == 1 && stream.IsTextSubtitleStream && convertible(stream.Codec, p.Format)) {
-				return SubtitleDelivery{Method: p.Method, Format: p.Format}
+func subtitleDelivery(profiles []SubtitleProfile, stream *MediaStream, transcode bool, container, protocol string, options Options) SubtitleDelivery {
+	if canConsiderEmbed(stream, transcode, protocol, container) {
+		for convert := range 2 {
+			for i := range profiles {
+				p := &profiles[i]
+				if !supportsLanguage(p, stream.Language) || p.Method != "Embed" || !listMeets(p.Container, container) ||
+					transcode && !embedsSubtitles(container) {
+					continue
+				}
+				if convert == 0 && stream.IsTextSubtitleStream == textSubtitle(p.Format) && strings.EqualFold(p.Format, stream.Codec) ||
+					convert == 1 && stream.IsTextSubtitleStream && convertible(stream, p.Format) {
+					return SubtitleDelivery{Method: p.Method, Format: p.Format}
+				}
 			}
 		}
 	}
-	for convert := range 2 {
-		for i := range profiles {
-			p := &profiles[i]
-			switch {
-			case p.Method == "External" && stream.IsTextSubtitleStream == textSubtitle(p.Format) && !(stream.IsExternal && strings.EqualFold(stream.Codec, "DVDSUB")) &&
-				!stream.NotReady:
-			case p.Method == "Hls" && transcode && stream.IsTextSubtitleStream:
-			default:
-				continue
-			}
-			if !listHas(p.Language, language) {
-				continue
-			}
-			if strings.EqualFold(p.Format, stream.Codec) || (convert == 1 && stream.IsTextSubtitleStream && stream.SupportsExternalStream && convertible(stream.Codec, p.Format)) {
-				return SubtitleDelivery{Method: p.Method, Format: p.Format}
-			}
+	for _, allowConversion := range [...]bool{false, true} {
+		if p := externalSubtitleProfile(profiles, stream, transcode, options, allowConversion); p != nil {
+			return SubtitleDelivery{Method: p.Method, Format: p.Format}
 		}
 	}
 	return SubtitleDelivery{Method: "Encode", Format: stream.Codec}
 }
 
-// webMWebVTT reports whether stream is a WebVTT track in a Matroska or
-// WebM container. FFmpeg reads and writes those as WebM's D_WEBVTT tracks,
-// which ExoPlayer's Matroska extractor leaves out, so an app told to find
-// one embedded shows nothing (Jellyfin for Android TV logs "Failed to find
-// correct subtitle group for method Embed"). Such a track goes out as a
-// file instead: the version's index reads it block by block.
-func webMWebVTT(stream *MediaStream, container string) bool {
-	return strings.EqualFold(stream.Codec, "webvtt") && listMeets("mkv,matroska,webm", container)
+// externalSubtitleProfile is Jellyfin 12.4's
+// StreamBuilder.GetExternalSubtitleProfile.
+func externalSubtitleProfile(profiles []SubtitleProfile, stream *MediaStream, transcode bool, options Options, allowConversion bool) *SubtitleProfile {
+	for i := range profiles {
+		p := &profiles[i]
+		if p.Method != "External" && p.Method != "Hls" || p.Method == "Hls" && !transcode || !supportsLanguage(p, stream.Language) {
+			continue
+		}
+		if !stream.IsExternal && transcode && !options.SubtitleExtraction && !pgsSubtitle(stream) && !vobSubSubtitle(stream) {
+			continue
+		}
+		mks := vobSubMksProfile(p, stream)
+		if !(p.Method == "External" && (mks || !vobSubMksDelivery(p) && stream.IsTextSubtitleStream == textSubtitle(p.Format)) ||
+			p.Method == "Hls" && stream.IsTextSubtitleStream) {
+			continue
+		}
+		if mks || strings.EqualFold(stream.Codec, p.Format) {
+			return p
+		}
+		if !allowConversion || options.InfiniteStream {
+			continue
+		}
+		if stream.IsTextSubtitleStream && stream.SupportsExternalStream && convertible(stream, p.Format) {
+			return p
+		}
+	}
+	return nil
 }
 
-// embedsSubtitles reports whether a transcode to container keeps subtitle
-// tracks.
+// canConsiderEmbed is Jellyfin 12.4's
+// StreamBuilder.CanConsiderEmbedSubtitle: a file may be embedded only in a
+// transcode to Matroska that is not HLS; a track inside the file, unless
+// transcoding over HLS.
+func canConsiderEmbed(stream *MediaStream, transcode bool, protocol, container string) bool {
+	if stream.IsExternal {
+		return transcode && !strings.EqualFold(protocol, "hls") && embedsSubtitles(container)
+	}
+	return !transcode || !strings.EqualFold(protocol, "hls")
+}
+
+// supportsLanguage is Jellyfin's SubtitleProfile.SupportsLanguage.
+func supportsLanguage(p *SubtitleProfile, language string) bool {
+	if p.Language == "" {
+		return true
+	}
+	if language == "" {
+		language = "und"
+	}
+	return listMeets(p.Language, language)
+}
+
+// vobSubMksDelivery is Jellyfin 12.4's IsVobSubMksDeliveryProfile: a VobSub
+// profile whose containers name "mks".
+func vobSubMksDelivery(p *SubtitleProfile) bool {
+	return vobSubFormat(p.Format) && strings.TrimSpace(p.Container) != "" && listMeets(p.Container, "mks")
+}
+
+// vobSubMksProfile is Jellyfin 12.4's IsVobSubMksProfile: VobSub goes out
+// as a file only extracted as Matroska, as FFmpeg cannot write an .idx and
+// .sub pair.
+func vobSubMksProfile(p *SubtitleProfile, stream *MediaStream) bool {
+	return vobSubMksDelivery(p) && vobSubSubtitle(stream) && !stream.IsExternal
+}
+
+// embedsSubtitles is Jellyfin's IsSubtitleEmbedSupported: a transcode to
+// Matroska keeps subtitle tracks, one to MPEG-TS or MP4 does not.
 func embedsSubtitles(container string) bool {
+	if container == "" || listMeets("ts,mpegts,mp4", container) {
+		return false
+	}
 	return listMeets("mkv,matroska", container)
 }
 
-// textSubtitle reports whether a subtitle format is text, not images.
+// textSubtitle is Jellyfin's MediaStream.IsTextFormat: a subtitle format
+// that is not pictures. MicroDVD shares VobSub's .sub extension but is
+// text.
 func textSubtitle(format string) bool {
-	for _, image := range [...]string{"pgs", "dvd", "dvbsub"} {
-		if containsFold(format, image) {
-			return false
-		}
-	}
-	return !strings.EqualFold(format, "sub") && !strings.EqualFold(format, "sup") && !strings.EqualFold(format, "dvb_subtitle")
+	return containsFold(format, "microdvd") ||
+		!containsFold(format, "pgs") && !containsFold(format, "dvdsub") && !containsFold(format, "vobsub") && !containsFold(format, "dvbsub") &&
+			!strings.EqualFold(format, "sup") && !strings.EqualFold(format, "sub")
 }
 
-// convertible reports whether a text subtitle converts from one format to
-// another; ASS and SSA styling is never converted.
-func convertible(from, to string) bool {
+// vobSubFormat is Jellyfin's MediaStream.IsVobSubFormat.
+func vobSubFormat(format string) bool {
+	return containsFold(format, "dvdsub") || containsFold(format, "vobsub")
+}
+
+// pgsSubtitle is Jellyfin's MediaStream.IsPgsSubtitleStream.
+func pgsSubtitle(stream *MediaStream) bool {
+	return stream.Type == "Subtitle" && (stream.Codec != "" || stream.IsExternal) &&
+		(containsFold(stream.Codec, "pgs") || strings.EqualFold(stream.Codec, "sup"))
+}
+
+// vobSubSubtitle is Jellyfin's MediaStream.IsVobSubSubtitleStream.
+func vobSubSubtitle(stream *MediaStream) bool {
+	return stream.Type == "Subtitle" && (stream.Codec != "" || stream.IsExternal) && vobSubFormat(stream.Codec)
+}
+
+// convertible is Jellyfin's MediaStream.SupportsSubtitleConversionTo: a
+// text subtitle converts to another text format, ASS and SSA styling
+// excepted, both ways.
+func convertible(stream *MediaStream, to string) bool {
 	styled := func(format string) bool {
 		return strings.EqualFold(format, "ass") || strings.EqualFold(format, "ssa")
 	}
-	return !styled(from) && !styled(to)
+	return stream.IsTextSubtitleStream && !styled(stream.Codec) && !styled(to)
 }
 
 func containsFold(s, substr string) bool {

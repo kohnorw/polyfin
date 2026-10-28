@@ -16,7 +16,6 @@ import (
 	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/media"
-	"github.com/moodiness/polyfin/internal/playback"
 	"github.com/moodiness/polyfin/internal/stremio"
 )
 
@@ -190,34 +189,6 @@ func TestPreferDirectPlayLooksNoFurtherThanTheVersionsReadAtOnce(t *testing.T) {
 	if source.Id != p.movie || !strings.HasSuffix(source.TranscodingUrl, "&allowAudioStreamCopy=false") || probe.runs() != 0 {
 		t.Errorf("chosen after %d analyses: %+v", probe.runs(), source)
 	}
-}
-
-// PlaybackInfo waits for the addons' subtitles a second at most once the
-// versions are in: those that come later reach the next PlaybackInfo.
-func TestPlaybackInfoWaitsForSubtitlesASecondAtMost(t *testing.T) {
-	skipAddonSubtitles(t)
-	t.Parallel()
-	subtitles := make(chan struct{})
-	p := manyOn(t, newTestServer(t, 10), manyVersionsAddon(t, 1, subtitles))
-	p.analyzed(t, p.versions[0], "h264-aac-mp4")
-	chrome := p.profile(t, "jellyfin-web-chrome")
-	hasSubtitle := func(source MediaSourceInfo) bool {
-		return slices.ContainsFunc(source.MediaStreams, func(s playback.MediaStream) bool { return s.Type == "Subtitle" && s.IsExternal })
-	}
-	started := time.Now()
-	source := firstSource(t, p.ask(t, p.token, p.movie, chrome, nil))
-	// The subtitles answer only once let go, below: a play that waited for
-	// them would wait for their request's 15-second timeout.
-	if elapsed := time.Since(started); elapsed < subtitleGrace || elapsed > 7500*time.Millisecond {
-		t.Errorf("answered after %s while the subtitles were held", elapsed)
-	}
-	if hasSubtitle(source) {
-		t.Errorf("a subtitle listed before its addon answered: %+v", source.MediaStreams)
-	}
-	close(subtitles)
-	eventually(t, "the subtitles to be listed", func() bool {
-		return hasSubtitle(firstSource(t, p.ask(t, p.token, p.movie, chrome, nil)))
-	})
 }
 
 // A title page is told of its versions on the user's jellyfin-web sockets as

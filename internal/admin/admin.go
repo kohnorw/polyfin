@@ -573,8 +573,6 @@ func accountError(w http.ResponseWriter, err error) bool {
 		{accounts.ErrInvalidRegistrationCodeUses, http.StatusBadRequest, "invalid_max_uses"},
 		{accounts.ErrInvalidMaxConversions, http.StatusBadRequest, "invalid_max_conversions"},
 		{accounts.ErrInvalidMaxConversionHeight, http.StatusBadRequest, "invalid_max_conversion_height"},
-		{accounts.ErrInvalidSubtitleOCR, http.StatusBadRequest, "invalid_subtitle_ocr"},
-		{accounts.ErrInvalidSubtitleOCRTracks, http.StatusBadRequest, "invalid_subtitle_ocr_tracks"},
 		{accounts.ErrInvalidEncoderPreset, http.StatusBadRequest, "invalid_encoder_preset"},
 		{accounts.ErrInvalidVideoQuality, http.StatusBadRequest, "invalid_video_quality"},
 		{accounts.ErrInvalidHardwareAcceleration, http.StatusBadRequest, "invalid_hardware_acceleration"},

@@ -110,22 +110,25 @@ type Origin struct {
 	Type, ID string
 }
 
-// ExternalSubtitle is a subtitle file offered for an item: by an addon, or
-// added by a user (see UploadSubtitle); or for a version, beside a local
-// file (see Version.Subtitles).
+// ExternalSubtitle is a subtitle file of a video, as Jellyfin lists its
+// external subtitle files: one beside a local file (see Version.Subtitles),
+// or one in its title's metadata folder, downloaded from a subtitle addon
+// or uploaded by a user.
 type ExternalSubtitle struct {
-	ID accounts.ID
-	// Language is the addon's code, usually ISO 639-2 ("fre").
-	Language string
-	URL      string
-	Addon    string
-	Confined bool
-	// Uploaded is set for a file a user added, whose text Polyfin keeps
-	// (see UploadedSubtitleText). A file a user added or a local file
-	// tells its Format (srt, vtt, ass or ssa) and its flags; a local file,
-	// a Title too.
-	Uploaded        bool
-	Format          string
+	// Path is where the file is read: a path on the server's disk, or the
+	// address the loopback interface serves a local folder's file at.
+	Path string
+	// Format is the file's extension, without its dot: srt, ass, ssa, vtt,
+	// sub, smi, sami, sup, mks, or idx for a VobSub pair.
+	Format string
+	// Codec is the stream's codec as Jellyfin names it after FFmpeg's probe
+	// (subrip, ass, webvtt, PGSSUB, DVDSUB…), empty until known.
+	Codec string
+	// Stream is the stream's index within the file, which only an MKS file
+	// has several of.
+	Stream int
+	// Language is as the file's name or its probe tells it.
+	Language        string
 	Title           string
 	Forced          bool
 	HearingImpaired bool
@@ -526,8 +529,17 @@ func newVersion(t target, entry installed, stream stremio.Stream) Version {
 		version.Torrent = &Torrent{InfoHash: strings.ToLower(stream.InfoHash), FileIdx: stream.FileIdx, Sources: slices.Clone(stream.Sources)}
 	}
 	version.ID = versionID(t.item, streamIdentity(stream))
-	// Only the tracks inside the file are offered: neither the subtitle
-	// files beside a local file nor those addons list with a stream.
+	// A local file's subtitle files are its own, as Jellyfin lists the
+	// files beside a video. Those other addons list with a stream are
+	// subtitles of the title, which subtitle searches find.
+	if entry.addon.Local() {
+		for _, subtitle := range stream.Subtitles {
+			if subtitle.Valid() {
+				version.Subtitles = append(version.Subtitles, ExternalSubtitle{Path: subtitle.URL, Format: subtitle.Format, Language: subtitle.Lang,
+					Title: subtitle.Title, Forced: subtitle.Forced, HearingImpaired: subtitle.HearingImpaired, Default: subtitle.Default})
+			}
+		}
+	}
 	return version
 }
 
@@ -606,13 +618,6 @@ func serves(entry installed, resource, metaType, id string) bool {
 		return false
 	}
 	return entry.addon.Manifest.Serves(resource, metaType, id)
-}
-
-// KnownSubtitles lists, as Subtitles does, the subtitle files known now,
-// stale lists' included, asking no addon. complete reports whether every
-// addon's list was known.
-func (s *Service) KnownSubtitles(ctx context.Context, user accounts.User, id accounts.ID) (subtitles []ExternalSubtitle, complete bool, err error) {
-	return s.subtitlesOf(ctx, user, id, knownOnly)
 }
 
 // shared runs fetch once for every caller asking for key at the same time,
@@ -804,31 +809,67 @@ func versionName(stream stremio.Stream) string {
 	return strings.Join(parts, " · ")
 }
 
-// Subtitles lists the subtitle files offered for a movie or an episode
-// beside its versions' own tracks: none, as only the tracks inside the
-// files are offered. It fails as the title's lookup does.
-func (s *Service) Subtitles(ctx context.Context, user accounts.User, id accounts.ID) ([]ExternalSubtitle, error) {
-	subtitles, _, err := s.subtitlesOf(ctx, user, id, waitAll)
-	return subtitles, err
+// AddonSubtitle is a subtitle one of a user's addons offers for a title:
+// what a subtitle search finds.
+type AddonSubtitle struct {
+	// ID identifies the subtitle among the addon's, without revealing
+	// either.
+	ID accounts.ID
+	// Addon is the name of the addon that offers it.
+	Addon string
+	// Language is as the addon gives it, usually ISO 639-2 ("fre").
+	Language string
+	URL      string
+	Confined bool
 }
 
-// SubtitlesNow lists, as Subtitles does, the subtitle files known now,
-// without waiting for addons: it asks those whose lists are not remembered,
-// or stale, in the background, for later requests, a stale list being
-// listed meanwhile. complete reports whether every addon's list was known,
-// none asked again.
-func (s *Service) SubtitlesNow(ctx context.Context, user accounts.User, id accounts.ID) (subtitles []ExternalSubtitle, complete bool, err error) {
-	return s.subtitlesOf(ctx, user, id, askLater)
-}
-
-// subtitlesOf lists no subtitle file: only the tracks inside the files
-// are offered, never the addons' subtitles nor files users added. It still
-// checks the user may see the title, for the answers that name it.
-func (s *Service) subtitlesOf(ctx context.Context, user accounts.User, id accounts.ID, _ listing) ([]ExternalSubtitle, bool, error) {
-	if _, _, err := s.target(ctx, user, id); err != nil {
-		return nil, false, err
+// SubtitleAddons names the user's addons that offer subtitles for a movie
+// or an episode, in addon order: the subtitle providers its searches ask.
+func (s *Service) SubtitleAddons(ctx context.Context, user accounts.User, id accounts.ID) ([]string, error) {
+	t, v, err := s.target(ctx, user, id)
+	if err != nil {
+		return nil, err
 	}
-	return nil, true, nil
+	var names []string
+	for _, entry := range v.addons {
+		if serves(entry, "subtitles", t.metaType, t.id) && !slices.Contains(names, entry.addon.Manifest.Name) {
+			names = append(names, entry.addon.Manifest.Name)
+		}
+	}
+	return names, nil
+}
+
+// AddonSubtitles lists the subtitles a user's addon, by its name, offers
+// for a movie or an episode, waiting for its answer.
+func (s *Service) AddonSubtitles(ctx context.Context, user accounts.User, id accounts.ID, addon string) ([]AddonSubtitle, error) {
+	t, v, err := s.target(ctx, user, id)
+	if err != nil {
+		return nil, err
+	}
+	var result []AddonSubtitle
+	seen := map[accounts.ID]bool{}
+	for _, entry := range v.addons {
+		if entry.addon.Manifest.Name != addon || !serves(entry, "subtitles", t.metaType, t.id) {
+			continue
+		}
+		subtitles, err := s.subtitleList(ctx, entry, t)
+		if err != nil {
+			return nil, err
+		}
+		for _, subtitle := range subtitles {
+			if !subtitle.Valid() {
+				continue
+			}
+			file := subtitleID(entry.addon.ID, subtitle)
+			if seen[file] {
+				continue
+			}
+			seen[file] = true
+			result = append(result, AddonSubtitle{ID: file, Addon: entry.addon.Manifest.Name, Language: subtitle.Lang, URL: subtitle.URL,
+				Confined: entry.confined})
+		}
+	}
+	return result, nil
 }
 
 // subtitleList lists an addon's subtitles for a title: those remembered

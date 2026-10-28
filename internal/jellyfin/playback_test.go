@@ -12,7 +12,6 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -120,6 +119,15 @@ func playingOn(t *testing.T, s testServer) playbackSetup {
 	p.versions = p.versionsOf(t, p.movie)
 	p.listed(t, user, p.movie)
 	p.analyzed(t, p.versions[1], "h264-aac-mp4")
+	// The movie's French subtitle, downloaded from its addon into the
+	// title's folder, as Jellyfin keeps a provider's subtitle.
+	folder := s.handler.subtitleManager.MetadataFolder(p.movie)
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(folder, subtitleFileBase+".fre.srt"), []byte("1\r\n00:00:01,000 --> 00:00:04,000\r\nBonjour\r\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	return p
 }
 
@@ -162,7 +170,6 @@ func (p playbackSetup) profile(t *testing.T, name string) json.RawMessage {
 }
 
 func TestItemDetailsListVersions(t *testing.T) {
-	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	var movie BaseItemDto
@@ -185,12 +192,13 @@ func TestItemDetailsListVersions(t *testing.T) {
 	if !strings.HasPrefix(first.Path, p.url+"/Videos/"+p.movie+"/stream.mkv?") || !strings.Contains(first.Path, grantParameter+"=") {
 		t.Errorf("path: %s", first.Path)
 	}
-	// Subtitle files come first; the analyzed version describes its tracks.
+	// Subtitle files come first, and Jellyfin's Default mode shows one;
+	// the analyzed version describes its tracks.
 	if len(first.MediaStreams) != 1 || first.MediaStreams[0].Type != "Subtitle" || first.MediaStreams[0].Language != "fra" {
 		t.Errorf("unanalyzed version streams: %+v", first.MediaStreams)
 	}
 	if len(second.MediaStreams) < 3 || second.MediaStreams[1].Type != "Video" || second.Container != "mp4" ||
-		second.DefaultSubtitleStreamIndex == nil || *second.DefaultSubtitleStreamIndex != -1 {
+		second.DefaultSubtitleStreamIndex == nil || *second.DefaultSubtitleStreamIndex != 0 {
 		t.Errorf("analyzed version: container %s, subtitle %v, streams %+v", second.Container, second.DefaultSubtitleStreamIndex, second.MediaStreams)
 	}
 	// A version opens as an item, its source carrying its identifier and
@@ -210,7 +218,6 @@ func TestItemDetailsListVersions(t *testing.T) {
 }
 
 func TestPlaybackInfoDecidesForTheDevice(t *testing.T) {
-	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	ask := func(profile string, mediaSourceID string) playbackInfoResponse {
@@ -321,7 +328,6 @@ func (p playbackSetup) remuxable(t *testing.T, more ...media.Stream) media.Analy
 }
 
 func TestAppsThatCannotPlayAVersionGetARemux(t *testing.T) {
-	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	p.remuxable(t)
@@ -341,7 +347,7 @@ func TestAppsThatCannotPlayAVersionGetARemux(t *testing.T) {
 	target := source.TranscodingUrl
 	// The subtitle file comes first: the audio is stream 1.
 	for _, part := range []string{"/videos/" + hyphenated(mustID(t, p.movie)) + "/master.m3u8?DeviceId=", "&MediaSourceId=" + p.movie + "&VideoCodec=av1,hevc,h264,vp9&AudioCodec=aac,mp2,opus,flac&AudioStreamIndex=1&",
-		"&SegmentContainer=mp4&MinSegments=2&PlaySessionId=" + url.QueryEscape(response.PlaySessionId) + "&ApiKey=" + p.token + "&", "&SubtitleMethod=Encode&TranscodeReasons=DirectPlayError"} {
+		"&SegmentContainer=mp4&MinSegments=2&PlaySessionId=" + url.QueryEscape(response.PlaySessionId) + "&ApiKey=" + p.token + "&", "&Tag=", "&TranscodeReasons=DirectPlayError"} {
 		if !strings.Contains(target, part) {
 			t.Errorf("TranscodingUrl lacks %q: %s", part, target)
 		}
@@ -396,7 +402,7 @@ func TestAudioTheAppCannotTakeIsConverted(t *testing.T) {
 	ask := func(profile string, more map[string]any) MediaSourceInfo {
 		t.Helper()
 		body := map[string]any{"UserId": p.user.ID.String(), "MediaSourceId": p.movie, "MaxStreamingBitrate": 120_000_000,
-			"DeviceProfile": p.profile(t, profile)}
+			"DeviceProfile": p.profile(t, profile), "SubtitleStreamIndex": -1}
 		maps.Copy(body, more)
 		status, data := p.call(http.MethodPost, "/Items/"+p.movie+"/PlaybackInfo", app("tv", p.token), body)
 		var response playbackInfoResponse
@@ -479,7 +485,6 @@ func TestVideoTheAppCannotTakeIsConverted(t *testing.T) {
 }
 
 func TestImageSubtitlesBrowsersCannotShowAreBurnedIn(t *testing.T) {
-	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	// An English PGS track, after the addon's file: stream 3 for Jellyfin.
@@ -536,7 +541,6 @@ func fetchText(t *testing.T, target string) (int, http.Header, string) {
 }
 
 func TestRemuxesOfferSubtitlesAsRenditions(t *testing.T) {
-	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	p.remuxable(t)
@@ -567,61 +571,25 @@ func TestRemuxesOfferSubtitlesAsRenditions(t *testing.T) {
 	query := strings.SplitN(target, "?", 2)[1]
 	base := p.url + strings.Split(target, "master.m3u8")[0]
 	_, _, master := fetchText(t, base+"master.m3u8?"+query)
-	if !strings.Contains(master, "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"French - SUBRIP - External\",LANGUAGE=\"fr\",DEFAULT=YES,AUTOSELECT=YES,FORCED=NO,URI=\"hls1/subtitles0/main.m3u8?DeviceId=") ||
-		!strings.Contains(master, ",SUBTITLES=\"subs\"\nmain.m3u8?") {
+	// As Jellyfin's DynamicHlsHelper lists them.
+	rendition := "#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID=\"subs\",NAME=\"French - SUBRIP - External\",DEFAULT=YES,FORCED=NO,AUTOSELECT=YES,URI=\"" +
+		p.movie + "/Subtitles/0/subtitles.m3u8?SegmentLength=30&ApiKey=" + p.token + "\",LANGUAGE=\"fra\""
+	if !strings.Contains(master, rendition) || !strings.Contains(master, ",SUBTITLES=\"subs\"\nmain.m3u8?") {
 		t.Errorf("master playlist:\n%s", master)
 	}
-	_, _, playlist := fetchText(t, base+"hls1/subtitles0/main.m3u8?"+query)
-	// Cut like the video: a first segment ending on the first keyframe
-	// 2 s in, then about 4 s ones.
-	for _, part := range []string{"#EXT-X-TARGETDURATION:5\n", "#EXTINF:3.125000,\n0.vtt?DeviceId=", "#EXTINF:2.508000,\n3.vtt?", "#EXT-X-ENDLIST"} {
+	// The subtitle controller's playlist, in 30 s segments of the media's
+	// time, each a WebVTT file with Jellyfin's timestamp map.
+	_, _, playlist := fetchText(t, base+p.movie+"/Subtitles/0/subtitles.m3u8?SegmentLength=30&ApiKey="+p.token)
+	for _, part := range []string{"#EXT-X-TARGETDURATION:30\n", "stream.vtt?CopyTimestamps=true&AddVttTimeMap=true&StartPositionTicks=0&EndPositionTicks=", "#EXT-X-ENDLIST"} {
 		if !strings.Contains(playlist, part) {
 			t.Errorf("subtitle playlist lacks %q:\n%s", part, playlist)
 		}
 	}
-	// Cues keep the version's time; the map places them on the remux's. A
-	// cue spanning two segments is in both.
-	bonjour := "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:900000,LOCAL:00:00:00.000\n\n00:00:01.000 --> 00:00:04.000\nBonjour\n"
-	for n, want := range []string{bonjour, bonjour, "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:900000,LOCAL:00:00:00.000\n"} {
-		status, header, segment := fetchText(t, base+"hls1/subtitles0/"+strconv.Itoa(n)+".vtt?"+query)
-		if status != http.StatusOK || header.Get("Content-Type") != "text/vtt" || segment != want {
-			t.Errorf("segment %d: %d %q", n, status, segment)
-		}
-	}
-	if status, _, _ := fetchText(t, base+"hls1/subtitles5/main.m3u8?"+query); status != http.StatusNotFound {
-		t.Errorf("a subtitle the version lacks: %d", status)
-	}
-}
-
-func TestWholeExtractedTracksAreExternalSubtitles(t *testing.T) {
-	skipAddonSubtitles(t)
-	t.Parallel()
-	p := playing(t)
-	p.remuxable(t, media.Stream{Index: 2, Type: "subtitle", Codec: "subrip", Language: "eng"})
-	// Earlier remuxes extracted the embedded track over the whole version.
-	if _, err := p.pool.Exec(t.Context(), "INSERT INTO media_subtitles (version_id, extracted) VALUES ($1, $2)", p.versions[0].ID,
-		`{"covered":[[0,15008]],"tracks":{"2":[{"s":1000,"e":2500,"t":"Hello"}]}}`); err != nil {
-		t.Fatal(err)
-	}
-	// jellyfin-web plays the file as it is, and takes subtitles as files.
-	status, data := p.call(http.MethodPost, "/Items/"+p.movie+"/PlaybackInfo", app("tv", p.token), map[string]any{
-		"UserId": p.user.ID.String(), "MediaSourceId": p.movie, "MaxStreamingBitrate": 120_000_000, "SubtitleStreamIndex": 3,
-		"DeviceProfile": p.profile(t, "jellyfin-web-chrome")})
-	var response playbackInfoResponse
-	if err := json.Unmarshal(data, &response); status != http.StatusOK || err != nil || len(response.MediaSources) != 1 {
-		t.Fatalf("%d %s", status, data)
-	}
-	source := response.MediaSources[0]
-	i := slices.IndexFunc(source.MediaStreams, func(s playback.MediaStream) bool { return s.Index == 3 })
-	if !source.SupportsDirectPlay || i < 0 {
-		t.Fatalf("source: %+v", source)
-	}
-	track := source.MediaStreams[i]
-	if track.DeliveryMethod != "External" || !strings.HasSuffix(track.DeliveryUrl, "/Subtitles/3/0/Stream.vtt?ApiKey="+p.token) {
-		t.Fatalf("embedded track: %s %s", track.DeliveryMethod, track.DeliveryUrl)
-	}
-	if status, _, body := fetchText(t, p.url+track.DeliveryUrl); status != http.StatusOK || body != "WEBVTT\n\n00:00:01.000 --> 00:00:02.500\nHello\n" {
-		t.Errorf("track: %d %q", status, body)
+	segment := base + p.movie + "/Subtitles/0/stream.vtt?CopyTimestamps=true&AddVttTimeMap=true&StartPositionTicks=0&EndPositionTicks=300000000&ApiKey=" + p.token
+	status, header, text := fetchText(t, segment)
+	want := "WEBVTT\nX-TIMESTAMP-MAP=MPEGTS:900000,LOCAL:00:00:00.000\n\n00:00:01.000 --> 00:00:04.000\nBonjour"
+	if status != http.StatusOK || header.Get("Content-Type") != "text/vtt" || text != want {
+		t.Errorf("segment: %d %q", status, text)
 	}
 }
 
@@ -676,13 +644,14 @@ func TestStreamsNeedAGrant(t *testing.T) {
 }
 
 func TestSubtitlesNeedNoCredentials(t *testing.T) {
-	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	p.get(t, "/Items/"+p.movie, p.token, nil)
 	for format, want := range map[string]string{
-		"vtt": "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nBonjour\n",
-		"srt": "1\n00:00:01,000 --> 00:00:04,000\nBonjour\n",
+		// Converted by libse's writers; the file itself when asked in its
+		// own format, as Jellyfin serves it.
+		"vtt": "WEBVTT\n\n00:00:01.000 --> 00:00:04.000\nBonjour",
+		"srt": "1\r\n00:00:01,000 --> 00:00:04,000\r\nBonjour\r\n",
 		"js":  `{"TrackEvents":[{"Id":"1","Text":"Bonjour","StartPositionTicks":10000000,"EndPositionTicks":40000000}]}`,
 	} {
 		response, err := http.Get(p.url + "/Videos/" + p.movie + "/" + p.movie + "/Subtitles/0/0/Stream." + format)
@@ -732,7 +701,6 @@ func TestSessionsShowWhatDevicesPlay(t *testing.T) {
 // recorded from Jellyfin 12.2 by scripts/jellyfin-fixtures.sh, for versions
 // analyzed as the clips Jellyfin played.
 func TestPlaybackResponsesMatchJellyfin(t *testing.T) {
-	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	user := p.user.ID.String()
@@ -794,12 +762,11 @@ var playbackShapes = shapeRules{
 	},
 	returned: map[string][]string{
 		// The recorded titles lacked the ratings the test addon provides.
-		"CommunityRating": {"item-media-sources", "sessions-now-playing"}, "OfficialRating": {"item-media-sources"},
+		"CommunityRating": {"item-media-sources", "sessions-now-playing"}, "OfficialRating": {"item-media-sources", "sessions-now-playing"},
 	},
 }
 
 func TestTextSubtitlesTakenOnlyBurnedInStayOfferedWhenNotChosen(t *testing.T) {
-	skipAddonSubtitles(t)
 	t.Parallel()
 	p := playing(t)
 	// An English ASS track, after the addon's file: stream 3 for Jellyfin.
@@ -820,13 +787,6 @@ func TestTextSubtitlesTakenOnlyBurnedInStayOfferedWhenNotChosen(t *testing.T) {
 		t.Fatalf("%+v", answer)
 	}
 	source := answer.MediaSources[0]
-	if os.Getenv("POLYFIN_TEST_FFMPEG") == "" {
-		// Without an encoder, nothing is burned in: the track is left out.
-		if !source.SupportsDirectPlay || track(source) != "Drop" {
-			t.Errorf("without FFmpeg: direct play %v, track %s", source.SupportsDirectPlay, track(source))
-		}
-		return
-	}
 	if !source.SupportsDirectPlay || track(source) != "Encode" {
 		t.Errorf("direct play %v, track %s", source.SupportsDirectPlay, track(source))
 	}

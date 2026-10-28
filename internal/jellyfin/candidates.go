@@ -181,45 +181,18 @@ func pick(states []*tried, prefer, patient bool) (int, bool) {
 	return first, true
 }
 
-// playableToPlay gathers a title's versions and subtitles for a play. It
-// lists the versions as VersionsToPlay does: stale lists as they are, so
-// complete is false when one was, for the caller to wait for the addons'
-// new answers when none of their versions plays. The subtitles the addons
-// have not given by then are waited for at most subtitleGrace more: those
-// known now stand for them, the others reaching the next PlaybackInfo, as a
-// track switch asks.
+// playableToPlay gathers a title's versions and subtitle files for a
+// play. It lists the versions as VersionsToPlay does: stale lists as they
+// are, so complete is false when one was, for the caller to wait for the
+// addons' new answers when none of their versions plays.
 func (h *Handler) playableToPlay(ctx context.Context, user accounts.User, item library.Item) (playable, bool, error) {
 	p := playable{item: item, tracks: h.trackPreferences(ctx, user)}
 	if item.Kind == library.KindRecording {
 		p.versions = h.recordingVersions(ctx, item)
 		return p, true, nil
 	}
-	listed := make(chan []library.ExternalSubtitle, 1)
-	go func() {
-		subtitles, err := h.Library.Subtitles(ctx, user, item.ID)
-		if err != nil {
-			subtitles = nil
-		}
-		listed <- subtitles
-	}()
 	versions, complete, err := h.Library.VersionsToPlay(ctx, user, item.ID)
 	p.versions = h.offered(ctx, user, versions)
-	grace := time.NewTimer(subtitleGrace)
-	defer grace.Stop()
-	select {
-	case p.subtitles = <-listed:
-		h.subtitleFiles.Put(item.ID, p.subtitles)
-	case <-grace.C:
-		if subtitles, all, err := h.Library.KnownSubtitles(ctx, user, item.ID); err == nil {
-			p.subtitles = subtitles
-			if all {
-				h.subtitleFiles.Put(item.ID, subtitles)
-			}
-		}
-	}
+	p.subtitles = h.titleSubtitles(item.ID)
 	return p, complete, err
 }
-
-// subtitleGrace is how long a play waits for the addons' subtitles once
-// its versions are in.
-const subtitleGrace = time.Second

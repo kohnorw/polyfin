@@ -777,7 +777,6 @@ func TestLocalBluRaysConvertForAppsWithoutTheirCodec(t *testing.T) {
 // flags their names tell, and Polyfin serves them in the format each app
 // asks for, French accents of Windows-1252 included.
 func TestLocalSubtitleFilesAreTracks(t *testing.T) {
-	skipAddonSubtitles(t)
 	t.Parallel()
 	var folders *localfiles.Service
 	s := newProbingServer(t, 10, "ffprobe-not-installed", func(o *Options, pool *pgxpool.Pool) {
@@ -881,10 +880,10 @@ func TestLocalSubtitleFilesAreTracks(t *testing.T) {
 		}
 		return body
 	}
-	if got := subtitle("3", "vtt"); got != "WEBVTT\n\n00:00:01.000 --> 00:00:02.500\nDéjà vu, “cool”\n" {
+	if got := subtitle("3", "vtt"); got != "WEBVTT\n\n00:00:01.000 --> 00:00:02.500\nDéjà vu, “cool”" {
 		t.Errorf("as WebVTT: %q", got)
 	}
-	if got := subtitle("3", "srt"); got != "1\n00:00:01,000 --> 00:00:02,500\nDéjà vu, “cool”\n" {
+	if got := subtitle("3", "srt"); got != "1\r\n00:00:01,000 --> 00:00:02,500\r\nDéjà vu, “cool”\r\n" {
 		t.Errorf("as SubRip: %q", got)
 	}
 	if got := subtitle("2", "ass"); !strings.Contains(got, `{\i1}[door creaks]{\i0}`) || !strings.Contains(got, "Style: Default,Arial,20") {
@@ -997,7 +996,6 @@ func localVersion(t *testing.T, p playbackSetup, local MediaSourceInfo) library.
 // file. An app that draws PGS takes the PGS file as it is, by ranges; a
 // VobSub pair is not one file, nor are pictures text.
 func TestLocalPictureSubtitleFilesAreTracks(t *testing.T) {
-	skipAddonSubtitles(t)
 	t.Parallel()
 	file, err := os.ReadFile(filepath.Join("..", "container", "testdata", "forced.mkv"))
 	if err != nil {
@@ -1025,7 +1023,7 @@ func TestLocalPictureSubtitleFilesAreTracks(t *testing.T) {
 	}
 	addonFile := track{"subrip", "French - SUBRIP - External", false, false, true, "External", "vtt"}
 	pgsFile := track{"PGSSUB", "English - Forced - PGSSUB - External", true, false, false, "External", "pgssub"}
-	vobSub := track{"DVDSUB", "English - Hearing Impaired - DVDSUB - External", false, true, false, "Drop", ""}
+	vobSub := track{"DVDSUB", "English - Hearing Impaired - DVDSUB - External", false, true, false, "Encode", ""}
 	if got := files(pictureInfo(t, p, local, pictureProfile(t, p), -1)); !slices.Equal(got, []track{addonFile, pgsFile, vobSub}) {
 		t.Errorf("the files, for an app that draws PGS: %+v", got)
 	}
@@ -1052,7 +1050,6 @@ func TestLocalPictureSubtitleFilesAreTracks(t *testing.T) {
 // always, as it is not one file, the PGS file on an app that does not draw
 // PGS.
 func TestLocalPictureSubtitleFilesAreBurnedIn(t *testing.T) {
-	skipAddonSubtitles(t)
 	t.Parallel()
 	ffmpeg := os.Getenv("POLYFIN_TEST_FFMPEG")
 	if ffmpeg == "" {

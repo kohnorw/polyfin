@@ -30,7 +30,6 @@ const remuxDBAnswer = `[
 ]`
 
 func TestItemDetailsDescribeVersionsFromRemuxDB(t *testing.T) {
-	skipAddonSubtitles(t)
 	t.Parallel()
 	var asked atomic.Int32
 	remux := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

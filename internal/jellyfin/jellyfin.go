@@ -30,6 +30,7 @@ import (
 	"github.com/moodiness/polyfin/internal/reminders"
 	"github.com/moodiness/polyfin/internal/remuxdb"
 	"github.com/moodiness/polyfin/internal/stremio"
+	"github.com/moodiness/polyfin/internal/subtitles"
 	"github.com/moodiness/polyfin/internal/tasks"
 	"github.com/moodiness/polyfin/internal/throttle"
 	"github.com/moodiness/polyfin/internal/thumbnails"
@@ -119,6 +120,11 @@ type Options struct {
 	// fonts are missing, which also write the names of generated images;
 	// empty or missing, it offers none.
 	FontsDir string
+	// FFmpeg is the path of FFmpeg, which extracts and converts subtitles;
+	// DataDir is Polyfin's data folder, which keeps them, in subtitles and
+	// metadata/library, as Jellyfin's do.
+	FFmpeg  string
+	DataDir string
 	// Thumbnails makes and keeps the scrubbing thumbnails and chapter
 	// images of the versions played; nil makes none.
 	Thumbnails *thumbnails.Service
@@ -153,10 +159,10 @@ type Handler struct {
 	// fontsFor).
 	fonts    fontsFor
 	sessions *playback.Sessions
-	// subtitleFiles remembers the subtitle files described for each item,
-	// for players that fetch them without credentials.
-	subtitleFiles *cache.Cache[accounts.ID, []library.ExternalSubtitle]
-	subtitleCache *cache.Cache[accounts.ID, subtitleText]
+	// subtitleEncoder and subtitleManager are Jellyfin's SubtitleEncoder
+	// and SubtitleManager (see subtitles.go).
+	subtitleEncoder *subtitles.Encoder
+	subtitleManager *subtitles.Manager
 	// runtimes remembers, for the reports of a playback, the runtime of
 	// the version they name (see playedRuntime).
 	runtimes *cache.Cache[string, time.Duration]
@@ -212,8 +218,6 @@ func New(options Options) *Handler {
 	h := &Handler{
 		Options:        options,
 		sessions:       playback.NewSessions(),
-		subtitleFiles:  cache.New[accounts.ID, []library.ExternalSubtitle](5000, 12*time.Hour).Sized(16<<20, cache.JSONSize),
-		subtitleCache:  cache.New[accounts.ID, subtitleText](200, time.Hour).Sized(32<<20, subtitleText.size),
 		runtimes:       cache.New[string, time.Duration](2000, 12*time.Hour),
 		configurations: cache.New[accounts.ID, UserConfiguration](1000, 12*time.Hour),
 		sockets:        newSockets(),
@@ -229,6 +233,7 @@ func New(options Options) *Handler {
 		downloads:      newDownloadPlays(),
 		dlna:           newDLNAPlays(),
 	}
+	h.subtitleEncoder, h.subtitleManager = newSubtitles(options)
 	h.syncPlay = newSyncPlay(h.canPlay, h.writeSyncPlay, options.Logger)
 	h.listings = newListings(h.listVersions)
 	if options.Library != nil {
@@ -287,7 +292,7 @@ func New(options Options) *Handler {
 	h.liveTvRoutes(rt)
 	h.playbackRoutes(rt)
 	h.userDataRoutes(rt)
-	h.remoteSubtitleRoutes(rt)
+	h.subtitleRoutes(rt)
 	h.remoteRoutes(rt)
 	h.configurationRoutes(rt)
 	h.localizationRoutes(rt)
@@ -298,7 +303,6 @@ func New(options Options) *Handler {
 	h.administrationRoutes(rt)
 	h.userImageRoutes(rt)
 	h.appRoutes(rt)
-	h.subtitleUploadRoutes(rt)
 	h.absentRoutes(rt)
 	h.backupRoutes(rt)
 	h.metadataRoutes(rt)

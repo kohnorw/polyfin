@@ -1,13 +1,13 @@
 package jellyfin
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"math"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
@@ -19,7 +19,6 @@ import (
 	"github.com/moodiness/polyfin/internal/media"
 	"github.com/moodiness/polyfin/internal/playback"
 	"github.com/moodiness/polyfin/internal/source"
-	"github.com/moodiness/polyfin/internal/subtitles"
 )
 
 // transcodingURL is a remux's TranscodingUrl: relative, with Jellyfin's
@@ -136,8 +135,8 @@ type remuxRequest struct {
 	user     accounts.User
 	item     library.Item
 	analysis media.Analysis
-	// files are the subtitle files addons offer: the first of the
-	// version's subtitle streams.
+	// files are the version's subtitle files: the first of its subtitle
+	// streams.
 	files []library.ExternalSubtitle
 	// live is set for a channel, whose stream FFmpeg converts as it comes.
 	live bool
@@ -177,7 +176,13 @@ func (h *Handler) remuxOf(w http.ResponseWriter, r *http.Request) (remuxRequest,
 		return remuxRequest{}, false
 	}
 	req, ok := h.remuxFor(w, r, user, opened, grant.Version, session)
-	req.uris, req.renditions = r.URL.RawQuery, strings.EqualFold(query(r, "subtitleMethod"), "Hls")
+	// As Jellyfin's DynamicHlsHelper, the text subtitles are listed in the
+	// master playlist when the app takes one in HLS, or asks them all in
+	// the manifest, and none is burned in.
+	method := query(r, "subtitleMethod")
+	req.uris = r.URL.RawQuery
+	req.renditions = (strings.EqualFold(method, "Hls") || strings.EqualFold(query(r, "enableSubtitlesInManifest"), "true")) &&
+		!(strings.EqualFold(method, "Encode") && query(r, "subtitleStreamIndex") != "" && query(r, "subtitleStreamIndex") != "-1")
 	return req, ok
 }
 
@@ -216,12 +221,7 @@ func (h *Handler) remuxFor(w http.ResponseWriter, r *http.Request, user accounts
 		analysis, err = h.Playback.AnalyzeLive(r.Context(), version)
 	} else {
 		analysis, err = h.Playback.Analyze(r.Context(), version)
-		if cached, ok := h.subtitleFiles.Get(item.ID); ok {
-			files = cached
-		} else {
-			files, _ = h.Library.Subtitles(r.Context(), user, item.ID)
-		}
-		files = versionFiles(files, version)
+		files = versionFiles(h.titleSubtitles(item.ID), version)
 	}
 	if err != nil {
 		processingError(w, http.StatusNotFound)
@@ -254,23 +254,9 @@ func (h *Handler) remuxFor(w http.ResponseWriter, r *http.Request, user accounts
 			}
 		}
 	}
-	// A subtitle burned in is a picture file, among the files counted
-	// first, read from its address, or an image track inside the file;
-	// never a picture subtitle's text copy, listed after the tracks, which
-	// goes out as text.
 	if index, err := strconv.Atoi(query(r, "subtitleStreamIndex")); err == nil && index >= 0 && remux.ConvertVideo != nil &&
 		strings.EqualFold(query(r, "subtitleMethod"), "Encode") {
-		switch {
-		case index < len(files) && pictureFile(files[index]):
-			remux.BurnFile = files[index].URL
-		case index >= len(files) && playback.BurnableSubtitle(analysis, index-len(files)):
-			remux.Burn = new(index - len(files))
-		default:
-			// A text subtitle: drawn by libass from a file Polyfin writes.
-			if path, styled, ok := h.textBurnFile(r.Context(), version, analysis, files, index); ok {
-				remux.BurnText, remux.StyledText = path, styled
-			}
-		}
+		h.burnSubtitle(r.Context(), &remux, version, analysis, files, index)
 	}
 	if strings.EqualFold(query(r, "allowAudioStreamCopy"), "false") {
 		channels, layout := 0, ""
@@ -413,7 +399,7 @@ func (h *Handler) masterPlaylist(w http.ResponseWriter, r *http.Request, req rem
 	}
 	var subtitles []hls.Rendition
 	if req.renditions {
-		subtitles = h.renditions(r.Context(), req, query(r, "subtitleStreamIndex"), req.uris)
+		subtitles = h.renditions(r, req)
 	}
 	w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 	w.Header().Set("Cache-Control", "no-cache")
@@ -455,33 +441,9 @@ func (h *Handler) adaptiveQuality(r *http.Request) bool {
 	return false
 }
 
-// renditions are the text subtitles a remux offers in HLS, the one the
-// app chose shown by default: the embedded tracks FFmpeg extracts, the only
-// subtitles offered. The app's player can switch between them.
-func (h *Handler) renditions(ctx context.Context, req remuxRequest, selected, rawQuery string) []hls.Rendition {
-	language := h.Accounts.Settings().Language
-	streams := playback.MediaStreams(req.analysis, externalStreams(req.files), language)
-	shown, err := strconv.Atoi(selected)
-	if err != nil {
-		shown = -1
-	}
-	h.markSynced(ctx, req.remux.Version.ID, req.files, streams, shown)
-	var renditions []hls.Rendition
-	for _, stream := range streams {
-		if stream.Type != "Subtitle" || !(stream.IsExternal && stream.IsTextSubtitleStream || playback.ExtractableSubtitle(req.analysis, stream.Index-len(req.files))) {
-			continue
-		}
-		index := strconv.Itoa(stream.Index)
-		renditions = append(renditions, hls.Rendition{Name: stream.DisplayTitle, Language: playback.LanguageTag(stream.Language),
-			Default: index == selected, Forced: stream.IsForced, URI: withQuery("hls1/subtitles"+index+"/main.m3u8", rawQuery)})
-	}
-	return renditions
-}
-
 // hlsSegment serves the segments of a remux under hls1/main, the
-// initialization segment as -1, those of its lower qualities and their
-// media playlists under hls1/main{variant}, and its subtitle renditions
-// under hls1/subtitles{index}.
+// initialization segment as -1, and those of its lower qualities and their
+// media playlists under hls1/main{variant}.
 func (h *Handler) hlsSegment(w http.ResponseWriter, r *http.Request) {
 	h.serveSegment(w, r, h.remuxOf)
 }
@@ -489,12 +451,6 @@ func (h *Handler) hlsSegment(w http.ResponseWriter, r *http.Request) {
 // serveSegment serves a segment of the remux remuxOf reads.
 func (h *Handler) serveSegment(w http.ResponseWriter, r *http.Request, remuxOf remuxer) {
 	playlist := strings.ToLower(r.PathValue("playlistId"))
-	if raw, ok := strings.CutPrefix(playlist, "subtitles"); ok {
-		if index, err := strconv.Atoi(raw); err == nil && index >= 0 {
-			h.hlsSubtitles(w, r, index, remuxOf)
-			return
-		}
-	}
 	variant, ok := playlistVariant(playlist)
 	if !ok {
 		processingError(w, http.StatusNotFound)
@@ -568,76 +524,6 @@ func playlistVariant(playlist string) (int, bool) {
 	return variant, err == nil && variant > 0 && strconv.Itoa(variant) == raw
 }
 
-// hlsSubtitles serves the playlist and the WebVTT segments of a subtitle
-// rendition, index being the Jellyfin index of its stream. The segments of
-// an addon's file, or of a picture subtitle's text copy, are cut from its
-// text; those of an embedded track wait for FFmpeg to extract them.
-func (h *Handler) hlsSubtitles(w http.ResponseWriter, r *http.Request, index int, remuxOf remuxer) {
-	name, extension, _ := strings.Cut(r.PathValue("file"), ".")
-	req, ok := remuxOf(w, r)
-	if !ok {
-		return
-	}
-	if req.live {
-		processingError(w, http.StatusNotFound)
-		return
-	}
-	stream := index - len(req.files)
-	copied := index >= len(req.files) && playback.IsTextCopy(req.analysis, req.files, index)
-	if !copied && (index >= len(req.files) && !playback.ExtractableSubtitle(req.analysis, stream) || index < len(req.files) && pictureFile(req.files[index])) {
-		processingError(w, http.StatusNotFound)
-		return
-	}
-	// An index past the tracks is a text copy only once it is read.
-	var copyCues []subtitles.Cue
-	if copied {
-		cues, found := h.Playback.TextCopyCues(r.Context(), req.remux.Version, req.analysis, req.files, index)
-		if !found {
-			processingError(w, http.StatusNotFound)
-			return
-		}
-		copyCues = cues
-	}
-	plan, err := h.Playback.Plan(r.Context(), req.remux.Version)
-	if err != nil {
-		h.remuxError(w, r, req.remux, err)
-		return
-	}
-	if strings.EqualFold(r.PathValue("file"), "main.m3u8") {
-		w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
-		w.Header().Set("Cache-Control", "no-cache")
-		if err := hls.WriteSubtitlePlaylist(w, plan, func(n int) string { return withQuery(strconv.Itoa(n)+".vtt", req.uris) }); err != nil {
-			h.remuxError(w, r, req.remux, err)
-		}
-		return
-	}
-	n, err := strconv.Atoi(name)
-	if err != nil || n < 0 || n >= plan.Len() || !strings.EqualFold(extension, "vtt") {
-		processingError(w, http.StatusNotFound)
-		return
-	}
-	var data []byte
-	switch {
-	case copied:
-		data = hls.SubtitleSegment(copyCues, plan, n)
-	case index < len(req.files):
-		var text subtitleText
-		if text, err = h.subtitleFile(r.Context(), req.files[index]); err == nil {
-			data = hls.SubtitleSegment(h.syncedSubtitle(r.Context(), req.remux.Version.ID, req.files[index], text).cues, plan, n)
-		}
-	default:
-		ctx, cancel := context.WithTimeout(r.Context(), segmentWait)
-		defer cancel()
-		data, err = h.Playback.RemuxSubtitle(ctx, req.remux, stream, n)
-	}
-	if err != nil {
-		h.remuxError(w, r, req.remux, err)
-		return
-	}
-	w.Header().Set("Content-Type", "text/vtt")
-	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(data))
-}
-
 // segmentWait bounds the wait for a segment whose FFmpeg makes progress.
 const segmentWait = 2 * time.Minute
 
@@ -681,4 +567,74 @@ func (h *Handler) stopEncodings(w http.ResponseWriter, r *http.Request) {
 		h.Playback.StopRemux(session)
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// renditions are the text subtitles of a remux's media source, as
+// Jellyfin's DynamicHlsHelper.AddSubtitles lists them in the master
+// playlist: the one the app takes in HLS shown by default, each served by
+// the subtitle controller's subtitles.m3u8 (see subtitlePlaylist).
+func (h *Handler) renditions(r *http.Request, req remuxRequest) []hls.Rendition {
+	streams := playback.MediaStreams(req.analysis, externalStreams(req.files), h.Accounts.Settings().Language)
+	selected := -1
+	if strings.EqualFold(query(r, "subtitleMethod"), "Hls") {
+		if index, err := strconv.Atoi(query(r, "subtitleStreamIndex")); err == nil {
+			selected = index
+		}
+	}
+	source := query(r, "mediaSourceId")
+	token := url.QueryEscape(query(r, "apiKey"))
+	var renditions []hls.Rendition
+	for _, stream := range streams {
+		if stream.Type != "Subtitle" || !stream.IsTextSubtitleStream {
+			continue
+		}
+		language := stream.Language
+		if language == "" {
+			language = "Unknown"
+		}
+		renditions = append(renditions, hls.Rendition{Name: stream.DisplayTitle, Language: language, Default: stream.Index == selected,
+			Forced: stream.IsForced, URI: source + "/Subtitles/" + strconv.Itoa(stream.Index) + "/subtitles.m3u8?SegmentLength=30&ApiKey=" + token})
+	}
+	return renditions
+}
+
+// burnSubtitle has a remux burn the subtitle stream of Jellyfin index
+// index into its converted video, as Jellyfin's EncodingHelper does: a
+// picture track inside the file overlaid, a picture file read as a second
+// input, and a text subtitle drawn by libass from the file the subtitle
+// encoder gives (extracting the tracks inside the file first), with the
+// character set of a subtitle file and the fonts the version carries. A
+// subtitle that cannot be read now is left out.
+func (h *Handler) burnSubtitle(ctx context.Context, remux *playback.Remux, version library.Version, analysis media.Analysis,
+	files []library.ExternalSubtitle, index int) {
+	source := h.subtitleSource(version, analysis, files)
+	stream, ok := subtitleStream(source, index)
+	if !ok {
+		return
+	}
+	switch {
+	case !stream.IsText() && stream.IsExternal:
+		remux.BurnFile = stream.Path
+	case !stream.IsText():
+		remux.Burn = new(stream.FFmpegIndex)
+	default:
+		path, err := h.subtitleEncoder.FilePath(ctx, source, stream)
+		if err != nil {
+			h.Logger.Warn("A subtitle to burn in could not be read", "addon", version.Addon, "index", index, "error", err)
+			return
+		}
+		remux.BurnText = path
+		if stream.IsExternal && stream.Language != "" {
+			if charset, err := h.subtitleEncoder.FileCharacterSet(ctx, source, stream); err == nil && charset != "utf-8" && charset != "ascii" {
+				remux.BurnCharset = charset
+			}
+		}
+		remux.BurnFonts = h.FontsDir
+		fonts := filepath.Join(h.DataDir, "attachments", version.ID.String())
+		if err := h.Playback.WriteAttachments(ctx, version, analysis, fonts); err == nil {
+			if entries, err := os.ReadDir(fonts); err == nil && len(entries) > 0 {
+				remux.BurnFonts = fonts
+			}
+		}
+	}
 }

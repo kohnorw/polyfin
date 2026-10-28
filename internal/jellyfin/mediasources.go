@@ -60,7 +60,7 @@ type MediaSourceInfo struct {
 }
 
 // playable is a movie or an episode with its versions and the subtitle
-// files addons offer for it, and the track preferences of the user it is
+// files kept for it (see titleSubtitles), and the track preferences of the user it is
 // described for.
 type playable struct {
 	item      library.Item
@@ -82,14 +82,9 @@ func (h *Handler) playable(ctx context.Context, user accounts.User, item library
 	var versionsErr error
 	var wg sync.WaitGroup
 	wg.Go(func() { p.versions, versionsErr = h.Library.Versions(ctx, user, item.ID) })
-	wg.Go(func() {
-		if subtitles, err := h.Library.Subtitles(ctx, user, item.ID); err == nil {
-			p.subtitles = subtitles
-		}
-	})
 	wg.Wait()
+	p.subtitles = h.titleSubtitles(item.ID)
 	p.versions = h.offered(ctx, user, p.versions)
-	h.subtitleFiles.Put(item.ID, p.subtitles)
 	return p, versionsErr
 }
 
@@ -114,12 +109,7 @@ func (h *Handler) knownPlayable(ctx context.Context, user accounts.User, item li
 	if err == nil {
 		h.watched.show(user.ID, item.ID, p.versions, h.rulesFor(ctx, user).key())
 	}
-	if subtitles, listed, err := h.Library.SubtitlesNow(ctx, user, item.ID); err == nil {
-		p.subtitles = subtitles
-		if listed {
-			h.subtitleFiles.Put(item.ID, subtitles)
-		}
-	}
+	p.subtitles = h.titleSubtitles(item.ID)
 	return p, complete, err
 }
 
@@ -136,7 +126,7 @@ func (h *Handler) cachedPlayable(ctx context.Context, user accounts.User, item l
 	if versions, ok := h.Library.CachedVersions(ctx, user, item.ID); ok {
 		p.versions = h.offered(ctx, user, versions)
 	}
-	p.subtitles, _ = h.subtitleFiles.Get(item.ID)
+	p.subtitles = h.titleSubtitles(item.ID)
 	return p
 }
 
@@ -158,41 +148,13 @@ func (p playable) externals(version library.Version) []playback.ExternalSubtitle
 }
 
 // versionFiles lists the subtitle files of a version, which come first
-// among its streams: its title's, files, those users added then the
-// addons', followed by its own, beside a local file.
+// among its streams: its title's, followed by its own, beside a local
+// file.
 func versionFiles(files []library.ExternalSubtitle, version library.Version) []library.ExternalSubtitle {
 	if len(version.Subtitles) == 0 {
 		return files
 	}
 	return append(slices.Clip(files), version.Subtitles...)
-}
-
-// pictureCodecs are the codecs of the picture subtitle files beside local
-// files, by their format, as Jellyfin names them: PGS files, and VobSub
-// pairs, by their .idx file.
-var pictureCodecs = map[string]string{"sup": "PGSSUB", "idx": "DVDSUB"}
-
-// pictureFile reports whether a subtitle file is pictures, which Polyfin
-// serves as they are or burns in, but never converts.
-func pictureFile(file library.ExternalSubtitle) bool {
-	return pictureCodecs[file.Format] != ""
-}
-
-// externalStreams describes subtitle files as the streams they are.
-func externalStreams(files []library.ExternalSubtitle) []playback.ExternalSubtitle {
-	result := make([]playback.ExternalSubtitle, len(files))
-	for i, subtitle := range files {
-		// Addon files are served as SubRip whatever they are; a file a user
-		// added or a local file keeps its format, as Jellyfin names its
-		// external files.
-		codec := "subrip"
-		if subtitle.Format != "" {
-			codec = cmp.Or(subtitleCodecs[subtitle.Format], pictureCodecs[subtitle.Format])
-		}
-		result[i] = playback.ExternalSubtitle{Language: subtitle.Language, Title: subtitle.Title, Codec: codec,
-			Forced: subtitle.Forced, HearingImpaired: subtitle.HearingImpaired, Default: subtitle.Default}
-	}
-	return result
 }
 
 // openedIndex is the index, among versions, of the version an item opened
@@ -324,17 +286,6 @@ func (h *Handler) baseSource(r *http.Request, p playable, version library.Versio
 		}
 	}
 	return source
-}
-
-// textCopyOf is the index of the text copy of the subtitle of index
-// index among streams, -1 when it has none.
-func textCopyOf(streams []playback.MediaStream, index int) int {
-	for _, stream := range streams {
-		if stream.CopyOf != nil && *stream.CopyOf == index {
-			return stream.Index
-		}
-	}
-	return -1
 }
 
 // streamURL is the address players fetch a version from when they use a

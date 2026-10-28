@@ -95,7 +95,8 @@ func TestDecisionsMatchJellyfin(t *testing.T) {
 			if !ok {
 				t.Fatalf("entry %d: no recorded container for %s", i, entry.Media)
 			}
-			options := Options{
+			options := Options{SubtitleExtraction: true, // Jellyfin's default
+
 				MaxStreamingBitrate: entry.Options.MaxStreamingBitrate,
 				AudioStreamIndex:    entry.Options.AudioStreamIndex,
 				SubtitleStreamIndex: entry.Options.SubtitleStreamIndex,
@@ -519,43 +520,36 @@ func TestHDRIsToneMappedOnTheGPUWithoutTheProcessorsLimits(t *testing.T) {
 	}
 }
 
-func TestWebVTTInMatroskaGoesOutAsAFile(t *testing.T) {
-	profile := readDeviceProfile(t, "androidtv")
-	webvtt := MediaStream{Type: "Subtitle", Codec: "webvtt", IsTextSubtitleStream: true, SupportsExternalStream: true}
-	subrip := MediaStream{Type: "Subtitle", Codec: "subrip", IsTextSubtitleStream: true, SupportsExternalStream: true}
-	for _, test := range []struct {
-		stream    MediaStream
-		container string
-		want      SubtitleDelivery
-	}{
-		{webvtt, "mkv", SubtitleDelivery{Method: "External", Format: "webvtt"}},
-		{webvtt, "matroska,webm", SubtitleDelivery{Method: "External", Format: "webvtt"}},
-		{webvtt, "webm", SubtitleDelivery{Method: "External", Format: "webvtt"}},
-		{webvtt, "mp4", SubtitleDelivery{Method: "Embed", Format: "webvtt"}},
-		{subrip, "mkv", SubtitleDelivery{Method: "Embed", Format: "subrip"}},
-	} {
-		if got := subtitleDelivery(profile.SubtitleProfiles, &test.stream, false, test.container, "http"); got != test.want {
-			t.Errorf("%s in %s: %+v, want %+v", test.stream.Codec, test.container, got, test.want)
-		}
-	}
-}
-
-func TestSubtitlesNotReadyAreNeverFiles(t *testing.T) {
+// Subtitle deliveries follow Jellyfin 12.4's StreamBuilder.GetSubtitleProfile.
+func TestSubtitleDeliveryIsJellyfins(t *testing.T) {
 	web, androidTV := readDeviceProfile(t, "jellyfin-web-chrome"), readDeviceProfile(t, "androidtv")
-	subrip := func(notReady bool) MediaStream {
-		return MediaStream{Type: "Subtitle", Codec: "subrip", IsTextSubtitleStream: true, SupportsExternalStream: true, NotReady: notReady}
+	text := func(codec string, external bool) MediaStream {
+		return MediaStream{Type: "Subtitle", Codec: codec, IsExternal: external, IsTextSubtitleStream: true, SupportsExternalStream: true}
 	}
+	pgs := MediaStream{Type: "Subtitle", Codec: "PGSSUB", SupportsExternalStream: true}
+	extracting := Options{SubtitleExtraction: true}
 	for _, test := range []struct {
-		name    string
-		profile *DeviceProfile
-		stream  MediaStream
-		want    string
+		name      string
+		profile   *DeviceProfile
+		stream    MediaStream
+		transcode bool
+		container string
+		protocol  string
+		options   Options
+		want      string
 	}{
-		{"jellyfin-web, ready", web, subrip(false), "External"},
-		{"jellyfin-web, not ready", web, subrip(true), "Encode"},
-		{"Android TV, not ready, read from the video", androidTV, subrip(true), "Embed"},
+		{"Android TV embeds WebVTT in Matroska", androidTV, text("webvtt", false), false, "mkv", "", Options{}, "Embed"},
+		{"Android TV embeds SubRip", androidTV, text("subrip", false), false, "mkv", "", Options{}, "Embed"},
+		{"jellyfin-web takes a track inside the file as a file", web, text("subrip", false), false, "mkv", "", Options{}, "External"},
+		{"jellyfin-web takes a subtitle file as a file", web, text("subrip", true), false, "mkv", "", Options{}, "External"},
+		{"a transcode extracts a track only on the fly", web, text("subrip", false), true, "ts", "hls", Options{}, "Encode"},
+		{"a transcode extracting on the fly", web, text("subrip", false), true, "ts", "hls", extracting, "External"},
+		{"a file needs no extraction", web, text("subrip", true), true, "ts", "hls", Options{}, "External"},
+		{"ASS is not converted", web, text("ass", true), true, "ts", "hls", Options{}, "External"},
+		{"PGS is burned in on the web", web, pgs, true, "ts", "hls", extracting, "Encode"},
 	} {
-		if got := subtitleDelivery(test.profile.SubtitleProfiles, &test.stream, false, "mkv", "http"); got.Method != test.want {
+		got := subtitleDelivery(test.profile.SubtitleProfiles, &test.stream, test.transcode, test.container, test.protocol, test.options)
+		if got.Method != test.want {
 			t.Errorf("%s: %+v, want %s", test.name, got, test.want)
 		}
 	}

@@ -9,19 +9,20 @@ import (
 )
 
 // A text subtitle is drawn onto the converted video by libass, with the
-// path escaped for FFmpeg's filter graph.
+// path escaped for FFmpeg's filter graph, in its own styles as Jellyfin's
+// subtitles filter draws it.
 func TestTextBurnGraph(t *testing.T) {
 	t.Parallel()
-	v := VideoEncoding{Encoder: "libx264", Width: 640, Height: 360, BurnText: "/data/cache/burned-subtitles/a:b.srt", FontsDir: "/usr/share/fonts"}
+	v := VideoEncoding{Encoder: "libx264", Width: 640, Height: 360, BurnText: "/data/subtitles/a:b.srt", BurnCharset: "windows-1252",
+		FontsDir: "/usr/share/fonts"}
 	graph := v.burnGraph(0, 0, "")
-	for _, want := range []string{"subtitles=filename=/data/cache/burned-subtitles/a\\\\:b.srt", ":fontsdir=/usr/share/fonts", ":force_style=FontName=DejaVu Sans\\,Bold=1", "[video]"} {
+	for _, want := range []string{"subtitles=filename=/data/subtitles/a\\\\:b.srt", ":charenc=windows-1252", ":fontsdir=/usr/share/fonts", "[video]"} {
 		if !strings.Contains(graph, want) {
 			t.Errorf("graph %q lacks %q", graph, want)
 		}
 	}
-	v.StyledText = true
-	if strings.Contains(v.burnGraph(0, 0, ""), "force_style") {
-		t.Error("an ASS script's styles are overridden")
+	if strings.Contains(graph, "force_style") {
+		t.Error("a subtitle's styles are overridden")
 	}
 	if !v.Burns() {
 		t.Error("a text subtitle is not burned")

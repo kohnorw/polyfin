@@ -1,574 +1,493 @@
 package subtitles
 
 import (
-	"bytes"
-	"cmp"
-	"slices"
+	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
-	"unicode/utf16"
-	"unicode/utf8"
 )
 
-// Script is an Advanced SubStation Alpha (v4+) or SubStation Alpha (v4)
-// script, kept as it is written so that players rendering ASS draw it as
-// its authors styled it.
-type Script struct {
-	// Header holds everything up to and including the [Events] Format
-	// line, verbatim: script info, styles and whatever sections precede the
-	// events.
-	Header []byte
-	// Events are the Dialogue lines, in file order.
-	Events []Event
-	// Footer holds what follows the events ([Fonts], [Graphics], ...),
-	// verbatim.
-	Footer []byte
+// AdvancedSubStationAlpha is libse's AdvancedSubStationAlpha format (.ass).
+type AdvancedSubStationAlpha struct {
+	errorCount int
+	errors     strings.Builder
 }
 
-// Event is a Dialogue line of a script.
-type Event struct {
-	Start, End time.Duration
-	// Layer is the first field verbatim: Layer (ASS) or Marked (SSA).
-	Layer string
-	// Rest holds the fields after End verbatim: Style, Name, MarginL,
-	// MarginR, MarginV, Effect and Text.
-	Rest string
-}
+func (*AdvancedSubStationAlpha) Name() string      { return "Advanced Sub Station Alpha" }
+func (*AdvancedSubStationAlpha) Extension() string { return ".ass" }
 
-// eventFields are the fields of Dialogue lines in the order scripts
-// almost always give them, and the one Matroska blocks follow; SSA scripts
-// name the first one Marked.
-var eventFields = []string{"Layer", "Start", "End", "Style", "Name", "MarginL", "MarginR", "MarginV", "Effect", "Text"}
+// Errors are the errors the last Load met.
+func (f *AdvancedSubStationAlpha) Errors() string { return f.errors.String() }
 
-// eventDefaults are the values a field missing from a script's Format
-// takes, in the order of eventFields.
-var eventDefaults = []string{"0", "", "", "Default", "", "0", "0", "0", "", ""}
+// assStyleFormat is libse's SsaStyle.DefaultAssStyleFormat.
+const assStyleFormat = "Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding"
 
-func formatLine(ssa bool) string {
-	if ssa {
-		return "Format: Marked, " + strings.Join(eventFields[1:], ", ") + "\n"
-	}
-	return "Format: " + strings.Join(eventFields, ", ") + "\n"
-}
+// assDefaultStyle is libse's default SsaStyle written as an ASS style:
+// white Arial 20 with a black outline and shadow of 1, at the bottom
+// center.
+const assDefaultStyle = "Style: Default,Arial,20,&H00FFFFFF,&H0000FFFF,&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,1,1,2,10,10,10,1"
 
-// eventFormat tells how to read the Dialogue lines of a script.
-type eventFormat struct {
-	// count is the number of fields of a Dialogue line, the last one, the
-	// text, holding commas of its own.
-	count int
-	// index gives, for each of eventFields, its position in Dialogue lines
-	// or -1 when they lack it; nil when they follow the order of
-	// eventFields.
-	index []int
-	ssa   bool
-}
+const assEventFormat = "Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
 
-var standardFormat = eventFormat{count: len(eventFields)}
+// assHeader is the script libse writes paragraphs read from another format
+// in, with libse's default settings (PlayDepth and ScaledBorderAndShadow
+// shown) and default style; %s is the title.
+const assHeader = "[Script Info]\n; This is an Advanced Sub Station Alpha v4+ script.\nTitle: %s\nScriptType: v4.00+\nPlayDepth: 0\nScaledBorderAndShadow: Yes\n\n" +
+	"[V4+ Styles]\n" + assStyleFormat + "\n" + assDefaultStyle + "\n\n[Events]\n" + assEventFormat
 
-// parseFormat reads the fields an [Events] Format line names. Dialogue
-// lines are written back as Layer, Start, End and the fields after End,
-// so a format placing Start and End elsewhere is read field by field
-// (rewrite reports that its Format line must then become the standard
-// one); a format lacking Start, End or Text, which libass could not read
-// either, is taken for the standard one.
-func parseFormat(line string, ssa bool) (format eventFormat, rewrite bool) {
-	_, list, _ := strings.Cut(line, ":")
-	names := strings.Split(list, ",")
-	for i, name := range names {
-		names[i] = strings.ToLower(strings.TrimSpace(name))
-	}
-	last := len(names) - 1
-	if len(names) >= 4 && names[1] == "start" && names[2] == "end" && names[last] == "text" {
-		return eventFormat{count: len(names), ssa: ssa}, false
-	}
-	format = eventFormat{count: len(names), index: make([]int, len(eventFields)), ssa: ssa}
-	for i, field := range eventFields {
-		format.index[i] = -1
-		for j, name := range names {
-			if name == strings.ToLower(field) || i == 0 && name == "marked" {
-				format.index[i] = j
-				break
-			}
-		}
-	}
-	if format.index[1] < 0 || format.index[2] < 0 || format.index[len(eventFields)-1] != last {
-		format = standardFormat
-		format.ssa = ssa
-	}
-	return format, true
-}
-
-// parseDialogue reads the fields after "Dialogue:" of an event line.
-func (f eventFormat) parseDialogue(fields string) (Event, bool) {
-	fields = strings.TrimLeft(fields, " \t")
-	var layer, start, end, rest string
-	if f.index == nil {
-		parts := strings.SplitN(fields, ",", 4)
-		if len(parts) < 4 || strings.Count(parts[3], ",") < f.count-4 {
-			return Event{}, false
-		}
-		layer, start, end, rest = parts[0], parts[1], parts[2], parts[3]
+// ToText writes the paragraphs as an ASS script, as libse's
+// AdvancedSubStationAlpha.ToText: the header of an ASS script read is kept
+// with its styles, which the paragraphs keep; paragraphs read from another
+// format get the default script and style.
+//
+// libse converts the styles of an SSA, TTML or WebVTT header into ASS
+// styles; Jellyfin never asks for that conversion of an SSA script, which
+// it serves as it is, and Polyfin writes the default style for the others.
+func (*AdvancedSubStationAlpha) ToText(s *Subtitle, title string) string {
+	var b strings.Builder
+	valid := strings.Contains(s.Header, "[V4+ Styles]")
+	var styles []string
+	if valid {
+		b.WriteString(strings.TrimSpace(s.Header) + "\n")
+		b.WriteString(assEventFormat + "\n")
+		styles = assStylesFromHeader(s.Header)
 	} else {
-		parts := strings.SplitN(fields, ",", f.count)
-		if len(parts) < f.count {
-			return Event{}, false
+		header := fmt.Sprintf(assHeader, title)
+		b.WriteString(header + "\n")
+		styles = assStylesFromHeader(header)
+	}
+	for _, p := range s.Paragraphs {
+		style := "Default"
+		switch {
+		case p.Extra != "" && valid && contains(styles, p.Extra):
+			style = p.Extra
+		case len(styles) > 0 && !contains(styles, style) && contains(styles, p.Extra):
+			style = p.Extra
+		case len(styles) > 0 && p.Extra == "":
+			style = styles[0]
 		}
-		values := make([]string, len(eventFields))
-		for i, j := range f.index {
-			if j >= 0 {
-				values[i] = parts[j]
-			} else {
-				values[i] = eventDefaults[i]
+		margin := func(m string) string {
+			if m != "" && isInteger(m) {
+				return m
 			}
+			return "0"
 		}
-		if f.index[0] < 0 && f.ssa {
-			values[0] = "Marked=0"
+		kind := "Dialogue"
+		if p.IsComment {
+			kind = "Comment"
 		}
-		layer, start, end, rest = values[0], values[1], values[2], strings.Join(values[3:], ",")
+		text := assFormatText(strings.ReplaceAll(p.Text, "\n", "\\N"))
+		fmt.Fprintf(&b, "%s: %d,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", kind, p.Layer, assTime(p.Start), assTime(p.End), style, p.Actor,
+			margin(p.MarginL), margin(p.MarginR), margin(p.MarginV), p.Effect, text)
 	}
-	startTime, ok := assTimestamp(start)
-	if !ok {
-		return Event{}, false
+	if s.Footer != "" && (strings.Contains(s.Footer, "[Fonts]\n") || strings.Contains(s.Footer, "[Graphics]\n") || strings.Contains(s.Footer, "[Aegisub Extradata]\n")) {
+		b.WriteString("\n" + s.Footer + "\n")
 	}
-	endTime, ok := assTimestamp(end)
-	if !ok || endTime < startTime {
-		return Event{}, false
-	}
-	return Event{Start: startTime, End: endTime, Layer: layer, Rest: rest}, true
+	return strings.TrimSpace(b.String()) + "\n"
 }
 
-// assTimestamp reads an H:MM:SS.cc time. Like libass, it reads the digits
-// after the dot as hundredths whatever their number; the bounds on digits
-// keep hostile values from overflowing.
-func assTimestamp(value string) (time.Duration, bool) {
-	value = strings.TrimSpace(value)
-	hours, rest, ok1 := strings.Cut(value, ":")
-	minutes, rest, ok2 := strings.Cut(rest, ":")
-	seconds, hundredths, _ := strings.Cut(rest, ".")
-	if !ok1 || !ok2 {
-		return 0, false
-	}
-	var total time.Duration
-	for i, part := range []string{hours, minutes, seconds, hundredths} {
-		limit := 2
-		if i == 0 {
-			limit = 6
-		} else if i == 3 {
-			limit = 3
-		}
-		if len(part) > limit || part == "" && i < 3 {
-			return 0, false
-		}
-		n := 0
-		for _, c := range []byte(part) {
-			if c < '0' || c > '9' {
-				return 0, false
-			}
-			n = n*10 + int(c-'0')
-		}
-		switch i {
-		case 0:
-			total = time.Duration(n) * time.Hour
-		case 1:
-			total += time.Duration(n) * time.Minute
-		case 2:
-			total += time.Duration(n) * time.Second
-		case 3:
-			total += time.Duration(n) * 10 * time.Millisecond
-		}
-	}
-	return total, true
-}
-
-// DecodeText turns the bytes of a subtitle, or of another text file such
-// as a music folder's lyrics files and playlists, into text with "\n" line
-// endings, without byte order mark: UTF-16 with a byte order mark, or
-// without one when its first character is ASCII, as a subtitle's is; else
-// UTF-8, text that is not valid UTF-8 being read as Windows-1252.
-func DecodeText(data []byte) string {
-	if units, ok := utf16Units(data); ok {
-		data = []byte(string(utf16.Decode(units)))
-	}
-	data = bytes.TrimPrefix(data, []byte("\xef\xbb\xbf"))
-	if !utf8.Valid(data) {
-		data = fromWindows1252(data)
-	}
-	return strings.ReplaceAll(strings.ReplaceAll(string(data), "\r\n", "\n"), "\r", "\n")
-}
-
-// utf16Units reads data as UTF-16 when it is: its byte order mark, or a
-// first character that is ASCII, tells little or big endian. The byte
-// order mark is left out.
-func utf16Units(data []byte) ([]uint16, bool) {
-	if len(data) < 2 {
-		return nil, false
-	}
-	var big bool
-	switch {
-	case data[0] == 0xff && data[1] == 0xfe:
-		data = data[2:]
-	case data[0] == 0xfe && data[1] == 0xff:
-		data, big = data[2:], true
-	case data[0] != 0 && data[0] < 0x80 && data[1] == 0:
-	case data[0] == 0 && data[1] != 0 && data[1] < 0x80:
-		big = true
-	default:
-		return nil, false
-	}
-	units := make([]uint16, len(data)/2)
-	for i := range units {
-		if big {
-			units[i] = uint16(data[2*i])<<8 | uint16(data[2*i+1])
-		} else {
-			units[i] = uint16(data[2*i+1])<<8 | uint16(data[2*i])
-		}
-	}
-	return units, true
-}
-
-// isScript reports text whose first line is the [Script Info] section
-// every ASS and SSA script opens with.
-func isScript(text string) bool {
-	for line := range strings.SplitSeq(text, "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			return strings.EqualFold(line, "[Script Info]")
+func contains(list []string, s string) bool {
+	for _, item := range list {
+		if item == s {
+			return true
 		}
 	}
 	return false
 }
 
-func hasPrefixFold(s, prefix string) bool {
-	return len(s) >= len(prefix) && strings.EqualFold(s[:len(prefix)], prefix)
+// assTime is h:mm:ss.cc, the centiseconds rounded, as libse's
+// AdvancedSubStationAlpha.MakeTimeCode.
+func assTime(d time.Duration) string {
+	h, m, s, ms := clock(d)
+	fragment := int64(math.Round(float64(ms) / 10))
+	if fragment >= 100 {
+		total := timeCode(int(h), int(m), int(s)+1, 0)
+		h, m, s, _ = clock(total)
+		fragment = 0
+	}
+	return fmt.Sprintf("%d:%02d:%02d.%02d", h, m, s, fragment)
 }
 
-func withNewline(s string) string {
-	if s != "" && !strings.HasSuffix(s, "\n") {
-		return s + "\n"
-	}
-	return s
-}
-
-// ParseScript reads an ASS or SSA script; ErrUnsupported when data is not
-// one. Like Parse, it reads text that is not valid UTF-8 as Windows-1252.
-// Lines of the [Events] section other than Dialogue lines (Comment,
-// Picture, ...) are dropped: players show none of them. A script whose
-// [Events] section has no Format line gets the standard one.
-func ParseScript(data []byte) (*Script, error) {
-	text := DecodeText(data)
-	if !isScript(text) {
-		return nil, ErrUnsupported
-	}
-	script, _ := parseScript(text)
-	return script, nil
-}
-
-// parseScript reads the script text holds, reporting whether it is an
-// SSA (v4) script.
-func parseScript(text string) (*Script, bool) {
-	var (
-		script   Script
-		ssa      bool
-		inEvents bool
-		header   = -1 // where the header ends, once the Format line is read
-		format   eventFormat
-		blank    = -1 // where the blank lines before the current line start
-	)
-	// standard ends the header before the line at offset at, giving it the
-	// standard Format line.
-	standard := func(at int) {
-		script.Header = []byte(withNewline(text[:at]) + formatLine(ssa))
-		format, format.ssa = standardFormat, ssa
-		header = at
-	}
-	for pos := 0; pos < len(text); {
-		start, end, next := pos, len(text), len(text)
-		if i := strings.IndexByte(text[pos:], '\n'); i >= 0 {
-			end, next = pos+i, pos+i+1
+// assStylesFromHeader lists the styles of a script's header, as libse's
+// AdvancedSubStationAlpha.GetStylesFromHeader.
+func assStylesFromHeader(header string) []string {
+	var styles []string
+	for _, line := range splitLines(header) {
+		trimmed := strings.TrimSpace(line)
+		if !hasPrefixFold(trimmed, "style:") {
+			continue
 		}
-		pos = next
-		line := strings.TrimSpace(text[start:end])
+		name, _, _ := strings.Cut(strings.TrimSpace(trimmed[len("style:"):]), ",")
+		if name = strings.TrimSpace(name); name != "" && !contains(styles, name) {
+			styles = append(styles, name)
+		}
+	}
+	return styles
+}
+
+// assFormatText turns the HTML tags other formats read into ASS override
+// tags, as libse's AdvancedSubStationAlpha.FormatText does for italic,
+// bold, underline and font colors.
+func assFormatText(text string) string {
+	if !strings.Contains(text, "<") {
+		return text
+	}
+	text = strings.NewReplacer("<i>", `{\i1}`, "</i>", `{\i0}`, "<u>", `{\u1}`, "</u>", `{\u0}`, "<b>", `{\b1}`, "</b>", `{\b0}`).Replace(text)
+	for count := 0; strings.Contains(text, "<font ") && count < 100; count++ {
+		start := strings.Index(text, "<font ")
+		end := strings.IndexByte(text[start:], '>')
+		if end < 0 {
+			break
+		}
+		end += start
+		tag := text[start+5 : end+1]
+		text = text[:start] + text[end+1:]
+		closing := strings.Index(text[start:], "</font>")
+		if closing >= 0 {
+			closing += start
+			text = text[:closing] + text[closing+7:]
+		}
+		if color := attribute(tag, "color"); color != "" {
+			ass := assColor(color)
+			if closing >= 0 && closing < len(text) {
+				text = text[:closing] + `{\c}` + text[closing:]
+			}
+			if ass != "" {
+				text = text[:start] + `{\c` + ass + `}` + text[start:]
+			}
+		}
+	}
+	return text
+}
+
+// attribute reads an attribute of an HTML tag.
+func attribute(tag, name string) string {
+	i := strings.Index(tag, name+"=")
+	if i < 0 {
+		return ""
+	}
+	value := strings.TrimLeft(tag[i+len(name)+1:], " ")
+	if value == "" {
+		return ""
+	}
+	if quote := value[0]; quote == '"' || quote == '\'' {
+		end := strings.IndexByte(value[1:], quote)
+		if end < 0 {
+			return value[1:]
+		}
+		return value[1 : end+1]
+	}
+	end := strings.IndexAny(value, " >")
+	if end < 0 {
+		return value
+	}
+	return value[:end]
+}
+
+// namedColors are the HTML color names subtitle files use.
+var namedColors = map[string]string{"white": "ffffff", "black": "000000", "red": "ff0000", "green": "008000", "blue": "0000ff",
+	"yellow": "ffff00", "cyan": "00ffff", "magenta": "ff00ff", "lime": "00ff00", "gray": "808080", "grey": "808080",
+	"orange": "ffa500", "purple": "800080", "silver": "c0c0c0", "aqua": "00ffff", "fuchsia": "ff00ff"}
+
+// assColor writes an HTML color (#rrggbb or a name) as ASS's &Hbbggrr&.
+func assColor(color string) string {
+	hex := strings.ToLower(strings.TrimPrefix(color, "#"))
+	if named, ok := namedColors[hex]; ok {
+		hex = named
+	}
+	if len(hex) != 6 {
+		return ""
+	}
+	if _, err := strconv.ParseUint(hex, 16, 32); err != nil {
+		return ""
+	}
+	return "&H" + strings.ToUpper(hex[4:6]+hex[2:4]+hex[0:2]) + "&"
+}
+
+// assTimeCode reads h:mm:ss.cc, as libse's
+// AdvancedSubStationAlpha.GetTimeCodeFromString.
+func assTimeCode(value string) (time.Duration, bool) {
+	parts := strings.FieldsFunc(value, func(r rune) bool { return r == ':' || r == '.' })
+	if len(parts) < 4 {
+		return 0, false
+	}
+	var n [4]int
+	for i := range n {
+		v, err := strconv.Atoi(parts[i])
+		if err != nil {
+			return 0, false
+		}
+		n[i] = v
+	}
+	return timeCode(n[0], n[1], n[2], n[3]*10), true
+}
+
+// normalizeNewLines turns ASS's line breaks into lines.
+func normalizeNewLines(text string) string {
+	return strings.ReplaceAll(strings.ReplaceAll(text, "\\N", "\n"), "\\n", "\n")
+}
+
+// assFields are the columns of an [Events] section.
+type assFields struct {
+	layer, start, end, style, actor, name, marginL, marginR, marginV, effect, text int
+}
+
+func (f *assFields) read(format string) {
+	*f = assFields{-1, -1, -1, -1, -1, -1, -1, -1, -1, -1, -1}
+	for i, column := range strings.Split(format, ",") {
+		switch strings.TrimSpace(column) {
+		case "start":
+			f.start = i
+		case "end":
+			f.end = i
+		case "text":
+			f.text = i
+		case "style":
+			f.style = i
+		case "actor":
+			f.actor = i
+		case "name":
+			f.name = i
+		case "marginl":
+			f.marginL = i
+		case "marginr":
+			f.marginR = i
+		case "marginv":
+			f.marginV = i
+		case "effect":
+			f.effect = i
+		case "layer", "marked":
+			f.layer = i
+		}
+	}
+}
+
+// loadScript reads the events, the header and the footer of an ASS or SSA
+// script, as libse's AdvancedSubStationAlpha.LoadSubtitle and
+// SubStationAlpha.LoadSubtitle do. text turns an event's text into the
+// paragraph's.
+func loadScript(s *Subtitle, lines []string, ssa bool, text func(string) string, errors *strings.Builder) int {
+	errorCount := 0
+	eventsStarted, fontsStarted, graphicsStarted := false, false, false
+	s.Paragraphs = s.Paragraphs[:0]
+	fields := assFields{layer: 0, start: 1, end: 2, style: 3, actor: -1, name: 4, marginL: 5, marginR: 6, marginV: 7, effect: 8, text: 9}
+	var header, footer strings.Builder
+	for lineNumber, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		lower := strings.ToLower(trimmed)
+		if ssa {
+			if !eventsStarted {
+				header.WriteString(line + "\n")
+			}
+		} else if !eventsStarted && !fontsStarted && !graphicsStarted && lower != "[fonts]" && lower != "[graphics]" {
+			header.WriteString(line + "\n")
+		}
+		if !ssa && trimmed != "" && !strings.HasPrefix(strings.TrimLeft(line, " \t"), ";") &&
+			(hasPrefixFold(strings.TrimLeft(line, " \t"), "dialog:") || hasPrefixFold(strings.TrimLeft(line, " \t"), "dialogue:")) {
+			eventsStarted, fontsStarted, graphicsStarted = true, false, false
+		}
+		if ssa && trimmed != "" && strings.HasPrefix(strings.TrimLeft(line, " \t"), ";") {
+			continue
+		}
 		switch {
-		case line == "":
-			if blank < 0 {
-				blank = start
+		case lower == "[events]":
+			if !ssa && !strings.Contains(strings.ToLower(header.String()), "\n[events]") {
+				h := strings.TrimRight(header.String(), " \t\r\n")
+				header.Reset()
+				header.WriteString(h + "\n\n[Events]\n")
 			}
-			continue
-		case line[0] == '[' && line[len(line)-1] == ']':
-			if inEvents {
-				// The blank lines between the events and the next section
-				// belong with it, so that writing the script back keeps them.
-				footer := start
-				if blank >= 0 {
-					footer = blank
-				}
-				if header < 0 {
-					standard(footer)
-				}
-				script.Footer = []byte(text[footer:])
-				return &script, ssa
-			}
-			switch strings.ToLower(line) {
-			case "[events]":
-				inEvents = true
-			case "[v4 styles]":
-				ssa = true
-			}
-		case !inEvents:
-		case header < 0 && hasPrefixFold(line, "format:"):
-			var rewrite bool
-			format, rewrite = parseFormat(line, ssa)
-			if rewrite {
-				standard(start)
-				format, _ = parseFormat(line, ssa)
-			} else {
-				script.Header = []byte(withNewline(text[:next]))
-				header = next
-			}
-		case strings.HasPrefix(line, "Dialogue:"):
-			if header < 0 {
-				standard(start)
-			}
-			if event, ok := format.parseDialogue(line[len("Dialogue:"):]); ok {
-				script.Events = append(script.Events, event)
-			}
-		}
-		blank = -1
-	}
-	switch {
-	case header >= 0:
-	case inEvents:
-		standard(len(text))
-	default:
-		script.Header = []byte(withNewline(text) + "\n[Events]\n" + formatLine(ssa))
-	}
-	return &script, ssa
-}
-
-// Bytes writes the script: its header, its events as Dialogue lines and
-// its footer.
-func (s *Script) Bytes() []byte {
-	var out bytes.Buffer
-	out.Grow(len(s.Header) + len(s.Footer) + len(s.Events)*96)
-	out.Write(s.Header)
-	for _, event := range s.Events {
-		out.WriteString("Dialogue: ")
-		out.WriteString(event.Layer)
-		out.WriteByte(',')
-		out.WriteString(assTime(event.Start))
-		out.WriteByte(',')
-		out.WriteString(assTime(event.End))
-		out.WriteByte(',')
-		out.WriteString(event.Rest)
-		out.WriteByte('\n')
-	}
-	out.Write(s.Footer)
-	return out.Bytes()
-}
-
-// From keeps, like From for cues, the events that end after start,
-// shifted so that start becomes zero. The new script shares the header
-// and footer of s.
-func (s *Script) From(start time.Duration) *Script {
-	if start <= 0 {
-		return s
-	}
-	events := make([]Event, 0, len(s.Events))
-	for _, event := range s.Events {
-		if event.End <= start {
-			continue
-		}
-		event.Start, event.End = max(event.Start-start, 0), event.End-start
-		events = append(events, event)
-	}
-	return &Script{Header: s.Header, Events: events, Footer: s.Footer}
-}
-
-// Cues returns the text the script shows, for apps that cannot render
-// ASS, as Jellyfin writes an ASS track as WebVTT: override blocks
-// removed, \N line breaks as lines, \h as a space, the rest of the text
-// as it is. \n breaks lines only where the script wraps with style 2, as
-// ASS defines it, and is a space elsewhere. Drawings are dropped, and
-// events showing the same text at the same times (a sign drawn in several
-// layers) give one cue.
-func (s *Script) Cues() []Cue {
-	fields, wrap := scriptLayout(s.Header)
-	cues := make([]Cue, 0, len(s.Events))
-	for _, event := range s.Events {
-		if event.End <= event.Start {
-			continue
-		}
-		text := event.Rest
-		for range fields - 4 {
-			if _, text, _ = strings.Cut(text, ","); text == "" {
-				break
-			}
-		}
-		if lines := plainText(text, wrap); len(lines) > 0 {
-			cues = append(cues, Cue{Start: event.Start, End: event.End, Lines: lines})
-		}
-	}
-	slices.SortStableFunc(cues, func(a, b Cue) int { return cmp.Compare(a.Start, b.Start) })
-	unique := cues[:0]
-	for _, cue := range cues {
-		duplicate := false
-		for i := len(unique) - 1; i >= 0 && unique[i].Start == cue.Start; i-- {
-			if unique[i].End == cue.End && slices.Equal(unique[i].Lines, cue.Lines) {
-				duplicate = true
-				break
-			}
-		}
-		if !duplicate {
-			unique = append(unique, cue)
-		}
-	}
-	return unique
-}
-
-// scriptLayout reads from a script header the number of fields of its
-// Dialogue lines and whether it wraps text with style 2, where \n breaks
-// lines.
-func scriptLayout(header []byte) (fields int, wrap bool) {
-	fields = len(eventFields)
-	text := strings.TrimRight(string(header), "\n")
-	if line := text[strings.LastIndexByte(text, '\n')+1:]; hasPrefixFold(line, "format:") {
-		if n := strings.Count(line, ",") + 1; n >= 4 {
-			fields = n
-		}
-	}
-	for line := range strings.SplitSeq(text, "\n") {
-		if line = strings.TrimSpace(line); hasPrefixFold(line, "wrapstyle:") {
-			wrap = strings.TrimSpace(line[len("wrapstyle:"):]) == "2"
-		}
-	}
-	return fields, wrap
-}
-
-// plainText turns the text of an event into the lines it shows.
-func plainText(text string, wrap bool) []string {
-	var out strings.Builder
-	drawing := false
-	show := func(s string) {
-		if !drawing {
-			out.WriteString(s)
-		}
-	}
-	for i := 0; i < len(text); {
-		switch c := text[i]; {
-		case c == '{':
-			end := strings.IndexByte(text[i:], '}')
-			if end < 0 {
-				// libass shows an override block left open as text.
-				show(text[i:])
-				i = len(text)
+			eventsStarted, fontsStarted, graphicsStarted = true, false, false
+		case lower == "[fonts]":
+			eventsStarted, fontsStarted, graphicsStarted = false, true, false
+			footer.WriteString("\n[Fonts]\n")
+		case lower == "[graphics]":
+			eventsStarted, fontsStarted, graphicsStarted = false, false, true
+			footer.WriteString("\n[Graphics]\n")
+		case !ssa && lower == "[aegisub extradata]":
+			eventsStarted, fontsStarted, graphicsStarted = false, false, true
+			footer.WriteString("\n[Aegisub Extradata]\n")
+		case fontsStarted || graphicsStarted:
+			footer.WriteString(line + "\n")
+		case eventsStarted && trimmed != "" && !strings.HasPrefix(strings.TrimLeft(line, " \t"), ";"):
+			if len(line) > 10 && strings.HasPrefix(lower, "format:") {
+				fields.read(lower[len("format:"):])
 				continue
 			}
-			// What precedes the first backslash is a comment.
-			tags := strings.Split(text[i+1:i+end], `\`)
-			for _, tag := range tags[1:] {
-				switch name, value := overrideTag(tag); name {
-				case "p":
-					drawing = value > 0
-				case "q":
-					wrap = value == 2
+			var split []string
+			switch {
+			case strings.HasPrefix(lower, "dialog:"):
+				split = strings.Split(strings.TrimPrefix(dropLeading(line, len("dialog:")), sspace(ssa)), ",")
+			case strings.HasPrefix(lower, "dialogue:"):
+				split = strings.Split(strings.TrimPrefix(dropLeading(line, len("dialogue:")), sspace(ssa)), ",")
+			default:
+				split = strings.Split(line, ",")
+			}
+			p := &Paragraph{}
+			var start, end, body string
+			for i, value := range split {
+				switch {
+				case i == fields.start:
+					start = strings.TrimSpace(value)
+				case i == fields.end:
+					end = strings.TrimSpace(value)
+				case i == fields.style:
+					p.Extra = strings.TrimSpace(value)
+				case i == fields.actor && fields.name == -1, i == fields.name:
+					p.Actor = strings.TrimSpace(value)
+				case i == fields.marginL:
+					p.MarginL = strings.TrimSpace(value)
+				case i == fields.marginR:
+					p.MarginR = strings.TrimSpace(value)
+				case i == fields.marginV:
+					p.MarginV = strings.TrimSpace(value)
+				case i == fields.effect:
+					p.Effect = strings.TrimSpace(value)
+				case i == fields.layer:
+					layer := strings.TrimSpace(strings.ReplaceAll(value, "Comment:", ""))
+					layer = strings.TrimPrefix(layer, "Marked=")
+					p.Layer, _ = strconv.Atoi(layer)
+				case i == fields.text:
+					body = value
+				case i > fields.text:
+					body += "," + value
 				}
 			}
-			i += end + 1
-		case c == '\\' && i+1 < len(text) && strings.IndexByte("Nnh", text[i+1]) >= 0:
-			if text[i+1] == 'N' || text[i+1] == 'n' && wrap {
-				show("\n")
-			} else {
-				show(" ")
+			var okStart, okEnd bool
+			p.Start, okStart = assTimeCode(start)
+			p.End, okEnd = assTimeCode(end)
+			if !okStart || !okEnd {
+				errorCount++
+				if errors.Len() < 2000 {
+					fmt.Fprintf(errors, "Line %d - error reading time code: %s\n", lineNumber+1, line)
+				} else if len(s.Paragraphs) == 0 {
+					return errorCount
+				}
+				continue
 			}
-			i += 2
-		default:
-			end := i + 1
-			for end < len(text) && text[end] != '{' && text[end] != '\\' {
-				end++
-			}
-			show(text[i:end])
-			i = end
+			p.Text = text(body)
+			p.IsComment = strings.HasPrefix(lower, "comment:")
+			s.Paragraphs = append(s.Paragraphs, p)
 		}
 	}
-	var lines []string
-	for line := range strings.SplitSeq(out.String(), "\n") {
-		if line = strings.Trim(line, " \t"); line != "" {
-			lines = append(lines, line)
+	if header.Len() > 0 {
+		s.Header = header.String()
+	}
+	if footer.Len() > 0 {
+		s.Footer = strings.TrimSpace(footer.String())
+	}
+	s.Renumber()
+	return errorCount
+}
+
+// dropLeading removes the first n bytes of line.
+func dropLeading(line string, n int) string {
+	if len(line) < n {
+		return ""
+	}
+	return line[n:]
+}
+
+// sspace is the space SSA's reader drops after "Dialogue:".
+func sspace(ssa bool) string {
+	if ssa {
+		return " "
+	}
+	return ""
+}
+
+// Load reads an ASS script, as libse's AdvancedSubStationAlpha.LoadSubtitle:
+// the text keeps its override tags, its line breaks becoming lines.
+func (f *AdvancedSubStationAlpha) Load(s *Subtitle, lines []string, _ string) int {
+	f.errors.Reset()
+	f.errorCount = loadScript(s, lines, false, normalizeNewLines, &f.errors)
+	return f.errorCount
+}
+
+// SubStationAlpha is libse's SubStationAlpha format (.ssa).
+type SubStationAlpha struct {
+	errorCount int
+	errors     strings.Builder
+}
+
+func (*SubStationAlpha) Name() string      { return "Sub Station Alpha" }
+func (*SubStationAlpha) Extension() string { return ".ssa" }
+
+// Errors are the errors the last Load met.
+func (f *SubStationAlpha) Errors() string { return f.errors.String() }
+
+// Load reads an SSA script, as libse's SubStationAlpha.LoadSubtitle: the
+// italic, bold and underline tags of its text become HTML tags.
+func (f *SubStationAlpha) Load(s *Subtitle, lines []string, _ string) int {
+	f.errors.Reset()
+	f.errorCount = loadScript(s, lines, true, formattedText, &f.errors)
+	return f.errorCount
+}
+
+// formattedText is the part of libse's
+// AdvancedSubStationAlpha.GetFormattedText Polyfin ports: line breaks, and
+// italic, bold and underline tags turned into HTML.
+func formattedText(input string) string {
+	return strings.NewReplacer(`{\i1}`, "<i>", `{\i0}`, "</i>", `{\i}`, "</i>", `{\b1}`, "<b>", `{\b0}`, "</b>", `{\b}`, "</b>",
+		`{\u1}`, "<u>", `{\u0}`, "</u>", `{\u}`, "</u>").Replace(normalizeNewLines(input))
+}
+
+// ssaHeader is the script libse's SubStationAlpha writes paragraphs read
+// from another format in, with libse's default style; %s is the title.
+const ssaHeader = "[Script Info]\n; This is a Sub Station Alpha v4 script.\nTitle: %s\nScriptType: v4.00\nCollisions: Normal\nPlayDepth: 0\n\n" +
+	"[V4 Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, TertiaryColour, BackColour, Bold, Italic, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, AlphaLevel, Encoding\n" +
+	"Style: Default,Arial,20,16777215,65535,0,0,0,0,1,1,1,2,10,10,10,0,1\n\n" +
+	"[Events]\nFormat: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
+
+// ToText writes the paragraphs as an SSA script, as libse's
+// SubStationAlpha.ToText: an SSA script read keeps its header and styles;
+// paragraphs read from another format get the default script.
+func (*SubStationAlpha) ToText(s *Subtitle, title string) string {
+	var b strings.Builder
+	valid := strings.Contains(s.Header, "[V4 Styles]")
+	var styles []string
+	if valid {
+		b.WriteString(strings.TrimSpace(s.Header) + "\n")
+		const formatLine = "Format: Marked, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text"
+		if !strings.Contains(s.Header, formatLine) {
+			b.WriteString(formatLine + "\n")
 		}
-	}
-	return lines
-}
-
-// overrideTag splits an override tag into its name, the letters it starts
-// with, and the number following them, or -1 when none does.
-func overrideTag(tag string) (string, int) {
-	tag = strings.TrimSpace(tag)
-	n := 0
-	for n < len(tag) && (tag[n] >= 'a' && tag[n] <= 'z' || tag[n] >= 'A' && tag[n] <= 'Z') {
-		n++
-	}
-	digits := n
-	for digits < len(tag) && digits-n < 6 && tag[digits] >= '0' && tag[digits] <= '9' {
-		digits++
-	}
-	value, err := strconv.Atoi(tag[n:digits])
-	if err != nil {
-		value = -1
-	}
-	return tag[:n], value
-}
-
-// MatroskaEvent is a block of a Matroska ASS/SSA track: its Data is
-// "ReadOrder,Layer,Style,Name,MarginL,MarginR,MarginV,Effect,Text".
-type MatroskaEvent struct {
-	Start, Duration time.Duration
-	Data            []byte
-}
-
-// MatroskaScript rebuilds the script a Matroska ASS/SSA track holds: its
-// CodecPrivate is the header, its blocks the events, in ReadOrder (ties by
-// Start). The header ends with the standard Format line, the order of the
-// fields of blocks, whatever the CodecPrivate gives. Blocks not shaped as
-// the format says are dropped.
-func MatroskaScript(codecPrivate []byte, events []MatroskaEvent) (*Script, error) {
-	text := DecodeText(bytes.TrimRight(codecPrivate, "\x00"))
-	if !isScript(text) {
-		return nil, ErrUnsupported
-	}
-	private, ssa := parseScript(text)
-	header := strings.TrimSuffix(string(private.Header), "\n")
-	at := strings.LastIndexByte(header, '\n') + 1
-	if format, rewrite := parseFormat(header[at:], ssa); rewrite || format.count != len(eventFields) ||
-		!strings.EqualFold(strings.Join(strings.Fields(header[at:]), " "), strings.TrimSuffix(formatLine(ssa), "\n")) {
-		header = header[:at] + formatLine(ssa)
+		styles = assStylesFromHeader(s.Header)
 	} else {
-		header += "\n"
+		b.WriteString(fmt.Sprintf(ssaHeader, title) + "\n")
 	}
-	type ordered struct {
-		readOrder int64
-		event     Event
-	}
-	list := make([]ordered, 0, len(events))
-	for _, block := range events {
-		data := strings.TrimRight(DecodeText(bytes.TrimRight(block.Data, "\x00")), "\n")
-		// A Dialogue line holds no line ending: a break the block carries
-		// raw becomes the one ASS writes.
-		data = strings.ReplaceAll(data, "\n", `\N`)
-		readOrder, rest, ok1 := strings.Cut(data, ",")
-		layer, rest, ok2 := strings.Cut(rest, ",")
-		order, err := strconv.ParseInt(strings.TrimSpace(readOrder), 10, 64)
-		if !ok1 || !ok2 || err != nil || strings.Count(rest, ",") < len(eventFields)-4 {
-			continue
+	for _, p := range s.Paragraphs {
+		ssaTime := func(d time.Duration) string {
+			h, m, sec, ms := clock(d)
+			return fmt.Sprintf("%d:%02d:%02d.%02d", h, m, sec, ms/10)
 		}
-		start := max(block.Start, 0)
-		list = append(list, ordered{order, Event{Start: start, End: start + max(block.Duration, 0), Layer: layer, Rest: rest}})
+		actor := "NTP"
+		if p.Actor != "" {
+			actor = p.Actor
+		}
+		margin := func(m string) string {
+			if m != "" && isInteger(m) {
+				return fmt.Sprintf("%04s", m)
+			}
+			return "0000"
+		}
+		style := "Default"
+		if p.Extra != "" && valid && contains(styles, p.Extra) {
+			style = p.Extra
+		}
+		if style == "Default" {
+			style = "*Default"
+		}
+		kind := "Dialogue"
+		if p.IsComment {
+			kind = "Comment"
+		}
+		text := assFormatText(strings.ReplaceAll(p.Text, "\n", "\\N"))
+		fmt.Fprintf(&b, "%s: Marked=%d,%s,%s,%s,%s,%s,%s,%s,%s,%s\n", kind, p.Layer, ssaTime(p.Start), ssaTime(p.End), style, actor,
+			margin(p.MarginL), margin(p.MarginR), margin(p.MarginV), p.Effect, text)
 	}
-	slices.SortStableFunc(list, func(a, b ordered) int {
-		return cmp.Or(cmp.Compare(a.readOrder, b.readOrder), cmp.Compare(a.event.Start, b.event.Start))
-	})
-	script := &Script{Header: []byte(header), Events: make([]Event, len(list)), Footer: private.Footer}
-	for i, item := range list {
-		script.Events[i] = item.event
+	if s.Footer != "" && (strings.Contains(s.Footer, "[Fonts]\n") || strings.Contains(s.Footer, "[Graphics]\n") || strings.Contains(s.Footer, "[Aegisub Extradata]\n")) {
+		b.WriteString("\n" + s.Footer + "\n")
 	}
-	return script, nil
+	return strings.TrimSpace(b.String()) + "\n"
 }

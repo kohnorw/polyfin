@@ -154,8 +154,6 @@ export function problemText(t: Messages, language: string, problem: HealthProble
       return problem.tone === 'error'
         ? text.httpsExpired(dateTime(problem.expires, language))
         : text.httpsExpires(dateTime(problem.expires, language))
-    case 'subtitle_ocr_language':
-      return text.subtitleOcrLanguage(ocrLanguageName(language, problem), problem.file)
     case 'metadata_languages':
       return text.metadataLanguages(problem.name)
     case 'connection_stopped':
@@ -165,18 +163,3 @@ export function problemText(t: Messages, language: string, problem: HealthProble
   }
 }
 
-/**
- * A language Tesseract has no data for, named in `language` from its file, as jpn.traineddata
- * or chi_sim.traineddata, else as the server names it in English.
- */
-function ocrLanguageName(language: string, problem: { name: string; file: string }): string {
-  const code = problem.file.replace(/\.traineddata$/, '').split('_')[0]
-  try {
-    return (
-      new Intl.DisplayNames([language], { type: 'language', fallback: 'none' }).of(code) ??
-      problem.name
-    )
-  } catch {
-    return problem.name
-  }
-}

@@ -185,6 +185,8 @@ func newProbingServer(t *testing.T, failures int, ffprobe string, configure ...f
 		Tasks:         registry,
 		Logs:          ring,
 		CacheDir:      t.TempDir(),
+		DataDir:       t.TempDir(),
+		FFmpeg:        "ffmpeg",
 	}
 	for _, c := range configure {
 		c(&options, pool)
@@ -217,9 +219,6 @@ func (s testServer) listed(t *testing.T, user accounts.User, items ...string) {
 			t.Fatal(err)
 		}
 		if _, err := s.library.Versions(t.Context(), user, id); err != nil {
-			t.Fatal(err)
-		}
-		if _, err := s.library.Subtitles(t.Context(), user, id); err != nil {
 			t.Fatal(err)
 		}
 	}

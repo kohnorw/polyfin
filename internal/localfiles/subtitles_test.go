@@ -17,8 +17,8 @@ import (
 
 // A subtitle file belongs to the video whose name its own begins with, in
 // the same folder, the longest such name winning; its name then tells its
-// language, title and flags in any order and case. A VobSub pair is its
-// .idx file, with the .sub file of the same name.
+// language, title and flags as Jellyfin's ExternalPathParser reads them. A
+// VobSub pair is its .idx file, with the .sub file of the same name.
 func TestSubtitleFilesBelongToTheirVideo(t *testing.T) {
 	read := func(kind string, videos, subtitles []string) map[string]sidecar {
 		entries := map[string]entry{}
@@ -67,9 +67,9 @@ func TestSubtitleFilesBelongToTheirVideo(t *testing.T) {
 		"Movie (2001).SDH.IDX",
 		"Movie (2001).SDH.sub",
 		"Disc (1999)/Disc (1999).de.sup",
-		// Belonging to no video: another name, a name followed by no dot,
-		// another folder, an NFO file, an .idx file without its .sub file
-		// and a .sub file alone, which is text (MicroDVD).
+		// A .sub file alone is text (MicroDVD). Belonging to no video:
+		// another name, a name followed by no dot, another folder, an NFO
+		// file and an .idx file without its .sub file.
 		"Other Movie.fr.srt",
 		"Movie (2001)x.srt",
 		"Extras/Movie (2001).fr.srt",
@@ -79,28 +79,29 @@ func TestSubtitleFilesBelongToTheirVideo(t *testing.T) {
 		"Movie (2001).it.sub",
 	}), map[string]want{
 		"Movie (2001).srt":                           {video: movie, format: "srt"},
-		"Movie (2001).fr.srt":                        {video: movie, format: "srt", subtitleTags: subtitleTags{language: "fr"}},
-		"Movie (2001).fre.srt":                       {video: movie, format: "srt", subtitleTags: subtitleTags{language: "fre"}},
-		"movie (2001).French.SRT":                    {video: movie, format: "srt", subtitleTags: subtitleTags{language: "French"}},
-		"Movie (2001).en.forced.srt":                 {video: movie, format: "srt", subtitleTags: subtitleTags{language: "en", forced: true}},
-		"Movie (2001).en.sdh.ass":                    {video: movie, format: "ass", subtitleTags: subtitleTags{language: "en", hearingImpaired: true}},
-		"Movie (2001).Default.HI.EN.ssa":             {video: movie, format: "ssa", subtitleTags: subtitleTags{language: "EN", hearingImpaired: true, isDefault: true}},
-		"Movie (2001).foreign.de.cc.vtt":             {video: movie, format: "vtt", subtitleTags: subtitleTags{language: "de", forced: true, hearingImpaired: true}},
-		"Movie (2001).pt-BR.Director.Commentary.srt": {video: movie, format: "srt", subtitleTags: subtitleTags{language: "pt-BR", title: "Director Commentary"}},
-		"Movie (2001) - 1080p.it.srt":                {video: version, format: "srt", subtitleTags: subtitleTags{language: "it"}},
-		"Disc (1999)/Disc (1999).es.srt":             {video: "Disc (1999)/BDMV/STREAM/00001.m2ts", format: "srt", subtitleTags: subtitleTags{language: "es"}},
-		"Shelf.ja.srt":                               {video: "BDMV/STREAM/00000.m2ts", format: "srt", subtitleTags: subtitleTags{language: "ja"}},
-		"Movie (2001).en.forced.sup":                 {video: movie, format: "sup", subtitleTags: subtitleTags{language: "en", forced: true}},
-		"Movie (2001).fr.idx":                        {video: movie, format: "idx", pair: "Movie (2001).fr.sub", subtitleTags: subtitleTags{language: "fr"}},
+		"Movie (2001).fr.srt":                        {video: movie, format: "srt", subtitleTags: subtitleTags{language: "fra"}},
+		"Movie (2001).fre.srt":                       {video: movie, format: "srt", subtitleTags: subtitleTags{language: "fra"}},
+		"movie (2001).French.SRT":                    {video: movie, format: "srt", subtitleTags: subtitleTags{language: "fra"}},
+		"Movie (2001).en.forced.srt":                 {video: movie, format: "srt", subtitleTags: subtitleTags{language: "eng", forced: true}},
+		"Movie (2001).en.sdh.ass":                    {video: movie, format: "ass", subtitleTags: subtitleTags{language: "eng", hearingImpaired: true}},
+		"Movie (2001).Default.HI.EN.ssa":             {video: movie, format: "ssa", subtitleTags: subtitleTags{language: "eng", hearingImpaired: true, isDefault: true}},
+		"Movie (2001).foreign.de.cc.vtt":             {video: movie, format: "vtt", subtitleTags: subtitleTags{language: "deu", forced: true, hearingImpaired: true}},
+		"Movie (2001).pt-BR.Director.Commentary.srt": {video: movie, format: "srt", subtitleTags: subtitleTags{language: "pt-BR", title: "Director.Commentary"}},
+		"Movie (2001) - 1080p.it.srt":                {video: version, format: "srt", subtitleTags: subtitleTags{language: "ita"}},
+		"Disc (1999)/Disc (1999).es.srt":             {video: "Disc (1999)/BDMV/STREAM/00001.m2ts", format: "srt", subtitleTags: subtitleTags{language: "spa"}},
+		"Shelf.ja.srt":                               {video: "BDMV/STREAM/00000.m2ts", format: "srt", subtitleTags: subtitleTags{language: "jpn"}},
+		"Movie (2001).en.forced.sup":                 {video: movie, format: "sup", subtitleTags: subtitleTags{language: "eng", forced: true}},
+		"Movie (2001).fr.idx":                        {video: movie, format: "idx", pair: "Movie (2001).fr.sub", subtitleTags: subtitleTags{language: "fra"}},
 		"Movie (2001).SDH.IDX":                       {video: movie, format: "idx", pair: "Movie (2001).SDH.sub", subtitleTags: subtitleTags{hearingImpaired: true}},
-		"Disc (1999)/Disc (1999).de.sup":             {video: "Disc (1999)/BDMV/STREAM/00001.m2ts", format: "sup", subtitleTags: subtitleTags{language: "de"}},
+		"Disc (1999)/Disc (1999).de.sup":             {video: "Disc (1999)/BDMV/STREAM/00001.m2ts", format: "sup", subtitleTags: subtitleTags{language: "deu"}},
+		"Movie (2001).it.sub":                        {video: movie, format: "sub", subtitleTags: subtitleTags{language: "ita"}},
 	})
 	episode := "Ranger Tales/Season 01/Ranger Tales - S01E01.mkv"
 	check(read(KindShows, []string{episode}, []string{
 		"Ranger Tales/Season 01/Ranger Tales - S01E01.fr.srt",
 		"Ranger Tales/Season 01/Ranger Tales - S01E02.fr.srt",
 	}), map[string]want{
-		"Ranger Tales/Season 01/Ranger Tales - S01E01.fr.srt": {video: episode, format: "srt", subtitleTags: subtitleTags{language: "fr"}},
+		"Ranger Tales/Season 01/Ranger Tales - S01E01.fr.srt": {video: episode, format: "srt", subtitleTags: subtitleTags{language: "fra"}},
 	})
 }
 
@@ -149,8 +150,8 @@ func TestSubtitleFilesAreOfferedWithTheirVideo(t *testing.T) {
 		t.Fatal(err)
 	}
 	subtitles := e.subtitles(addon.ID, "tt0063350")
-	if len(subtitles) != 2 || subtitles[0].Lang != "en" || !subtitles[0].Forced || subtitles[0].Format != "ass" ||
-		subtitles[1].Lang != "fr" || subtitles[1].Forced || subtitles[1].Format != "srt" || !subtitles[1].Valid() {
+	if len(subtitles) != 2 || subtitles[0].Lang != "eng" || !subtitles[0].Forced || subtitles[0].Format != "ass" ||
+		subtitles[1].Lang != "fra" || subtitles[1].Forced || subtitles[1].Format != "srt" || !subtitles[1].Valid() {
 		t.Fatalf("subtitles: %+v", subtitles)
 	}
 	if got := e.text(subtitles[1]); got != "1\n00:00:01,000 --> 00:00:02,000\nBonjour\n" {
@@ -167,8 +168,8 @@ func TestSubtitleFilesAreOfferedWithTheirVideo(t *testing.T) {
 		t.Fatal(err)
 	}
 	changed := e.subtitles(addon.ID, "tt0063350")
-	if len(changed) != 2 || changed[0].Lang != "de" || !changed[0].HearingImpaired || changed[0].Format != "vtt" ||
-		changed[1].Lang != "fr" || changed[1].ID == subtitles[1].ID || changed[1].URL != subtitles[1].URL {
+	if len(changed) != 2 || changed[0].Lang != "deu" || !changed[0].HearingImpaired || changed[0].Format != "vtt" ||
+		changed[1].Lang != "fra" || changed[1].ID == subtitles[1].ID || changed[1].URL != subtitles[1].URL {
 		t.Fatalf("after a rescan: %+v", changed)
 	}
 	if got := e.text(changed[1]); got != "1\n00:00:01,000 --> 00:00:02,000\nSalut\n" {
@@ -206,8 +207,8 @@ func TestPictureSubtitleFilesAreOffered(t *testing.T) {
 		t.Fatal(err)
 	}
 	subtitles := e.subtitles(addon.ID, "tt0063350")
-	if len(subtitles) != 2 || subtitles[0].Format != "sup" || subtitles[0].Lang != "en" || !subtitles[0].Forced ||
-		!strings.HasSuffix(subtitles[0].URL, ".sup") || subtitles[1].Format != "idx" || subtitles[1].Lang != "de" ||
+	if len(subtitles) != 2 || subtitles[0].Format != "sup" || subtitles[0].Lang != "eng" || !subtitles[0].Forced ||
+		!strings.HasSuffix(subtitles[0].URL, ".sup") || subtitles[1].Format != "idx" || subtitles[1].Lang != "deu" ||
 		!strings.HasSuffix(subtitles[1].URL, ".idx") {
 		t.Fatalf("subtitles: %+v", subtitles)
 	}
@@ -219,7 +220,7 @@ func TestPictureSubtitleFilesAreOffered(t *testing.T) {
 	if err := e.service.Scan(t.Context(), addon.ID); err != nil {
 		t.Fatal(err)
 	}
-	if changed := e.subtitles(addon.ID, "tt0063350"); len(changed) != 2 || changed[1].ID == subtitles[1].ID || changed[1].Lang != "de" ||
+	if changed := e.subtitles(addon.ID, "tt0063350"); len(changed) != 2 || changed[1].ID == subtitles[1].ID || changed[1].Lang != "deu" ||
 		e.opened(pair+".sub") != "more packs" {
 		t.Fatalf("after the .sub file changed: %+v", changed)
 	}
@@ -257,7 +258,7 @@ func TestShareSubtitleFiles(t *testing.T) {
 	}
 	e.idle(addon.ID)
 	subtitles := e.subtitles(addon.ID, "tt0013442")
-	if len(subtitles) != 2 || subtitles[0].Lang != "fr" || subtitles[1].Format != "idx" || subtitles[1].Lang != "it" || !subtitles[1].HearingImpaired {
+	if len(subtitles) != 2 || subtitles[0].Lang != "fra" || subtitles[1].Format != "idx" || subtitles[1].Lang != "ita" || !subtitles[1].HearingImpaired {
 		t.Fatalf("subtitles: %+v", subtitles)
 	}
 	if got := e.text(subtitles[0]); got != "1\n00:00:01,000 --> 00:00:02,000\nD\xe9j\xe0\n" {
@@ -274,7 +275,9 @@ func TestShareSubtitleFiles(t *testing.T) {
 	if err := e.service.Scan(t.Context(), addon.ID); err != nil {
 		t.Fatal(err)
 	}
-	if got := e.subtitles(addon.ID, "tt0013442"); len(got) != 0 {
+	// The .sub file left without its .idx file is a MicroDVD file, as on
+	// Jellyfin.
+	if got := e.subtitles(addon.ID, "tt0013442"); len(got) != 1 || got[0].Format != "sub" {
 		t.Errorf("a removed file: %+v", got)
 	}
 }

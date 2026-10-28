@@ -104,9 +104,6 @@ func (s *Service) ForgetFile(id accounts.ID) {
 	s.unindexed.Delete(id)
 	s.offsets.Delete(id)
 	s.warmed.Delete(id)
-	s.extractions.Delete(id)
-	s.locations.Delete(id)
-	s.unlocated.Delete(id)
 	s.attached.Delete(id)
 	if !s.sources.Discard(id) {
 		s.logger.Warn("The cached blocks of a file still read were kept", "version", id.String())

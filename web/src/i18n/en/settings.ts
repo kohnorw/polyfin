@@ -233,9 +233,6 @@ const settings = {
     exactTitleMatch: 'Match titles exactly',
     exactTitleMatchHelp:
       'Leaves out the versions whose file is of another title: its name starts with another title (Smiling Friends for Friends, No Way Home for Brand New Day), a movie’s names a year more than one year off, an episode’s names another season or episode. A leading “The”, punctuation, spaces and country tags such as (US) do not count. Versions without a file name, or whose title cannot be read from it, are kept; releases named in another language are left out, as another title. On by default.',
-    prefetchSubtitles: 'Read subtitles ahead',
-    prefetchSubtitlesHelp:
-      'When a play starts, reads the subtitles inside the file in the background, and those of the next episode, so that they show at once when turned on. Files whose subtitles cannot be found through their index are downloaded a second time for it. On by default.',
     subtitleExtraction: 'Extract subtitles on the fly',
     subtitleExtractionHelp:
       'Reads the subtitles inside a file out of it when an app asks for them, which can keep the app waiting (“Fetching additional data”). Turned off, subtitles inside a file are offered as files only once they were read, ahead of time or by an earlier play; until then, apps that cannot show them from the video get them burned into it, or not at all. On by default.',

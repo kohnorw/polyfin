@@ -23,7 +23,6 @@ import (
 
 	"github.com/moodiness/polyfin/internal/metrics"
 	"github.com/moodiness/polyfin/internal/process"
-	"github.com/moodiness/polyfin/internal/subtitles"
 )
 
 const (
@@ -58,11 +57,6 @@ const (
 	// tolerance absorbs the rounding between the keyframe index and the
 	// timestamps in FFmpeg's output.
 	tolerance = 2 * time.Millisecond
-	// settle is how long after FFmpeg wrote a part of the video the
-	// subtitle cues shown there count as extracted. FFmpeg converts them in
-	// threads of its own, which may lag behind the video it copies, most
-	// when they start; nothing tells a cue still on its way from no cue.
-	settle = 500 * time.Millisecond
 )
 
 var (
@@ -109,11 +103,6 @@ type Remux struct {
 	Encode *VideoEncoding
 	Format Format
 	Plan   Plan
-	// Subtitles are the FFmpeg indexes of the text subtitle streams
-	// extracted into Extracted while remuxing, from the bytes FFmpeg reads
-	// anyway.
-	Subtitles []int
-	Extracted Extracted
 	// Failed, when set, is closed once the input failed for good: its host
 	// stopped answering, refused it, or answers another file. Failure then
 	// tells why. The encoding ends at once, nothing it cut short is served,
@@ -161,13 +150,14 @@ type VideoEncoding struct {
 	// beside the source (see burnGraph).
 	Burn     *int
 	BurnFile string
-	// BurnText is a text subtitle file (SRT, WebVTT, ASS) burned in
-	// instead, a local path or an address, drawn by libass with the fonts
-	// of FontsDir; StyledText tells an ASS or SSA file, which keeps its own
-	// styles, from one given Plex's look (see textBurnStyle).
-	BurnText   string
-	StyledText bool
-	FontsDir   string
+	// BurnText is a text subtitle file burned in instead, a local path or
+	// an address, drawn by libass with the fonts of FontsDir, as Jellyfin's
+	// subtitles filter draws the file its subtitle encoder gives;
+	// BurnCharset is the character set of a subtitle file, FFmpeg's
+	// charenc, empty for UTF-8.
+	BurnText    string
+	BurnCharset string
+	FontsDir    string
 	// Hardware is the GPU decoding and encoding the video, nil for none.
 	Hardware *Hardware
 	// Preset trades the encoder's speed for quality: one of x264's preset
@@ -277,12 +267,6 @@ func (v *VideoEncoding) Burns() bool {
 	return v.Burn != nil || v.BurnFile != "" || v.BurnText != ""
 }
 
-// textBurnStyle draws unstyled text subtitles as Plex shows them: white,
-// bold sans serif, a thin black outline and shadow, no box, low on the
-// picture.
-const textBurnStyle = "FontName=DejaVu Sans,Bold=1,PrimaryColour=&H00FFFFFF,OutlineColour=&H00000000,BackColour=&H80000000," +
-	"BorderStyle=1,Outline=1.6,Shadow=0.8,MarginV=24"
-
 // filterValue escapes a value of a filter option, a file path Polyfin
 // names itself, as FFmpeg's filter graph reads it: its option separator,
 // quote and escape characters, and the graph's.
@@ -307,11 +291,11 @@ func (v *VideoEncoding) textBurnGraph(video int, skip string) string {
 		converted = v.deviceToneMapping() + ",hwdownload,format=nv12"
 	}
 	options := "filename=" + filterOption(v.BurnText)
+	if v.BurnCharset != "" {
+		options += ":charenc=" + filterValue(v.BurnCharset)
+	}
 	if v.FontsDir != "" {
 		options += ":fontsdir=" + filterOption(v.FontsDir)
-	}
-	if !v.StyledText {
-		options += ":force_style=" + filterValue(textBurnStyle)
 	}
 	return "[0:" + strconv.Itoa(video) + "]" + skip + converted + ",subtitles=" + options + "," + v.Hardware.output() + "[video]"
 }
@@ -1005,32 +989,6 @@ func (m *Manager) Segment(ctx context.Context, key Key, open Opener, n int) (*os
 	return e.await(ctx, n)
 }
 
-// Subtitles waits until the extracted subtitles of an encoding cover
-// segment n, starting or moving FFmpeg to it when needed. They come from
-// the variant of key's playback asked for last, whichever key names: every
-// variant extracts them. Kept video extracts them, not its audio.
-func (m *Manager) Subtitles(ctx context.Context, key Key, open Opener, n int) error {
-	if m.keeps(key) {
-		key, open = key.keptVideo(), videoAlone(open)
-	}
-	e := m.playing(key)
-	if e == nil {
-		var err error
-		if e, err = m.encoding(ctx, key, open); err != nil {
-			return err
-		}
-	} else if err := e.waitOpen(ctx); err != nil {
-		return err
-	}
-	if n < 0 || n >= e.remux.Plan.Len() {
-		return ErrNotFound
-	}
-	if len(e.remux.Subtitles) == 0 {
-		return nil
-	}
-	return e.awaitCovered(ctx, n)
-}
-
 // playing returns the encoding of key's playback asked for last, nil when
 // none was or it was stopped since.
 func (m *Manager) playing(key Key) *encoding {
@@ -1359,44 +1317,6 @@ func (e *encoding) await(ctx context.Context, n int) (*os.File, error) {
 	}
 }
 
-// awaitCovered waits until the extracted subtitles cover segment n. The
-// job making it, or about to, is waited for; another starts from n.
-func (e *encoding) awaitCovered(ctx context.Context, n int) error {
-	e.mu.Lock()
-	defer e.mu.Unlock()
-	since := time.Now()
-	e.ask(-1, since)
-	plan := e.remux.Plan
-	for {
-		if e.failure != nil {
-			return e.failure
-		}
-		if e.stopped {
-			return ErrStopped
-		}
-		if e.remux.Extracted.Covers(plan.Start(n), plan.End(n)) {
-			return nil
-		}
-		j := e.job
-		switch {
-		case j != nil && j.done && j.err != nil && !errors.Is(j.err, errStale) && j.start == n:
-			e.job = nil
-			return j.err
-		case j == nil || j.done || n < j.start || n > j.next+reach:
-			e.start(n)
-		}
-		// A player may fetch subtitles ahead of the video: FFmpeg goes on
-		// until it reaches them.
-		if n > e.requested {
-			e.requested = n
-			e.signal()
-		}
-		if err := e.waitProgress(ctx, since); err != nil {
-			return err
-		}
-	}
-}
-
 // prune removes the segments far from segment n: more than behind before
 // it, or past what FFmpeg makes ahead of it and reach. The caller holds
 // e.mu.
@@ -1478,19 +1398,17 @@ func (e *encoding) progress(j *job) {
 	j.progressed = time.Now()
 }
 
-// run runs FFmpeg for a job and files what it writes into segments, and
-// the cues of the subtitles it extracts.
+// run runs FFmpeg for a job and files what it writes into segments.
 func (e *encoding) run(ctx context.Context, j *job) {
 	cmd := exec.CommandContext(ctx, e.m.ffmpeg, e.remux.args(j.start, j.lookback)...)
 	cmd.WaitDelay = 5 * time.Second
 	stderr := &tail{limit: 4096}
 	cmd.Stderr = stderr
 	output, err := cmd.StdoutPipe()
-	// Each extracted subtitle stream comes on an output of its own, pipe:3
-	// on, then FFmpeg's progress (see Remux.args).
+	// FFmpeg's progress comes on pipe:3 (see Remux.args).
 	var outputs *process.Outputs
 	if err == nil {
-		outputs, err = process.NewOutputs(cmd, len(e.remux.Subtitles)+1)
+		outputs, err = process.NewOutputs(cmd, 1)
 	}
 	if err == nil {
 		err = cmd.Start()
@@ -1505,22 +1423,11 @@ func (e *encoding) run(ctx context.Context, j *job) {
 	e.runs++
 	e.mu.Unlock()
 	var extracting sync.WaitGroup
-	progress := readers[len(readers)-1]
+	progress := readers[0]
 	extracting.Go(func() {
 		defer progress.Close()
 		watchProgress(progress, func() { e.progress(j) })
 	})
-	for i, r := range readers[:len(readers)-1] {
-		stream := e.remux.Subtitles[i]
-		extracting.Go(func() {
-			defer r.Close()
-			if err := subtitles.Scan(r, func(cue subtitles.Cue) { e.remux.Extracted.Add(stream, cue) }); err != nil {
-				e.m.logger.Warn("A subtitle could not be extracted", "stream", stream, "error", err)
-				// FFmpeg would wait for the pipe to be read.
-				_, _ = io.Copy(io.Discard, r)
-			}
-		})
-	}
 	started := time.Now()
 	e.m.logger.Debug("Started a remux", "from", j.start, "variant", e.key.Variant)
 	take := func(p piece) error { return e.take(ctx, j, p) }
@@ -1646,28 +1553,9 @@ func (e *encoding) close(j *job) error {
 	}
 	e.ready[j.next] = true
 	metrics.SegmentMade(e.remux.Encode.method())
-	// The cues starting before the segment just made are counted as
-	// extracted once they had time to come, leaving that segment's length
-	// as a margin too.
-	if j.next > j.start {
-		from, to := e.remux.Plan.Start(j.start), e.remux.Plan.Start(j.next)
-		time.AfterFunc(settle, func() {
-			e.mu.Lock()
-			defer e.mu.Unlock()
-			e.cover(from, to)
-			e.signal()
-		})
-	}
 	j.next++
 	e.signal()
 	return nil
-}
-
-// cover records that the subtitles a job extracts cover [from, to).
-func (e *encoding) cover(from, to time.Duration) {
-	if len(e.remux.Subtitles) > 0 {
-		e.remux.Extracted.Cover(from, to)
-	}
 }
 
 // searchFurther starts again further back a job of a searched version
@@ -1698,7 +1586,7 @@ func (e *encoding) searchFurther(j *job, at time.Duration) bool {
 }
 
 // finish records the end of a job; one that reached the end of its output
-// completes its last segment, and has extracted every cue from its start.
+// completes its last segment.
 // One that reached it without starting its first segment, FFmpeg finding
 // no keyframe it could start it on past the time asked in a searched
 // version, starts again further back.
@@ -1709,8 +1597,8 @@ func (e *encoding) finish(j *job, err error) {
 		plan := e.remux.Plan
 		if j.next == j.start && j.file == nil && e.searchFurther(j, plan.End(plan.Len()-1)) {
 			err = errStale
-		} else if err = e.close(j); err == nil {
-			e.cover(plan.Start(j.start), plan.End(plan.Len()-1))
+		} else {
+			err = e.close(j)
 		}
 	}
 	if j.file != nil {
@@ -1735,12 +1623,11 @@ func writeFile(path string, data []byte) error {
 // args is FFmpeg's command line for a job starting at segment n, lookback
 // before it in a searched version (see Plan.seekTime). Segments keep the
 // source's timestamps, shifted by timestampOffset, so that those of
-// different jobs follow each other. Extracted subtitles keep the source's
-// own. FFmpeg reports its progress on the pipe after the subtitles'. A
-// subtitle file burned in is the second input, read whole (see
+// different jobs follow each other. FFmpeg reports its progress on
+// pipe:3. A subtitle file burned in is the second input, read whole (see
 // burnGraph).
 func (r Remux) args(n int, lookback time.Duration) []string {
-	args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-progress", "pipe:" + strconv.Itoa(3+len(r.Subtitles))}
+	args := []string{"-hide_banner", "-nostdin", "-loglevel", "error", "-progress", "pipe:3"}
 	seek, from := r.seekArgs(n, lookback)
 	args = append(args, seek...)
 	if r.Encode != nil {
@@ -1782,10 +1669,6 @@ func (r Remux) args(n int, lookback time.Duration) []string {
 		// some codecs, such as E-AC-3, describe themselves in their first
 		// packet.
 		args = append(args, "-use_editlist", "0", "-f", "mp4", "-movflags", "+frag_keyframe+empty_moov+delay_moov+default_base_moof+frag_discont", "pipe:1")
-	}
-	// Each subtitle stream is written as WebVTT, cue by cue, on its pipe.
-	for i, stream := range r.Subtitles {
-		args = append(args, "-map", "0:"+strconv.Itoa(stream), "-c:s", "webvtt", "-flush_packets", "1", "-f", "webvtt", "pipe:"+strconv.Itoa(3+i))
 	}
 	return args
 }

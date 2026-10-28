@@ -9,6 +9,7 @@ require (
 	github.com/fsnotify/fsnotify v1.10.1
 	github.com/jackc/pgx/v5 v5.11.0
 	github.com/pkg/sftp v1.13.11
+	github.com/saintfish/chardet v0.0.0-20230101081208-5e3ef4b5456d
 	github.com/prometheus/client_golang v1.25.0
 	github.com/prometheus/client_model v0.6.3
 	github.com/ulikunitz/xz v0.5.17

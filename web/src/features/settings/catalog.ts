@@ -240,12 +240,6 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'playback',
-    anchor: 'prefetch-subtitles',
-    label: (t) => s(t).prefetchSubtitles,
-    help: (t) => s(t).prefetchSubtitlesHelp,
-  },
-  {
-    section: 'playback',
     anchor: 'subtitle-extraction',
     label: (t) => s(t).subtitleExtraction,
     help: (t) => s(t).subtitleExtractionHelp,
