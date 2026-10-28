@@ -485,6 +485,13 @@ function Playback({ form, update, error, number, range, limits }: SectionFormApi
           checked={form.exactTitleMatch}
           onChange={(exactTitleMatch) => update({ exactTitleMatch })}
         />
+        <SwitchRow
+          anchor="prefetch-subtitles"
+          label={s.prefetchSubtitles}
+          help={s.prefetchSubtitlesHelp}
+          checked={form.prefetchSubtitles}
+          onChange={(prefetchSubtitles) => update({ prefetchSubtitles })}
+        />
         <FieldRow
           anchor="default-audio-language"
           label={s.defaultAudioLanguage}

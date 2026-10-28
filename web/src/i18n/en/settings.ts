@@ -233,6 +233,9 @@ const settings = {
     exactTitleMatch: 'Match titles exactly',
     exactTitleMatchHelp:
       'Leaves out the versions whose file is of another title: its name starts with another title (Smiling Friends for Friends, No Way Home for Brand New Day), a movie’s names a year more than one year off, an episode’s names another season or episode. A leading “The”, punctuation, spaces and country tags such as (US) do not count. Versions without a file name, or whose title cannot be read from it, are kept; releases named in another language are left out, as another title. On by default.',
+    prefetchSubtitles: 'Read subtitles ahead',
+    prefetchSubtitlesHelp:
+      'When a play starts, reads the subtitles inside the file in the background, and those of the next episode, so that they show at once when turned on. Files whose subtitles cannot be found through their index are downloaded a second time for it. On by default.',
     defaultAudioLanguage: 'Default audio language',
     defaultAudioLanguageHelp:
       'The audio language played for users who chose none in their own settings.',

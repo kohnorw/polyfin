@@ -426,6 +426,7 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	chosen, unreadable, versions, at := choice.decided, choice.unreadable, p.versions, openedIndex(opened, p.versions)
 	session := h.Playback.Signer().Sign(playback.Grant{Version: chosen.version.ID, User: user.ID, Relay: mustRelay(r, chosen.version)})
 	chosenSource := h.decidedSource(r, p, *chosen, request, session)
+	h.readSubtitlesAhead(user, p.item, chosen.version, chosen.analysis)
 	// Every version listed is named for the profile sent: the one chosen
 	// from its decision, the others from what is known of them.
 	namer := h.playbackNamer(item, request, user)

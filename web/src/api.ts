@@ -373,6 +373,8 @@ export type Settings = {
   hideSpecials: boolean
   /** Leaves out the versions whose file name names another title. */
   exactTitleMatch: boolean
+  /** Reads the subtitles inside the version played, and the next episode's, ahead in the background. */
+  prefetchSubtitles: boolean
   /** Ends version names with how the app asking plays each, as its last playback decides it. */
   nameHowVersionsPlay: boolean
   /** Playbacks whose video the server converts at once, 0 for no limit. */

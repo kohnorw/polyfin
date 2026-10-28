@@ -488,6 +488,7 @@ type settingsJSON struct {
 	DefaultAudioLanguage    *string `json:"defaultAudioLanguage"`
 	DefaultSubtitleLanguage *string `json:"defaultSubtitleLanguage"`
 	ExactTitleMatch         *bool   `json:"exactTitleMatch"`
+	PrefetchSubtitles       *bool   `json:"prefetchSubtitles"`
 	LoginAttempts           *int    `json:"loginAttempts"`
 	InactiveDeviceDays      *int    `json:"inactiveDeviceDays"`
 	DetailedLog             *bool   `json:"detailedLog"`
@@ -776,6 +777,7 @@ func newSettingsJSON(settings accounts.Settings) settingsJSON {
 		DefaultAudioLanguage:    &settings.DefaultAudioLanguage,
 		DefaultSubtitleLanguage: &settings.DefaultSubtitleLanguage,
 		ExactTitleMatch:         &settings.ExactTitleMatch,
+		PrefetchSubtitles:       &settings.PrefetchSubtitles,
 		LoginAttempts:           &settings.LoginAttempts,
 		TwoStepAdministrators:   &settings.TwoStepAdministrators,
 		InactiveDeviceDays:      &settings.InactiveDeviceDays,
@@ -1452,6 +1454,7 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		DefaultAudioLanguage:    valueOr(body.DefaultAudioLanguage, current.DefaultAudioLanguage),
 		DefaultSubtitleLanguage: valueOr(body.DefaultSubtitleLanguage, current.DefaultSubtitleLanguage),
 		ExactTitleMatch:         valueOr(body.ExactTitleMatch, current.ExactTitleMatch),
+		PrefetchSubtitles:       valueOr(body.PrefetchSubtitles, current.PrefetchSubtitles),
 		LoginAttempts:           valueOr(body.LoginAttempts, current.LoginAttempts),
 		TwoStepAdministrators:   valueOr(body.TwoStepAdministrators, current.TwoStepAdministrators),
 		InactiveDeviceDays:      valueOr(body.InactiveDeviceDays, current.InactiveDeviceDays),

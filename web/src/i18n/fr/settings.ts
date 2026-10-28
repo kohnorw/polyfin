@@ -239,6 +239,9 @@ const settings: typeof en = {
     exactTitleMatch: 'Titres exacts',
     exactTitleMatchHelp:
       'Retire les versions dont le fichier est d’un autre titre : son nom commence par un autre titre (Smiling Friends pour Friends, No Way Home pour Brand New Day), celui d’un film donne une année à plus d’un an près, celui d’un épisode une autre saison ou un autre épisode. « The », la ponctuation, les espaces et les pays comme (US) ne comptent pas. Les versions sans nom de fichier, ou dont le titre ne s’y lit pas, sont gardées ; les sorties nommées dans une autre langue sont retirées comme un autre titre. Activé par défaut.',
+    prefetchSubtitles: 'Lire les sous-titres à l’avance',
+    prefetchSubtitlesHelp:
+      'Au début d’une lecture, lit en arrière-plan les sous-titres du fichier, et ceux de l’épisode suivant, pour qu’ils s’affichent dès qu’on les active. Les fichiers dont l’index ne donne pas les sous-titres sont téléchargés une seconde fois pour cela. Activé par défaut.',
     defaultAudioLanguage: 'Langue audio par défaut',
     defaultAudioLanguageHelp:
       'La langue audio jouée pour les utilisateurs qui n’en ont choisi aucune.',

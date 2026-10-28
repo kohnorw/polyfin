@@ -4,6 +4,7 @@
 > **This fork** adds to Polyfin:
 > - **Rip exclusion list** (Settings › Playback): CAM, telesync, telecine, screener and workprint releases are removed from every title, each type toggled on its own, all on by default.
 > - **NostalgiaTV and other live-TV apps:** library-wide episode listings (`/Items?IncludeItemTypes=Episode&Recursive=true`, with or without a library, narrowed by `Genres`/`GenreIds`) and `/Genres` without a library, answered from a pool of each TV library's first 40 series, ported from AIOFin.
+> - **Read subtitles ahead** (Settings › Playback): when a play starts, the subtitles inside the file, and the next episode's, are read in the background so they show at once when turned on (a second download of files whose index does not give them), on by default.
 > - **Hide specials** toggle (Settings › Playback): season 0 left out of seasons, episode lists and Next Up, on by default.
 > - **AIOStreams look** for the web player (jellyfin-web, themed by its default Custom CSS: near-black pages, white pill buttons, rounded cards, Inter), with **Plex-style subtitles**.
 > - **Wide collections:** an addon's collection with a landscape poster (`posterShape`), such as streaming-service tiles, shows on wide cards on the home page and in its library.

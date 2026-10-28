@@ -50,6 +50,9 @@ type preparationKey struct {
 	user, title accounts.ID
 	next        bool
 	version     accounts.ID
+	// subtitles marks a reading ahead of subtitles (see subtitlesahead.go),
+	// apart from the analysis of the same title or version.
+	subtitles bool
 }
 
 // preparation is a preparation waiting for a place: work reports whether
