@@ -428,6 +428,18 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	// The subtitles inside an NZB are extracted while the player starts,
 	// so that they are there when it asks (see usenet.go).
 	go h.extractUsenet(context.WithoutCancel(r.Context()), chosen.version)
+	// The subtitles inside any version are read as soon as its play is
+	// decided, so that the one the user picks loads at once (see
+	// extractAhead).
+	shown := chosen.decision.SubtitleStreamIndex
+	if shown >= 0 {
+		switch chosen.decision.Subtitles[shown].Method {
+		case "External", "Hls":
+		default:
+			shown = -1
+		}
+	}
+	go h.extractAhead(context.WithoutCancel(r.Context()), chosen.version, shown)
 	session := h.Playback.Signer().Sign(playback.Grant{Version: chosen.version.ID, User: user.ID, Relay: mustRelay(r, chosen.version)})
 	chosenSource := h.decidedSource(r, p, *chosen, request, session)
 	// Every version listed is named for the profile sent: the one chosen

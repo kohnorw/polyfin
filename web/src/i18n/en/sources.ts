@@ -2,7 +2,7 @@
 const sources = {
   sources: {
     title: 'Sources',
-    lede: 'Stremio addons, Eclipse addons, IPTV sources and local folders in one list. The server’s sources serve every user; a member’s own sources serve only them.',
+    lede: 'Your Stremio addons. The server’s sources serve every user; a member’s own sources serve only them.',
     add: 'Add a source',
     listLabel: 'Sources',
     listNote: 'Members’ own sources only serve their owner.',

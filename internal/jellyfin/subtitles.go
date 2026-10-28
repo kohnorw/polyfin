@@ -146,6 +146,22 @@ func (h *Handler) subtitleSource(version library.Version, analysis media.Analysi
 	source := subtitles.Source{ID: version.ID.String(), Read: func(ctx context.Context, read func(context.Context, string, []string) error) error {
 		return h.Playback.ReadVersion(ctx, version, read)
 	}}
+	// Tracks of a Matroska file are read through its index first, in
+	// seconds, rather than with all of the file (see playback.IndexedSubtitles).
+	source.Indexed = func(ctx context.Context, streams []subtitles.Stream) map[int][]byte {
+		indexes := make([]int, len(streams))
+		for i, stream := range streams {
+			indexes[i] = stream.FFmpegIndex
+		}
+		read := h.Playback.IndexedSubtitles(ctx, version, analysis, indexes)
+		files := make(map[int][]byte, len(read))
+		for _, stream := range streams {
+			if data, ok := read[stream.FFmpegIndex]; ok && indexedFits(stream, data) {
+				files[stream.Index] = data
+			}
+		}
+		return files
+	}
 	for _, stream := range streams {
 		if stream.Type != "Subtitle" {
 			continue
@@ -743,4 +759,19 @@ func (h *Handler) MoveUploadedSubtitles(ctx context.Context) error {
 		return h.subtitleManager.Upload(video, subtitles.Response{Language: file.Language, Format: file.Format,
 			IsForced: file.Forced, IsHearingImpaired: file.HearingImpaired, Data: file.Data})
 	})
+}
+
+// indexedFits reports whether a track read through the index is in the
+// format the cache keeps the stream's in: the script for ASS, a SUP file
+// for PGS, SubRip for the other text tracks.
+func indexedFits(stream subtitles.Stream, data []byte) bool {
+	switch {
+	case strings.EqualFold(stream.Codec, "ass"), strings.EqualFold(stream.Codec, "ssa"):
+		return bytes.Contains(data[:min(len(data), 4096)], []byte("[Script Info]"))
+	case subtitles.IsPgsFormat(stream.Codec):
+		return bytes.HasPrefix(data, []byte("PG"))
+	case subtitles.IsVobSubFormat(stream.Codec):
+		return false
+	}
+	return !bytes.HasPrefix(data, []byte("PG")) && !bytes.Contains(data[:min(len(data), 4096)], []byte("[Script Info]"))
 }

@@ -286,3 +286,37 @@ func needFFmpeg(t *testing.T) {
 		t.Skip("POLYFIN_TEST_FFMPEG is not set: FFmpeg extracts the tracks inside files")
 	}
 }
+
+// The tracks inside a Matroska file are read through its index, without
+// FFmpeg and without reading the whole file: as soon as the play is
+// decided, so that a track picked later loads at once.
+func TestTracksInsideMatroskaFilesAreReadThroughTheIndex(t *testing.T) {
+	t.Parallel()
+	s, user, token, id := playingFile(t, subtitledFile)
+	if s.handler.subtitleEncoder.FFmpeg != "" {
+		s.handler.subtitleEncoder.FFmpeg = "ffmpeg-not-installed"
+	}
+	profile, err := os.ReadFile(filepath.Join(playbackFixtures, "profiles", "jellyfin-web-chrome.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, body := s.call(http.MethodPost, "/Items/"+id.String()+"/PlaybackInfo", app("tv", token),
+		map[string]any{"UserId": user.ID.String(), "DeviceProfile": json.RawMessage(profile), "SubtitleStreamIndex": -1})
+	var response playbackInfoResponse
+	if err := json.Unmarshal(body, &response); status != http.StatusOK || err != nil || len(response.MediaSources) != 1 {
+		t.Fatalf("PlaybackInfo: %d %s", status, body)
+	}
+	tracks := map[int]playback.MediaStream{}
+	for _, stream := range response.MediaSources[0].MediaStreams {
+		tracks[stream.Index] = stream
+	}
+	srt, ass := tracks[1], tracks[2]
+	status, _, text := fetchText(t, s.url+srt.DeliveryUrl)
+	if status != http.StatusOK || !strings.HasPrefix(text, "WEBVTT") || !strings.Contains(text, "-->") {
+		t.Errorf("SRT track: %d %s", status, text)
+	}
+	status, _, script := fetchText(t, s.url+ass.DeliveryUrl)
+	if status != http.StatusOK || !strings.Contains(script, "[V4+ Styles]") || !strings.Contains(script, "Dialogue:") {
+		t.Errorf("ASS track: %d %s", status, script)
+	}
+}

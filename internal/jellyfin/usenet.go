@@ -149,3 +149,29 @@ func (h *Handler) extractUsenet(ctx context.Context, version library.Version) {
 		h.subtitleEncoder.ExtractAll(playback.Background(context.WithoutCancel(ctx)), source)
 	})
 }
+
+// extractAhead reads the subtitle tracks inside a version as soon as a
+// play of it is decided: those its Matroska index gives, in seconds, so
+// that a track the user picks later loads at once; all of them, with the
+// rest of the file, when the track shown, index, is one the index does not
+// give.
+func (h *Handler) extractAhead(ctx context.Context, version library.Version, index int) {
+	if h.subtitleEncoder == nil {
+		return
+	}
+	analysis, ok := h.Playback.Analyzed(ctx, version.ID)
+	if !ok {
+		return
+	}
+	source := h.subtitleSource(version, analysis, versionFiles(h.titleSubtitles(version.Item), version))
+	if !slices.ContainsFunc(source.Streams, func(s subtitles.Stream) bool { return !s.IsExternal && s.SupportsExternalStream }) {
+		return
+	}
+	ctx = playback.Background(ctx)
+	h.subtitleEncoder.ReadIndexed(ctx, source)
+	stream, ok := subtitleStream(source, index)
+	if index < 0 || !ok || stream.IsExternal || !stream.SupportsExternalStream || h.subtitleEncoder.FFmpeg == "" {
+		return
+	}
+	h.subtitleEncoder.ExtractAll(ctx, source)
+}
