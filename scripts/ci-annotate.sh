@@ -37,6 +37,7 @@ function flush() {
 /^panic: / { flush(); title = "panic"; body = $0 "\n"; inpanic = 1; next }
 inpanic && /\.go:[0-9]+/ { body = body $0 "\n"; if (++frames > 20) { inpanic = 0 } ; next }
 /^FAIL[[:space:]]/ { flush(); next }
+/^go: downloading / { next }
 /gofmt needed:|^# |^go: |cannot find|undefined:|declared and not used|vet: / {
 	flush(); title = "build"; body = $0 "\n"; next
 }
