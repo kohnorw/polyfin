@@ -130,6 +130,18 @@ func (s *Service) IndexedSubtitles(ctx context.Context, version library.Version,
 			failed(stream)
 			continue
 		}
+		// A host known to serve one range at a time takes a request per
+		// group of blocks, which the index tells without asking it: a
+		// track past the share is left to FFmpeg at once.
+		if served, known := src.ServesRanges(); known && !served {
+			if n, err := m.SingleRangeRequests(ctx, track.Number); err == nil && n > indexedRequests {
+				s.logger.Debug("A subtitle track would take its host too many requests", "addon", version.Addon, "stream", stream, "requests", n)
+				for _, rest := range streams[i:] {
+					failed(rest)
+				}
+				break
+			}
+		}
 		blocks, err := m.SubtitleBlocks(ctx, &boundedFetcher{src: src, left: indexedRequests}, track.Number)
 		if err != nil {
 			s.logger.Info("A subtitle track could not be read through its index", "addon", version.Addon, "stream", stream, "error", err)
