@@ -91,15 +91,15 @@ func TestAnswersAreKeptForADayAndAskedOnce(t *testing.T) {
 	if got := fake.asked("/3/find/tt404"); got != 1 {
 		t.Errorf("unknown title asked %d times, want once", got)
 	}
-	advance(23 * time.Hour)
+	advance(answerLife - time.Hour)
 	_, _ = c.TitleImages(t.Context(), Movie, "550")
 	if got := fake.asked("/3/movie/550/images"); got != 1 {
-		t.Errorf("within a day: asked %d times", got)
+		t.Errorf("within two weeks: asked %d times", got)
 	}
 	advance(2 * time.Hour)
 	_, _ = c.TitleImages(t.Context(), Movie, "550")
 	if got := fake.asked("/3/movie/550/images"); got != 2 {
-		t.Errorf("after a day: asked %d times, want twice", got)
+		t.Errorf("after two weeks: asked %d times, want twice", got)
 	}
 	if c.ImageURL("/p.jpg", "w342") != "https://images.example/t/p/w342/p.jpg" {
 		t.Errorf("image URL: %s", c.ImageURL("/p.jpg", "w342"))
