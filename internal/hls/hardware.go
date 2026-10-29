@@ -490,7 +490,25 @@ func (m *Manager) encodes(hw Hardware, encoder string, options ...string) bool {
 	args = append(args, "-c:v", encoder)
 	args = append(args, options...)
 	args = append(args, "-f", "null", "-")
-	return m.succeeds(args...)
+	if m.run != nil {
+		return m.succeeds(args...)
+	}
+	// FFmpeg's own words tell why a GPU does not encode (a driver too old
+	// for its NVENC, a library the container lacks): they are logged.
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, m.ffmpeg, args...).CombinedOutput()
+	if err != nil {
+		m.logger.Warn("The GPU did not encode a test video", "encoder", encoder, "error", err,
+			"ffmpeg", strings.TrimSpace(lastLines(string(out), 6)))
+	}
+	return err == nil
+}
+
+// lastLines is the last n lines of text.
+func lastLines(text string, n int) string {
+	lines := strings.Split(strings.TrimSpace(text), "\n")
+	return strings.Join(lines[max(len(lines)-n, 0):], "\n")
 }
 
 // deinterlaces reports whether the deinterlacer name deinterlaces a
