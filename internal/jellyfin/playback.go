@@ -877,6 +877,10 @@ func (h *Handler) convertible(allowed accounts.Conversions, user accounts.User, 
 // allowed hours gets nothing: Jellyfin serves direct streams without
 // checking who asks, but Polyfin knows, and keeps to the hours.
 func (h *Handler) streamAccess(r *http.Request) (accounts.User, playback.Grant, bool) {
+	// A playback ended from the server gets nothing more (see ended.go).
+	if h.endings.isEnded(query(r, "playSessionId")) {
+		return accounts.User{}, playback.Grant{}, false
+	}
 	for _, name := range []string{grantParameter, "playSessionId"} {
 		token := query(r, name)
 		if token == "" {
@@ -926,6 +930,9 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
+	// The stream is cut if its playback is ended (see ended.go).
+	w, release := h.endings.open(query(r, "playSessionId"), w)
+	defer release()
 	item, err := h.played(r.Context(), user, opened)
 	if err != nil {
 		processingError(w, http.StatusNotFound)

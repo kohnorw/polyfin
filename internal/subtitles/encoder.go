@@ -147,6 +147,48 @@ type Encoder struct {
 
 	jobsMu sync.Mutex
 	jobs   map[string]chan struct{}
+
+	// waiters are the requests waiting for a track to land in the cache,
+	// by its path, woken by saved as soon as it does.
+	waitersMu sync.Mutex
+	waiters   map[string][]chan struct{}
+}
+
+// await returns a channel closed once path is saved, and a function that
+// stops waiting.
+func (e *Encoder) await(path string) (<-chan struct{}, func()) {
+	ch := make(chan struct{})
+	e.waitersMu.Lock()
+	if e.waiters == nil {
+		e.waiters = map[string][]chan struct{}{}
+	}
+	e.waiters[path] = append(e.waiters[path], ch)
+	e.waitersMu.Unlock()
+	return ch, func() {
+		e.waitersMu.Lock()
+		defer e.waitersMu.Unlock()
+		list := e.waiters[path]
+		for i, c := range list {
+			if c == ch {
+				e.waiters[path] = append(list[:i], list[i+1:]...)
+				break
+			}
+		}
+		if len(e.waiters[path]) == 0 {
+			delete(e.waiters, path)
+		}
+	}
+}
+
+// saved wakes the requests waiting for a track now in the cache.
+func (e *Encoder) saved(path string) {
+	e.waitersMu.Lock()
+	list := e.waiters[path]
+	delete(e.waiters, path)
+	e.waitersMu.Unlock()
+	for _, ch := range list {
+		close(ch)
+	}
 }
 
 func (e *Encoder) logger() *slog.Logger {
@@ -498,6 +540,10 @@ func (e *Encoder) extractStream(ctx context.Context, source Source, stream Strea
 	if stream.Path != "" {
 		sourcePath = stream.Path
 	}
+	// Waiting starts before the check, so that a track saved in between
+	// still wakes it.
+	ready, stop := e.await(path)
+	defer stop()
 	if fresh(path, sourcePath) {
 		return nil
 	}
@@ -506,19 +552,16 @@ func (e *Encoder) extractStream(ctx context.Context, source Source, stream Strea
 		defer close(done)
 		e.ExtractAll(ctx, source)
 	}()
-	tick := time.NewTicker(250 * time.Millisecond)
-	defer tick.Stop()
-	for {
-		select {
-		case <-done:
-			return ctx.Err()
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-tick.C:
-			if fresh(path, sourcePath) {
-				return nil
-			}
+	select {
+	case <-ready:
+		return nil
+	case <-done:
+		if fresh(path, sourcePath) {
+			return nil
 		}
+		return ctx.Err()
+	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
@@ -641,6 +684,7 @@ func (e *Encoder) extractInternal(ctx context.Context, source Source, streams []
 			return err
 		}
 		e.writeCacheMeta(path, source.Path)
+		e.saved(path)
 	}
 	return nil
 }
@@ -695,6 +739,7 @@ func (e *Encoder) readIndexed(ctx context.Context, source Source, streams []Stre
 			continue
 		}
 		e.writeCacheMeta(path, source.Path)
+		e.saved(path)
 	}
 	return left
 }
@@ -733,6 +778,7 @@ func (e *Encoder) extractMKS(ctx context.Context, source Source, streams []Strea
 		}
 		for _, path := range outputs {
 			e.writeCacheMeta(path, file)
+			e.saved(path)
 		}
 	}
 	return errors.Join(errs...)

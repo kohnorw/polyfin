@@ -335,15 +335,23 @@ function SessionRow({ session, elapsed }: { session: LiveSession; elapsed: numbe
         </div>
 
         <div className="col-span-full flex items-center gap-0.5 lg:col-span-1 max-lg:-mt-2 max-lg:justify-end">
-          {session.controllable ? (
+          {session.shared || session.download ? (
+            <p className="text-small text-ink-3 lg:max-w-32">
+              {session.shared ? live.sharedNotControllable : live.downloadNotControllable}
+            </p>
+          ) : (
             <>
-              <IconButton
-                icon={ChatCircleTextIcon}
-                label={live.messageTo(session.user.name)}
-                aria-expanded={messaging}
-                aria-controls={formId}
-                onClick={() => setMessaging(!messaging)}
-              />
+              {session.controllable && (
+                <IconButton
+                  icon={ChatCircleTextIcon}
+                  label={live.messageTo(session.user.name)}
+                  aria-expanded={messaging}
+                  aria-controls={formId}
+                  onClick={() => setMessaging(!messaging)}
+                />
+              )}
+              {/* The server ends a playback whether the app takes
+                  commands or not. */}
               <IconButton
                 icon={StopCircleIcon}
                 label={live.stopFor(session.user.name)}
@@ -354,14 +362,6 @@ function SessionRow({ session, elapsed }: { session: LiveSession; elapsed: numbe
                 }}
               />
             </>
-          ) : (
-            <p className="text-small text-ink-3 lg:max-w-32">
-              {session.shared
-                ? live.sharedNotControllable
-                : session.download
-                  ? live.downloadNotControllable
-                  : live.notControllable}
-            </p>
           )}
         </div>
 
