@@ -439,24 +439,11 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 			"enable_direct_play", request.EnableDirectPlay == nil || *request.EnableDirectPlay,
 			"enable_direct_stream", request.EnableDirectStream == nil || *request.EnableDirectStream)
 	}
-	// The subtitles inside an NZB are extracted while the player starts,
-	// so that they are there when it asks (see usenet.go).
-	go h.extractUsenet(context.WithoutCancel(r.Context()), chosen.version)
-	// The subtitles inside any version are read as soon as its play is
-	// decided, so that the one the user picks loads at once (see
-	// extractAhead).
-	shown := chosen.decision.SubtitleStreamIndex
-	if shown >= 0 {
-		switch chosen.decision.Subtitles[shown].Method {
-		case "External", "Hls":
-		default:
-			shown = -1
-		}
-	}
-	// A converted download reads the whole file itself, and carries no
-	// subtitle the player asks for while it plays.
+	// The subtitles inside the version its index gives are read once
+	// playback is under way (see extractAhead). A converted download reads
+	// the whole file itself, and carries no subtitle the player asks for.
 	if !chosen.decision.Progressive {
-		go h.extractAhead(context.WithoutCancel(r.Context()), chosen.version, shown)
+		go h.extractAhead(context.WithoutCancel(r.Context()), chosen.version)
 	}
 	session := h.Playback.Signer().Sign(playback.Grant{Version: chosen.version.ID, User: user.ID, Relay: mustRelay(r, chosen.version)})
 	chosenSource := h.decidedSource(r, p, *chosen, request, session)

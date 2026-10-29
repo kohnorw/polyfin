@@ -31,7 +31,7 @@ Each track goes out as Jellyfin's `StreamBuilder` decides, from the app's subtit
 Tracks inside the file are kept in `<data>/subtitles/` once read. They are read 20 seconds after a play of the version starts, so that the reading never slows the start of playback, and before the user picks one; a player asking for one sooner has it read at once:
 
 - **Through the index first.** A Matroska file's index tells where every subtitle block sits, so Polyfin fetches those blocks alone, in seconds, rather than the whole file. The files it makes are FFmpeg's to the byte: SubRip for text, the script for ASS, SUP for PGS.
-- **Else with the whole file.** Tracks the index does not give (MP4 files, VobSub, hosts that would take too many requests) are extracted by FFmpeg, every track at once: as soon as the play is decided when the subtitle shown is one of them, else when the player asks. For an addon stream, FFmpeg reads the addon's link itself when the addon allows it, else through Polyfin.
+- **Else with the whole file.** Tracks the index does not give (MP4 files, VobSub, hosts that would take too many requests) are extracted by FFmpeg, every track at once: when the player asks for one, never ahead, as hosts rate limit what they serve. For an addon stream, FFmpeg reads the addon's link itself when the addon allows it, else through Polyfin.
 
 A player asking for a track gets it the moment it is read, while the others still are. An extraction goes on when the player stops waiting, so that asking again finds it under way or done. **Allow subtitle extraction on the fly** is Jellyfin's `EnableSubtitleExtraction`.
 
@@ -39,7 +39,7 @@ A track that could only be burned in is left out when the user may not have the 
 
 ### NZB versions
 
-An addon announces none of the subtitles inside an NZB release, so Polyfin finds them itself. Opening a title analyzes its NZB versions (8 at most, 3 at a time), waiting up to 8 seconds so that the version picker lists their subtitle tracks; a version still being read lists them the next time the title opens. A play extracts the subtitles of the NZB version it plays once playback is under way, so that the player finds them ready, or waits for the extraction under way.
+An addon announces none of the subtitles inside an NZB release, so Polyfin finds them itself. Opening a title analyzes its NZB versions (8 at most, 3 at a time), waiting up to 8 seconds so that the version picker lists their subtitle tracks; a version still being read lists them the next time the title opens. Their subtitles are extracted when the player asks for one.
 
 ## ASS styles and fonts
 
