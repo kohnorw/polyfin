@@ -7,6 +7,8 @@ import (
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"github.com/moodiness/polyfin/internal/accounts"
+	"github.com/moodiness/polyfin/internal/cache"
 	"net/url"
 	"slices"
 	"strconv"
@@ -71,14 +73,31 @@ var errNotIndexed = errors.New("the subtitle track is not read through the index
 // indexedReads bounds the versions read so at once, by host.
 var indexedReads hostSlots
 
+// unindexed are the versions whose tracks their index did not give, by
+// version and FFmpeg stream index: a file's index, or its host, does not
+// change, and trying again only delays FFmpeg's extraction.
+var unindexed = cache.New[string, bool](20000, 24*time.Hour)
+
+func unindexedKey(version accounts.ID, stream int) string {
+	return version.String() + "/" + strconv.Itoa(stream)
+}
+
 // IndexedSubtitles reads subtitle tracks of a version through its Matroska
 // index, by FFmpeg stream index: each track read is the file FFmpeg's
 // extraction would make, SubRip for text, the script for ASS, SUP for PGS.
 // Tracks it cannot read are left out, for FFmpeg to extract.
 func (s *Service) IndexedSubtitles(ctx context.Context, version library.Version, analysis media.Analysis, streams []int) map[int][]byte {
-	if !matroska(analysis) || len(streams) == 0 || version.Torrent != nil || s.ReadsInput(version) {
+	if !matroska(analysis) || version.Torrent != nil || s.ReadsInput(version) {
 		return nil
 	}
+	streams = slices.DeleteFunc(slices.Clone(streams), func(stream int) bool {
+		_, failed := unindexed.Get(unindexedKey(version.ID, stream))
+		return failed
+	})
+	if len(streams) == 0 {
+		return nil
+	}
+	failed := func(stream int) { unindexed.Put(unindexedKey(version.ID, stream), true) }
 	ctx, cancel := context.WithTimeout(ctx, indexedReadTime)
 	defer cancel()
 	release, err := indexedReads.acquire(ctx, hostOf(version.URL))
@@ -96,22 +115,40 @@ func (s *Service) IndexedSubtitles(ctx context.Context, version library.Version,
 		return err
 	}); err != nil {
 		s.logger.Info("The subtitles of a version could not be read through its index", "addon", version.Addon, "error", err)
+		if errors.Is(err, container.ErrUnreadable) || errors.Is(err, container.ErrNoIndex) {
+			for _, stream := range streams {
+				failed(stream)
+			}
+		}
 		return nil
 	}
 	tracks := streamTracks(analysis, m.Tracks())
 	files := map[int][]byte{}
-	for _, stream := range streams {
+	for i, stream := range streams {
 		track, ok := tracks[stream]
 		if _, indexed := indexedCodecs[track.CodecID]; !ok || !indexed || !track.Decodable {
+			failed(stream)
 			continue
 		}
 		blocks, err := m.SubtitleBlocks(ctx, &boundedFetcher{src: src, left: indexedRequests}, track.Number)
 		if err != nil {
 			s.logger.Info("A subtitle track could not be read through its index", "addon", version.Addon, "stream", stream, "error", err)
+			if ctx.Err() == nil {
+				failed(stream)
+			}
+			// A host that would take too many requests for one track
+			// would for the others: they are left to FFmpeg at once.
+			if errors.Is(err, errIndexedRequests) {
+				for _, rest := range streams[i+1:] {
+					failed(rest)
+				}
+				break
+			}
 			continue
 		}
 		file, err := trackFile(track, blocks)
 		if err != nil || len(file) == 0 || len(file) > maxIndexedTrack {
+			failed(stream)
 			s.logger.Info("A subtitle track read through its index makes no file", "addon", version.Addon, "stream", stream, "error", err)
 			continue
 		}
