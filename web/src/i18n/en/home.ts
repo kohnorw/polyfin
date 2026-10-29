@@ -146,8 +146,8 @@ const home = {
       stopFor: (user: string) => `Stop ${user}’s playback`,
       stopTitle: 'Stop this playback?',
       stopConfirm: (user: string, title: string) =>
-        `Stop “${title}” on ${user}’s device? The app stops playing at once.`,
-      stopped: 'The app was asked to stop.',
+        `Stop “${title}” on ${user}’s device? Its stream is cut at once, and its position is kept.`,
+      stopped: 'The playback was stopped.',
       message: 'Send a message',
       messageTo: (user: string) => `Send a message to ${user}`,
       messageLabel: (device: string) => `Message to show on ${device}`,

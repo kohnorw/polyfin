@@ -148,7 +148,7 @@ const home: typeof en = {
       stopTitle: 'Arrêter cette lecture ?',
       stopConfirm: (user: string, title: string) =>
         `Arrêter « ${title} » sur l’appareil de ${user} ? La lecture s’arrête tout de suite.`,
-      stopped: 'L’appli a reçu l’ordre d’arrêter.',
+      stopped: 'La lecture a été arrêtée.',
       message: 'Envoyer un message',
       messageTo: (user: string) => `Envoyer un message à ${user}`,
       messageLabel: (device: string) => `Message à afficher sur ${device}`,

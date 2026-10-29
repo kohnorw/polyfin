@@ -60,6 +60,12 @@ func (f *fakeSessions) StopPlayback(_ context.Context, by accounts.User, session
 	return f.err
 }
 
+// EndPlayback is what the stop button calls: it records the session as
+// StopPlayback does.
+func (f *fakeSessions) EndPlayback(ctx context.Context, by accounts.User, session accounts.ID) error {
+	return f.StopPlayback(ctx, by, session)
+}
+
 func (f *fakeSessions) SendMessage(_ context.Context, by accounts.User, session accounts.ID, header, text string, timeout time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()

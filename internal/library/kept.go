@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"hash/fnv"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -44,8 +45,56 @@ const (
 	// past their refresh age.
 	staleCatalogs = 24 * time.Hour
 	// metaKept is how long a description is kept, stale ones included.
-	metaKept = 7 * 24 * time.Hour
+	metaKept = 42 * 24 * time.Hour
+	// settledMetaTTL is the age past which the description of a settled
+	// title (see settled) is asked for again: such titles barely change,
+	// and asking less often spares the addons' and TMDB's limits.
+	settledMetaTTL = 21 * 24 * time.Hour
+	// settledAfter is how long after its release a movie is settled.
+	settledAfter = 90 * 24 * time.Hour
 )
+
+// settled reports whether a title's description is unlikely to change: a
+// movie released more than settledAfter ago, or a series that has ended,
+// or whose last episode aired more than a year ago. Airing series and new
+// movies are asked for as often as before, so new episodes still appear.
+func settled(meta stremio.Meta, now time.Time) bool {
+	switch strings.ToLower(meta.Type) {
+	case "movie":
+		released, ok := releaseDate(meta.Released)
+		return ok && now.Sub(released) > settledAfter
+	case "series":
+		switch strings.ToLower(strings.TrimSpace(meta.Status)) {
+		case "ended", "canceled", "cancelled":
+			return true
+		case "":
+		default:
+			return false
+		}
+		var last time.Time
+		for _, video := range meta.Videos {
+			if released, ok := releaseDate(video.Released); ok && released.After(last) {
+				last = released
+			}
+		}
+		return !last.IsZero() && now.Sub(last) > 365*24*time.Hour
+	}
+	return false
+}
+
+// releaseDate reads a release date as addons give it: RFC 3339, or a bare
+// date.
+func releaseDate(text string) (time.Time, bool) {
+	if t, err := time.Parse(time.RFC3339, text); err == nil {
+		return t, true
+	}
+	if len(text) >= 10 {
+		if t, err := time.Parse(time.DateOnly, text[:10]); err == nil {
+			return t, true
+		}
+	}
+	return time.Time{}, false
+}
 
 // fetched is what an addon gave, at the time it gave it.
 type fetched[T any] struct {
@@ -383,7 +432,11 @@ func (s *Service) keptMeta(ctx context.Context, addon installed, metaType, id st
 
 // metaStale reports whether a description is to be asked for again.
 func (s *Service) metaStale(ctx context.Context, kept fetched[stremio.Meta]) bool {
-	return !kept.fresh(s.now(), metaTTL) || iptv.IsOpening(ctx) && !kept.fresh(s.now(), s.catalogLife())
+	now := s.now()
+	if settled(kept.value, now) {
+		return !kept.fresh(now, settledMetaTTL)
+	}
+	return !kept.fresh(now, metaTTL) || iptv.IsOpening(ctx) && !kept.fresh(now, s.catalogLife())
 }
 
 // fetchKeptMeta asks the addon for a description and keeps it. A movie's

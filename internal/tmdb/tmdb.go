@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
@@ -23,6 +24,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"golang.org/x/sync/singleflight"
 
 	"github.com/moodiness/polyfin/internal/accounts"
@@ -36,8 +39,10 @@ const (
 )
 
 const (
-	// answerLife is how long an answer is kept, and maxAnswers how many.
-	answerLife = 24 * time.Hour
+	// answerLife is how long an answer is kept, and maxAnswers how many
+	// in memory; the database keeps them all (see Keep). Images rarely
+	// change once a title is out.
+	answerLife = 14 * 24 * time.Hour
 	maxAnswers = 2000
 	// maxRequests bounds the requests to TMDB at once.
 	maxRequests = 4
@@ -91,6 +96,9 @@ type Client struct {
 	slots                  chan struct{}
 	answers                *cache.Cache[string, answer]
 	flight                 singleflight.Group
+	// db keeps answers across restarts, when Keep gave one.
+	db  *pgxpool.Pool
+	now func() time.Time
 }
 
 // answer is what TMDB answered for a path: its body, or nothing for what
@@ -116,6 +124,7 @@ func newClient(api, images, version string, settings func() accounts.Settings, n
 		key:       func() string { return settings().TMDBKey },
 		http:      &http.Client{Timeout: requestTimeout},
 		slots:     make(chan struct{}, maxRequests),
+		now:       now,
 		answers: cache.NewLasting[string, answer](maxAnswers, func() time.Duration { return answerLife }, now).Sized(64<<20, func(a answer) int {
 			return len(a.body) + 64
 		}),
@@ -258,6 +267,10 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, into an
 			if kept, ok := c.answers.Get(cacheKey); ok {
 				return kept, nil
 			}
+			if kept, ok := c.load(detached, cacheKey); ok {
+				c.answers.Put(cacheKey, kept)
+				return kept, nil
+			}
 			release, err := c.Hold(detached)
 			if err != nil {
 				return answer{}, err
@@ -270,6 +283,7 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, into an
 			case status == http.StatusNotFound:
 				kept := answer{}
 				c.answers.Put(cacheKey, kept)
+				c.store(detached, cacheKey, kept)
 				return kept, nil
 			case status == http.StatusUnauthorized:
 				return answer{}, ErrKeyRefused
@@ -278,6 +292,7 @@ func (c *Client) get(ctx context.Context, path string, query url.Values, into an
 			}
 			kept := answer{body: body, found: true}
 			c.answers.Put(cacheKey, kept)
+			c.store(detached, cacheKey, kept)
 			return kept, nil
 		})
 		if err != nil {
@@ -336,4 +351,47 @@ func withoutURL(err error) error {
 		return urlErr.Err
 	}
 	return err
+}
+
+// Keep has the client keep TMDB's answers in db for answerLife, so that a
+// restart does not ask TMDB again, and forgets those older.
+func (c *Client) Keep(ctx context.Context, db *pgxpool.Pool) {
+	c.db = db
+	if _, err := db.Exec(ctx, "DELETE FROM tmdb_answers WHERE fetched_at < $1", c.now().Add(-answerLife)); err != nil {
+		slog.Debug("Old TMDB answers could not be forgotten", "error", err)
+	}
+}
+
+// load reads an answer kept in the database, younger than answerLife.
+func (c *Client) load(ctx context.Context, key string) (answer, bool) {
+	if c.db == nil {
+		return answer{}, false
+	}
+	var kept answer
+	err := c.db.QueryRow(ctx, "SELECT body, found FROM tmdb_answers WHERE key = $1 AND fetched_at > $2",
+		key, c.now().Add(-answerLife)).Scan(&kept.body, &kept.found)
+	if err != nil {
+		if !errors.Is(err, pgx.ErrNoRows) {
+			slog.Debug("A kept TMDB answer could not be read", "error", err)
+		}
+		return answer{}, false
+	}
+	return kept, true
+}
+
+// store keeps an answer in the database.
+func (c *Client) store(ctx context.Context, key string, kept answer) {
+	if c.db == nil {
+		return
+	}
+	body := kept.body
+	if body == nil {
+		body = []byte{}
+	}
+	_, err := c.db.Exec(ctx, `INSERT INTO tmdb_answers (key, body, found, fetched_at) VALUES ($1, $2, $3, $4)
+		ON CONFLICT (key) DO UPDATE SET body = EXCLUDED.body, found = EXCLUDED.found, fetched_at = EXCLUDED.fetched_at`,
+		key, body, kept.found, c.now())
+	if err != nil {
+		slog.Debug("A TMDB answer could not be kept", "error", err)
+	}
 }
