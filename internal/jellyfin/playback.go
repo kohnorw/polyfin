@@ -425,6 +425,20 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	chosen, unreadable, versions, at := choice.decided, choice.unreadable, p.versions, openedIndex(opened, p.versions)
+	{
+		caller := callerFrom(r.Context())
+		d := chosen.decision
+		profile := "none"
+		if request.DeviceProfile != nil {
+			profile = request.DeviceProfile.Name
+		}
+		h.Logger.Debug("Decided how a version plays", "client", caller.Device.Client, "device", caller.Device.DeviceName,
+			"addon", chosen.version.Addon, "profile", profile, "direct_play", d.DirectPlay, "hls", d.HLS, "progressive", d.Progressive,
+			"video_converted", d.Video != nil, "audio_converted", d.Audio != nil, "reasons", strings.Join(d.Reasons, ","),
+			"container", d.Container, "start", time.Duration(request.StartTimeTicks.value)*100,
+			"enable_direct_play", request.EnableDirectPlay == nil || *request.EnableDirectPlay,
+			"enable_direct_stream", request.EnableDirectStream == nil || *request.EnableDirectStream)
+	}
 	// The subtitles inside an NZB are extracted while the player starts,
 	// so that they are there when it asks (see usenet.go).
 	go h.extractUsenet(context.WithoutCancel(r.Context()), chosen.version)

@@ -190,6 +190,11 @@ func (h *Handler) remuxOf(w http.ResponseWriter, r *http.Request) (remuxRequest,
 // play session session, from the parameters of r's query, as
 // PlaybackInfo's TranscodingUrl gives them.
 func (h *Handler) remuxFor(w http.ResponseWriter, r *http.Request, user accounts.User, opened, versionID accounts.ID, session string) (remuxRequest, bool) {
+	if strings.HasSuffix(r.URL.Path, "master.m3u8") || strings.HasSuffix(r.URL.Path, "main.m3u8") {
+		h.Logger.Debug("An app asked for a stream", "client", callerFrom(r.Context()).Device.Client, "path", r.URL.Path,
+			"video_codec", query(r, "videoCodec"), "audio_codec", query(r, "audioCodec"), "copy_video", query(r, "allowVideoStreamCopy"),
+			"copy_audio", query(r, "allowAudioStreamCopy"), "reasons", query(r, "transcodeReasons"), "start", query(r, "startTimeTicks"))
+	}
 	// A conversion the user may not have is refused, as Jellyfin refuses
 	// it once FFmpeg is about to start. PlaybackInfo plans none: this
 	// guards URLs kept from before a permission was taken away, or made up.
