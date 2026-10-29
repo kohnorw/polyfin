@@ -100,14 +100,14 @@ func (h *Handler) prepareUsenet(ctx context.Context, versions []library.Version,
 			}
 		}))
 	}
-	first := nzbs[0]
+	// Only analyzed: the subtitles are read once a play has started (see
+	// aheadDelay), not while the user browses.
 	analyzed := make(chan struct{})
 	go func() {
 		for _, wait := range waits {
 			<-wait
 		}
 		close(analyzed)
-		h.extractUsenet(ctx, first)
 	}()
 	return analyzed
 }
@@ -129,11 +129,32 @@ func waitUsenet(ctx context.Context, analyzed <-chan struct{}) bool {
 	return false
 }
 
+// aheadDelay is how long after a play is decided its subtitles are read
+// ahead: the player has started by then, and reading them meanwhile would
+// take the host's connections and bandwidth from the start of playback. A
+// player asking for a subtitle sooner has it read at once.
+var aheadDelay = 20 * time.Second
+
+// waitAhead waits aheadDelay, and reports whether ctx lasted.
+func waitAhead(ctx context.Context) bool {
+	timer := time.NewTimer(aheadDelay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return true
+	case <-ctx.Done():
+		return false
+	}
+}
+
 // extractUsenet extracts, in the background, the subtitle tracks inside
 // an analyzed NZB version, every track at once in one read of its file,
 // as Jellyfin's ExtractAllExtractableSubtitles. A player asking for one
 // meanwhile waits for the extraction under way.
 func (h *Handler) extractUsenet(ctx context.Context, version library.Version) {
+	if !waitAhead(ctx) {
+		return
+	}
 	if h.usenet == nil || h.subtitleEncoder == nil || h.subtitleEncoder.FFmpeg == "" || !playback.Usenet(version) {
 		return
 	}
@@ -156,7 +177,7 @@ func (h *Handler) extractUsenet(ctx context.Context, version library.Version) {
 // rest of the file, when the track shown, index, is one the index does not
 // give.
 func (h *Handler) extractAhead(ctx context.Context, version library.Version, index int) {
-	if h.subtitleEncoder == nil {
+	if h.subtitleEncoder == nil || !waitAhead(ctx) {
 		return
 	}
 	analysis, ok := h.Playback.Analyzed(ctx, version.ID)
