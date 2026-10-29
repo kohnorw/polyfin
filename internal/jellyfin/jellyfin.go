@@ -148,6 +148,8 @@ type Handler struct {
 	// fontsFor).
 	fonts    fontsFor
 	sessions *playback.Sessions
+	// endings are the play sessions ended from the server (see ended.go).
+	endings endings
 	// subtitleEncoder and subtitleManager are Jellyfin's SubtitleEncoder
 	// and SubtitleManager (see subtitles.go).
 	subtitleEncoder *subtitles.Encoder

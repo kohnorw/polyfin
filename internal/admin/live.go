@@ -22,6 +22,7 @@ import (
 type Sessions interface {
 	LiveSessions(ctx context.Context) ([]jellyfin.LiveSession, error)
 	StopPlayback(ctx context.Context, by accounts.User, session accounts.ID) error
+	EndPlayback(ctx context.Context, by accounts.User, session accounts.ID) error
 	SendMessage(ctx context.Context, by accounts.User, session accounts.ID, header, text string, timeout time.Duration) error
 }
 
@@ -327,7 +328,8 @@ func audioCodecOf(encoder string) string {
 // maxMessageLength bounds the messages administrators send to apps.
 const maxMessageLength = 500
 
-// stopSession asks the app of a session to stop playing.
+// stopSession stops a session's playback: its app is asked to, and the
+// server ends it whether the app obeys or not.
 func (h *handler) stopSession(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r, "id")
 	if !ok {
@@ -337,7 +339,7 @@ func (h *handler) stopSession(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 		return
 	}
-	h.answerCommand(w, r, h.Sessions.StopPlayback(r.Context(), sessionFrom(r.Context()).User, id))
+	h.answerCommand(w, r, h.Sessions.EndPlayback(r.Context(), sessionFrom(r.Context()).User, id))
 }
 
 // messageSession has the app of a session show a message.

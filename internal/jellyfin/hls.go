@@ -165,7 +165,7 @@ func (h *Handler) remuxOf(w http.ResponseWriter, r *http.Request) (remuxRequest,
 	}
 	session := query(r, "playSessionId")
 	grant, err := h.Playback.Signer().Verify(session)
-	if err != nil {
+	if err != nil || h.endings.isEnded(session) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return remuxRequest{}, false
 	}

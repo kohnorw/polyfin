@@ -299,6 +299,7 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 	// Edit images searches TMDB's images while the settings hold the
 	// server's TMDB key.
 	imageSearch := tmdb.New(tmdb.API, tmdb.Images, version, store.Settings)
+	imageSearch.Keep(ctx, pool)
 	// Local folders match their files through the library's searches of
 	// the metadata addons.
 	folders := localfiles.New(pool, addonStore, lib, logger, store.Settings, box)
@@ -642,6 +643,8 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 	go notifier.Run(ctx)
 	go updateCheck.Run(ctx)
 	go playbacks.Run(ctx)
+	// Playbacks paused for over an hour are ended.
+	go jellyfinAPI.EndLongPauses(ctx)
 	served := make(chan error, 1)
 	go func() { served <- httpServer.Serve(listener) }()
 	secure.Start(ctx, httpServer.Handler)
