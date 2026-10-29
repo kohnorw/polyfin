@@ -42,17 +42,21 @@ FROM scratch AS jellyfin-web-source
 ADD --checksum=sha256:2978d0fbe3bc24d3bef637473c55e2628262fa725600e55788a45d9a42a53d44 \
 	https://github.com/jellyfin/jellyfin-web/archive/refs/tags/v12.4.tar.gz /jellyfin-web-12.4-source.tar.gz
 
-# FFmpeg 9.0 built against glibc by BtbN, which can load GPU drivers at run
+# FFmpeg 8.1 built against glibc by BtbN, which can load GPU drivers at run
 # time (NVIDIA through the NVIDIA container runtime, VAAPI through libva):
 # the last build of a month, kept for two years. The shared build keeps
 # ffmpeg and ffprobe from carrying a copy of every library each.
+# 8.1, not 9.0: BtbN builds 9.0 against the NVENC API 13.1, which needs
+# NVIDIA's driver 610, and 8.1 against 13.0, which driver 580 has. 580 is
+# the last driver for Pascal GPUs (GTX 10 series), so with 9.0 they could
+# not encode at all. Keep NVENC at 13.0 or lower when updating.
 FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS ffmpeg-amd64
-ADD --checksum=sha256:01a9764d0b5364b66cfeb4617557c64321b0e232e172ec73f0a701c5f7694326 \
-	https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n9.0.2-17-g2a571b6068-linux64-gpl-shared-9.0.tar.xz /ffmpeg.tar.xz
+ADD --checksum=sha256:76649c19a7a4615b367251ba4a8adc643f65831278a00e7a0c38398f7f06484b \
+	https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n8.1.3-9-g29e619e767-linux64-gpl-shared-8.1.tar.xz /ffmpeg.tar.xz
 
 FROM --platform=$BUILDPLATFORM debian:trixie-slim@sha256:a99cfc517144bc59b1978475ec53b46ecabec7e43635402ee5b77cc54cd1b20a AS ffmpeg-arm64
-ADD --checksum=sha256:706ccdbc8b0537646345532713a9b6750c0a6258cc001ec1c0379754f0ae730a \
-	https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n9.0.2-17-g2a571b6068-linuxarm64-gpl-shared-9.0.tar.xz /ffmpeg.tar.xz
+ADD --checksum=sha256:d5b52fcb4f8d86d997bb75f6c4b383ca0be3f4cd9efd94ab3b4f27b22984f91c \
+	https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n8.1.3-9-g29e619e767-linuxarm64-gpl-shared-8.1.tar.xz /ffmpeg.tar.xz
 
 # A stage of this file, chosen by platform: no tag to give.
 # hadolint ignore=DL3006
