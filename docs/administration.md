@@ -339,6 +339,7 @@ Jellyfin apps see Polyfin's own jobs and can start and stop them:
 - recording ended accounts in the activity log, hourly;
 - recording expired share links in the activity log, every 10 minutes, and deleting the links that ended more than 30 days ago;
 - fetching the IPTV channel lists, then the Live TV guides due under **Settings › Live TV**. Polyfin looks for due ones every 5 minutes; started by hand, the task fetches every list and guide;
+- extracting the subtitles inside the files of local folders, daily at 3, the files not read yet (the job of Jellyfin's Subtitle Extract plugin; addon streams are read when played, see [Subtitles](subtitles.md));
 - refreshing ratings, which asks addons and runs only when started.
 
 Their schedules cannot be changed.

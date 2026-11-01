@@ -667,6 +667,7 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 	}
 	// Jellyfin's handler, created above, closes the sockets of the devices
 	// the device sweep signs out. The guides due are fetched at start too.
+	registerFolderSubtitlesTask(registry, folders, jellyfinAPI)
 	registry.Start(ctx)
 	// Recordings in progress when ctx ends are finished, as partial, when
 	// Polyfin starts again.
@@ -845,6 +846,25 @@ func registerTasks(registry *tasks.Registry, store *accounts.Store, activityLog 
 // registerLocalFoldersTask registers the scans of local folders: each
 // folder at startup, then every LocalScanHours, all of them when run by
 // hand.
+func registerFolderSubtitlesTask(registry *tasks.Registry, folders *localfiles.Service, api *jellyfin.Handler) {
+	registry.Register(tasks.Task{
+		Key:      "ExtractFolderSubtitles",
+		Category: tasks.CategoryLibrary,
+		Text: map[string]tasks.Text{
+			"en": {Name: "Extract subtitles", Description: "Reads the subtitles inside the files of the local folders ahead of any play, so that they show at once: every day at 3, the files not read yet."},
+			"fr": {Name: "Extraire les sous-titres", Description: "Lit les sous-titres contenus dans les fichiers des dossiers locaux avant toute lecture, pour qu'ils s'affichent aussitôt : chaque jour à 3 h, les fichiers pas encore lus."},
+		},
+		Daily: func() int { return 3 },
+		Run: func(ctx context.Context) error {
+			titles, err := folders.FolderTitles(ctx)
+			if err != nil {
+				return err
+			}
+			return api.ExtractFolderSubtitles(ctx, titles)
+		},
+	})
+}
+
 func registerLocalFoldersTask(registry *tasks.Registry, folders *localfiles.Service) {
 	registry.Register(tasks.Task{
 		Key:      "ScanLocalFolders",
