@@ -667,7 +667,7 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 	}
 	// Jellyfin's handler, created above, closes the sockets of the devices
 	// the device sweep signs out. The guides due are fetched at start too.
-	registerFolderSubtitlesTask(registry, folders, jellyfinAPI)
+	registerWatchingSubtitlesTask(registry, folders, jellyfinAPI)
 	registry.Start(ctx)
 	// Recordings in progress when ctx ends are finished, as partial, when
 	// Polyfin starts again.
@@ -846,21 +846,21 @@ func registerTasks(registry *tasks.Registry, store *accounts.Store, activityLog 
 // registerLocalFoldersTask registers the scans of local folders: each
 // folder at startup, then every LocalScanHours, all of them when run by
 // hand.
-func registerFolderSubtitlesTask(registry *tasks.Registry, folders *localfiles.Service, api *jellyfin.Handler) {
+func registerWatchingSubtitlesTask(registry *tasks.Registry, folders *localfiles.Service, api *jellyfin.Handler) {
 	registry.Register(tasks.Task{
-		Key:      "ExtractFolderSubtitles",
+		Key:      "ExtractWatchingSubtitles",
 		Category: tasks.CategoryLibrary,
 		Text: map[string]tasks.Text{
-			"en": {Name: "Extract subtitles", Description: "Reads the subtitles inside the files of the local folders ahead of any play, so that they show at once: every day at 3, the files not read yet."},
-			"fr": {Name: "Extraire les sous-titres", Description: "Lit les sous-titres contenus dans les fichiers des dossiers locaux avant toute lecture, pour qu'ils s'affichent aussitôt : chaque jour à 3 h, les fichiers pas encore lus."},
+			"en": {Name: "Extract subtitles", Description: "Reads ahead the subtitles of the titles users left unfinished and of their next episodes, 20 titles at most each hour. Files of addons are read through their index alone, spaced apart; only files of local folders are read whole."},
+			"fr": {Name: "Extraire les sous-titres", Description: "Lit à l'avance les sous-titres des titres que les utilisateurs n'ont pas finis et de leurs prochains épisodes, 20 titres au plus par heure. Les fichiers des addons sont lus par leur index seul, espacés ; seuls ceux des dossiers locaux sont lus en entier."},
 		},
-		Daily: func() int { return 3 },
+		Interval: time.Hour,
 		Run: func(ctx context.Context) error {
-			titles, err := folders.FolderTitles(ctx)
+			ids, err := folders.FolderIDs(ctx)
 			if err != nil {
 				return err
 			}
-			return api.ExtractFolderSubtitles(ctx, titles)
+			return api.ExtractWatchingSubtitles(ctx, ids)
 		},
 	})
 }
