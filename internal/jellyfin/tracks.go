@@ -56,6 +56,12 @@ func (h *Handler) trackPreferences(ctx context.Context, user accounts.User) trac
 	if preferences.subtitleLanguage == "" {
 		preferences.subtitleLanguage = settings.DefaultSubtitleLanguage
 	}
+	// A language chosen wins over the file's flag, which is on by default
+	// in every user's configuration and would otherwise leave the language
+	// a tie-break.
+	if preferences.audioLanguage != "" {
+		preferences.playDefaultAudio = false
+	}
 	return preferences
 }
 
