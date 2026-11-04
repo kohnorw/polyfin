@@ -472,9 +472,9 @@ func createUser(ctx context.Context, db interface {
 	}
 	// An administrator may control other users' apps and manage collections,
 	// subtitles and Live TV recordings unless that is taken away, a user may
-	// not unless given it.
+	// not unless given it. So may an administrator watch Live TV.
 	created, err := scanUser(db.QueryRow(ctx,
-		"INSERT INTO users (name, password_hash, is_administrator, is_hidden, remote_control, collection_management, subtitle_management, live_tv_management) VALUES ($1, $2, $3, $4, $3, $3, $3, $3) RETURNING "+userColumns,
+		"INSERT INTO users (name, password_hash, is_administrator, is_hidden, remote_control, collection_management, subtitle_management, live_tv_management, live_tv) VALUES ($1, $2, $3, $4, $3, $3, $3, $3, $3) RETURNING "+userColumns,
 		name, hashPassword(user.Password), user.IsAdministrator, user.IsHidden))
 	if uniqueViolation(err) {
 		return User{}, ErrNameTaken

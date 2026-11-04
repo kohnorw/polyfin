@@ -92,7 +92,7 @@ func TestXMLTVGuideFillsChannelsWithoutNativeEPG(t *testing.T) {
 	if names := programNames(programs); !slices.Equal(names, []string{"Next", "Late Movie"}) {
 		t.Errorf("movies of both guides: %q", names)
 	}
-	s.get(t, "/LiveTv/Programs/Recommended?IsAiring=true", token, &programs)
+	s.get(t, "/LiveTv/Programs?IsAiring=true", token, &programs)
 	if names := programNames(programs); !slices.Equal(names, []string{"Now", "Talk Show"}) {
 		t.Errorf("airing now: %q", names)
 	}
@@ -109,7 +109,7 @@ func TestXMLTVGuideFillsChannelsWithoutNativeEPG(t *testing.T) {
 	}
 
 	// Upcoming, by start time, limited without a count: read no further.
-	s.get(t, "/LiveTv/Programs/Recommended?IsAiring=false&HasAired=false&Limit=1&EnableTotalRecordCount=false", token, &programs)
+	s.get(t, "/LiveTv/Programs?IsAiring=false&HasAired=false&Limit=1&EnableTotalRecordCount=false", token, &programs)
 	if names := programNames(programs); !slices.Equal(names, []string{"Next"}) && !slices.Equal(names, []string{"Late Movie"}) {
 		t.Errorf("the next programme: %q", names)
 	}

@@ -255,9 +255,6 @@ func (h *Handler) views(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) userViews(r *http.Request, user accounts.User, includeHidden bool) ([]BaseItemDto, error) {
 	items, err := h.libraryViews(r, user)
 	if err == nil {
-		items, err = h.addLiveTvView(r, user, items)
-	}
-	if err == nil {
 		items, err = h.addLiveCategoriesView(r, user, items)
 	}
 	if err == nil {

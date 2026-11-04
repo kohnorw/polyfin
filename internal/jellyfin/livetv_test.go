@@ -144,15 +144,14 @@ func TestTVCatalogsListAsChannels(t *testing.T) {
 
 	var views QueryResult
 	s.get(t, "/UserViews", token, &views)
-	if len(views.Items) != 2 || views.Items[1].Name != "TV Categories" || views.Items[0].CollectionType != "livetv" || views.Items[0].Type != "UserView" {
+	if len(views.Items) != 1 || views.Items[0].Name != "Live TV" || views.Items[0].CollectionType != "folders" {
 		t.Fatalf("views: a live TV catalog must give the Live TV view and no library: %+v", views.Items)
 	}
 	_, view := s.call(http.MethodGet, "/Items/"+views.Items[0].Id, app("tv", token), nil)
 	_, body := s.call(http.MethodGet, "/UserViews", app("tv", token), nil)
 	var raw struct{ Items []json.RawMessage }
 	_ = json.Unmarshal(body, &raw)
-	compareLive(t, "livetv-view", raw.Items[0])
-	if !strings.Contains(string(view), `"livetv"`) {
+	if !strings.Contains(string(view), `"folders"`) {
 		t.Errorf("the Live TV view by id: %s", view)
 	}
 
@@ -206,10 +205,13 @@ func TestTVCatalogsListAsChannels(t *testing.T) {
 		t.Errorf("movies: %s", body)
 	}
 	_, body = s.call(http.MethodGet, "/LiveTv/Programs/Recommended?IsAiring=true&Fields=ChannelInfo", app("tv", token), nil)
-	if json.Unmarshal(body, &programs) != nil || len(programs.Items) != 1 || programs.Items[0].ChannelName != "One" {
-		t.Errorf("airing now: %s", body)
+	if json.Unmarshal(body, &programs) != nil || len(programs.Items) != 0 {
+		t.Errorf("recommended, which the home page shows: %s", body)
 	}
-	compareLive(t, "livetv-guided-recommended", body)
+	_, body = s.call(http.MethodGet, "/LiveTv/Programs?Fields=ChannelInfo", app("tv", token), nil)
+	if json.Unmarshal(body, &programs) != nil || len(programs.Items) == 0 {
+		t.Fatalf("programmes: %s", body)
+	}
 	status, body = s.call(http.MethodGet, "/LiveTv/Programs/"+programs.Items[0].Id, app("tv", token), nil)
 	if status != http.StatusOK {
 		t.Fatalf("programme: %d %s", status, body)
@@ -278,22 +280,6 @@ func TestSearchFindsChannelsAndProgrammes(t *testing.T) {
 	s.limit(t, user, func(c *accounts.UserChanges) { c.LiveTv = new(false) })
 	if found := search(combined); len(found.Items) != 0 {
 		t.Errorf("channels found by a user without Live TV: %+v", found.Items)
-	}
-}
-
-// The On Now rows ask what airs now: only today's guide is read for it,
-// not the week ahead.
-func TestProgrammesAiringNowReadTodaysGuideOnly(t *testing.T) {
-	t.Parallel()
-	addon := newTVAddon(t, true, "")
-	s, token, _ := tuned(t, addon)
-	var programs QueryResult
-	s.get(t, "/LiveTv/Programs/Recommended?IsAiring=true", token, &programs)
-	if len(programs.Items) != 1 || programs.Items[0].Name != "Now" {
-		t.Fatalf("airing now: %+v", programs.Items)
-	}
-	if n := addon.guides.Load(); n > 2 {
-		t.Errorf("%d guide pages read for what airs now", n)
 	}
 }
 

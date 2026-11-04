@@ -52,6 +52,9 @@ func TestMyAccountListsRemindersAndKeepsTheirSettings(t *testing.T) {
 		t.Fatalf("users: %+v %v", users, err)
 	}
 	user := users[0]
+	if user, err = api.store.UpdateUser(t.Context(), user.ID, accounts.UserChanges{LiveTv: new(true)}, nil); err != nil {
+		t.Fatal(err)
+	}
 	status, settings, _ := member.call(http.MethodGet, "/account/reminders/settings", nil)
 	if status != http.StatusOK || settings["available"] != true || settings["beforeMinutes"] != 5.0 || settings["onApps"] != false ||
 		len(settings["choices"].([]any)) != 6 {

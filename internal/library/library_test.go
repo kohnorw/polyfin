@@ -190,6 +190,7 @@ func newEnv(t *testing.T) env {
 	}
 	admin, _ := users.CreateUser(t.Context(), accounts.NewUser{Name: "admin", Password: "correct horse", IsAdministrator: true})
 	member, _ := users.CreateUser(t.Context(), accounts.NewUser{Name: "member", Password: "correct horse"})
+	member, _ = users.UpdateUser(t.Context(), member.ID, accounts.UserChanges{LiveTv: new(true)}, nil)
 	client := stremio.NewClient("test")
 	store := addons.New(pool, client)
 	service := New(pool, store, client, slog.New(slog.NewTextHandler(io.Discard, nil)), users.Settings)

@@ -231,8 +231,19 @@ func (s testServer) user(name string, change func(*accounts.UserChanges)) accoun
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	if change != nil {
-		var changes accounts.UserChanges
+	if !user.LiveTv {
+		liveTv := true
+		if user, err = s.store.UpdateUser(s.t.Context(), user.ID, accounts.UserChanges{LiveTv: &liveTv}, nil); err != nil {
+			s.t.Fatal(err)
+		}
+	}
+	if change == nil {
+		change = func(*accounts.UserChanges) {}
+	}
+	{
+		// Most tests' users watch Live TV, which new users do not by default.
+		on := true
+		changes := accounts.UserChanges{LiveTv: &on}
 		change(&changes)
 		if user, err = s.store.UpdateUser(s.t.Context(), user.ID, changes, nil); err != nil {
 			s.t.Fatal(err)

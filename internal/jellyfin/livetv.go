@@ -555,6 +555,12 @@ func (q *programQuery) readChannels() {
 // to, by channel. Without a guide, the lists are empty, as Jellyfin's.
 func (h *Handler) programs(recommended bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// Apps open Live TV by its categories: recommending nothing leaves
+		// jellyfin-web's home page without its On Now row and guide buttons.
+		if recommended {
+			writeJSON(w, http.StatusOK, QueryResult{Items: []BaseItemDto{}})
+			return
+		}
 		q, ok := readProgramQuery(w, r)
 		if !ok {
 			return

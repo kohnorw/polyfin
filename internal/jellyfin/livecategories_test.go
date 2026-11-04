@@ -16,7 +16,7 @@ func liveCategories(t *testing.T, s testServer, token string) []BaseItemDto {
 	var views, folders QueryResult
 	s.get(t, "/UserViews", token, &views)
 	for _, view := range views.Items {
-		if view.Name == "TV Categories" {
+		if view.Name == "Live TV" {
 			s.get(t, "/Items?ParentId="+view.Id, token, &folders)
 			return folders.Items
 		}

@@ -6,7 +6,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 )
 
-// TV Categories is a view of Polyfin's own, beside the libraries: a folder
+// The Live TV section apps list is a view of Polyfin's own: a folder
 // per category of the user's channels, holding its channels, so that apps
 // without a category list of their own browse channels without loading the
 // guide. A channel's category is its first genre; an IPTV source's provider
