@@ -718,6 +718,16 @@ func serve(ctx context.Context, restore *pendingRestore) error {
 func registerTasks(registry *tasks.Registry, store *accounts.Store, activityLog *activity.Store, lib *library.Service, channels *iptv.Service,
 	logger *slog.Logger) {
 	registry.Register(tasks.Task{
+		Key:      "CheckXtreamLogins",
+		Category: tasks.CategoryMaintenance,
+		Text: map[string]tasks.Text{
+			"en": {Name: "Check IPTV logins", Description: "Turns off Live TV for users whose IPTV login no longer works."},
+			"fr": {Name: "Vérifier les identifiants IPTV", Description: "Désactive la TV en direct des utilisateurs dont l'identifiant IPTV ne fonctionne plus."},
+		},
+		Interval: 24 * time.Hour,
+		Run:      func(ctx context.Context) error { return store.CheckXtreamLogins(ctx, channels.VerifyXtreamLogin) },
+	})
+	registry.Register(tasks.Task{
 		Key:      "SignOutInactiveDevices",
 		Category: tasks.CategoryMaintenance,
 		Text: map[string]tasks.Text{

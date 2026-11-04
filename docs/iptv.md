@@ -186,7 +186,9 @@ A source behaves as an installed addon with one TV catalog:
 
 ## Registering with an Xtream login
 
-The **Live TV** box on `/register` makes a visitor register with their Xtream login: Polyfin asks the server's Xtream sources, at their own addresses, and creates the account with Live TV on only if one accepts it. Otherwise it answers "Incorrect login. Try again or deselect Live TV." The login is checked once: the account then keeps its own password.
+The **Live TV** box on `/register` opens a second login, the user's Xtream one, beside their Polyfin user and password. Polyfin asks the server's Xtream sources, at their own addresses, and creates the account with Live TV on only if one accepts it.
+
+The login is kept encrypted with the server's secret key, and without a key this registration is refused, as a login is never stored in the clear. **Check IPTV logins**, a task under **System › Schedule**, asks every 24 hours about each one: a refused login turns the user's Live TV off and is forgotten. When a source does not accept its own account, as when the provider is down, the run stops and nobody changes.
 
 ## Live TV categories in apps
 

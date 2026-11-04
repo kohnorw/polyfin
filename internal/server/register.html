@@ -94,7 +94,13 @@
         <label for="password">Password</label>
         <input id="password" name="password" type="password" autocomplete="new-password" required>
       </div>
-      <label style="display:flex;gap:.5rem;align-items:center;margin:0 0 .8rem"><input id="live-tv" type="checkbox" style="width:auto"> Live TV (use your Xtream login)</label>
+      <label style="display:flex;gap:.5rem;align-items:center;margin:0 0 .8rem"><input id="live-tv" type="checkbox" style="width:auto"> Live TV</label>
+      <div id="xtream" hidden>
+        <div class="field"><label for="xtream-name">IPTV username</label>
+        <input id="xtream-name" autocomplete="off" autocapitalize="none" spellcheck="false"></div>
+        <div class="field"><label for="xtream-password">IPTV password</label>
+        <input id="xtream-password" type="password" autocomplete="off"></div>
+      </div>
       <p class="error" id="error" role="alert"></p>
       <button type="submit" id="submit">Register</button>
     </form>
@@ -129,6 +135,7 @@
   logo.src = base + '/Branding/Logo'
 
   var messages = {
+    live_tv_registration_unavailable: 'Live TV registration is not available on this server.',
     xtream_login_refused: 'Incorrect login. Try again or deselect Live TV.',
     name_taken: 'That user name is taken. Choose another.',
     invalid_name: 'Enter a user name.',
@@ -221,6 +228,9 @@
 
   var error = document.getElementById('error')
   var submit = document.getElementById('submit')
+  document.getElementById('live-tv').addEventListener('change', function (e) {
+    document.getElementById('xtream').hidden = !e.target.checked
+  })
   form.addEventListener('submit', function (event) {
     event.preventDefault()
     var name = form.name.value.trim()
@@ -228,12 +238,12 @@
     error.textContent = ''
     if (!name) { error.textContent = messages.invalid_name; return }
     var liveTv = document.getElementById('live-tv').checked
-    if (!liveTv && password.length < 8) { error.textContent = messages.invalid_password; return }
+    if (password.length < 8) { error.textContent = messages.invalid_password; return }
     submit.disabled = true
     fetch(api, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, password: password, code: code, liveTv: liveTv }),
+      body: JSON.stringify({ name: name, password: password, code: code, liveTv: liveTv, xtreamUsername: document.getElementById('xtream-name').value.trim(), xtreamPassword: document.getElementById('xtream-password').value }),
     }).then(function (r) {
       return r.json().catch(function () { return {} }).then(function (body) { return { ok: r.ok, body: body } })
     }).then(function (result) {
