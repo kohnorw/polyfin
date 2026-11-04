@@ -97,6 +97,9 @@ func (s *Service) archives(ctx context.Context, v view) (map[string]int, error) 
 			return nil, err
 		}
 		for id, days := range archives {
+			if v.hiddenChannels[id] {
+				continue
+			}
 			result[id] = min(days, maxReplayDays)
 		}
 	}

@@ -89,6 +89,9 @@ type User struct {
 	// show; libraries added later show. Their titles stay reachable from
 	// elsewhere: this chooses libraries, it hides no title.
 	HiddenLibraries []ID
+	// HiddenLiveTv are the IPTV sources of the server, and the categories
+	// of their line-ups, the user does not reach, in apps or by identifier.
+	HiddenLiveTv []ID
 	// BlockedGenres hides the titles of any of these genres, compared
 	// without regard to case, like parental control (see Restricted).
 	BlockedGenres []string
@@ -169,6 +172,7 @@ type UserChanges struct {
 	RemoteControl *bool
 	// The user's content settings, see User.
 	HiddenLibraries *[]ID
+	HiddenLiveTv    *[]ID
 	BlockedGenres   *[]string
 	AccessSchedules *[]AccessSchedule
 	// The user's permission to manage collections, see User.
@@ -297,7 +301,7 @@ const userColumns = "id, name, is_administrator, is_hidden, is_disabled, created
 	"personal_addons, use_shared_addons, invalid_login_attempts, blocked_until, " +
 	"max_playbacks, max_bitrate, live_tv, sync_play, remote_control, " +
 	"hidden_libraries, blocked_genres, access_schedules, collection_management, " +
-	"subtitle_management, image_tag, live_tv_management, quality_group, ends_on, can_share, group_id, follow_group, metadata_language, two_step, torrent_streams"
+	"subtitle_management, image_tag, live_tv_management, quality_group, ends_on, can_share, group_id, follow_group, metadata_language, two_step, torrent_streams, hidden_live_tv"
 
 // fields lists where the userColumns of a row go.
 func (user *User) fields() []any {
@@ -309,7 +313,7 @@ func (user *User) fields() []any {
 		&user.MaxPlaybacks, &user.MaxBitrate, &user.LiveTv, &user.SyncPlay, &user.RemoteControl,
 		&user.HiddenLibraries, &user.BlockedGenres, &user.AccessSchedules, &user.CollectionManagement,
 		&user.SubtitleManagement, &user.ImageTag, &user.LiveTvManagement, &user.QualityGroup, &user.EndsOn, &user.CanShare,
-		&user.GroupID, &user.FollowGroup, &user.MetadataLanguage, &user.TwoStep, &user.TorrentStreams}
+		&user.GroupID, &user.FollowGroup, &user.MetadataLanguage, &user.TwoStep, &user.TorrentStreams, &user.HiddenLiveTv}
 }
 
 func scanUser(row pgx.Row) (User, error) {
@@ -578,6 +582,7 @@ type userUpdate struct {
 	name, hash *string
 	parental   ParentalControl
 	hidden     *[]ID
+	hiddenLive *[]ID
 	genres     *[]string
 	schedules  *[]AccessSchedule
 }
@@ -597,6 +602,9 @@ func (changes UserChanges) prepare() (userUpdate, error) {
 	}
 	if changes.HiddenLibraries != nil {
 		u.hidden = new(normalizedLibraries(*changes.HiddenLibraries))
+	}
+	if changes.HiddenLiveTv != nil {
+		u.hiddenLive = new(normalizedLibraries(*changes.HiddenLiveTv))
 	}
 	if changes.BlockedGenres != nil {
 		normalized, err := normalizedGenres(*changes.BlockedGenres)
@@ -729,7 +737,8 @@ func applyUserChanges(ctx context.Context, tx pgx.Tx, id ID, changes UserChanges
 			group_id = $30,
 			follow_group = $31,
 			metadata_language = coalesce($32, metadata_language),
-			torrent_streams = coalesce($33, torrent_streams)
+			torrent_streams = coalesce($33, torrent_streams),
+			hidden_live_tv = coalesce($34, hidden_live_tv)
 		WHERE id = $1 RETURNING `+userColumns,
 		id, u.name, u.hash, changes.IsAdministrator, changes.IsHidden, changes.IsDisabled,
 		changes.Parental != nil, u.parental.MaxRating, u.parental.MaxSubRating, u.parental.BlockUnrated,
@@ -738,7 +747,7 @@ func applyUserChanges(ctx context.Context, tx pgx.Tx, id ID, changes UserChanges
 		changes.MaxPlaybacks, changes.MaxBitrate, changes.LiveTv, changes.SyncPlay, changes.RemoteControl,
 		u.hidden, u.genres, u.schedules, changes.CollectionManagement,
 		changes.SubtitleManagement, changes.LiveTvManagement, changes.QualityGroup, changes.UseSharedAddons, endsOn, changes.CanShare,
-		membership.group, membership.follow, changes.MetadataLanguage, changes.TorrentStreams))
+		membership.group, membership.follow, changes.MetadataLanguage, changes.TorrentStreams, u.hiddenLive))
 	if uniqueViolation(err) {
 		return User{}, nil, ErrNameTaken
 	}

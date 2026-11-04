@@ -71,7 +71,7 @@ func (s *Service) channels(ctx context.Context, v view) ([]Item, []record) {
 		src := v.channels[i]
 		addon := src.addon.addon.ID
 		for _, meta := range metas {
-			if meta.ID == "" || seen[meta.ID] {
+			if meta.ID == "" || seen[meta.ID] || v.hiddenChannels[meta.ID] {
 				continue
 			}
 			seen[meta.ID] = true
@@ -118,7 +118,7 @@ func (s *Service) channel(ctx context.Context, v view, r record) (Item, error) {
 	index := slices.IndexFunc(v.channels, func(src source) bool {
 		return r.Addon != nil && src.addon.addon.ID == *r.Addon && src.catalog.Type == r.CatalogType && src.catalog.ID == r.CatalogID
 	})
-	if r.Kind != KindChannel || r.Meta == nil || index < 0 {
+	if r.Kind != KindChannel || r.Meta == nil || index < 0 || v.hiddenChannels[r.Meta.ID] {
 		return Item{}, ErrNotFound
 	}
 	if src := v.channels[index]; src.addon.addon.IPTV() {

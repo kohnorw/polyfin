@@ -167,6 +167,7 @@ type IPTV interface {
 	MappingChannels(ctx context.Context, source accounts.ID) ([]stremio.Meta, error)
 	Logo(ctx context.Context, item accounts.ID) (string, bool, error)
 	Archives(ctx context.Context, source accounts.ID) (map[string]int, error)
+	ChannelsIn(ctx context.Context, source accounts.ID, categories []accounts.ID) ([]string, error)
 	GuideArchives(ctx context.Context, guide accounts.ID) (map[string]int, error)
 }
 
@@ -334,6 +335,9 @@ func (l library) catalogSource() source {
 // server's first unless they turned them off. Enabled live TV catalogs are
 // not libraries: they list the user's channels, in the same order.
 type view struct {
+	// hiddenChannels are the Stremio identifiers of the channels of the
+	// categories taken from the user (see accounts.User.HiddenLiveTv).
+	hiddenChannels map[string]bool
 	// user is the user browsing, zero for a request made with an API key:
 	// whose music My music lists (see myMusicRecords).
 	user      accounts.ID
@@ -460,8 +464,22 @@ func (s *Service) buildView(ctx context.Context, user accounts.User) (view, erro
 			case LiveCatalog(l.Catalog.Type):
 				// A user without Live TV has no channels, so none of them,
 				// nor their programmes, can be reached.
-				if user.LiveTv {
+				// Nor has one a source or category was taken from.
+				assigned := scope.Owner != nil || !slices.Contains(user.HiddenLiveTv, l.AddonID)
+				if user.LiveTv && assigned {
 					v.channels = append(v.channels, source{addon: entry, catalog: l.Catalog, guide: len(l.Guides) > 0})
+					if scope.Owner == nil && entry.addon.IPTV() && len(user.HiddenLiveTv) > 0 && s.iptv != nil {
+						ids, err := s.iptv.ChannelsIn(ctx, l.AddonID, user.HiddenLiveTv)
+						if err != nil {
+							return view{}, err
+						}
+						if len(ids) > 0 && v.hiddenChannels == nil {
+							v.hiddenChannels = map[string]bool{}
+						}
+						for _, id := range ids {
+							v.hiddenChannels[id] = true
+						}
+					}
 				}
 			// The server's libraries the user does not see; their titles stay
 			// reachable through the addon.
@@ -1015,6 +1033,10 @@ func (s *Service) childrenIn(ctx context.Context, v view, user accounts.User, pa
 		folders, err := s.replayFolders(ctx, v)
 		return slicePage(folders, start, count), err
 	}
+	if parent == LiveCategoriesViewID {
+		folders, err := s.liveCategories(ctx, v)
+		return slicePage(folders, start, count), err
+	}
 	if parent == WatchlistViewID {
 		return s.watchlistChildren(ctx, v, start, count, first)
 	}
@@ -1034,6 +1056,9 @@ func (s *Service) childrenIn(ctx context.Context, v view, user accounts.User, pa
 	case KindReplayFolder:
 		programmes, err := s.replayProgrammes(ctx, v, r)
 		return slicePage(programmes, start, count), err
+	case KindLiveCategory:
+		channels, err := s.liveCategoryChannels(ctx, v, r)
+		return slicePage(channels, start, count), err
 	case KindAlbum, KindArtist, KindMusicPlaylist:
 		folder, entry, err := s.musicFolder(ctx, v, parent)
 		if err != nil {
@@ -1556,7 +1581,7 @@ func (s *Service) listingLimit(ctx context.Context, user accounts.User, parent a
 	}
 	if l, ok := v.library(parent); ok {
 		most = l.maxItems
-	} else if parent == ReplayViewID || parent == WatchlistViewID {
+	} else if parent == ReplayViewID || parent == WatchlistViewID || parent == LiveCategoriesViewID {
 		return WholeListing, true, nil
 	} else if l, ok := v.smartList(parent); ok {
 		if l.list.MaxItems > 0 {
@@ -1574,7 +1599,7 @@ func (s *Service) listingLimit(ctx context.Context, user accounts.User, parent a
 		switch r.Kind {
 		case KindCollection:
 			most = s.collectionMax(ctx, v, r)
-		case KindReplayFolder:
+		case KindReplayFolder, KindLiveCategory:
 			return WholeListing, true, nil
 		default:
 			return 0, false, nil
@@ -1905,6 +1930,9 @@ func (s *Service) item(ctx context.Context, v view, id accounts.ID) (Item, error
 	if id == ReplayViewID {
 		return s.replayView(ctx, v)
 	}
+	if id == LiveCategoriesViewID {
+		return s.liveCategoriesView(v)
+	}
 	if id == WatchlistViewID {
 		return s.watchlistView(ctx, v)
 	}
@@ -2002,6 +2030,8 @@ func (s *Service) described(ctx context.Context, v view, r record) (Item, error)
 		return s.program(ctx, v, r)
 	case KindReplayFolder:
 		return s.replayFolderItem(ctx, v, r)
+	case KindLiveCategory:
+		return s.liveCategoryItem(ctx, v, r)
 	case KindReplay:
 		return s.replayProgramme(ctx, v, r)
 	case KindArtist, KindAlbum, KindTrack, KindAudiobook, KindMusicPlaylist:

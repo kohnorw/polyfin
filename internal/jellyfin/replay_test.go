@@ -79,11 +79,11 @@ func newReplayProvider(t *testing.T, file string) *replayProvider {
 			_ = json.NewEncoder(w).Encode(map[string]any{"user_info": map[string]any{"auth": 1, "allowed_output_formats": []string{"ts"}},
 				"server_info": map[string]any{"timezone": "Europe/Paris"}})
 		case "/player_api.php?get_live_categories":
-			_, _ = io.WriteString(w, `[{"category_id": "1", "category_name": "News"}]`)
+			_, _ = io.WriteString(w, `[{"category_id": "1", "category_name": "News"}, {"category_id": "2", "category_name": "Sport"}]`)
 		case "/player_api.php?get_live_streams":
 			_, _ = io.WriteString(w, `[
 				{"num": 1, "name": "Zeb One", "stream_id": 101, "epg_channel_id": "zeb.zz", "category_id": "1", "tv_archive": 1, "tv_archive_duration": "2"},
-				{"num": 2, "name": "Orbe", "stream_id": 102, "epg_channel_id": "orbe.zz", "category_id": "1", "tv_archive": 0},
+				{"num": 2, "name": "Orbe", "stream_id": 102, "epg_channel_id": "orbe.zz", "category_id": "2", "tv_archive": 0},
 				{"num": 3, "name": "Quill", "stream_id": 103, "epg_channel_id": "zeb.zz", "category_id": "1", "tv_archive": 1, "tv_archive_duration": 7}
 			]`)
 		default:
@@ -103,7 +103,7 @@ func (p *replayProvider) paths() []string {
 
 // addReplaySource adds the provider as a shared source with its guide,
 // and reads the guide.
-func addReplaySource(t *testing.T, s testServer, p *replayProvider) {
+func addReplaySource(t *testing.T, s testServer, p *replayProvider) accounts.ID {
 	t.Helper()
 	account := iptv.Account{Kind: addons.KindXtream, Server: p.url, Username: "user", Password: "secret"}
 	addon, err := s.iptv.Add(t.Context(), addons.Shared(), iptv.NewSource{Name: "Box", Account: account, Guide: iptv.ProviderGuide(account)}, false)
@@ -113,6 +113,7 @@ func addReplaySource(t *testing.T, s testServer, p *replayProvider) {
 	if err := s.library.RefreshGuide(t.Context(), addons.Shared(), addons.LibraryKey{AddonID: addon.ID, CatalogType: "tv", CatalogID: "channels"}); err != nil {
 		t.Fatal(err)
 	}
+	return addon.ID
 }
 
 // replayView returns the Replay view a user's /UserViews lists, if any.

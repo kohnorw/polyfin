@@ -10,6 +10,7 @@ import {
   TrashIcon,
   UserPlusIcon,
   UsersThreeIcon,
+  TelevisionIcon,
 } from '@phosphor-icons/react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useEffect, useId, useState, type FormEvent } from 'react'
@@ -59,6 +60,7 @@ import {
   ParentalControlForm,
   PermissionRows,
   PlaybackAccessForm,
+  LiveTvAccessForm,
   VisibleLibrariesForm,
   type LimitsTarget,
 } from './UserForms'
@@ -172,6 +174,7 @@ function GroupPage({ group }: { group: Group }) {
           icon: BooksIcon,
           to: '#libraries',
         },
+        { id: 'live-tv', label: t.users.liveTvAccessTitle, icon: TelevisionIcon, to: '#live-tv' },
         { id: 'genres', label: t.users.blockedGenresTitle, icon: ProhibitIcon, to: '#genres' },
         { id: 'hours', label: t.users.allowedHoursTitle, icon: ClockIcon, to: '#hours' },
         { id: 'members', label: t.groups.membersTitle, icon: UsersThreeIcon, to: '#members' },
@@ -204,6 +207,7 @@ function GroupPage({ group }: { group: Group }) {
         <PlaybackAccessForm id="playback" target={target} />
         <ParentalControlForm id="parental" target={target} />
         <VisibleLibrariesForm id="libraries" target={target} />
+        <LiveTvAccessForm id="live-tv" target={target} />
         <BlockedGenresForm id="genres" target={target} />
         <AllowedHoursForm id="hours" target={target} />
         <MembersSection group={group} />

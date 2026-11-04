@@ -23,6 +23,9 @@ type words struct {
 	myMusic string
 	// replay names the Replay view (see ReplayViewID).
 	replay string
+	// tvCategories names the TV Categories view (see LiveCategoriesViewID);
+	// other, its folder of channels without a category.
+	tvCategories, other string
 	// watchlist names the Watchlist view (see WatchlistViewID).
 	watchlist string
 	// language is the language of the words, "en" or "fr".
@@ -33,11 +36,11 @@ var vocabulary = map[string]words{
 	"en": {season: "Season", specials: "Specials", episode: "Episode", chapter: "Chapter",
 		movies: "Movies", shows: "Shows", collections: "Collections",
 		songs: "Songs", albums: "Albums", artists: "Artists", playlists: "Playlists", myMusic: "My music", replay: "Replay",
-		watchlist: "Watchlist"},
+		tvCategories: "TV Categories", other: "Other", watchlist: "Watchlist"},
 	"fr": {season: "Saison", specials: "Épisodes spéciaux", episode: "Épisode", chapter: "Chapitre",
 		movies: "Films", shows: "Séries", collections: "Collections",
 		songs: "Titres", albums: "Albums", artists: "Artistes", playlists: "Playlists", myMusic: "Ma musique", replay: "Replay",
-		watchlist: "À regarder"},
+		tvCategories: "Catégories TV", other: "Autres", watchlist: "À regarder"},
 }
 
 // vocabularyOf returns the words of a server language, English when the

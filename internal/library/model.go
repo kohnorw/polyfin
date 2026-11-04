@@ -44,6 +44,9 @@ const (
 	// from the provider's archive (see replay.go).
 	KindReplayFolder Kind = "replayfolder"
 	KindReplay       Kind = "replay"
+	// KindLiveCategory is a folder of the TV Categories view, holding the
+	// channels of a category (see livecategories.go).
+	KindLiveCategory Kind = "livecategory"
 	// The items of Eclipse music addons (see music.go): artists, albums,
 	// tracks, the tracks of audiobook addons, and the addons' playlists.
 	KindArtist        Kind = "artist"

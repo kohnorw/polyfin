@@ -231,6 +231,12 @@ const users: typeof en = {
     sectionsLabel: 'Sections de l’utilisateur',
     profileTitle: 'Nom et mot de passe',
     accessHelp: 'Chaque changement est enregistré tout de suite.',
+    liveTvAccessTitle: 'Accès à la TV en direct',
+    liveTvAccessHelp:
+      'Les sources IPTV et catégories que reçoit cet utilisateur, avec la permission TV en direct. Les catégories ajoutées ensuite à une source apparaissent, sauf si toute la source est désactivée.',
+    saveLiveTvAccess: 'Enregistrer l’accès à la TV en direct',
+    noLiveTvSources: 'Aucune source IPTV',
+    noLiveTvSourcesHelp: 'Ajoutez une source IPTV dans Contenu › Sources, puis attribuez-la ici.',
     noServerLibrariesHelp:
       'Ajoutez une bibliothèque dans Contenu › Bibliothèques, puis choisissez ici celles que cet utilisateur voit.',
     jellyfinImport: {

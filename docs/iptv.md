@@ -180,6 +180,16 @@ A source behaves as an installed addon with one TV catalog:
 - Its channels play, record and follow the **Live TV** permission, quality groups, parental control and allowed hours as any channel (see [Users](users.md) and [Live TV](live-tv.md)).
 - **Edit the account** renames it and changes its address or login. The new address is fetched first; a password left empty keeps the current one.
 
+## Assigning sources to users
+
+**Live TV access**, on a user's or a group's page, sets which of the server's IPTV sources and categories they get, on top of the **Live TV** permission. Everything is on by default. A source turned off takes all its channels and any category it gains later; a category turned off takes its channels, and categories a source adds later arrive on. A channel taken this way is gone from lists, the guide, search and Replay, and does not play by its identifier. Administrators can set it too; users' own sources and Stremio addons' catalogs are not concerned.
+
+## TV Categories in apps
+
+Apps show a **TV Categories** view after Live TV: a folder per category of the user's channels, in line-up order, each listing its channels. Selecting a channel opens it as anywhere else. It reads no guide, so it stays quick on large line-ups and works in every Jellyfin app, with nothing to install. Categories of the same name from several sources are one folder.
+
+**For app developers:** the view is a `CollectionFolder` of `CollectionType` `folders`, with the same identifier on every server; its categories are `Folder` items holding `TvChannel` items.
+
 ## Replay
 
 Many providers keep their channels' past programmes for a few days, an archive also called catch-up or timeshift. Polyfin lists them in apps in a Replay view, apart from Live TV and from recordings, and plays them from the provider's archive.

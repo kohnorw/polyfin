@@ -12,6 +12,7 @@ import {
   UserCircleDashedIcon,
   BooksIcon,
   TranslateIcon,
+  TelevisionIcon,
 } from '@phosphor-icons/react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useEffect, useId, useState, type FormEvent } from 'react'
@@ -78,6 +79,7 @@ import {
   ParentalControlForm,
   PermissionRows,
   PlaybackAccessForm,
+  LiveTvAccessForm,
   VisibleLibrariesForm,
   type LimitsTarget,
 } from './UserForms'
@@ -198,6 +200,7 @@ function UserPage({ user }: { user: User }) {
           icon: BooksIcon,
           to: '#libraries',
         },
+        { id: 'live-tv', label: t.users.liveTvAccessTitle, icon: TelevisionIcon, to: '#live-tv' },
         { id: 'genres', label: t.users.blockedGenresTitle, icon: ProhibitIcon, to: '#genres' },
         { id: 'hours', label: t.users.allowedHoursTitle, icon: ClockIcon, to: '#hours' },
         {
@@ -272,6 +275,7 @@ function UserPage({ user }: { user: User }) {
         <PlaybackAccessForm key={`playback:${formsKey}`} id="playback" target={target} />
         <ParentalControlForm key={`parental:${formsKey}`} id="parental" target={target} />
         <VisibleLibrariesForm key={`libraries:${formsKey}`} id="libraries" target={target} />
+        <LiveTvAccessForm key={`live-tv:${formsKey}`} id="live-tv" target={target} />
         <BlockedGenresForm key={`genres:${formsKey}`} id="genres" target={target} />
         <AllowedHoursForm key={`hours:${formsKey}`} id="hours" target={target} />
         <ShareLinksSection user={user} />

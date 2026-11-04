@@ -63,6 +63,8 @@ export type User = {
   liveTvManagement: boolean
   /** IDs of the server's libraries this user's apps do not show; libraries added later show. */
   hiddenLibraries: string[]
+  /** IDs of the IPTV sources and categories this user does not reach; new ones of a source they keep show. */
+  hiddenLiveTv: string[]
   /** Titles of any of these genres are hidden from the user, like parental control. */
   blockedGenres: string[]
   /** When not empty, the only hours the user may use the server in (server time). */
@@ -124,6 +126,7 @@ export type GroupLimits = Pick<
   | 'liveTvManagement'
   | 'parentalControl'
   | 'hiddenLibraries'
+  | 'hiddenLiveTv'
   | 'blockedGenres'
   | 'accessSchedules'
 >
@@ -166,7 +169,11 @@ export type ScheduleDay = (typeof scheduleDays)[number]
 export type AccessSchedule = { day: ScheduleDay; startHour: number; endHour: number }
 
 /** What the admin app offers for a user's content: the server's libraries and the genres they offer. */
-export type UserContentChoices = { libraries: { id: string; name: string }[]; genres: string[] }
+export type UserContentChoices = {
+  libraries: { id: string; name: string }[]
+  genres: string[]
+  liveTv: { id: string; name: string; categories: { id: string; name: string }[] }[]
+}
 
 /** Jellyfin parental control: `maxRating` null means no limit. */
 export type ParentalControl = {
@@ -666,6 +673,7 @@ export type UserPatch = Partial<{
   remoteControl: boolean
   liveTvManagement: boolean
   hiddenLibraries: string[]
+  hiddenLiveTv: string[]
   blockedGenres: string[]
   accessSchedules: AccessSchedule[]
   collectionManagement: boolean

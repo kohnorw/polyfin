@@ -39,7 +39,7 @@ const groupColumns = "max_parental_rating, max_parental_sub_rating, block_unrate
 	"video_transcoding, audio_transcoding, content_downloading, personal_addons, " +
 	"max_playbacks, max_bitrate, live_tv, sync_play, remote_control, " +
 	"hidden_libraries, blocked_genres, access_schedules, collection_management, " +
-	"subtitle_management, live_tv_management, quality_group, can_share, torrent_streams"
+	"subtitle_management, live_tv_management, quality_group, can_share, torrent_streams, hidden_live_tv"
 
 // Limits are the settings a group holds; see User for each.
 type Limits struct {
@@ -62,6 +62,7 @@ type Limits struct {
 	QualityGroup         int
 	CanShare             bool
 	TorrentStreams       bool
+	HiddenLiveTv         []ID
 }
 
 // fields lists where the groupColumns of a row go.
@@ -70,7 +71,7 @@ func (l *Limits) fields() []any {
 		&l.VideoTranscoding, &l.AudioTranscoding, &l.ContentDownloading, &l.PersonalAddons,
 		&l.MaxPlaybacks, &l.MaxBitrate, &l.LiveTv, &l.SyncPlay, &l.RemoteControl,
 		&l.HiddenLibraries, &l.BlockedGenres, &l.AccessSchedules, &l.CollectionManagement,
-		&l.SubtitleManagement, &l.LiveTvManagement, &l.QualityGroup, &l.CanShare, &l.TorrentStreams}
+		&l.SubtitleManagement, &l.LiveTvManagement, &l.QualityGroup, &l.CanShare, &l.TorrentStreams, &l.HiddenLiveTv}
 }
 
 // Limits returns the settings of u a group holds.
@@ -80,7 +81,7 @@ func (u User) Limits() Limits {
 		MaxBitrate: u.MaxBitrate, LiveTv: u.LiveTv, SyncPlay: u.SyncPlay, RemoteControl: u.RemoteControl,
 		HiddenLibraries: u.HiddenLibraries, BlockedGenres: u.BlockedGenres, AccessSchedules: u.AccessSchedules,
 		CollectionManagement: u.CollectionManagement, SubtitleManagement: u.SubtitleManagement,
-		LiveTvManagement: u.LiveTvManagement, QualityGroup: u.QualityGroup, CanShare: u.CanShare, TorrentStreams: u.TorrentStreams}
+		LiveTvManagement: u.LiveTvManagement, QualityGroup: u.QualityGroup, CanShare: u.CanShare, TorrentStreams: u.TorrentStreams, HiddenLiveTv: u.HiddenLiveTv}
 }
 
 // with returns l with the settings changes, prepared as u, sets.
@@ -106,6 +107,7 @@ func (l Limits) with(changes UserChanges, u userUpdate) Limits {
 	set(&l.QualityGroup, changes.QualityGroup)
 	set(&l.CanShare, changes.CanShare)
 	set(&l.TorrentStreams, changes.TorrentStreams)
+	set(&l.HiddenLiveTv, u.hiddenLive)
 	return l
 }
 
@@ -128,7 +130,7 @@ func (l Limits) equal(o Limits) bool {
 		SameLibraries(l.HiddenLibraries, o.HiddenLibraries) && slices.Equal(l.BlockedGenres, o.BlockedGenres) &&
 		slices.Equal(l.AccessSchedules, o.AccessSchedules) && l.CollectionManagement == o.CollectionManagement &&
 		l.SubtitleManagement == o.SubtitleManagement && l.LiveTvManagement == o.LiveTvManagement &&
-		l.QualityGroup == o.QualityGroup && l.CanShare == o.CanShare && l.TorrentStreams == o.TorrentStreams
+		l.QualityGroup == o.QualityGroup && l.CanShare == o.CanShare && l.TorrentStreams == o.TorrentStreams && SameLibraries(l.HiddenLiveTv, o.HiddenLiveTv)
 }
 
 func equalPointers(a, b *int) bool {
@@ -199,7 +201,7 @@ func (changes GroupChanges) Sections() []string {
 		{SectionPlayback, l.MaxPlaybacks != nil || l.MaxBitrate != nil || l.QualityGroup != nil || l.SyncPlay != nil ||
 			l.LiveTv != nil || l.RemoteControl != nil || l.LiveTvManagement != nil},
 		{SectionParental, l.Parental != nil},
-		{SectionLibraries, l.HiddenLibraries != nil},
+		{SectionLibraries, l.HiddenLibraries != nil || l.HiddenLiveTv != nil},
 		{SectionGenres, l.BlockedGenres != nil},
 		{SectionHours, l.AccessSchedules != nil},
 	} {
@@ -311,13 +313,14 @@ func (s *Store) UpdateGroup(ctx context.Context, id ID, changes GroupChanges) (G
 				live_tv_management = coalesce($21, live_tv_management),
 				quality_group = coalesce($22, quality_group),
 				can_share = coalesce($23, can_share),
-				torrent_streams = coalesce($24, torrent_streams)
+				torrent_streams = coalesce($24, torrent_streams),
+				hidden_live_tv = coalesce($25, hidden_live_tv)
 			WHERE id = $1`,
 			id, name, l.Parental != nil, u.parental.MaxRating, u.parental.MaxSubRating, u.parental.BlockUnrated,
 			l.VideoTranscoding, l.AudioTranscoding, l.ContentDownloading, l.PersonalAddons,
 			l.MaxPlaybacks, l.MaxBitrate, l.LiveTv, l.SyncPlay, l.RemoteControl,
 			u.hidden, u.genres, u.schedules, l.CollectionManagement,
-			l.SubtitleManagement, l.LiveTvManagement, l.QualityGroup, l.CanShare, l.TorrentStreams)
+			l.SubtitleManagement, l.LiveTvManagement, l.QualityGroup, l.CanShare, l.TorrentStreams, u.hiddenLive)
 		if uniqueViolation(err) {
 			return ErrGroupNameTaken
 		}

@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
+	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/config"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/localization"
@@ -84,7 +85,10 @@ type limitsJSON struct {
 	// HiddenLibraries are the identifiers of the server's libraries the
 	// user's apps do not show; BlockedGenres, the genres whose titles are
 	// hidden; AccessSchedules, the hours the user may use the server in.
-	HiddenLibraries []string             `json:"hiddenLibraries"`
+	HiddenLibraries []string `json:"hiddenLibraries"`
+	// HiddenLiveTv are the IPTV sources and line-up categories the user
+	// does not reach.
+	HiddenLiveTv    []string             `json:"hiddenLiveTv"`
 	BlockedGenres   []string             `json:"blockedGenres"`
 	AccessSchedules []accessScheduleJSON `json:"accessSchedules"`
 	// CollectionManagement lets the user create, change and delete the
@@ -124,6 +128,7 @@ func newLimitsJSON(limits accounts.Limits) limitsJSON {
 		SyncPlay:             string(limits.SyncPlay),
 		RemoteControl:        limits.RemoteControl,
 		HiddenLibraries:      idStrings(limits.HiddenLibraries),
+		HiddenLiveTv:         idStrings(limits.HiddenLiveTv),
 		BlockedGenres:        append([]string{}, limits.BlockedGenres...),
 		AccessSchedules:      schedulesJSON(limits.AccessSchedules),
 		CollectionManagement: limits.CollectionManagement,
@@ -149,6 +154,7 @@ type limitChanges struct {
 	SyncPlay             *accounts.SyncPlayAccess `json:"syncPlay"`
 	RemoteControl        *bool                    `json:"remoteControl"`
 	HiddenLibraries      *[]string                `json:"hiddenLibraries"`
+	HiddenLiveTv         *[]string                `json:"hiddenLiveTv"`
 	BlockedGenres        *[]string                `json:"blockedGenres"`
 	AccessSchedules      *[]accessScheduleJSON    `json:"accessSchedules"`
 	CollectionManagement *bool                    `json:"collectionManagement"`
@@ -194,6 +200,18 @@ func (l limitChanges) changes(w http.ResponseWriter) (accounts.UserChanges, bool
 			hidden = append(hidden, id)
 		}
 		changes.HiddenLibraries = &hidden
+	}
+	if l.HiddenLiveTv != nil {
+		hidden := make([]accounts.ID, 0, len(*l.HiddenLiveTv))
+		for _, raw := range *l.HiddenLiveTv {
+			id, err := accounts.ParseID(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid_hidden_live_tv")
+				return changes, false
+			}
+			hidden = append(hidden, id)
+		}
+		changes.HiddenLiveTv = &hidden
 	}
 	if l.AccessSchedules != nil {
 		schedules := make([]accounts.AccessSchedule, 0, len(*l.AccessSchedules))
@@ -358,11 +376,55 @@ type libraryChoiceJSON struct {
 	Name string `json:"name"`
 }
 
+// liveTvChoiceJSON is an IPTV source of the server that can be taken from a
+// user, whole or by category.
+type liveTvChoiceJSON struct {
+	ID         string              `json:"id"`
+	Name       string              `json:"name"`
+	Categories []libraryChoiceJSON `json:"categories"`
+}
+
+// liveTvChoices lists the server's IPTV sources with their categories
+// turned on, in line-up order.
+func (h *handler) liveTvChoices(ctx context.Context) ([]liveTvChoiceJSON, error) {
+	choices := []liveTvChoiceJSON{}
+	if h.IPTV == nil {
+		return choices, nil
+	}
+	installed, err := h.Addons.Addons(ctx, addons.Shared())
+	if err != nil {
+		return nil, err
+	}
+	for _, addon := range installed {
+		if !addon.IPTV() {
+			continue
+		}
+		categories, err := h.IPTV.Categories(ctx, addons.Shared(), addon.ID, "")
+		if err != nil {
+			return nil, err
+		}
+		choice := liveTvChoiceJSON{ID: addon.ID.String(), Name: addon.Manifest.Name, Categories: []libraryChoiceJSON{}}
+		for _, c := range categories {
+			if c.Enabled {
+				choice.Categories = append(choice.Categories, libraryChoiceJSON{ID: c.ID.String(), Name: c.Name})
+			}
+		}
+		choices = append(choices, choice)
+	}
+	return choices, nil
+}
+
 // userContentChoices lists what the admin app offers for a user's content:
 // the server's libraries, in order, and the genres the server's libraries
-// can be narrowed to, which name their genre pages, sorted.
+// can be narrowed to, which name their genre pages, sorted, and the IPTV
+// sources to assign.
 func (h *handler) userContentChoices(w http.ResponseWriter, r *http.Request) {
 	libraries, err := library.ServerLibraries(r.Context(), h.Addons, h.SmartLists, h.Accounts.Settings().Language)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	liveTv, err := h.liveTvChoices(r.Context())
 	if err != nil {
 		h.internalError(w, r, err)
 		return
@@ -370,7 +432,8 @@ func (h *handler) userContentChoices(w http.ResponseWriter, r *http.Request) {
 	result := struct {
 		Libraries []libraryChoiceJSON `json:"libraries"`
 		Genres    []string            `json:"genres"`
-	}{Libraries: []libraryChoiceJSON{}, Genres: []string{}}
+		LiveTv    []liveTvChoiceJSON  `json:"liveTv"`
+	}{Libraries: []libraryChoiceJSON{}, Genres: []string{}, LiveTv: liveTv}
 	for _, l := range libraries {
 		result.Libraries = append(result.Libraries, libraryChoiceJSON{ID: l.ID.String(), Name: l.Name})
 		for _, genre := range l.Genres {

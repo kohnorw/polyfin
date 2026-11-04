@@ -221,6 +221,12 @@ const users = {
     sectionsLabel: 'Sections of the user',
     profileTitle: 'Name and password',
     accessHelp: 'Each change is saved at once.',
+    liveTvAccessTitle: 'Live TV access',
+    liveTvAccessHelp:
+      'The IPTV sources and categories this user gets, with the Live TV permission. Categories a source adds later show, unless the whole source is off.',
+    saveLiveTvAccess: 'Save Live TV access',
+    noLiveTvSources: 'No IPTV sources',
+    noLiveTvSourcesHelp: 'Add an IPTV source in Content › Sources, then assign it here.',
     noServerLibrariesHelp:
       'Add a library in Content › Libraries, then choose here which ones this user sees.',
     jellyfinImport: {

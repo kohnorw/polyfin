@@ -144,7 +144,7 @@ func TestTVCatalogsListAsChannels(t *testing.T) {
 
 	var views QueryResult
 	s.get(t, "/UserViews", token, &views)
-	if len(views.Items) != 1 || views.Items[0].CollectionType != "livetv" || views.Items[0].Type != "UserView" {
+	if len(views.Items) != 2 || views.Items[1].Name != "TV Categories" || views.Items[0].CollectionType != "livetv" || views.Items[0].Type != "UserView" {
 		t.Fatalf("views: a live TV catalog must give the Live TV view and no library: %+v", views.Items)
 	}
 	_, view := s.call(http.MethodGet, "/Items/"+views.Items[0].Id, app("tv", token), nil)

@@ -60,6 +60,22 @@ func (s *Service) Archives(ctx context.Context, source accounts.ID) (map[string]
 	return result.(map[string]int), nil
 }
 
+// ChannelsIn lists the Stremio identifiers of a source's channels whose
+// category is one of categories, where a channel moved counts in the
+// category it was moved to.
+func (s *Service) ChannelsIn(ctx context.Context, source accounts.ID, categories []accounts.ID) ([]string, error) {
+	rows, err := s.db.Query(ctx, `SELECT id FROM iptv_lineup
+		WHERE addon_id = $1 AND coalesce(moved_to, category_id) = ANY($2)`, source, categories)
+	if err != nil {
+		return nil, err
+	}
+	ids, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	for i, id := range ids {
+		ids[i] = prefix(source) + id
+	}
+	return ids, err
+}
+
 // GuideArchives maps the channels of an XMLTV guide that line-up channels
 // with an archive are mapped to, by their guide identifier, to the most
 // days those archives reach back: the past programmes of the guide worth

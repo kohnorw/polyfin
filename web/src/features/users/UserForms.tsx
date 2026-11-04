@@ -378,6 +378,89 @@ export function ParentalControlForm({ target, id }: { target: LimitsTarget; id: 
   )
 }
 
+export function LiveTvAccessForm({ target, id }: { target: LimitsTarget; id: string }) {
+  const { t } = useI18n()
+  const choices = useQuery({
+    queryKey: queryKeys.userContentChoices,
+    queryFn: ({ signal }) => fetchUserContentChoices(signal),
+  })
+  const { save, error, submit } = useSectionSave(target)
+  const [hidden, setHidden] = useState(limitsOf(target).hiddenLiveTv)
+
+  function change(next: string[]) {
+    save.reset()
+    setHidden(next)
+  }
+
+  function onSubmit() {
+    // Sources and categories removed from the server since are dropped.
+    const known = (choices.data?.liveTv ?? []).flatMap((s) => [
+      s.id,
+      ...s.categories.map((c) => c.id),
+    ])
+    submit({ hiddenLiveTv: hidden.filter((id) => known.includes(id)) })
+  }
+
+  return (
+    <SectionForm
+      id={id}
+      target={target}
+      title={t.users.liveTvAccessTitle}
+      description={t.users.liveTvAccessHelp}
+      onSubmit={onSubmit}
+      error={error}
+      saving={save.isPending}
+      saveLabel={t.users.saveLiveTvAccess}
+      disabled={!choices.isSuccess}
+    >
+      {choices.isPending ? (
+        <Skeleton className="h-5 w-40" />
+      ) : choices.isError ? (
+        <InlineError onRetry={() => void choices.refetch()} retrying={choices.isFetching}>
+          {errorMessage(t, choices.error)}
+        </InlineError>
+      ) : choices.data.liveTv.length === 0 ? (
+        <EmptyState title={t.users.noLiveTvSources}>{t.users.noLiveTvSourcesHelp}</EmptyState>
+      ) : (
+        <div className="grid gap-5">
+          {choices.data.liveTv.map((source) => {
+            const assigned = !hidden.includes(source.id)
+            return (
+              <div key={source.id} className="grid gap-3">
+                <Checkbox
+                  label={source.name}
+                  checked={assigned}
+                  onChange={(shown) =>
+                    change(shown ? hidden.filter((id) => id !== source.id) : [...hidden, source.id])
+                  }
+                />
+                {assigned && source.categories.length > 0 && (
+                  <div className="grid max-h-72 gap-3 overflow-y-auto ps-6 sm:grid-cols-2">
+                    {source.categories.map((category) => (
+                      <Checkbox
+                        key={category.id}
+                        label={category.name}
+                        checked={!hidden.includes(category.id)}
+                        onChange={(shown) =>
+                          change(
+                            shown
+                              ? hidden.filter((id) => id !== category.id)
+                              : [...hidden, category.id],
+                          )
+                        }
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            )
+          })}
+        </div>
+      )}
+    </SectionForm>
+  )
+}
+
 export function VisibleLibrariesForm({ target, id }: { target: LimitsTarget; id: string }) {
   const { t } = useI18n()
   const choices = useQuery({

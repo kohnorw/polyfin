@@ -328,6 +328,7 @@ var itemTypes = map[library.Kind]string{
 	// programmes are as well, in a folder per channel.
 	library.KindRecording:     "Video",
 	library.KindReplayFolder:  "Folder",
+	library.KindLiveCategory:  "Folder",
 	library.KindReplay:        "Video",
 	library.KindArtist:        "MusicArtist",
 	library.KindAlbum:         "MusicAlbum",
@@ -361,7 +362,7 @@ func namesType(name string, kind library.Kind) bool {
 func isFolder(kind library.Kind) bool {
 	switch kind {
 	case library.KindLibrary, library.KindCollection, library.KindSeries, library.KindSeason,
-		library.KindArtist, library.KindAlbum, library.KindMusicPlaylist, library.KindReplayFolder:
+		library.KindArtist, library.KindAlbum, library.KindMusicPlaylist, library.KindReplayFolder, library.KindLiveCategory:
 		return true
 	}
 	return false
