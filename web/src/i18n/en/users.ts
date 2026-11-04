@@ -74,6 +74,9 @@ const users = {
       'Offers this user the torrents addons list, while Settings › Torrents plays them. Off for everyone, administrators included, until given.',
     noTranscoding: 'No conversion',
     noDownloads: 'No downloads',
+    deleteSelected: (n: number) => `Delete selected (${n})`,
+    deleteSelectedHelp:
+      'These accounts and their watch history, favorites and settings are deleted for good.',
     selectAll: 'Select all',
     liveTvOn: 'Turn Live TV on',
     liveTvOff: 'Turn Live TV off',

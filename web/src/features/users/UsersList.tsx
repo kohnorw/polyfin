@@ -12,6 +12,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import {
   fetchGroups,
+  deleteUser,
   fetchUsers,
   updateUser,
   queryClient,
@@ -226,6 +227,18 @@ function LiveTvBulk({
       Promise.allSettled(selected.map((id) => updateUser(id, { liveTv }))),
     onSettled: () => void client.invalidateQueries({ queryKey: queryKeys.users }),
   })
+  const self = useSessionUser()
+  const [confirming, setConfirming] = useState(false)
+  // Your own account is never deleted from here.
+  const doomed = selected.filter((id) => id !== self.id)
+  const removal = useMutation({
+    mutationFn: () => Promise.allSettled(doomed.map((id) => deleteUser(id))),
+    onSettled: () => {
+      setConfirming(false)
+      onSelect([])
+      void client.invalidateQueries({ queryKey: queryKeys.users })
+    },
+  })
   return (
     <div className="mb-3 flex flex-wrap items-center gap-3">
       <Checkbox
@@ -239,6 +252,18 @@ function LiveTvBulk({
       <Button disabled={!selected.length || change.isPending} onClick={() => change.mutate(false)}>
         {t.users.liveTvOff}
       </Button>
+      <Button disabled={!doomed.length || removal.isPending} onClick={() => setConfirming(true)}>
+        {t.users.deleteSelected(doomed.length)}
+      </Button>
+      <ConfirmDialog
+        open={confirming}
+        onClose={() => setConfirming(false)}
+        onConfirm={() => removal.mutate()}
+        title={t.users.deleteSelected(doomed.length)}
+        confirmLabel={t.users.deleteSelected(doomed.length)}
+      >
+        {t.users.deleteSelectedHelp}
+      </ConfirmDialog>
     </div>
   )
 }

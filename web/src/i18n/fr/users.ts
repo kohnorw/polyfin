@@ -80,6 +80,9 @@ const users: typeof en = {
       'Propose à cet utilisateur les torrents que listent les addons, quand Paramètres › Torrents les lit. Désactivé pour tous, administrateurs compris, jusqu’à ce qu’on le donne.',
     noTranscoding: 'Sans conversion',
     noDownloads: 'Sans téléchargement',
+    deleteSelected: (n: number) => `Supprimer la sélection (${n})`,
+    deleteSelectedHelp:
+      'Ces comptes et leur historique, favoris et réglages sont supprimés définitivement.',
     selectAll: 'Tout sélectionner',
     liveTvOn: 'Activer la TV en direct',
     liveTvOff: 'Désactiver la TV en direct',
