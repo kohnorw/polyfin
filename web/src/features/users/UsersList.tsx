@@ -65,6 +65,7 @@ export default function UsersList() {
   const [stoppingDownloads, setStoppingDownloads] = useState(false)
   const [shownGroup, setShownGroup] = useState(allUsers)
   const [selected, setSelected] = useState<string[]>([])
+  const session = useSessionUser()
   const users = useQuery({ queryKey: queryKeys.users, queryFn: ({ signal }) => fetchUsers(signal) })
   const groups = useQuery({
     queryKey: queryKeys.groups,
@@ -159,17 +160,21 @@ export default function UsersList() {
               <LiveTvBulk users={shown} selected={selected} onSelect={setSelected} />
               <RowList aria-label={t.users.listTitle}>
                 {shown.map((user) => (
-                  <div key={user.id} className="flex items-center gap-3">
-                    <Checkbox
-                      label={user.name}
-                      hideLabel
-                      checked={selected.includes(user.id)}
-                      onChange={(on) =>
-                        setSelected(
-                          on ? [...selected, user.id] : selected.filter((id) => id !== user.id),
-                        )
-                      }
-                    />
+                  <div key={user.id} className="flex items-center gap-1 ps-3 sm:gap-3">
+                    {user.id === session.id ? (
+                      <span aria-hidden="true" className="size-5 shrink-0" />
+                    ) : (
+                      <Checkbox
+                        label={user.name}
+                        hideLabel
+                        checked={selected.includes(user.id)}
+                        onChange={(on) =>
+                          setSelected(
+                            on ? [...selected, user.id] : selected.filter((id) => id !== user.id),
+                          )
+                        }
+                      />
+                    )}
                     <div className="min-w-0 flex-1">
                       <UserRow user={user} />
                     </div>
@@ -229,7 +234,8 @@ function LiveTvBulk({
   })
   const self = useSessionUser()
   const [confirming, setConfirming] = useState(false)
-  // Your own account is never deleted from here.
+  // Your own account is never selected: it is changed on its own page.
+  const others = users.filter((u) => u.id !== self.id)
   const doomed = selected.filter((id) => id !== self.id)
   const removal = useMutation({
     mutationFn: () => Promise.allSettled(doomed.map((id) => deleteUser(id))),
@@ -240,21 +246,25 @@ function LiveTvBulk({
     },
   })
   return (
-    <div className="mb-3 flex flex-wrap items-center gap-3">
-      <Checkbox
-        label={t.users.selectAll}
-        checked={users.length > 0 && selected.length === users.length}
-        onChange={(all) => onSelect(all ? users.map((u) => u.id) : [])}
-      />
+    <div className="mb-3 grid grid-cols-2 items-center gap-2 sm:flex sm:flex-wrap sm:gap-3">
+      <div className="col-span-2 ps-3 sm:ps-0">
+        <Checkbox
+          label={t.users.selectAll}
+          checked={others.length > 0 && selected.length === others.length}
+          onChange={(all) => onSelect(all ? others.map((u) => u.id) : [])}
+        />
+      </div>
       <Button disabled={!selected.length || change.isPending} onClick={() => change.mutate(true)}>
         {t.users.liveTvOn}
       </Button>
       <Button disabled={!selected.length || change.isPending} onClick={() => change.mutate(false)}>
         {t.users.liveTvOff}
       </Button>
-      <Button disabled={!doomed.length || removal.isPending} onClick={() => setConfirming(true)}>
-        {t.users.deleteSelected(doomed.length)}
-      </Button>
+      <div className="col-span-2 grid sm:block">
+        <Button disabled={!doomed.length || removal.isPending} onClick={() => setConfirming(true)}>
+          {t.users.deleteSelected(doomed.length)}
+        </Button>
+      </div>
       <ConfirmDialog
         open={confirming}
         onClose={() => setConfirming(false)}
