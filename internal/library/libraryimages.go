@@ -245,13 +245,17 @@ func (s *Service) LibraryImages(ctx context.Context, scope addons.Scope, confine
 	var group errgroup.Group
 	group.SetLimit(catalogFetches)
 	for i, c := range catalogs {
-		if !c.Enabled || LiveCatalog(c.Catalog.Type) {
+		if !c.Enabled {
 			continue
 		}
 		id := LibraryID(c)
 		result[i].ID = id
 		if url, ok := s.UploadedArtwork(id, "Primary"); ok {
 			result[i].URL, result[i].Uploaded = url, true
+			continue
+		}
+		// A live TV catalog shows only what was uploaded for it.
+		if LiveCatalog(c.Catalog.Type) {
 			continue
 		}
 		addon, ok := byID[c.AddonID]

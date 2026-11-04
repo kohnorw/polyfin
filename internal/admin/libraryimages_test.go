@@ -122,7 +122,7 @@ func TestLibraryImages(t *testing.T) {
 	if movie["image"] != "none" || movie["imageTag"] != nil || movie["itemId"] == nil {
 		t.Errorf("a library by default: %v", movie)
 	}
-	if tv["itemId"] != nil || available["itemId"] != nil || available["image"] != "none" {
+	if tv["itemId"] == nil || available["itemId"] != nil || available["image"] != "none" {
 		t.Errorf("catalogs that are not libraries: %v, %v", tv, available)
 	}
 

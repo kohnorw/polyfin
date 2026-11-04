@@ -258,9 +258,6 @@ func (h *Handler) userViews(r *http.Request, user accounts.User, includeHidden b
 		items, err = h.addLiveCategoriesView(r, user, items)
 	}
 	if err == nil {
-		items, err = h.addReplayView(r, user, items)
-	}
-	if err == nil {
 		items, err = h.addPlaylistsView(r, user, items)
 	}
 	if err == nil {

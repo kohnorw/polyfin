@@ -188,6 +188,8 @@ A source behaves as an installed addon with one TV catalog:
 
 Apps show **Live TV** as a folder per category of the user's channels, in line-up order, each listing its channels. Selecting a channel opens it as anywhere else. It reads no guide, so it stays quick on large line-ups and works in every Jellyfin app, with nothing to install. Categories of the same name from several sources are one folder.
 
+Under **Content › Libraries**, a TV catalog's row sets the name and picture of **Live TV** in apps. With several catalogs, the first one that has each is used.
+
 **For app developers:** the view is a `CollectionFolder` of `CollectionType` `folders`, with the same identifier on every server; its categories are `Folder` items holding `TvChannel` items.
 
 ## Replay
@@ -196,7 +198,7 @@ Many providers keep their channels' past programmes for a few days, an archive a
 
 ### The Replay view
 
-- Apps show a Replay view after Live TV to the users who reach at least one channel with an archive. Its name follows the server language.
+- Apps do not list the Replay view among the libraries. It stays reachable by its identifier, and programmes already started stay in Continue Watching.
 - It holds one folder per channel with an archive, in channel order, named and pictured as the channel.
 - A folder holds the programmes of the channel's guide that have ended and started within the channel's archive, the latest first. A programme in progress or to come is not listed.
 - A programme is a video named after its guide's title, with its episode title, description and image (the channel's logo when the guide gives none), its air time and its length. It plays, resumes from Continue Watching, and is marked played as a movie is.

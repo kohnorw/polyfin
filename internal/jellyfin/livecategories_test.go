@@ -84,3 +84,32 @@ func TestLiveCategoriesFollowEachUsersAccess(t *testing.T) {
 		t.Fatalf("the other user: %q", names)
 	}
 }
+
+// A TV catalog's name in Libraries names the Live TV view.
+func TestLiveTvViewTakesTheCatalogsName(t *testing.T) {
+	t.Parallel()
+	provider := newReplayProvider(t, "")
+	s := newTestServer(t, 10)
+	s.user("member", nil)
+	token := s.signIn("member", "tv")
+	addReplaySource(t, s, provider)
+	libraries, err := s.addons.Libraries(t.Context(), addons.Shared())
+	if err != nil {
+		t.Fatal(err)
+	}
+	name := "Television"
+	selection := []addons.LibraryChoice{}
+	for _, l := range libraries {
+		if l.Enabled {
+			selection = append(selection, addons.LibraryChoice{AddonID: l.AddonID, CatalogType: l.Catalog.Type, CatalogID: l.Catalog.ID, Name: &name})
+		}
+	}
+	if _, err := s.addons.SetLibraries(t.Context(), addons.Shared(), selection); err != nil {
+		t.Fatal(err)
+	}
+	var views QueryResult
+	s.get(t, "/UserViews", token, &views)
+	if !slices.Contains(itemNames(views.Items), name) {
+		t.Fatalf("views: %q", itemNames(views.Items))
+	}
+}

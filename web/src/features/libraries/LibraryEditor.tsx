@@ -499,7 +499,7 @@ function LibraryForm({
                       {index + 1}
                     </span>
                     <div className="flex min-w-0 items-start gap-3 sm:gap-3.5">
-                      {tv ? (
+                      {tv && library.itemId == null ? (
                         <LiveTvThumb />
                       ) : (
                         <LibraryThumb
@@ -544,7 +544,19 @@ function LibraryForm({
                     </div>
                     <div className="col-span-2 col-start-2 row-start-2 min-w-0 md:col-span-1 md:col-start-3 md:row-start-1">
                       {tv ? (
-                        <TvSummary scope={scope} library={library} name={name} iptv={iptv} />
+                        <div className="grid gap-2">
+                          <TextInput
+                            id={inputId}
+                            size="sm"
+                            aria-label={t.libraries.name}
+                            value={entry.name}
+                            onValue={(value) => rename(index, value)}
+                            placeholder={t.libraries.name}
+                            maxLength={nameMaxLength}
+                            autoComplete="off"
+                          />
+                          <TvSummary scope={scope} library={library} name={name} iptv={iptv} />
+                        </div>
                       ) : (
                         <>
                           <label

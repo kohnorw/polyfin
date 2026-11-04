@@ -1,9 +1,11 @@
 package library
 
 import (
+	"cmp"
 	"context"
 
 	"github.com/moodiness/polyfin/internal/accounts"
+	"github.com/moodiness/polyfin/internal/addons"
 )
 
 // The Live TV section apps list is a view of Polyfin's own: a folder
@@ -29,11 +31,32 @@ func liveCategoryOf(v view, channel Item) string {
 
 // liveCategoriesView describes the view, ErrNotFound for a user without
 // channels.
-func (s *Service) liveCategoriesView(v view) (Item, error) {
+func (s *Service) liveCategoriesView(ctx context.Context, v view) (Item, error) {
 	if len(v.channels) == 0 {
 		return Item{}, ErrNotFound
 	}
-	return Item{ID: LiveCategoriesViewID, Kind: KindLibrary, Name: v.words.tvCategories, CollectionType: "folders"}, nil
+	item := Item{ID: LiveCategoriesViewID, Kind: KindLibrary, Name: cmp.Or(v.liveName, v.words.tvCategories), CollectionType: "folders"}
+	if url, ok := s.liveViewImage(ctx, "Primary"); ok {
+		item.Images.Primary = url
+	}
+	return item, nil
+}
+
+// liveViewImage is the picture uploaded for the first of the server's live
+// TV catalogs that has one, which the Live TV view shows.
+func (s *Service) liveViewImage(ctx context.Context, imageType string) (string, bool) {
+	libraries, err := s.addons.Libraries(ctx, addons.Shared())
+	if err != nil {
+		return "", false
+	}
+	for _, l := range libraries {
+		if l.Enabled && LiveCatalog(l.Catalog.Type) {
+			if url, ok := s.UploadedArtwork(LibraryID(l), imageType); ok {
+				return url, true
+			}
+		}
+	}
+	return "", false
 }
 
 func liveCategoryFolder(name string) Item {
@@ -43,7 +66,7 @@ func liveCategoryFolder(name string) Item {
 // liveCategories lists the folders of the view, in channel order, which is
 // the line-up's category order.
 func (s *Service) liveCategories(ctx context.Context, v view) ([]Item, error) {
-	if _, err := s.liveCategoriesView(v); err != nil {
+	if _, err := s.liveCategoriesView(ctx, v); err != nil {
 		return nil, err
 	}
 	channels, channelRecords := s.channels(ctx, v)

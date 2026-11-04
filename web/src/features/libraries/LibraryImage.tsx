@@ -289,9 +289,11 @@ export function LibraryImageEditor({
       : text.help[choice]
   // Music libraries have no posters to draw an image from.
   const choices: LibraryImageChoice[] =
-    library.filterable || library.image === 'generated'
-      ? ['none', 'automatic', 'generated', 'custom']
-      : ['none', 'automatic', 'custom']
+    library.catalogType === 'tv'
+      ? ['none', 'custom']
+      : library.filterable || library.image === 'generated'
+        ? ['none', 'automatic', 'generated', 'custom']
+        : ['none', 'automatic', 'custom']
 
   return (
     <section

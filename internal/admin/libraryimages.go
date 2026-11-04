@@ -75,7 +75,7 @@ func (h *handler) saveLibraryImage(w http.ResponseWriter, r *http.Request) {
 	}
 	index := slices.IndexFunc(catalogs, func(l addons.Library) bool {
 		return l.Enabled && l.AddonID == addonID && l.Catalog.Type == body.CatalogType && l.Catalog.ID == body.CatalogID &&
-			!library.LiveCatalog(l.Catalog.Type)
+			(!library.LiveCatalog(l.Catalog.Type) || body.Image == "custom" || body.Image == addons.LibraryImageNone)
 	})
 	if index < 0 {
 		writeError(w, http.StatusBadRequest, "invalid_library")

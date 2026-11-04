@@ -17,6 +17,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/iptv"
+	"github.com/moodiness/polyfin/internal/library"
 )
 
 // replayProvider is an Xtream account (user / secret) whose server keeps
@@ -119,14 +120,11 @@ func addReplaySource(t *testing.T, s testServer, p *replayProvider) accounts.ID 
 // replayView returns the Replay view a user's /UserViews lists, if any.
 func replayView(t *testing.T, s testServer, token string) (BaseItemDto, bool) {
 	t.Helper()
-	var views QueryResult
-	s.get(t, "/UserViews", token, &views)
-	for _, view := range views.Items {
-		if view.Name == "Replay" {
-			return view, true
-		}
+	var view BaseItemDto
+	if status := s.get(t, "/Items/"+library.ReplayViewID.String(), token, &view); status != http.StatusOK {
+		return BaseItemDto{}, false
 	}
-	return BaseItemDto{}, false
+	return view, true
 }
 
 // replayProgrammes lists the programmes of the first folder of a user's

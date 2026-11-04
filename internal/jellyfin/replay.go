@@ -8,14 +8,6 @@ import (
 	"github.com/moodiness/polyfin/internal/library"
 )
 
-// addReplayView adds the Replay view to views when user has channels whose
-// provider keeps past programmes (see library.ReplayViewID): a library of
-// folders, one per channel, which jellyfin-web lists as it lists a
-// folder's items.
-func (h *Handler) addReplayView(r *http.Request, user accounts.User, views []BaseItemDto) ([]BaseItemDto, error) {
-	return h.addFolderView(r, user, views, library.ReplayViewID)
-}
-
 // addLiveCategoriesView adds the TV Categories view to views when user has
 // channels (see library.LiveCategoriesViewID).
 func (h *Handler) addLiveCategoriesView(r *http.Request, user accounts.User, views []BaseItemDto) ([]BaseItemDto, error) {

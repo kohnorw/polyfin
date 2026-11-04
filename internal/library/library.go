@@ -335,6 +335,9 @@ func (l library) catalogSource() source {
 // server's first unless they turned them off. Enabled live TV catalogs are
 // not libraries: they list the user's channels, in the same order.
 type view struct {
+	// liveName is the name the administrator gave a live TV catalog, which
+	// the Live TV view takes.
+	liveName string
 	// hiddenChannels are the Stremio identifiers of the channels of the
 	// categories taken from the user (see accounts.User.HiddenLiveTv).
 	hiddenChannels map[string]bool
@@ -465,6 +468,9 @@ func (s *Service) buildView(ctx context.Context, user accounts.User) (view, erro
 				// A user without Live TV has no channels, so none of them,
 				// nor their programmes, can be reached.
 				// Nor has one a source or category was taken from.
+				if l.Name != nil && v.liveName == "" {
+					v.liveName = strings.TrimSpace(*l.Name)
+				}
 				assigned := scope.Owner != nil || !slices.Contains(user.HiddenLiveTv, l.AddonID)
 				if user.LiveTv && assigned {
 					v.channels = append(v.channels, source{addon: entry, catalog: l.Catalog, guide: len(l.Guides) > 0})
@@ -1931,7 +1937,7 @@ func (s *Service) item(ctx context.Context, v view, id accounts.ID) (Item, error
 		return s.replayView(ctx, v)
 	}
 	if id == LiveCategoriesViewID {
-		return s.liveCategoriesView(v)
+		return s.liveCategoriesView(ctx, v)
 	}
 	if id == WatchlistViewID {
 		return s.watchlistView(ctx, v)
@@ -2523,6 +2529,12 @@ type Artwork struct {
 // whichever addon gave it (see artworkView); an extra's Primary and
 // Backdrop images are its title's (see extraArtwork).
 func (s *Service) Artwork(ctx context.Context, id accounts.ID, imageType string) (Artwork, error) {
+	if id == LiveCategoriesViewID {
+		if url, ok := s.liveViewImage(ctx, imageType); ok {
+			return Artwork{URL: url}, nil
+		}
+		return Artwork{}, ErrNotFound
+	}
 	if url, ok := s.UploadedArtwork(id, imageType); ok {
 		return Artwork{URL: url}, nil
 	}
