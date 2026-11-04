@@ -243,7 +243,8 @@ func (s testServer) user(name string, change func(*accounts.UserChanges)) accoun
 	{
 		// Most tests' users watch Live TV, which new users do not by default.
 		on := true
-		changes := accounts.UserChanges{LiveTv: &on}
+		unlimited := 0
+		changes := accounts.UserChanges{LiveTv: &on, MaxPlaybacks: &unlimited}
 		change(&changes)
 		if user, err = s.store.UpdateUser(s.t.Context(), user.ID, changes, nil); err != nil {
 			s.t.Fatal(err)

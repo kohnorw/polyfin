@@ -626,7 +626,7 @@ On a user's page under **Users**, the **Playback and access** section holds five
 
 | Setting | Where | Default | What it does |
 |---|---|---|---|
-| **Playbacks at once (0 = no limit)** | **Users › Playback and access** | 0, no limit (up to 20) | How many of the user's devices may play at once. |
+| **Playbacks at once (0 = no limit)** | **Users › Playback and access** | 1 (0 = no limit, up to 20) | How many of the user's devices may play at once. |
 | **Maximum quality** | **Users › Playback and access** | No limit | Caps the bitrate of everything the user plays. |
 | **Live TV** | **Users › Playback and access** | On | Whether the user can see and play Live TV. |
 | **Watch together** | **Users › Playback and access** | Create and join | Whether the user may create and join SyncPlay groups, only join them, or not watch together at all. |

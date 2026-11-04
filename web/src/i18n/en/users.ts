@@ -74,6 +74,9 @@ const users = {
       'Offers this user the torrents addons list, while Settings › Torrents plays them. Off for everyone, administrators included, until given.',
     noTranscoding: 'No conversion',
     noDownloads: 'No downloads',
+    selectAll: 'Select all',
+    liveTvOn: 'Turn Live TV on',
+    liveTvOff: 'Turn Live TV off',
     turnOffDownloads: 'Turn off downloads for everyone',
     turnOffDownloadsConfirm:
       'Every user and every group lose the permission to download, also in the Jellyfin apps already signed in. You can give it back to a user or a group on their page, under Access.',

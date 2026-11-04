@@ -3,6 +3,7 @@ package admin
 import (
 	"context"
 	"errors"
+	"github.com/moodiness/polyfin/internal/iptv"
 	"net/http"
 	"time"
 
@@ -33,6 +34,9 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		Name     string `json:"name"`
 		Password string `json:"password"`
 		Code     string `json:"code"`
+		// LiveTv registers with the login of the server's Xtream provider,
+		// which must accept it, and gives the account Live TV.
+		LiveTv bool `json:"liveTv"`
 		// CheckCode only checks the code, before the form.
 		CheckCode bool `json:"checkCode"`
 	}
@@ -45,6 +49,17 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer attempt.Cancel()
+	if body.LiveTv && !body.CheckCode && h.IPTV != nil {
+		accepted, err := h.IPTV.CheckXtreamLogin(r.Context(), body.Name, body.Password)
+		if err != nil && !errors.Is(err, iptv.ErrNoXtreamSource) {
+			h.Logger.Warn("An Xtream login could not be checked", "error", err)
+		}
+		if !accepted {
+			attempt.Fail()
+			writeError(w, http.StatusUnauthorized, "xtream_login_refused")
+			return
+		}
+	}
 	if settings.RegistrationCodes {
 		if body.CheckCode {
 			usable, err := h.Accounts.RegistrationCodeUsable(r.Context(), body.Code)
@@ -72,7 +87,7 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
-	user, err := h.Accounts.CreateUser(r.Context(), accounts.NewUser{Name: body.Name, Password: body.Password, IsHidden: true})
+	user, err := h.Accounts.CreateUser(r.Context(), accounts.NewUser{Name: body.Name, Password: body.Password, IsHidden: true, ProviderPassword: body.LiveTv})
 	if settings.RegistrationCodes {
 		if err != nil {
 			_ = h.Accounts.ReleaseRegistrationCode(context.WithoutCancel(r.Context()), body.Code)
@@ -90,6 +105,12 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.internalError(w, r, err)
 		return
+	}
+	if body.LiveTv {
+		if user, err = h.Accounts.UpdateUser(r.Context(), user.ID, accounts.UserChanges{LiveTv: new(true)}, nil); err != nil {
+			h.internalError(w, r, err)
+			return
+		}
 	}
 	attempt.Fail()
 	h.Activity.UserCreated(r.Context(), user)

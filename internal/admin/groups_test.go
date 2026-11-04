@@ -29,7 +29,7 @@ func TestGroupsHoldTheLimitsOfTheirMembers(t *testing.T) {
 
 	status, kids, _ := admin.call(http.MethodPost, "/groups", map[string]any{"name": " Kids "})
 	if status != http.StatusCreated || kids["name"] != "Kids" || kids["memberCount"] != 0.0 || kids["downloads"] != true ||
-		kids["maxPlaybacks"] != 0.0 || kids["syncPlay"] != "CreateAndJoinGroups" {
+		kids["maxPlaybacks"] != 1.0 || kids["syncPlay"] != "CreateAndJoinGroups" {
 		t.Fatalf("creating a group: %d %v", status, kids)
 	}
 	group := kids["id"].(string)

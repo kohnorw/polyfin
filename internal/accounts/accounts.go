@@ -142,6 +142,9 @@ type User struct {
 
 // NewUser describes an account to create.
 type NewUser struct {
+	// ProviderPassword tells that an IPTV provider accepted Password, which
+	// it chose: it need not be as long as Polyfin asks.
+	ProviderPassword bool
 	Name            string
 	Password        string
 	IsAdministrator bool
@@ -467,7 +470,7 @@ func createUser(ctx context.Context, db interface {
 	if err != nil {
 		return User{}, err
 	}
-	if err := checkPassword(user.Password); err != nil {
+	if err := checkPassword(user.Password); err != nil && !(user.ProviderPassword && user.Password != "") {
 		return User{}, err
 	}
 	// An administrator may control other users' apps and manage collections,

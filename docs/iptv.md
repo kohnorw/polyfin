@@ -184,6 +184,10 @@ A source behaves as an installed addon with one TV catalog:
 
 **Live TV access**, on a user's or a group's page, sets which of the server's IPTV sources and categories they get, on top of the **Live TV** permission. New users and groups start with the **Live TV** permission off, so they get no Live TV until it is turned on; accounts that existed before keep theirs. With it on, every source and category is on by default. A source turned off takes all its channels and any category it gains later; a category turned off takes its channels, and categories a source adds later arrive on. A channel taken this way is gone from lists, the guide, search and Replay, and does not play by its identifier. Administrators can set it too; users' own sources and Stremio addons' catalogs are not concerned.
 
+## Registering with an Xtream login
+
+The **Live TV** box on `/register` makes a visitor register with their Xtream login: Polyfin asks the server's Xtream sources, at their own addresses, and creates the account with Live TV on only if one accepts it. Otherwise it answers "Incorrect login. Try again or deselect Live TV." The login is checked once: the account then keeps its own password.
+
 ## Live TV categories in apps
 
 Apps show **Live TV** as a folder per category of the user's channels, in line-up order, each listing its channels. Selecting a channel opens it as anywhere else. It reads no guide, so it stays quick on large line-ups and works in every Jellyfin app, with nothing to install. Categories of the same name from several sources are one folder.

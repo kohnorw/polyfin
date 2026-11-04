@@ -8,11 +8,12 @@ import {
   PlusIcon,
   UsersIcon,
 } from '@phosphor-icons/react'
-import { useMutation, useQuery } from '@tanstack/react-query'
+import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
 import { useState } from 'react'
 import {
   fetchGroups,
   fetchUsers,
+  updateUser,
   queryClient,
   queryKeys,
   turnOffDownloads,
@@ -28,6 +29,7 @@ import {
   Badge,
   Block,
   Button,
+  Checkbox,
   ButtonLink,
   ConfirmDialog,
   EmptyState,
@@ -61,6 +63,7 @@ export default function UsersList() {
   const [inviting, setInviting] = useState(false)
   const [stoppingDownloads, setStoppingDownloads] = useState(false)
   const [shownGroup, setShownGroup] = useState(allUsers)
+  const [selected, setSelected] = useState<string[]>([])
   const users = useQuery({ queryKey: queryKeys.users, queryFn: ({ signal }) => fetchUsers(signal) })
   const groups = useQuery({
     queryKey: queryKeys.groups,
@@ -151,11 +154,28 @@ export default function UsersList() {
           ) : shown.length === 0 ? (
             <EmptyState icon={UsersIcon} title={t.groups.noneShown} />
           ) : (
-            <RowList aria-label={t.users.listTitle}>
-              {shown.map((user) => (
-                <UserRow key={user.id} user={user} />
-              ))}
-            </RowList>
+            <>
+              <LiveTvBulk users={shown} selected={selected} onSelect={setSelected} />
+              <RowList aria-label={t.users.listTitle}>
+                {shown.map((user) => (
+                  <div key={user.id} className="flex items-center gap-3">
+                    <Checkbox
+                      label={user.name}
+                      hideLabel
+                      checked={selected.includes(user.id)}
+                      onChange={(on) =>
+                        setSelected(
+                          on ? [...selected, user.id] : selected.filter((id) => id !== user.id),
+                        )
+                      }
+                    />
+                    <div className="min-w-0 flex-1">
+                      <UserRow user={user} />
+                    </div>
+                  </div>
+                ))}
+              </RowList>
+            </>
           )}
         </Block>
         <InviteLinks onCreate={() => setInviting(true)} />
@@ -187,6 +207,39 @@ export default function UsersList() {
         {t.users.turnOffDownloadsConfirm}
       </ConfirmDialog>
     </>
+  )
+}
+
+function LiveTvBulk({
+  users,
+  selected,
+  onSelect,
+}: {
+  users: User[]
+  selected: string[]
+  onSelect: (ids: string[]) => void
+}) {
+  const { t } = useI18n()
+  const client = useQueryClient()
+  const change = useMutation({
+    mutationFn: (liveTv: boolean) =>
+      Promise.allSettled(selected.map((id) => updateUser(id, { liveTv }))),
+    onSettled: () => void client.invalidateQueries({ queryKey: queryKeys.users }),
+  })
+  return (
+    <div className="mb-3 flex flex-wrap items-center gap-3">
+      <Checkbox
+        label={t.users.selectAll}
+        checked={users.length > 0 && selected.length === users.length}
+        onChange={(all) => onSelect(all ? users.map((u) => u.id) : [])}
+      />
+      <Button disabled={!selected.length || change.isPending} onClick={() => change.mutate(true)}>
+        {t.users.liveTvOn}
+      </Button>
+      <Button disabled={!selected.length || change.isPending} onClick={() => change.mutate(false)}>
+        {t.users.liveTvOff}
+      </Button>
+    </div>
   )
 }
 

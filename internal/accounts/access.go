@@ -28,7 +28,7 @@ var ErrInvalidQualityGroup = errors.New("invalid quality group")
 const (
 	MinMaxPlaybacks     = 0
 	MaxMaxPlaybacks     = 20
-	DefaultMaxPlaybacks = 0
+	DefaultMaxPlaybacks = 1
 	MinMaxBitrate       = 0
 	MaxMaxBitrate       = math.MaxInt32
 	DefaultMaxBitrate   = 0

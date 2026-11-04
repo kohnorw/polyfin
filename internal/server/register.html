@@ -94,6 +94,7 @@
         <label for="password">Password</label>
         <input id="password" name="password" type="password" autocomplete="new-password" required>
       </div>
+      <label style="display:flex;gap:.5rem;align-items:center;margin:0 0 .8rem"><input id="live-tv" type="checkbox" style="width:auto"> Live TV (use your Xtream login)</label>
       <p class="error" id="error" role="alert"></p>
       <button type="submit" id="submit">Register</button>
     </form>
@@ -128,6 +129,7 @@
   logo.src = base + '/Branding/Logo'
 
   var messages = {
+    xtream_login_refused: 'Incorrect login. Try again or deselect Live TV.',
     name_taken: 'That user name is taken. Choose another.',
     invalid_name: 'Enter a user name.',
     invalid_password: 'The password must be at least 8 characters.',
@@ -225,12 +227,13 @@
     var password = form.password.value
     error.textContent = ''
     if (!name) { error.textContent = messages.invalid_name; return }
-    if (password.length < 8) { error.textContent = messages.invalid_password; return }
+    var liveTv = document.getElementById('live-tv').checked
+    if (!liveTv && password.length < 8) { error.textContent = messages.invalid_password; return }
     submit.disabled = true
     fetch(api, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: name, password: password, code: code }),
+      body: JSON.stringify({ name: name, password: password, code: code, liveTv: liveTv }),
     }).then(function (r) {
       return r.json().catch(function () { return {} }).then(function (body) { return { ok: r.ok, body: body } })
     }).then(function (result) {

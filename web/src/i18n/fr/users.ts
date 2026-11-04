@@ -80,6 +80,9 @@ const users: typeof en = {
       'Propose à cet utilisateur les torrents que listent les addons, quand Paramètres › Torrents les lit. Désactivé pour tous, administrateurs compris, jusqu’à ce qu’on le donne.',
     noTranscoding: 'Sans conversion',
     noDownloads: 'Sans téléchargement',
+    selectAll: 'Tout sélectionner',
+    liveTvOn: 'Activer la TV en direct',
+    liveTvOff: 'Désactiver la TV en direct',
     turnOffDownloads: 'Désactiver les téléchargements pour tous',
     turnOffDownloadsConfirm:
       'Tous les utilisateurs et tous les groupes perdent l’autorisation de télécharger, y compris dans les applications Jellyfin déjà connectées. Vous pouvez la rendre à un utilisateur ou à un groupe depuis sa page, dans Accès.',

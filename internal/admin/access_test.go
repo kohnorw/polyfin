@@ -13,7 +13,7 @@ func TestAdministratorsSetPlaybackAndAccessLimits(t *testing.T) {
 	administrator := api.signedIn("administrator", true)
 	member := api.signedIn("member", false)
 	_, created, _ := administrator.call(http.MethodPost, "/users", map[string]any{"name": "child", "password": "correct horse"})
-	if created["maxPlaybacks"] != 0.0 || created["maxBitrate"] != 0.0 || created["liveTv"] != false ||
+	if created["maxPlaybacks"] != 1.0 || created["maxBitrate"] != 0.0 || created["liveTv"] != false ||
 		created["syncPlay"] != "CreateAndJoinGroups" || created["remoteControl"] != false {
 		t.Fatalf("new user's limits: %v", created)
 	}
