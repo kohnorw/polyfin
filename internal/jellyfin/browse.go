@@ -257,14 +257,6 @@ func (h *Handler) userViews(r *http.Request, user accounts.User, includeHidden b
 	if err == nil {
 		items, err = h.addLiveCategoriesView(r, user, items)
 	}
-	// Streamyfin's guide opens only from a view of Live TV's own type, which
-	// shows no categories: it gets that view too, as TV Guide.
-	if err == nil && strings.Contains(strings.ToLower(callerFrom(r.Context()).Device.Client), "streamyfin") {
-		before := len(items)
-		if items, err = h.addLiveTvView(r, user, items); err == nil && len(items) > before {
-			items[before].Name = "TV Guide"
-		}
-	}
 	if err == nil {
 		items, err = h.addPlaylistsView(r, user, items)
 	}
@@ -418,6 +410,10 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 			h.internalError(w, r, err)
 			return
 		}
+		// Streamyfin opens an item through this listing.
+		if len(items) == 1 && len(found) == 1 && found[0].Kind == library.KindChannel {
+			h.addSchedule(r, user, &items[0], found[0].ID)
+		}
 		writeJSON(w, http.StatusOK, QueryResult{Items: items, TotalRecordCount: len(items)})
 		return
 	}
@@ -478,6 +474,10 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if h.collectionListing(w, r, user, parent, hasParent, start, limit) {
+		return
+	}
+	if hasParent && parent == library.LiveFavoritesID {
+		h.favoriteChannels(w, r, user, fields)
 		return
 	}
 	if h.channelListing(w, r, user, parent, hasParent, start, limit) {
@@ -552,6 +552,9 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.internalError(w, r, err)
 		return
+	}
+	if hasParent && parent == library.LiveCategoriesViewID && start <= 0 {
+		items = h.withFavoritesFolder(r, user, items, fields)
 	}
 	// A category's channels show what airs now, as Live TV's do.
 	h.addCurrentPrograms(r, user, items, fields)

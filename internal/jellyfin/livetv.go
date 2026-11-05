@@ -390,6 +390,54 @@ func (h *Handler) addCurrentPrograms(r *http.Request, user accounts.User, dtos [
 	}
 }
 
+// favoriteOf lists the user's favorite channels.
+func (h *Handler) favoriteOf(r *http.Request, user accounts.User) ([]library.Item, error) {
+	channels, err := h.Library.Channels(r.Context(), user)
+	if err != nil {
+		return nil, err
+	}
+	state, err := h.userState(r.Context(), user, channels)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(channels, func(c library.Item) bool { return !state.of(c).IsFavorite }), nil
+}
+
+// favoriteChannels lists the Favorites folder of the Live TV view.
+func (h *Handler) favoriteChannels(w http.ResponseWriter, r *http.Request, user accounts.User, fields fieldSet) {
+	channels, err := h.favoriteOf(r, user)
+	if err != nil {
+		h.browseError(w, r, err)
+		return
+	}
+	dtos, err := h.dtos(r, user, channels, fields, nil)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	h.addCurrentPrograms(r, user, dtos, fields)
+	writeJSON(w, http.StatusOK, QueryResult{Items: dtos, TotalRecordCount: len(dtos)})
+}
+
+// withFavoritesFolder puts the Favorites folder first among the Live TV
+// view's categories when the user has favorite channels: apps such as
+// Streamyfin have no favorites page for channels.
+func (h *Handler) withFavoritesFolder(r *http.Request, user accounts.User, items []BaseItemDto, fields fieldSet) []BaseItemDto {
+	favorites, err := h.favoriteOf(r, user)
+	if err != nil || len(favorites) == 0 {
+		return items
+	}
+	folder, err := h.Library.Item(r.Context(), user, library.LiveFavoritesID)
+	if err != nil {
+		return items
+	}
+	dtos, err := h.dtos(r, user, []library.Item{folder}, fields, nil)
+	if err != nil {
+		return items
+	}
+	return append(dtos, items...)
+}
+
 // addSchedule puts what a channel airs next in its description, in the
 // server's time zone: apps such as Streamyfin show a channel's page with
 // its description and no guide.

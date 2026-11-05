@@ -19,6 +19,10 @@ import (
 // server.
 var LiveCategoriesViewID = itemID("view|livecategories")
 
+// LiveFavoritesID identifies the view's Favorites folder, which package
+// jellyfin lists from the user's favorites.
+var LiveFavoritesID = itemID("view|livefavorites")
+
 func liveCategoryKey(name string) string { return "livecategory|" + name }
 
 // liveCategoryOf names a channel's category.

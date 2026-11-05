@@ -1939,6 +1939,12 @@ func (s *Service) item(ctx context.Context, v view, id accounts.ID) (Item, error
 	if id == LiveCategoriesViewID {
 		return s.liveCategoriesView(ctx, v)
 	}
+	if id == LiveFavoritesID {
+		if len(v.channels) == 0 {
+			return Item{}, ErrNotFound
+		}
+		return Item{ID: id, Kind: KindLiveCategory, Name: v.words.favorites, ParentID: LiveCategoriesViewID, CollectionType: "folders", Available: true}, nil
+	}
 	if id == WatchlistViewID {
 		return s.watchlistView(ctx, v)
 	}
