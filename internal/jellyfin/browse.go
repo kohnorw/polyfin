@@ -257,6 +257,14 @@ func (h *Handler) userViews(r *http.Request, user accounts.User, includeHidden b
 	if err == nil {
 		items, err = h.addLiveCategoriesView(r, user, items)
 	}
+	// Streamyfin's guide opens only from a view of Live TV's own type, which
+	// shows no categories: it gets that view too, as TV Guide.
+	if err == nil && strings.Contains(strings.ToLower(callerFrom(r.Context()).Device.Client), "streamyfin") {
+		before := len(items)
+		if items, err = h.addLiveTvView(r, user, items); err == nil && len(items) > before {
+			items[before].Name = "TV Guide"
+		}
+	}
 	if err == nil {
 		items, err = h.addPlaylistsView(r, user, items)
 	}
@@ -545,6 +553,8 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
+	// A category's channels show what airs now, as Live TV's do.
+	h.addCurrentPrograms(r, user, items, fields)
 	if took := time.Since(begun); took > slowListing {
 		h.Logger.Info("A listing was slow", "folder", parent, "whole", wholeListing(r), "items", len(items),
 			"checked", asked.Sub(begun).Round(time.Millisecond), "read", read.Round(time.Millisecond),

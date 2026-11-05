@@ -237,6 +237,15 @@ func (h *Handler) channelListing(w http.ResponseWriter, r *http.Request, user ac
 		h.browseError(w, r, err)
 		return true
 	}
+	// Favorites and the like, as jellyfin-web's Favorites page asks.
+	if filter, ok := stateFilterOf(r); ok {
+		state, err := h.userState(r.Context(), user, channels)
+		if err != nil {
+			h.internalError(w, r, err)
+			return true
+		}
+		channels = slices.DeleteFunc(channels, func(c library.Item) bool { return !filter.keeps(c, state) })
+	}
 	from, to := bounds(len(channels), start, limit)
 	dtos, err := h.dtos(r, user, channels[from:to], requestedFields(r), nil)
 	if err == nil {

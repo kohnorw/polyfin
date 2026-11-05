@@ -47,6 +47,16 @@ func TestLiveCategoriesFollowEachUsersAccess(t *testing.T) {
 	}
 	orbe := sport.Items[0].Id
 
+	// A favorite channel is the only one Favorites lists.
+	if status, _ := s.call(http.MethodPost, "/UserFavoriteItems/"+orbe, app("tv", token), nil); status != http.StatusOK {
+		t.Fatalf("favorite: %d", status)
+	}
+	var favorites QueryResult
+	s.get(t, "/Items?recursive=true&includeItemTypes=TvChannel&filters=IsFavorite", token, &favorites)
+	if !slices.Equal(itemNames(favorites.Items), []string{"Orbe"}) {
+		t.Fatalf("favorites: %q", itemNames(favorites.Items))
+	}
+
 	// As Streamyfin lists a folder of a library without a kind of its own.
 	var through QueryResult
 	s.get(t, "/Items?recursive=true&sortBy=SortName&sortOrder=Ascending&parentId="+folders[1].Id, token, &through)
