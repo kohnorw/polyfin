@@ -758,6 +758,9 @@ func (h *Handler) item(w http.ResponseWriter, r *http.Request) {
 	}
 	dto := h.newItemDto(item, requestedFields(r), true, state)
 	h.addMediaSources(r, user, &dto, item, id, true)
+	if item.Kind == library.KindChannel {
+		h.addSchedule(r, user, &dto, item.ID)
+	}
 	h.setExtraCounts(r, user, &dto, item)
 	if item.Kind == library.KindChannel {
 		dtos := []BaseItemDto{dto}

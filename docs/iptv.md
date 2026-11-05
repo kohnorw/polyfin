@@ -198,6 +198,8 @@ Apps show **Live TV** as a folder per category of the user's channels, in line-u
 
 Under **Content › Libraries**, a TV catalog's row sets the name and picture of **Live TV** in apps. With several catalogs, the first one that has each is used.
 
+A channel's details list its next programmes in its description, in the server's time zone.
+
 Streamyfin, whose guide opens only from a Live TV view of Jellyfin's own type, also lists that view, as **TV Guide**.
 
 **For app developers:** the view is a `CollectionFolder` of `CollectionType` `folders`, with the same identifier on every server; its categories are `CollectionFolder` items, as Streamyfin opens no plain `Folder`, holding `TvChannel` items.

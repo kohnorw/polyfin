@@ -3,6 +3,7 @@ package jellyfin
 import (
 	"net/http"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/moodiness/polyfin/internal/accounts"
@@ -46,6 +47,14 @@ func TestLiveCategoriesFollowEachUsersAccess(t *testing.T) {
 		t.Fatalf("Sport: %+v", sport.Items)
 	}
 	orbe := sport.Items[0].Id
+
+	// A channel's page lists what it airs.
+	var zeb QueryResult
+	s.get(t, "/Items?ParentId="+folders[0].Id, token, &zeb)
+	_, details := s.call(http.MethodGet, "/Items/"+zeb.Items[0].Id, app("tv", token), nil)
+	if !strings.Contains(string(details), "Now On") {
+		t.Fatalf("a channel's schedule: %s", details)
+	}
 
 	// A favorite channel is the only one Favorites lists.
 	if status, _ := s.call(http.MethodPost, "/UserFavoriteItems/"+orbe, app("tv", token), nil); status != http.StatusOK {

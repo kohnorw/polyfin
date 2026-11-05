@@ -390,6 +390,23 @@ func (h *Handler) addCurrentPrograms(r *http.Request, user accounts.User, dtos [
 	}
 }
 
+// addSchedule puts what a channel airs next in its description, in the
+// server's time zone: apps such as Streamyfin show a channel's page with
+// its description and no guide.
+func (h *Handler) addSchedule(r *http.Request, user accounts.User, dto *BaseItemDto, channel accounts.ID) {
+	now := time.Now()
+	programs, err := h.Library.Guide(r.Context(), user, library.GuideQuery{From: now, To: now.Add(24 * time.Hour),
+		Channels: []accounts.ID{channel}, Limit: 8})
+	if err != nil || len(programs) == 0 {
+		return
+	}
+	lines := make([]string, 0, len(programs))
+	for _, p := range programs {
+		lines = append(lines, p.StartDate.Local().Format("15:04")+"  "+p.Name)
+	}
+	dto.Overview = new(strings.Join(lines, "\n"))
+}
+
 // airing maps each of channels to the programme it airs now; nil asks
 // for every channel.
 func (h *Handler) airing(r *http.Request, user accounts.User, channels []accounts.ID) (map[accounts.ID]library.Item, error) {
