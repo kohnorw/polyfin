@@ -51,7 +51,13 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer attempt.Cancel()
+	// An existing user who gives their own password adds Live TV to their
+	// account rather than making one.
+	var existing *accounts.User
 	if body.LiveTv && !body.CheckCode {
+		if found, err := h.Accounts.Authenticate(r.Context(), body.Name, body.Password); err == nil && !found.IsDisabled {
+			existing = &found
+		}
 		if h.IPTV == nil || !h.Accounts.CanSealLogins() {
 			writeError(w, http.StatusServiceUnavailable, "live_tv_registration_unavailable")
 			return
@@ -65,6 +71,19 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusUnauthorized, "xtream_login_refused")
 			return
 		}
+	}
+	if existing != nil {
+		if err := h.Accounts.SaveXtreamLogin(r.Context(), accounts.XtreamLogin{User: existing.ID, Username: body.XtreamUsername, Password: body.XtreamPassword}); err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		user, err := h.Accounts.UpdateUser(r.Context(), existing.ID, accounts.UserChanges{LiveTv: new(true)}, nil)
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"user": newSessionUser(user)})
+		return
 	}
 	if settings.RegistrationCodes {
 		if body.CheckCode {
@@ -100,6 +119,13 @@ func (h *handler) register(w http.ResponseWriter, r *http.Request) {
 		} else {
 			_ = h.Accounts.RegistrationCodeUsedBy(r.Context(), body.Code, user.ID)
 		}
+	}
+	// The account exists and the password was not its own: Live TV is only
+	// added for whoever signs in to it.
+	if errors.Is(err, accounts.ErrNameTaken) && body.LiveTv {
+		attempt.Fail()
+		writeError(w, http.StatusUnauthorized, "account_login_refused")
+		return
 	}
 	if errors.Is(err, accounts.ErrNameTaken) {
 		writeError(w, http.StatusConflict, "name_taken")

@@ -190,6 +190,8 @@ The **Live TV** box on `/register` opens a second login, the user's Xtream one, 
 
 The login is kept encrypted with the server's secret key, and without a key this registration is refused, as a login is never stored in the clear. **Check IPTV logins**, a task under **System › Schedule**, asks every 24 hours about each one: a refused login turns the user's Live TV off and is forgotten. When a source does not accept its own account, as when the provider is down, the run stops and nobody changes.
 
+A user who already has an account can do the same on `/register`: their own user and correct password with the box ticked add Live TV to it, once the Xtream login is accepted. A wrong password changes nothing.
+
 ## Live TV categories in apps
 
 Apps show **Live TV** as a folder per category of the user's channels, in line-up order, each listing its channels. Selecting a channel opens it as anywhere else. It reads no guide, so it stays quick on large line-ups and works in every Jellyfin app, with nothing to install. Categories of the same name from several sources are one folder.

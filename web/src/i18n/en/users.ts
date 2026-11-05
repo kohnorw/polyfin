@@ -77,6 +77,8 @@ const users = {
     deleteSelected: (n: number) => `Delete selected (${n})`,
     deleteSelectedHelp:
       'These accounts and their watch history, favorites and settings are deleted for good.',
+    previousPage: 'Previous',
+    nextPage: 'Next',
     selectAll: 'Select all',
     liveTvOn: 'Turn Live TV on',
     liveTvOff: 'Turn Live TV off',

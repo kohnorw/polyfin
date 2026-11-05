@@ -83,6 +83,8 @@ const users: typeof en = {
     deleteSelected: (n: number) => `Supprimer la sélection (${n})`,
     deleteSelectedHelp:
       'Ces comptes et leur historique, favoris et réglages sont supprimés définitivement.',
+    previousPage: 'Précédent',
+    nextPage: 'Suivant',
     selectAll: 'Tout sélectionner',
     liveTvOn: 'Activer la TV en direct',
     liveTvOff: 'Désactiver la TV en direct',

@@ -57,6 +57,8 @@ const noGroup = 'none'
  * accounts from a Jellyfin server and a user's watch data from an app, the one turning downloads
  * off for everyone, and the invite links, with the button to create one.
  */
+const pageSize = 25
+
 export default function UsersList() {
   const { t } = useI18n()
   const toast = useToast()
@@ -65,6 +67,7 @@ export default function UsersList() {
   const [stoppingDownloads, setStoppingDownloads] = useState(false)
   const [shownGroup, setShownGroup] = useState(allUsers)
   const [selected, setSelected] = useState<string[]>([])
+  const [page, setPage] = useState(0)
   const session = useSessionUser()
   const users = useQuery({ queryKey: queryKeys.users, queryFn: ({ signal }) => fetchUsers(signal) })
   const groups = useQuery({
@@ -87,6 +90,8 @@ export default function UsersList() {
       toast(t.users.downloadsTurnedOff(changed.length), { tone: 'ok' })
     },
   })
+  const pages = Math.ceil(shown.length / pageSize)
+  const current = Math.min(page, Math.max(pages - 1, 0))
 
   const create = (
     <Button variant="primary" icon={PlusIcon} onClick={() => setCreating(true)}>
@@ -159,7 +164,7 @@ export default function UsersList() {
             <>
               <LiveTvBulk users={shown} selected={selected} onSelect={setSelected} />
               <RowList aria-label={t.users.listTitle}>
-                {shown.map((user) => (
+                {shown.slice(current * pageSize, (current + 1) * pageSize).map((user) => (
                   <div key={user.id} className="flex items-center gap-1 ps-3 sm:gap-3">
                     {user.id === session.id ? (
                       <span aria-hidden="true" className="size-5 shrink-0" />
@@ -181,6 +186,19 @@ export default function UsersList() {
                   </div>
                 ))}
               </RowList>
+              {pages > 1 && (
+                <div className="mt-3 flex items-center justify-between gap-3">
+                  <Button disabled={current === 0} onClick={() => setPage(current - 1)}>
+                    {t.users.previousPage}
+                  </Button>
+                  <span className="text-small text-ink-3 tabular-nums">
+                    {current + 1} / {pages}
+                  </span>
+                  <Button disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>
+                    {t.users.nextPage}
+                  </Button>
+                </div>
+              )}
             </>
           )}
         </Block>
