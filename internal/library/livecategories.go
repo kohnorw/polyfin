@@ -60,7 +60,7 @@ func (s *Service) liveViewImage(ctx context.Context, imageType string) (string, 
 }
 
 func liveCategoryFolder(name string) Item {
-	return Item{ID: itemID(liveCategoryKey(name)), Kind: KindLiveCategory, Name: name, ParentID: LiveCategoriesViewID, Available: true}
+	return Item{ID: itemID(liveCategoryKey(name)), Kind: KindLiveCategory, Name: name, CollectionType: "folders", ParentID: LiveCategoriesViewID, Available: true}
 }
 
 // liveCategories lists the folders of the view, in channel order, which is

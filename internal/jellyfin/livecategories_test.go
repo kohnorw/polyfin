@@ -37,7 +37,7 @@ func TestLiveCategoriesFollowEachUsersAccess(t *testing.T) {
 	source := addReplaySource(t, s, provider)
 
 	folders := liveCategories(t, s, token)
-	if !slices.Equal(itemNames(folders), []string{"News", "Sport"}) || folders[0].Type != "Folder" || !folders[0].IsFolder {
+	if !slices.Equal(itemNames(folders), []string{"News", "Sport"}) || folders[0].Type != "CollectionFolder" || !folders[0].IsFolder {
 		t.Fatalf("folders: %+v", folders)
 	}
 	var sport QueryResult
@@ -46,6 +46,17 @@ func TestLiveCategoriesFollowEachUsersAccess(t *testing.T) {
 		t.Fatalf("Sport: %+v", sport.Items)
 	}
 	orbe := sport.Items[0].Id
+
+	// As Streamyfin lists a folder of a library without a kind of its own.
+	var through QueryResult
+	s.get(t, "/Items?recursive=true&sortBy=SortName&sortOrder=Ascending&parentId="+folders[1].Id, token, &through)
+	if !slices.Equal(itemNames(through.Items), []string{"Orbe"}) {
+		t.Fatalf("a recursive listing of a category: %+v", through.Items)
+	}
+	s.get(t, "/Users/"+limited.ID.String()+"/Items?recursive=true&parentId="+folders[1].Id, token, &through)
+	if !slices.Equal(itemNames(through.Items), []string{"Orbe"}) {
+		t.Fatalf("a recursive listing by user: %+v", through.Items)
+	}
 
 	categories, err := s.iptv.Categories(t.Context(), addons.Shared(), source, "")
 	if err != nil {

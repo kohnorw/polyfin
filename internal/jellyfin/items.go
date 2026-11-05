@@ -328,7 +328,7 @@ var itemTypes = map[library.Kind]string{
 	// programmes are as well, in a folder per channel.
 	library.KindRecording:     "Video",
 	library.KindReplayFolder:  "Folder",
-	library.KindLiveCategory:  "Folder",
+	library.KindLiveCategory:  "CollectionFolder",
 	library.KindReplay:        "Video",
 	library.KindArtist:        "MusicArtist",
 	library.KindAlbum:         "MusicAlbum",

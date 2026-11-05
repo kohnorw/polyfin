@@ -243,8 +243,9 @@ func newUserDto(user accounts.User, serverID string) UserDto {
 			EnableSharedDeviceControl:       true,
 			EnableRemoteAccess:              true,
 			EnableLiveTvAccess:              user.LiveTv,
-			EnableLiveTvManagement:          user.LiveTvManagement,
-			EnableMediaPlayback:             true,
+			// Always off: apps draw their record buttons from it.
+			EnableLiveTvManagement: false,
+			EnableMediaPlayback:    true,
 			// The user's own permissions; the server's switches apply on top.
 			EnableAudioPlaybackTranscoding:   user.AudioTranscoding,
 			EnableVideoPlaybackTranscoding:   user.VideoTranscoding,

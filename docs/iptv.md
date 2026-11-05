@@ -198,7 +198,7 @@ Apps show **Live TV** as a folder per category of the user's channels, in line-u
 
 Under **Content › Libraries**, a TV catalog's row sets the name and picture of **Live TV** in apps. With several catalogs, the first one that has each is used.
 
-**For app developers:** the view is a `CollectionFolder` of `CollectionType` `folders`, with the same identifier on every server; its categories are `Folder` items holding `TvChannel` items.
+**For app developers:** the view is a `CollectionFolder` of `CollectionType` `folders`, with the same identifier on every server; its categories are `CollectionFolder` items, as Streamyfin opens no plain `Folder`, holding `TvChannel` items.
 
 ## Replay
 
