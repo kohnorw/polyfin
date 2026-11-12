@@ -86,6 +86,7 @@ const libraries = {
           'An image you upload, or one Polyfin downloads once from an address. Wide 16:9 images fit library tiles best. JPEG, PNG or WebP, at most 10 MB.',
       },
       parental: 'Users under parental control or blocking genres do not see it.',
+      liveTv: 'Apps show it on the Live TV library tile.',
       notFound: {
         automatic: 'Nothing found in this catalog for now, so apps show no image.',
         generated:

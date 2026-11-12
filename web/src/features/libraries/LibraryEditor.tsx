@@ -481,7 +481,10 @@ function LibraryForm({
                 const music = musicContent.get(library.addonId)
                 const iptv = iptvAddons.has(library.addonId)
                 const tv = isTvCatalog(library)
-                const imageShown = !tv && imageOpen === entry.key
+                // A live TV catalog's uploaded image is the Live TV tile's, which apps
+                // load for the server's catalogs only.
+                const imageEditable = !tv || scope === 'shared'
+                const imageShown = imageEditable && imageOpen === entry.key
                 const narrowShown = library.filterable && narrowOpen === entry.key
                 return (
                   <li
@@ -499,7 +502,7 @@ function LibraryForm({
                       {index + 1}
                     </span>
                     <div className="flex min-w-0 items-start gap-3 sm:gap-3.5">
-                      {tv && library.itemId == null ? (
+                      {!imageEditable || (tv && library.itemId == null) ? (
                         <LiveTvThumb />
                       ) : (
                         <LibraryThumb

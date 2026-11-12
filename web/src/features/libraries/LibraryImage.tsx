@@ -328,7 +328,9 @@ export function LibraryImageEditor({
                     label: text.choices[value],
                   }))}
                 />
-                <p className="mt-2 max-w-[64ch] text-small text-ink-3">{help}</p>
+                <p className="mt-2 max-w-[64ch] text-small text-ink-3">
+                  {library.catalogType === 'tv' ? `${help} ${text.liveTv}` : help}
+                </p>
                 {(choice === 'automatic' || choice === 'generated') &&
                   library.image === choice &&
                   library.imageTag === null && (

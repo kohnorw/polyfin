@@ -95,6 +95,7 @@ const libraries: typeof en = {
       },
       parental:
         'Les utilisateurs sous contrôle parental ou qui bloquent des genres ne la voient pas.',
+      liveTv: 'Les applications l’affichent sur la vignette de la bibliothèque TV en direct.',
       notFound: {
         automatic:
           'Rien trouvé dans ce catalogue pour l’instant : les applications n’affichent pas d’image.',
