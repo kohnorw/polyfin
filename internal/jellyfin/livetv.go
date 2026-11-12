@@ -2,6 +2,7 @@ package jellyfin
 
 import (
 	"cmp"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -181,14 +182,20 @@ func channelPlaceholder(item library.Item) MediaSourceInfo {
 
 // liveTvView describes the Live TV view, a view of Jellyfin's own.
 func (h *Handler) liveTvView(r *http.Request, user accounts.User) (BaseItemDto, error) {
-	view := library.Item{ID: liveTvViewID, Kind: library.KindLibrary, Name: "Live TV", CollectionType: "livetv"}
-	dtos, err := h.folderDtos(r, user, []library.Item{view})
+	dtos, err := h.folderDtos(r, user, []library.Item{h.liveTvViewItem()})
 	if err != nil {
 		return BaseItemDto{}, err
 	}
 	dtos[0].Type = "UserView"
 	dtos[0].ChildCount, dtos[0].DateLastMediaAdded = new(0), nil
 	return dtos[0], nil
+}
+
+// liveTvViewItem is Jellyfin's Live TV view, which opens apps' own Live TV
+// pages and guide. Apps list it as TV Guide, beside the Live TV view of
+// categories (see library.LiveCategoriesViewID).
+func (h *Handler) liveTvViewItem() library.Item {
+	return library.Item{ID: liveTvViewID, Kind: library.KindLibrary, Name: h.Library.GuideViewName(), CollectionType: "livetv"}
 }
 
 // addLiveTvView adds the Live TV view to views when user has live TV
@@ -318,7 +325,8 @@ func asksPrograms(r *http.Request, categories programQuery) bool {
 }
 
 // liveChannels lists the user's channels, with the programme each airs
-// now when the guide has it.
+// now when the guide has it: those of the categories the user marked
+// favorite, when there are some (see guideChannels).
 func (h *Handler) liveChannels(w http.ResponseWriter, r *http.Request) {
 	b := bindErrors{}
 	start, limit := b.paging(r, -1)
@@ -328,7 +336,7 @@ func (h *Handler) liveChannels(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	channels, err := h.Library.Channels(r.Context(), user)
+	channels, _, err := h.guideChannels(r.Context(), user)
 	if err != nil {
 		h.browseError(w, r, err)
 		return
@@ -401,6 +409,40 @@ func (h *Handler) favoriteOf(r *http.Request, user accounts.User) ([]library.Ite
 		return nil, err
 	}
 	return slices.DeleteFunc(channels, func(c library.Item) bool { return !state.of(c).IsFavorite }), nil
+}
+
+// guideChannels lists the channels apps' guide shows user: those of the
+// Live TV categories the user marked favorite, in channel order, or every
+// channel when none of the user's categories is. narrowed tells which. The
+// guide asks for no category, so the choice is the user's, kept as
+// favorites, and holds in every app.
+func (h *Handler) guideChannels(ctx context.Context, user accounts.User) (channels []library.Item, narrowed bool, err error) {
+	channels, categories, err := h.Library.ChannelCategories(ctx, user)
+	if err != nil {
+		return nil, false, err
+	}
+	seen := map[accounts.ID]bool{}
+	var ids []accounts.ID
+	for _, id := range categories {
+		if !seen[id] {
+			seen[id] = true
+			ids = append(ids, id)
+		}
+	}
+	data, err := h.UserData.Get(ctx, user.ID, ids)
+	if err != nil {
+		return nil, false, err
+	}
+	var kept []library.Item
+	for i, channel := range channels {
+		if data[categories[i]].Favorite {
+			kept = append(kept, channel)
+		}
+	}
+	if len(kept) == 0 {
+		return channels, false, nil
+	}
+	return kept, true, nil
 }
 
 // favoriteChannels lists the Favorites folder of the Live TV view.
@@ -690,6 +732,19 @@ func (h *Handler) programs(recommended bool) http.HandlerFunc {
 		guide := library.GuideQuery{From: from, To: to, Keep: func(p library.Item) bool { return q.keeps(p, now) }}
 		if len(q.ChannelIds) > 0 {
 			guide.Channels = slices.Collect(maps.Keys(q.channels))
+		} else {
+			// Programmes asked of every channel come from the guide's.
+			channels, narrowed, err := h.guideChannels(r.Context(), user)
+			if err != nil {
+				h.browseError(w, r, err)
+				return
+			}
+			if narrowed {
+				guide.Channels = make([]accounts.ID, 0, len(channels))
+				for _, channel := range channels {
+					guide.Channels = append(guide.Channels, channel.ID)
+				}
+			}
 		}
 		counted := q.EnableTotalRecordCount == nil || *q.EnableTotalRecordCount
 		if limit >= 0 && !counted && !byName && !descending && !(recommended && airing) {

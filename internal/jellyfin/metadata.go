@@ -91,7 +91,7 @@ func (h *Handler) originalItem(r *http.Request, user accounts.User, id accounts.
 		if has, err := h.Library.HasChannels(ctx, user); err != nil || !has {
 			return library.Item{}, cmpErr(err, library.ErrNotFound)
 		}
-		return library.Item{ID: liveTvViewID, Kind: library.KindLibrary, Name: "Live TV", CollectionType: "livetv"}, nil
+		return h.liveTvViewItem(), nil
 	}
 	if c, err := h.Collections.Get(ctx, id); err == nil {
 		titles, err := h.collectionTitles(ctx, user, c)

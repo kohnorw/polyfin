@@ -26,6 +26,8 @@ type words struct {
 	// tvCategories names the TV Categories view (see LiveCategoriesViewID);
 	// other, its folder of channels without a category.
 	tvCategories, other, favorites string
+	// tvGuide names the view that opens apps' own guide (see GuideViewName).
+	tvGuide string
 	// watchlist names the Watchlist view (see WatchlistViewID).
 	watchlist string
 	// language is the language of the words, "en" or "fr".
@@ -36,11 +38,11 @@ var vocabulary = map[string]words{
 	"en": {season: "Season", specials: "Specials", episode: "Episode", chapter: "Chapter",
 		movies: "Movies", shows: "Shows", collections: "Collections",
 		songs: "Songs", albums: "Albums", artists: "Artists", playlists: "Playlists", myMusic: "My music", replay: "Replay",
-		tvCategories: "Live TV", other: "Other", favorites: "Favorites", watchlist: "Watchlist"},
+		tvCategories: "Live TV", other: "Other", favorites: "Favorites", tvGuide: "TV Guide", watchlist: "Watchlist"},
 	"fr": {season: "Saison", specials: "Épisodes spéciaux", episode: "Épisode", chapter: "Chapitre",
 		movies: "Films", shows: "Séries", collections: "Collections",
 		songs: "Titres", albums: "Albums", artists: "Artistes", playlists: "Playlists", myMusic: "Ma musique", replay: "Replay",
-		tvCategories: "TV en direct", other: "Autres", favorites: "Favoris", watchlist: "À regarder"},
+		tvCategories: "TV en direct", other: "Autres", favorites: "Favoris", tvGuide: "Guide TV", watchlist: "À regarder"},
 }
 
 // vocabularyOf returns the words of a server language, English when the

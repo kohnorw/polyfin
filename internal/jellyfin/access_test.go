@@ -295,7 +295,7 @@ func TestLiveTvOffHidesTheViewAndRefusesTheRoutes(t *testing.T) {
 		status, _ := s.call(method, path, app("tv", token), body)
 		return status
 	}
-	if got := views(); !slices.Contains(got, "folders") {
+	if got := views(); !slices.Contains(got, "folders") || !slices.Contains(got, "livetv") {
 		t.Fatalf("views with Live TV: %v", got)
 	}
 	for _, path := range routes {
@@ -305,7 +305,7 @@ func TestLiveTvOffHidesTheViewAndRefusesTheRoutes(t *testing.T) {
 	}
 
 	s.limit(t, user, func(c *accounts.UserChanges) { c.LiveTv = new(false) })
-	if got := views(); slices.Contains(got, "folders") {
+	if got := views(); slices.Contains(got, "folders") || slices.Contains(got, "livetv") {
 		t.Errorf("views without Live TV: %v", got)
 	}
 	for _, path := range routes {

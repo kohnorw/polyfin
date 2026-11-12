@@ -1,6 +1,7 @@
 package jellyfin
 
 import (
+	"encoding/json"
 	"net/http"
 	"slices"
 	"strings"
@@ -162,5 +163,117 @@ func TestLiveTvViewTakesTheCatalogsName(t *testing.T) {
 	s.get(t, "/UserViews", token, &views)
 	if !slices.Contains(itemNames(views.Items), name) {
 		t.Fatalf("views: %q", itemNames(views.Items))
+	}
+}
+
+// TV Guide, Jellyfin's Live TV view, opens apps' own guide beside the Live
+// TV categories. A category the user marks favorite narrows the guide's
+// channels and programmes to it, in every app; with none marked, the guide
+// shows every channel. jellyfin-web, which marks only plain folders
+// favorite, is told a category is one.
+func TestTvGuideFollowsFavoriteCategories(t *testing.T) {
+	t.Parallel()
+	provider := newReplayProvider(t, "")
+	s := newTestServer(t, 10)
+	s.user("member", nil)
+	token := s.signIn("member", "tv")
+	addReplaySource(t, s, provider)
+
+	var views QueryResult
+	s.get(t, "/UserViews", token, &views)
+	names := itemNames(views.Items)
+	at := slices.Index(names, "Live TV")
+	if at < 0 || at+1 >= len(names) || names[at+1] != "TV Guide" || views.Items[at].CollectionType != "folders" ||
+		views.Items[at+1].CollectionType != "livetv" {
+		t.Fatalf("views: %+v", views.Items)
+	}
+	var guideView BaseItemDto
+	if status := s.get(t, "/Items/"+views.Items[at+1].Id, token, &guideView); status != http.StatusOK || guideView.Name != "TV Guide" {
+		t.Fatalf("TV Guide by id: %d %+v", status, guideView)
+	}
+
+	channels := func() []string {
+		t.Helper()
+		var listed QueryResult
+		s.get(t, "/LiveTv/Channels", token, &listed)
+		return slices.Sorted(slices.Values(itemNames(listed.Items)))
+	}
+	programmes := func() []string {
+		t.Helper()
+		var listed QueryResult
+		s.get(t, "/LiveTv/Programs", token, &listed)
+		return itemNames(listed.Items)
+	}
+	favorite := func(id string, on bool) {
+		t.Helper()
+		method := http.MethodPost
+		if !on {
+			method = http.MethodDelete
+		}
+		if status, body := s.call(method, "/UserFavoriteItems/"+id, app("tv", token), nil); status != http.StatusOK {
+			t.Fatalf("favorite %s %v: %d %s", id, on, status, body)
+		}
+	}
+	if got := channels(); !slices.Equal(got, []string{"Orbe", "Quill", "Zeb One"}) {
+		t.Fatalf("every channel: %q", got)
+	}
+	if got := programmes(); !slices.Contains(got, "Now On") {
+		t.Fatalf("every programme: %q", got)
+	}
+
+	folders := liveCategories(t, s, token)
+	if !slices.Equal(itemNames(folders), []string{"News", "Sport"}) || folders[1].Type != "CollectionFolder" {
+		t.Fatalf("folders: %+v", folders)
+	}
+	news, sport := folders[0].Id, folders[1].Id
+
+	favorite(sport, true)
+	if got := channels(); !slices.Equal(got, []string{"Orbe"}) {
+		t.Errorf("the guide of Sport: %q", got)
+	}
+	if got := programmes(); slices.Contains(got, "Now On") {
+		t.Errorf("programmes of Sport: %q", got)
+	}
+	if folders := liveCategories(t, s, token); len(folders) != 2 || !folders[1].UserData.IsFavorite || folders[0].UserData.IsFavorite {
+		t.Errorf("folders with Sport chosen: %+v", folders)
+	}
+	// The categories themselves still list every channel.
+	var inside QueryResult
+	s.get(t, "/Items?ParentId="+news, token, &inside)
+	if got := itemNames(inside.Items); !slices.Equal(got, []string{"Zeb One", "Quill"}) {
+		t.Errorf("News with Sport chosen: %q", got)
+	}
+
+	favorite(news, true)
+	if got := channels(); !slices.Equal(got, []string{"Orbe", "Quill", "Zeb One"}) {
+		t.Errorf("the guide of News and Sport: %q", got)
+	}
+	favorite(sport, false)
+	if got := channels(); !slices.Equal(got, []string{"Quill", "Zeb One"}) {
+		t.Errorf("the guide of News: %q", got)
+	}
+	if got := programmes(); !slices.Contains(got, "Now On") {
+		t.Errorf("programmes of News: %q", got)
+	}
+	favorite(news, false)
+	if got := channels(); !slices.Equal(got, []string{"Orbe", "Quill", "Zeb One"}) {
+		t.Errorf("the guide with no category chosen: %q", got)
+	}
+
+	// jellyfin-web is told the categories are plain folders.
+	webApp := `MediaBrowser Client="Jellyfin Web", Device="Firefox", DeviceId="web-id", Version="10.11.0"`
+	status, body := s.call(http.MethodPost, "/Users/AuthenticateByName", webApp, map[string]string{"Username": "member", "Pw": "correct horse"})
+	var signedIn AuthenticationResult
+	if status != http.StatusOK || json.Unmarshal(body, &signedIn) != nil || signedIn.AccessToken == "" {
+		t.Fatalf("jellyfin-web's sign-in: %d %s", status, body)
+	}
+	web := webApp + `, Token="` + signedIn.AccessToken + `"`
+	var webFolders QueryResult
+	if status, body := s.call(http.MethodGet, "/Items?ParentId="+views.Items[at].Id, web, nil); status != http.StatusOK ||
+		json.Unmarshal(body, &webFolders) != nil {
+		t.Fatalf("categories in jellyfin-web: %d %s", status, body)
+	}
+	if len(webFolders.Items) != 2 || webFolders.Items[0].Type != "Folder" || !webFolders.Items[0].IsFolder {
+		t.Errorf("categories in jellyfin-web: %+v", webFolders.Items)
 	}
 }

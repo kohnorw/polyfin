@@ -63,6 +63,9 @@ type userState struct {
 	// library holds collections: an administrator chose the app (see
 	// appCollectionType).
 	collectionLibraries bool
+	// webApp tells the app asking is jellyfin-web (see webClient), which
+	// offers to mark a Live TV category favorite only as a plain folder.
+	webApp bool
 }
 
 // userState loads what user did with items, which of its songs have
@@ -90,7 +93,7 @@ func (h *Handler) userState(ctx context.Context, user accounts.User, items []lib
 		return userState{}, err
 	}
 	state := userState{data: data, counts: counts, contents: map[accounts.ID]*library.Contents{}, lyrics: h.Lyrics.Known(ctx, songs),
-		gains: h.gains(ctx, items), collectionLibraries: h.collectionLibrariesByType(ctx)}
+		gains: h.gains(ctx, items), collectionLibraries: h.collectionLibrariesByType(ctx), webApp: webClient(callerFrom(ctx).Device.Client)}
 	var incomplete []accounts.ID
 	for _, item := range items {
 		if item.Kind == library.KindSeries && item.Contents == nil && counts[item.ID].Played > 0 {

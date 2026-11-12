@@ -114,3 +114,25 @@ func (s *Service) liveCategoryItem(ctx context.Context, v view, r record) (Item,
 	}
 	return liveCategoryFolder(r.Channel), nil
 }
+
+// GuideViewName names the view that opens apps' own guide, in the server's
+// language: Jellyfin's Live TV view, listed beside the Live TV categories.
+func (s *Service) GuideViewName() string {
+	return vocabularyOf(s.settings().Language).tvGuide
+}
+
+// ChannelCategories lists the user's channels as Channels does, with the
+// category folder each is in (see LiveCategoriesViewID), at the same index.
+// Marking a folder favorite narrows apps' guide to its channels.
+func (s *Service) ChannelCategories(ctx context.Context, user accounts.User) ([]Item, []accounts.ID, error) {
+	v, err := s.view(ctx, user)
+	if err != nil {
+		return nil, nil, err
+	}
+	channels, records := s.channels(ctx, v)
+	categories := make([]accounts.ID, len(channels))
+	for i, channel := range channels {
+		categories[i] = liveCategoryFolder(liveCategoryOf(v, channel)).ID
+	}
+	return s.overridden(channels), categories, s.save(ctx, records)
+}
