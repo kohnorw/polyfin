@@ -250,17 +250,12 @@ func (h *Handler) views(w http.ResponseWriter, r *http.Request) {
 }
 
 // userViews describes the views user sees, in the order apps list them:
-// their libraries and Polyfin's Live TV, TV Guide, Playlists, Collections
+// their libraries and Polyfin's Live TV, Replay, Playlists, Collections
 // and Watchlist views, those they hide included when includeHidden is set.
 func (h *Handler) userViews(r *http.Request, user accounts.User, includeHidden bool) ([]BaseItemDto, error) {
 	items, err := h.libraryViews(r, user)
 	if err == nil {
 		items, err = h.addLiveCategoriesView(r, user, items)
-	}
-	// Apps' own guide opens only from Jellyfin's Live TV view: it follows
-	// the categories, as TV Guide.
-	if err == nil {
-		items, err = h.addLiveTvView(r, user, items)
 	}
 	if err == nil {
 		items, err = h.addPlaylistsView(r, user, items)

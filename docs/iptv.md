@@ -200,15 +200,7 @@ Under **Content › Libraries**, a TV catalog's row sets the name and picture of
 
 A **Favorites** folder comes first once the user has favorite channels. A channel's details list its next programmes in its description, in the server's time zone.
 
-## TV Guide
-
-Beside **Live TV**, apps list **TV Guide**, which opens the app's own Live TV pages and programme guide.
-
-A user chooses what the guide shows by marking categories favorite: the heart on a category folder in **Live TV**. The guide then lists only the channels of the categories marked, and its programmes come from those channels; with none marked, it lists every channel. The choice is the user's own and holds in every app, so a category marked in the web player narrows the guide in Streamyfin too. The category folders themselves keep listing all their channels.
-
-The web player offers the heart on category folders; apps that offer no favorite on folders use the choice made there.
-
-**For app developers:** the view is a `CollectionFolder` of `CollectionType` `folders`, with the same identifier on every server; its categories are `CollectionFolder` items, as Streamyfin opens no plain `Folder`, holding `TvChannel` items. jellyfin-web (`Client` `Jellyfin Web`) is told they are `Folder` items, the type it marks favorite. TV Guide is Jellyfin's Live TV `UserView`, of `CollectionType` `livetv`; `/LiveTv/Channels`, and `/LiveTv/Programs` when it names no channel, follow the user's favorite categories.
+**For app developers:** the view is a `CollectionFolder` of `CollectionType` `folders`, with the same identifier on every server; its categories are `CollectionFolder` items, as Streamyfin opens no plain `Folder`, holding `TvChannel` items.
 
 ## Replay
 

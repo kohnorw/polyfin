@@ -387,18 +387,6 @@ func appCollectionType(item library.Item, collectionLibraries bool) string {
 	return item.CollectionType
 }
 
-// appItemType is the type apps are told an item has. A Live TV category is
-// a CollectionFolder, as Streamyfin opens no plain Folder; jellyfin-web is
-// told a Folder, the type it lets users mark favorite, which narrows the
-// guide to the category (see guideChannels). The Favorites folder stays as
-// it is: marking it would choose nothing.
-func appItemType(item library.Item, webApp bool) string {
-	if webApp && item.Kind == library.KindLiveCategory && item.ID != library.LiveFavoritesID {
-		return "Folder"
-	}
-	return itemTypes[item.Kind]
-}
-
 // collectionLibrariesByType reports whether the app of ctx's caller is told
 // an addon's collection library holds collections: an administrator chose
 // it, by the name it sends in the Client field of its authorization. A
@@ -424,7 +412,7 @@ func (h *Handler) newItemDto(item library.Item, fields fieldSet, detail bool, st
 		Id:                item.ID.String(),
 		OfficialRating:    item.OfficialRating,
 		IsFolder:          folder,
-		Type:              appItemType(item, state.webApp),
+		Type:              itemTypes[item.Kind],
 		Status:            item.Status,
 		CollectionType:    appCollectionType(item, state.collectionLibraries),
 		SeriesName:        item.SeriesName,
