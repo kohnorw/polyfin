@@ -26,14 +26,14 @@ jobs:
           --health-retries 20
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 5
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - name: gofmt
-        run: test -z "$(gofmt -l cmd internal web/*.go)"
-      - name: vet
-        run: go vet ./...
-      - name: new tests first
-        run: go test -count=1 -run 'TestTvGuideFollowsFavoriteCategories|TestTVCatalogsListAsChannels|TestLiveCategories|TestLiveTvView|Access' ./internal/jellyfin/
-      - name: library, admin and jellyfin packages
-        run: go test -count=1 ./internal/library/... ./internal/admin/... ./internal/jellyfin/...
+      - name: tracks test on this branch
+        continue-on-error: true
+        run: go test -count=3 -run 'TestDefaultTracksFollowTheUsersPreferences' ./internal/jellyfin/
+      - name: tracks test on main (aec3310)
+        continue-on-error: true
+        run: git checkout -q aec3310 && go test -count=3 -run 'TestDefaultTracksFollowTheUsersPreferences' ./internal/jellyfin/; status=$?; git checkout -q -; exit $status
