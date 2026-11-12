@@ -1,0 +1,39 @@
+# Temporary: checks the TV Guide branch. Not merged to main.
+name: verify-tv-guide
+on:
+  push:
+    branches: [feat/tv-guide-categories]
+permissions:
+  contents: read
+jobs:
+  go:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    env:
+      POLYFIN_TEST_DATABASE_URL: postgresql://polyfin:polyfin@127.0.0.1:5432/polyfin
+    services:
+      postgres:
+        image: mirror.gcr.io/library/postgres:18.6@sha256:5a5a84b19854a9ffaa54082c166ff4ec27473a361e496e5ea167f298f2da9722
+        env:
+          POSTGRES_DB: polyfin
+          POSTGRES_USER: polyfin
+          POSTGRES_PASSWORD: polyfin
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U polyfin -d polyfin"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: gofmt
+        run: test -z "$(gofmt -l cmd internal web/*.go)"
+      - name: vet
+        run: go vet ./...
+      - name: new tests first
+        run: go test -count=1 -run 'TestTvGuideFollowsFavoriteCategories|TestTVCatalogsListAsChannels|TestLiveCategories|TestLiveTvView|Access' ./internal/jellyfin/
+      - name: library, admin and jellyfin packages
+        run: go test -count=1 ./internal/library/... ./internal/admin/... ./internal/jellyfin/...
