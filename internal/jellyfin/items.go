@@ -472,9 +472,13 @@ func (h *Handler) newItemDto(item library.Item, fields fieldSet, detail bool, st
 		dto.DisplayOrder = item.DisplayOrder
 	case library.KindCollection:
 		dto.DisplayOrder = "PremiereDate"
-	case library.KindFolder:
-		// Listings count a folder's videos when asked; its own description
-		// always does (see below).
+	}
+	switch item.Kind {
+	case library.KindFolder, library.KindSeries, library.KindSeason:
+		// Listings count a folder's videos, a series' seasons and a
+		// season's episodes when asked; their own descriptions always do
+		// (see below). Jellyfin for Android TV shows a season's episodes
+		// only when its listing counts them.
 		if c := item.Contents; c != nil && !detail {
 			if fields.has("ChildCount") {
 				dto.ChildCount = new(c.Children)
@@ -746,7 +750,18 @@ func itemTypeFilter(r *http.Request) func(library.Item) bool {
 		return slices.ContainsFunc(list, func(t string) bool { return strings.EqualFold(t, value) })
 	}
 	folders, others := matches(filters, "IsFolder"), matches(filters, "IsNotFolder")
+	// Items left out by id, as Jellyfin for Android TV leaves the season
+	// shown out of its row of the series' other seasons.
+	var excluded []accounts.ID
+	for _, raw := range listQuery(r, "excludeItemIds") {
+		if id, ok := parseGUID(raw); ok {
+			excluded = append(excluded, id)
+		}
+	}
 	return func(item library.Item) bool {
+		if slices.Contains(excluded, item.ID) {
+			return false
+		}
 		named := func(list []string) bool {
 			return slices.ContainsFunc(list, func(t string) bool { return namesType(t, item.Kind) })
 		}
