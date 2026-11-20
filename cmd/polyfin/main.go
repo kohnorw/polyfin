@@ -667,7 +667,7 @@ func serve(ctx context.Context, cfg config.Config, environ []string, restore *pe
 		if err != nil {
 			return watchlist.Made{}, err
 		}
-		return lib.WatchlistEntries(library.Background(ctx), user, title)
+		return lib.WatchlistEntries(library.Background(stremio.WithOrigin(ctx, stremio.OriginWatchlists)), user, title)
 	})
 	// The titles every import did not find are kept, each with what it
 	// would import, and a user may link one to its IMDb or TMDB title:
@@ -899,6 +899,7 @@ func serve(ctx context.Context, cfg config.Config, environ []string, restore *pe
 			Addons:           addonClient,
 			SearchesLeaveOut: lib.SearchesLeaveOut,
 			StreamsTimingOut: lib.StreamsTimingOut,
+			BackgroundPause:  lib.BackgroundPause,
 			Cache:            sources,
 			Folders:          work,
 			MoveDataDirTo:    cfg.MoveDataDirTo,
@@ -1020,7 +1021,10 @@ func serve(ctx context.Context, cfg config.Config, environ []string, restore *pe
 	if err := registry.Load(ctx, tasks.NewStore(pool)); err != nil {
 		return fmt.Errorf("read the tasks' triggers and last runs: %w", err)
 	}
-	registry.Start(ctx)
+	// The tasks' requests to addons count as background work's in Health,
+	// as those of the kind each task names, such as its catalogs, where it
+	// names one.
+	registry.Start(stremio.InBackground(ctx))
 	// Recordings in progress when ctx ends are finished, as partial, when
 	// Polyfin starts again.
 	go recorder.Run(ctx)

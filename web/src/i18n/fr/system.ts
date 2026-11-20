@@ -379,7 +379,7 @@ const system: typeof en = {
       },
       addonsTitle: 'Addons',
       addonsHelp:
-        'D’après les requêtes faites pour les applis depuis le démarrage du serveur. «\u202fVérifier\u202f» demande une fois son manifeste à l’addon, au plus une fois par minute.',
+        'D’après les requêtes faites à chaque addon depuis le démarrage du serveur, pour les applis comme en arrière-plan. «\u202fVérifier\u202f» demande une fois son manifeste à l’addon, au plus une fois par minute.',
       noAddons: 'Le serveur n’a aucun addon.',
       addonStatus: {
         ok: 'Répond',
@@ -402,6 +402,37 @@ const system: typeof en = {
       requestsTerm: 'Requêtes',
       requests: (count: number, failures: number) =>
         `${count} ${count === 1 ? 'requête' : 'requêtes'}, ${failures} en échec`,
+      addonRateLimited: 'Signale des limites de requêtes',
+      backgroundPaused: (until: string, reason: 'rate_limited' | 'timeout') =>
+        reason === 'rate_limited'
+          ? `Les requêtes de Polyfin en arrière-plan vers son serveur sont suspendues jusqu’à ${until}, car il en a refusé une pour excès de requêtes. Les lectures l’interrogent toujours.`
+          : `Les requêtes de Polyfin en arrière-plan vers son serveur sont suspendues jusqu’à ${until}, car il n’a pas répondu à temps aux demandes de versions. Les lectures l’interrogent toujours.`,
+      trafficTitle: 'Requêtes par origine',
+      trafficNone: 'Aucune requête ces dernières 24 heures.',
+      trafficSummary: (count: number, background: number) =>
+        count === 0
+          ? 'Aucune requête dans la dernière heure.'
+          : `${count} ${count === 1 ? 'requête' : 'requêtes'} dans la dernière heure, dont ${background} en arrière-plan (${Math.round((background / count) * 100)}\u202f%)`,
+      trafficOrigin: 'Origine',
+      trafficHour: 'Dernière heure',
+      trafficDay: 'Dernières 24 h',
+      trafficOrigins: {
+        apps: 'Lectures et pages des applis',
+        preload: 'Préchargement',
+        watchlists: 'Vérification des listes à regarder',
+        catalogs: 'Catalogues et rangées d’accueil',
+        ratings: 'Classifications',
+        refresh: 'Actualisation des sources',
+        imports: 'Imports',
+        other: 'Autre travail en arrière-plan',
+      },
+      trafficFailed: (count: number) => `${count} en échec`,
+      noticesTitle: 'Messages dans ses réponses',
+      noticesHelp:
+        'Ce que ses réponses ont dit au lieu de proposer quelque chose à lire, sur les dernières 24 heures, comme l’échec d’un addon qu’il rassemble. Les liens et les clés sont masqués.',
+      noticeRateLimited: 'Trop de requêtes',
+      noticeSeen: (answers: number, background: number, since: string) =>
+        `${answers} ${answers === 1 ? 'réponse' : 'réponses'} depuis ${since}, dont ${background} à des requêtes en arrière-plan`,
       check: 'Vérifier',
       checkLabel: (name: string) => `Vérifier ${name} maintenant`,
       checking: 'Vérification…',

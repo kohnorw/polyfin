@@ -21,6 +21,24 @@ func TestRedactHidesAddressesAndSecrets(t *testing.T) {
 	}
 }
 
+// RedactText replaces a URL whole, whatever its form, and a word that
+// looks like a key; it keeps words, figures and short codes.
+func TestRedactTextHidesAddressesWholeAndKeyLikeWords(t *testing.T) {
+	t.Parallel()
+	for text, want := range map[string]string{
+		`Failed to fetch https://sub.example/eyJrZXkiOiJ4In0/manifest.json (429)`: `Failed to fetch <link> (429)`,
+		`see //sub.example/config or sub.example:8080/path?token=1`:               `see <link> or <link>`,
+		`Refused, api_key=abc, password: hunter2`:                                 `Refused, api_key=<redacted>, password: <redacted>`,
+		`Debrid key A1b2C3d4E5f6G7h8I9j0K1 refused`:                               `Debrid key <redacted> refused`,
+		`Too Many Requests (retry after 1m), 23 streams hidden by your filters`:   `Too Many Requests (retry after 1m), 23 streams hidden by your filters`,
+		`internationalization_and_localization stays, as a word`:                  `internationalization_and_localization stays, as a word`,
+	} {
+		if got := RedactText(text); got != want {
+			t.Errorf("RedactText(%s)\n got %s\nwant %s", text, got, want)
+		}
+	}
+}
+
 func TestRingKeepsTheLastLinesWithinItsCapacity(t *testing.T) {
 	t.Parallel()
 	ring := NewRing(45)

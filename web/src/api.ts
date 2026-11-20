@@ -5175,6 +5175,35 @@ export type AddonHealth = {
   responseTime: number
   requests: number
   failures: number
+  /**
+   * The requests of the last hour and of the last 24 hours, by origin, each origin once: `apps`
+   * for those users wait for, the others for background work.
+   */
+  hour: AddonOriginCount[]
+  day: AddonOriginCount[]
+  /** The notices its answers carried lately instead of something to play, the latest first. */
+  notices: AddonNotice[]
+  /** The pause of the background requests to its server; null when none runs. */
+  backgroundPause: { until: string; reason: 'rate_limited' | 'timeout' } | null
+}
+
+/** What a request to an addon was made for: `apps` when a user waits, else background work. */
+export type AddonOrigin =
+  'apps' | 'preload' | 'watchlists' | 'catalogs' | 'ratings' | 'refresh' | 'imports' | 'other'
+
+export type AddonOriginCount = { origin: AddonOrigin; requests: number; failures: number }
+
+/**
+ * A text an addon's answers carried, URLs and keys hidden: `answers` counts them since `firstAt`,
+ * `background` those to background work.
+ */
+export type AddonNotice = {
+  text: string
+  rateLimited: boolean
+  answers: number
+  background: number
+  firstAt: string
+  lastAt: string
 }
 
 /**

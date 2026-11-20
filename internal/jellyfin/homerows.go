@@ -7,6 +7,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/iptv"
 	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/stremio"
 )
 
 // With playback prepared ahead in the settings, the titles of Continue
@@ -131,7 +132,7 @@ func (h *Handler) listAhead(user accounts.User, items []library.Item) {
 // paced (see library.Background). An IPTV source is checked once for the
 // listing, which describes its title more than once (see iptv.CheckOnce).
 func (h *Handler) listVersions(user accounts.User, title accounts.ID, prepare bool) {
-	ctx, cancel := context.WithTimeout(iptv.CheckOnce(library.Background(context.Background())), preparationTimeout)
+	ctx, cancel := context.WithTimeout(iptv.CheckOnce(library.Background(stremio.WithOrigin(context.Background(), stremio.OriginCatalogs))), preparationTimeout)
 	defer cancel()
 	versions, err := h.Library.Versions(ctx, user, title)
 	if err != nil {

@@ -33,12 +33,13 @@ const (
 )
 
 // healthLimit bounds the addons whose health is kept: past it, the one
-// asked least recently is forgotten.
+// asked least recently is forgotten. Each keeps about 6 KB of counts (see
+// traffic) and noticesKept notices.
 const healthLimit = 1000
 
-// Health is how the requests Polyfin made to an addon for apps went since
-// the server started: nothing is requested to learn it. An answer the
-// addon gave, even "not found", is a success.
+// Health is how the requests Polyfin made to an addon went since the
+// server started, for apps and in the background: nothing is requested to
+// learn it. An answer the addon gave, even "not found", is a success.
 type Health struct {
 	// LastSuccess and LastFailure are when a request last succeeded and
 	// failed, zero when none did.
@@ -57,15 +58,30 @@ type Health struct {
 	// Client.CatalogsWait); zero when none runs. Failure is then
 	// FailureRateLimited, whatever answered since.
 	CatalogsWaitUntil time.Time
+	// Traffic counts the requests of the last hour and day by origin (see
+	// WithOrigin).
+	Traffic Traffic
+	// Notices are the notices its answers carried within noticeLife, the
+	// latest first, noticesKept at most.
+	Notices []Notice
 }
 
-// healthRecords keeps the Health of each addon, by base URL: the address
+// healthRecords keeps the record of each addon, by base URL: the address
 // is a key only, never shown; and waits, the end of the wait each host
 // asked for.
 type healthRecords struct {
 	mu      sync.Mutex
-	byAddon map[string]*Health
+	byAddon map[string]*addonRecord
 	waits   map[string]time.Time
+}
+
+// addonRecord is what is kept of an addon's requests: its Health but for
+// Traffic and Notices, which traffic and notices keep. traffic is counted
+// without healthRecords.mu (see traffic.count).
+type addonRecord struct {
+	health  Health
+	traffic traffic
+	notices []Notice
 }
 
 // record accounts for a request for target to the addon manifestURL
@@ -80,24 +96,39 @@ func (h *healthRecords) record(ctx context.Context, manifestURL, target string, 
 	key := BaseURL(manifestURL)
 	metrics.AddonRequest(key, resourceOf(manifestURL, target), now.Sub(started), failure == "")
 	h.mu.Lock()
-	defer h.mu.Unlock()
-	health := h.byAddon[key]
-	if health == nil {
+	record := h.byAddon[key]
+	if record == nil {
 		if len(h.byAddon) >= healthLimit {
 			h.forgetOldest()
 		}
-		health = &Health{}
-		h.byAddon[key] = health
+		record = &addonRecord{}
+		h.byAddon[key] = record
 	}
+	health := &record.health
 	health.Requests++
 	health.Failure = failure
 	if failure != "" {
 		health.Failures++
 		health.LastFailure = now
+	} else {
+		health.LastSuccess = now
+		health.ResponseTime = now.Sub(started)
+	}
+	h.mu.Unlock()
+	record.traffic.count(now, originOf(ctx), failure != "")
+}
+
+// noticed records the notices an answer of the addon manifestURL installs
+// carried, as kept (see noticesOf), to a request on ctx.
+func (h *healthRecords) noticed(ctx context.Context, manifestURL string, texts []string) {
+	if len(texts) == 0 {
 		return
 	}
-	health.LastSuccess = now
-	health.ResponseTime = now.Sub(started)
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if record := h.byAddon[BaseURL(manifestURL)]; record != nil {
+		record.notices = note(record.notices, texts, originOf(ctx), time.Now())
+	}
 }
 
 // resourceOf names the resource target asks of the addon manifestURL
@@ -123,7 +154,8 @@ func resourceOf(manifestURL, target string) string {
 func (h *healthRecords) forgetOldest() {
 	var oldest string
 	var at time.Time
-	for key, health := range h.byAddon {
+	for key, record := range h.byAddon {
+		health := &record.health
 		last := health.LastSuccess
 		if health.LastFailure.After(last) {
 			last = health.LastFailure
@@ -140,12 +172,14 @@ func (h *healthRecords) forgetOldest() {
 func (c *Client) Health(manifestURL string) (Health, bool) {
 	c.health.mu.Lock()
 	defer c.health.mu.Unlock()
-	health, ok := c.health.byAddon[BaseURL(manifestURL)]
+	record, ok := c.health.byAddon[BaseURL(manifestURL)]
 	if !ok {
 		return Health{}, false
 	}
-	result := *health
-	if until := c.health.waits[HostOf(manifestURL)]; time.Now().Before(until) {
+	now := time.Now()
+	result := record.health
+	result.Traffic, result.Notices = record.traffic.totals(now), recent(record.notices, now)
+	if until := c.health.waits[HostOf(manifestURL)]; now.Before(until) {
 		result.CatalogsWaitUntil, result.Failure = until, FailureRateLimited
 	}
 	return result, true

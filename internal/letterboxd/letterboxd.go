@@ -40,6 +40,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/importlinks"
 	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/userdata"
 	"github.com/moodiness/polyfin/internal/watchlist"
 )
@@ -90,7 +91,7 @@ type Service struct {
 
 // New returns a service importing with options.
 func New(options Options) *Service {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(stremio.WithOrigin(context.Background(), stremio.OriginImports))
 	return &Service{titles: options.Titles, userData: options.UserData, watchlist: options.Watchlist, links: options.Links,
 		logger: options.Logger, now: time.Now, ctx: ctx, cancel: cancel, imports: map[accounts.ID]*Status{},
 		stops: map[accounts.ID]context.CancelFunc{}, reserved: map[accounts.ID]bool{}}

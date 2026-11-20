@@ -555,6 +555,7 @@ const refreshBatch = 500
 // same for the titles they list; this does it ahead, when an administrator
 // starts it.
 func (s *Service) RefreshRatings(ctx context.Context) (int, error) {
+	ctx = stremio.WithOrigin(ctx, stremio.OriginRatings)
 	v, err := s.view(ctx, accounts.User{})
 	if err != nil {
 		return 0, err

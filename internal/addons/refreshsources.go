@@ -46,6 +46,7 @@ type SourcesRefreshed struct {
 // is and logged; the run goes on with the next. Only ctx ending, or the
 // addons not being listed, ends it with an error.
 func (s *Store) RefreshSources(ctx context.Context, users []accounts.User, settings accounts.Settings, logger *slog.Logger) (SourcesRefreshed, error) {
+	ctx = stremio.WithOrigin(ctx, stremio.OriginRefresh)
 	type source struct {
 		scope    Scope
 		addon    Addon

@@ -374,7 +374,7 @@ const system: typeof en = {
       },
       addonsTitle: 'Complementos',
       addonsHelp:
-        'Com base nas requisições feitas para os aplicativos desde que o servidor foi iniciado. “Verificar” solicita o manifesto a um complemento uma vez, no máximo uma vez por minuto.',
+        'Com base nas requisições feitas a cada complemento desde que o servidor foi iniciado, para os aplicativos e em segundo plano. “Verificar” solicita o manifesto a um complemento uma vez, no máximo uma vez por minuto.',
       noAddons: 'O servidor não tem nenhum complemento.',
       addonStatus: {
         ok: 'Respondendo',
@@ -397,6 +397,37 @@ const system: typeof en = {
       requestsTerm: 'Requisições',
       requests: (count: number, failures: number) =>
         `${count} ${count === 1 ? 'requisição' : 'requisições'}, ${failures} com falha`,
+      addonRateLimited: 'Relata limites de requisições',
+      backgroundPaused: (until: string, reason: 'rate_limited' | 'timeout') =>
+        reason === 'rate_limited'
+          ? `As requisições em segundo plano do Polyfin ao servidor dele estão pausadas até as ${until}, porque ele recusou uma por excesso de requisições. As reproduções continuam consultando-o.`
+          : `As requisições em segundo plano do Polyfin ao servidor dele estão pausadas até as ${until}, porque ele não respondeu a tempo aos pedidos de versões. As reproduções continuam consultando-o.`,
+      trafficTitle: 'Requisições por origem',
+      trafficNone: 'Nenhuma requisição nas últimas 24 horas.',
+      trafficSummary: (count: number, background: number) =>
+        count === 0
+          ? 'Nenhuma requisição na última hora.'
+          : `${count} ${count === 1 ? 'requisição' : 'requisições'} na última hora, ${background} delas em segundo plano (${Math.round((background / count) * 100)}%)`,
+      trafficOrigin: 'Origem',
+      trafficHour: 'Última hora',
+      trafficDay: 'Últimas 24 h',
+      trafficOrigins: {
+        apps: 'Reproduções e páginas nos aplicativos',
+        preload: 'Pré-carregamento',
+        watchlists: 'Verificação das listas para assistir',
+        catalogs: 'Catálogos e linhas iniciais',
+        ratings: 'Classificações',
+        refresh: 'Atualização das fontes',
+        imports: 'Importações',
+        other: 'Outro trabalho em segundo plano',
+      },
+      trafficFailed: (count: number) => `${count} com falha`,
+      noticesTitle: 'Avisos nas respostas dele',
+      noticesHelp:
+        'O que as respostas dele disseram em vez de oferecer algo para reproduzir, nas últimas 24 horas, como a falha de um complemento que ele reúne. Links e chaves ficam ocultos.',
+      noticeRateLimited: 'Requisições demais',
+      noticeSeen: (answers: number, background: number, since: string) =>
+        `${answers} ${answers === 1 ? 'resposta' : 'respostas'} desde ${since}, ${background} delas para o trabalho em segundo plano`,
       check: 'Verificar',
       checkLabel: (name: string) => `Verificar ${name} agora`,
       checking: 'Verificando…',

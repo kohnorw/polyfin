@@ -621,10 +621,10 @@ func unmarshal(data []byte, v any) error {
 // is not the title's (see Describes) is ErrInvalidResponse, a failed
 // description, so that it is never kept as the title's; one of another
 // identifier that says the addon refused the request for its rate is,
-// whatever its type, and ErrRateLimited too. A description the addon
-// gives by another identifier is returned under the one asked, which its
-// title is recorded by: what is recorded from it, its seasons among it,
-// names that title and no other.
+// whatever its type, and ErrRateLimited too. Both are notices, recorded
+// for Health. A description the addon gives by another identifier is
+// returned under the one asked, which its title is recorded by: what is
+// recorded from it, its seasons among it, names that title and no other.
 func (c *Client) Meta(ctx context.Context, manifestURL, metaType, id string, confined bool) (Meta, error) {
 	body, err := c.get(ctx, manifestURL, ResourceURL(manifestURL, "/meta/"+encodeComponent(metaType)+"/"+encodeComponent(id)+".json"), confined, c.timeout)
 	if err != nil {
@@ -639,10 +639,15 @@ func (c *Client) Meta(ctx context.Context, manifestURL, metaType, id string, con
 	if response.Meta == nil || response.Meta.ID == "" {
 		return Meta{}, ErrNotFound
 	}
+	noticed := func() {
+		c.health.noticed(ctx, manifestURL, []string{keptNotice(joinTexts(response.Meta.Name, response.Meta.Description))})
+	}
 	if response.Meta.ID != id && SaysRateLimited(response.Meta.Name, response.Meta.Description) {
+		noticed()
 		return Meta{}, fmt.Errorf("%w: %w: meta: asked for %s %q", ErrInvalidResponse, ErrRateLimited, metaType, id)
 	}
 	if !response.Meta.Describes(metaType, id) {
+		noticed()
 		return Meta{}, fmt.Errorf("%w: meta: asked for %s %q, the addon described %s %q", ErrInvalidResponse, metaType, id,
 			response.Meta.Type, response.Meta.Name)
 	}

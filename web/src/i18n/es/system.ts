@@ -377,7 +377,7 @@ const system: typeof en = {
       },
       addonsTitle: 'Extensiones',
       addonsHelp:
-        'Según las solicitudes hechas para las aplicaciones desde que se inició el servidor. «Comprobar» pide su manifiesto a una extensión una vez, como máximo una vez por minuto.',
+        'Según las solicitudes hechas a cada extensión desde que se inició el servidor, para las aplicaciones y en segundo plano. «Comprobar» pide su manifiesto a una extensión una vez, como máximo una vez por minuto.',
       noAddons: 'El servidor no tiene ninguna extensión.',
       addonStatus: {
         ok: 'Responde',
@@ -400,6 +400,37 @@ const system: typeof en = {
       requestsTerm: 'Solicitudes',
       requests: (count: number, failures: number) =>
         `${count} ${count === 1 ? 'solicitud' : 'solicitudes'}, ${failures} ${failures === 1 ? 'fallida' : 'fallidas'}`,
+      addonRateLimited: 'Informa de límites de solicitudes',
+      backgroundPaused: (until: string, reason: 'rate_limited' | 'timeout') =>
+        reason === 'rate_limited'
+          ? `Las solicitudes en segundo plano de Polyfin a su servidor se pausan hasta las ${until}, porque rechazó una por exceso de solicitudes. Las reproducciones siguen consultándola.`
+          : `Las solicitudes en segundo plano de Polyfin a su servidor se pausan hasta las ${until}, porque no respondió a tiempo a las peticiones de versiones. Las reproducciones siguen consultándola.`,
+      trafficTitle: 'Solicitudes por origen',
+      trafficNone: 'Ninguna solicitud en las últimas 24 horas.',
+      trafficSummary: (count: number, background: number) =>
+        count === 0
+          ? 'Ninguna solicitud en la última hora.'
+          : `${count} ${count === 1 ? 'solicitud' : 'solicitudes'} en la última hora, ${background} de ellas en segundo plano (${Math.round((background / count) * 100)} %)`,
+      trafficOrigin: 'Origen',
+      trafficHour: 'Última hora',
+      trafficDay: 'Últimas 24 h',
+      trafficOrigins: {
+        apps: 'Reproducciones y páginas en las aplicaciones',
+        preload: 'Precarga',
+        watchlists: 'Comprobación de las listas para ver',
+        catalogs: 'Catálogos y filas de inicio',
+        ratings: 'Clasificaciones',
+        refresh: 'Actualización de las fuentes',
+        imports: 'Importaciones',
+        other: 'Otro trabajo en segundo plano',
+      },
+      trafficFailed: (count: number) => `${count} ${count === 1 ? 'fallida' : 'fallidas'}`,
+      noticesTitle: 'Avisos en sus respuestas',
+      noticesHelp:
+        'Lo que dijeron sus respuestas en lugar de ofrecer algo que reproducir, en las últimas 24 horas, como el fallo de una extensión que reúne. Los enlaces y las claves se ocultan.',
+      noticeRateLimited: 'Demasiadas solicitudes',
+      noticeSeen: (answers: number, background: number, since: string) =>
+        `${answers} ${answers === 1 ? 'respuesta' : 'respuestas'} desde ${since}, ${background} de ellas al trabajo en segundo plano`,
       check: 'Comprobar',
       checkLabel: (name: string) => `Comprobar ${name} ahora`,
       checking: 'Comprobando…',

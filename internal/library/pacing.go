@@ -360,6 +360,18 @@ func (p *pacing) timingOut(host string, addon accounts.ID) (time.Time, bool) {
 	return h.slowUntil, true
 }
 
+// refusedUntil reports when the pause of host's background requests after
+// a refusal for its rate ends, while it runs.
+func (p *pacing) refusedUntil(host string) (time.Time, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	h, ok := p.hosts[host]
+	if !ok || !p.now().Before(h.until) {
+		return time.Time{}, false
+	}
+	return h.until, true
+}
+
 // paceMark tells how a context's requests are paced: those of background
 // work wait for their turn, unless it came already (paced), after the
 // others when later.
@@ -372,15 +384,17 @@ type paceKey struct{}
 // Background marks ctx as background work's, whose requests to addons are
 // paced (see pacing): the work no user waits for, such as listing ahead
 // the titles of home rows, preparing, preloading or checking watchlists.
+// Health counts its requests as background work's (see
+// stremio.InBackground).
 func Background(ctx context.Context) context.Context {
-	return context.WithValue(ctx, paceKey{}, paceMark{background: true})
+	return context.WithValue(stremio.InBackground(ctx), paceKey{}, paceMark{background: true})
 }
 
 // laterBackground marks ctx as background work's that lets other
 // background work go first, as follow-ups do: a title's first answer
 // matters more than a longer one.
 func laterBackground(ctx context.Context) context.Context {
-	return context.WithValue(ctx, paceKey{}, paceMark{background: true, later: true})
+	return context.WithValue(stremio.InBackground(ctx), paceKey{}, paceMark{background: true, later: true})
 }
 
 // foreground marks ctx as the work of a user waiting, its requests sent
@@ -473,6 +487,21 @@ func (s *Service) streamsOutcome(ctx context.Context, addon addons.Addon, err er
 // pacing), when the pause ends, for System › Health.
 func (s *Service) StreamsTimingOut(addon addons.Addon) (time.Time, bool) {
 	return s.pace.timingOut(stremio.HostOf(addon.ManifestURL), addon.ID)
+}
+
+// BackgroundPause reports, while the background requests to addon's
+// server pause, when the pause ends and why, for System › Health:
+// stremio.FailureRateLimited after a refusal for its rate, which pauses
+// those to every addon of the server, or stremio.FailureTimeout while
+// StreamsTimingOut tells a pause.
+func (s *Service) BackgroundPause(addon addons.Addon) (time.Time, string, bool) {
+	if until, ok := s.pace.refusedUntil(stremio.HostOf(addon.ManifestURL)); ok {
+		return until, stremio.FailureRateLimited, true
+	}
+	if until, ok := s.StreamsTimingOut(addon); ok {
+		return until, stremio.FailureTimeout, true
+	}
+	return time.Time{}, "", false
 }
 
 // refusal tells whether err is an addon's refusal of a request for its

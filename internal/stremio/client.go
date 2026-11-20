@@ -76,7 +76,7 @@ func NewClient(version string) *Client {
 		trusted:       newHTTPClient(false),
 		confined:      newHTTPClient(true),
 		local:         newLocalClient(),
-		health:        healthRecords{byAddon: map[string]*Health{}},
+		health:        healthRecords{byAddon: map[string]*addonRecord{}},
 		timeout:       requestTimeout,
 		streamTimeout: StreamTimeout,
 		bound:         context.WithTimeout,

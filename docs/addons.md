@@ -526,6 +526,7 @@ After a refusal for its rate, an addon's server gets no background request for a
 - **The pause:** as long as `Retry-After` asks, 15 minutes at most. Without it, a minute, when the refused title is asked again anyway.
 - **Meanwhile:** requests users wait for are still sent. Watchlist checks skip the addon, and check its titles at their next hour.
 - **The log:** it says once per pause, at Info, `An addon refused a request for its rate: Polyfin's background requests to its server pause`, with the addon and the wait.
+- **Health:** **System › Health › Addons** shows the pause until it ends, the notices the addon's answers carried, rate limits marked, and its requests of the last hour and day by origin, so that a limit background work reaches shows at a glance (see [What Health shows](health.md#what-health-shows)).
 
 There is nothing to set. An addon without limits only has Polyfin's background work spread over a few more seconds. A home page with 20 titles of Continue Watching and Next Up has them listed within about half a minute from one such addon, with their follow-ups after.
 

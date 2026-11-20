@@ -175,7 +175,8 @@ func (m Manifest) ServesType(resource, contentType string) bool {
 // Streams lists the streams an addon offers for a title, or for an episode
 // by its video identifier, waiting StreamTimeout for its answer. Of its
 // list, the first MaxListed elements are read, and those that tell
-// nothing, as an empty object, are left out (see tells).
+// nothing, as an empty object, are left out (see tells). The notices it
+// lists, with streams or without, are recorded for Health.
 func (c *Client) Streams(ctx context.Context, manifestURL, streamType, id string, confined bool) ([]Stream, error) {
 	body, err := c.get(ctx, manifestURL, ResourceURL(manifestURL, "/stream/"+encodeComponent(streamType)+"/"+encodeComponent(id)+".json"), confined, c.streamTimeout)
 	if err != nil {
@@ -191,6 +192,7 @@ func (c *Client) Streams(ctx context.Context, manifestURL, streamType, id string
 	if err != nil {
 		return nil, fmt.Errorf("%w: streams: %v", ErrInvalidResponse, err)
 	}
+	c.health.noticed(ctx, manifestURL, noticesOf(streams))
 	return streams, nil
 }
 

@@ -326,11 +326,23 @@ func TestARefusalPausesBackgroundRequestsUntilTheyResume(t *testing.T) {
 			if at, ok := e.clock.first(); !ok || !at.Equal(refusedAt.Add(c.pause)) {
 				t.Errorf("the background requests wait until %v, want %v", at, refusedAt.Add(c.pause))
 			}
+			// System › Health tells the pause, for every addon of the server.
+			installed, err := e.addons.Addons(t.Context(), addons.Shared())
+			if err != nil || len(installed) != 1 {
+				t.Fatalf("addons: %v %v", installed, err)
+			}
+			if until, reason, ok := e.service.BackgroundPause(installed[0]); !ok || !until.Equal(refusedAt.Add(c.pause)) ||
+				reason != stremio.FailureRateLimited {
+				t.Errorf("the pause told: %v %q %v, want until %v", until, reason, ok, refusedAt.Add(c.pause))
+			}
 			versions, _, err := e.service.VersionsToPlay(t.Context(), e.member, e.movies[4])
 			if err != nil || len(versions) != 1 {
 				t.Fatalf("the user's title during the pause: %d versions, %v; want 1", len(versions), err)
 			}
 			e.drain(done, 3)
+			if until, _, ok := e.service.BackgroundPause(installed[0]); ok {
+				t.Errorf("a pause told after it ended, until %v", until)
+			}
 			if answered, refused := e.limited.counts(); answered != 4 || refused != 1 {
 				t.Errorf("the addon answered %d requests and refused %d, want 4 and 1", answered, refused)
 			}

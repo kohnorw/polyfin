@@ -48,7 +48,7 @@ func (s *Service) ReadConfigureHints(ctx context.Context) {
 			skipped++
 			continue
 		}
-		hint, err := request(Background(ctx), s, u.Addon, paceMetas, func(ctx context.Context) (bool, error) {
+		hint, err := request(Background(stremio.WithOrigin(ctx, stremio.OriginRefresh)), s, u.Addon, paceMetas, func(ctx context.Context) (bool, error) {
 			return s.addons.ReadHint(ctx, u.Addon, u.Confined)
 		})
 		if err == nil {

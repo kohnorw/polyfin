@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -255,6 +256,27 @@ func Redact(line string) string {
 			return value
 		}
 		return "<redacted>"
+	})
+}
+
+// keyLike matches a run of letters, digits, dashes and underscores long
+// enough to be a key or a token, which RedactText hides when it mixes
+// letters and digits, as words do not.
+var keyLike = regexp.MustCompile(`[A-Za-z0-9_\-]{20,}`)
+
+// RedactText hides, in a text kept to be shown, such as an addon's notice,
+// more than Redact does: each URL is replaced whole, by "<link>", and so
+// is a word that looks like a key (see keyLike), by "<redacted>", besides
+// the values of tokens, keys, passwords and cookies.
+func RedactText(text string) string {
+	if strings.ContainsAny(text, "/%") {
+		text = rewrite(addresses, text, func(int, string) string { return "<link>" })
+	}
+	return keyLike.ReplaceAllStringFunc(Redact(text), func(word string) string {
+		if strings.ContainsAny(word, "0123456789") && strings.IndexFunc(word, unicode.IsLetter) >= 0 {
+			return "<redacted>"
+		}
+		return word
 	})
 }
 

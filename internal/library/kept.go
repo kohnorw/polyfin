@@ -972,6 +972,7 @@ const WarmInterval = time.Hour
 // the database that no one read for long, and the catalogs and titles no
 // read saw for long (see arrivals.go).
 func (s *Service) Warm(ctx context.Context) error {
+	ctx = stremio.WithOrigin(ctx, stremio.OriginCatalogs)
 	scopes := []struct {
 		scope  addons.Scope
 		member bool
@@ -1066,7 +1067,7 @@ const collectionsAtOnce = 2
 // as a request is served (see PerRequest): its view is built once.
 func (s *Service) ReadCollections(ctx context.Context) error {
 	started := time.Now()
-	ctx = withRefreshing(context.WithValue(ctx, wholeKey{}, true))
+	ctx = withRefreshing(context.WithValue(stremio.WithOrigin(ctx, stremio.OriginCatalogs), wholeKey{}, true))
 	var server accounts.User
 	v, err := s.view(ctx, server)
 	if err != nil {

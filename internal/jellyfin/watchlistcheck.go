@@ -7,6 +7,7 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/watchlist"
 )
 
@@ -27,7 +28,7 @@ import (
 // (see library.Background), and builds the user's view once for its reads
 // of the library (see library.PerRequest).
 func (h *Handler) FindWatchlistVersions(ctx context.Context, user accounts.User, title accounts.ID) (watchlist.Found, error) {
-	ctx = library.PerRequest(library.Background(ctx))
+	ctx = library.PerRequest(library.Background(stremio.WithOrigin(ctx, stremio.OriginWatchlists)))
 	item, err := h.Library.Item(ctx, user, title)
 	if errors.Is(err, library.ErrNotFound) {
 		return watchlist.Unseen, nil
