@@ -14,12 +14,14 @@
 #
 # It prints, and writes to $GITHUB_OUTPUT when set, upstream=<commit> and
 # state=up-to-date, merged (a merge commit made, not pushed) or conflict
-# (nothing changed; the conflicting files are listed in conflicts.txt).
+# (nothing changed; the conflicting files are listed in $CONFLICTS, by
+# default conflicts.txt in the temporary folder).
 set -euo pipefail
 
 UPSTREAM_URL=${UPSTREAM_URL:-https://github.com/moodiness/polyfin.git}
 UPSTREAM_BRANCH=${UPSTREAM_BRANCH:-main}
 FORK_WORKFLOWS="docker.yml sync-upstream.yml"
+CONFLICTS=${CONFLICTS:-${RUNNER_TEMP:-${TMPDIR:-/tmp}}/conflicts.txt}
 
 out() {
 	echo "$1"
@@ -71,7 +73,7 @@ fi
 
 conflicts=$(git diff --name-only --diff-filter=U || true)
 if [ -n "$conflicts" ]; then
-	echo "$conflicts" >conflicts.txt
+	echo "$conflicts" >"$CONFLICTS"
 	git merge --abort
 	out "state=conflict"
 	echo "Conflicts with upstream:" >&2

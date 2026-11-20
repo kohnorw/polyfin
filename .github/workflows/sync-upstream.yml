@@ -133,7 +133,7 @@ jobs:
           RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
         run: |
           if [ "$STATE" = conflict ]; then
-            why="Merging upstream's main (moodiness/polyfin@${UPSTREAM:0:8}) conflicts with the fork in:"$'\n\n'"$(sed 's/^/- `/; s/$/`/' conflicts.txt)"
+            why="Merging upstream's main (moodiness/polyfin@${UPSTREAM:0:8}) conflicts with the fork in:"$'\n\n'"$(sed 's/^/- `/; s/$/`/' "$RUNNER_TEMP/conflicts.txt")"
           elif [ -n "$FAILED" ]; then
             why="Upstream's main (moodiness/polyfin@${UPSTREAM:0:8}) merges, but $FAILED failed after the merge: see $RUN."
           else
