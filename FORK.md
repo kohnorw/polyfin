@@ -65,4 +65,4 @@ If the merge conflicts or a test fails, `main` is left alone. A pull request fro
 1. Create a [fine-grained personal access token](https://github.com/settings/personal-access-tokens/new) for `kohnorw/polyfin` with **Contents**, **Pull requests** and **Workflows** set to *Read and write*.
 2. Save it as the repository secret `SYNC_TOKEN` (**Settings › Secrets and variables › Actions**).
 
-Without it, the sync opens an issue the first time it can't push.
+Without it, the first run that can't push fails (GitHub emails you) and the sync pauses, marked by the branch `sync-paused`. The runs after that stop at once instead of retrying. Adding `SYNC_TOKEN` resumes it on its own; deleting `sync-paused` makes it try again without the token.

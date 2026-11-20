@@ -16,7 +16,11 @@
 # Pull requests and Workflows set to Read and write, and save it as the
 # repository secret SYNC_TOKEN (Settings › Secrets and variables ›
 # Actions). Without it the workflow still runs, and syncs whatever does not
-# touch upstream's workflows.
+# touch upstream's workflows. The first time it cannot push, that run fails
+# (GitHub emails about it) and the sync pauses: it leaves the branch
+# sync-paused as its mark, and the runs after it stop at once. Adding
+# SYNC_TOKEN resumes it by itself; deleting the branch sync-paused makes it
+# try again without one.
 name: sync-upstream
 
 on:
@@ -27,7 +31,6 @@ on:
 permissions:
   contents: write
   pull-requests: write
-  issues: write
   actions: write
 
 concurrency:
@@ -59,17 +62,26 @@ jobs:
           fetch-depth: 0
           token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Wait for a pull request left to settle
+      - name: Wait for a pull request left to settle, or a pause
         id: pending
+        env:
+          HAS_SYNC_TOKEN: ${{ secrets.SYNC_TOKEN != '' }}
         run: |
+          if git ls-remote --exit-code --heads origin sync-paused >/dev/null; then
+            if [ "$HAS_SYNC_TOKEN" = true ]; then
+              echo "SYNC_TOKEN is set: the sync resumes."
+              git push origin --delete sync-paused
+            else
+              echo "The sync is paused until SYNC_TOKEN is set, or the branch sync-paused is deleted."
+              echo "open=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
           number=$(gh pr list --head upstream-sync --base main --state open --json number --jq '.[0].number')
           if [ -n "$number" ]; then
             git fetch --no-tags --quiet https://github.com/moodiness/polyfin.git main
             git push --force origin FETCH_HEAD:refs/heads/upstream-sync || true
             echo "Pull request #$number is waiting to be settled: nothing else to do."
-            echo "open=true" >> "$GITHUB_OUTPUT"
-          elif [ -n "$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number')" ]; then
-            echo "An upstream-sync issue is open: close it once SYNC_TOKEN is set."
             echo "open=true" >> "$GITHUB_OUTPUT"
           fi
 
@@ -143,11 +155,11 @@ jobs:
           if git push --force origin "$UPSTREAM:refs/heads/upstream-sync"; then
             gh pr create --head upstream-sync --base main --title "Sync with upstream needs a hand" --body "$body"
           else
-            # The token may not push upstream's workflow changes: an issue
-            # says so instead, once.
-            if [ -z "$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number')" ]; then
-              gh label create upstream-sync --color 6152df --force >/dev/null 2>&1 || true
-              gh issue create --label upstream-sync --title "Sync with upstream needs a hand" \
-                --body "$body"$'\n\n'"The branch upstream-sync could not be pushed either: add the SYNC_TOKEN secret (see .github/workflows/sync-upstream.yml)."
-            fi
+            # The token may not push upstream's workflow changes: the sync
+            # pauses, marked by the branch sync-paused on main as it is,
+            # until SYNC_TOKEN is set. This run fails, which GitHub emails
+            # about, once.
+            git push origin "$(git rev-parse origin/main):refs/heads/sync-paused"
+            echo "::error::The sync is paused: add the SYNC_TOKEN secret (see .github/workflows/sync-upstream.yml), and it resumes by itself."
+            exit 1
           fi
