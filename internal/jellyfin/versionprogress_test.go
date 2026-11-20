@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
+	"github.com/moodiness/polyfin/internal/playback"
 	"github.com/moodiness/polyfin/internal/stremio"
 )
 
@@ -50,12 +52,13 @@ func newHeldAddon(t *testing.T, name string, broken bool) *heldAddon {
 				http.Error(w, "unavailable", http.StatusServiceUnavailable)
 				return
 			}
-			stream := func(height string, size int64) stremio.Stream {
-				file := "Movie.2008." + height + ".WEB-" + name + ".mkv"
+			// Its files announce no size, as scriptedAddon's do.
+			stream := func(height string) stremio.Stream {
+				file := name + "." + height + ".mkv"
 				return stremio.Stream{Name: name + " " + height, URL: server.URL + "/files/" + file,
-					BehaviorHints: stremio.StreamBehavior{Filename: file, VideoSize: stremio.Number(size)}}
+					BehaviorHints: stremio.StreamBehavior{Filename: file}}
 			}
-			_ = json.NewEncoder(w).Encode(map[string]any{"streams": []stremio.Stream{stream("1080p", 3_000_000_000), stream("720p", 1_000_000_000)}})
+			_ = json.NewEncoder(w).Encode(map[string]any{"streams": []stremio.Stream{stream("1080p"), stream("720p")}})
 		case strings.HasPrefix(path, "/files/"):
 			http.ServeContent(w, r, "", time.Time{}, strings.NewReader("\x1a\x45\xdf\xa3 media bytes"))
 		default:
@@ -194,7 +197,7 @@ func (h heldSetup) askPlaybackInfo(t *testing.T, source string) <-chan heldAnswe
 		request, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, h.url+"/Items/"+h.movie+"/PlaybackInfo", bytes.NewReader(body))
 		request.Header.Set("Authorization", app("tv", h.token))
 		request.Header.Set("Content-Type", "application/json")
-		response, err := http.DefaultClient.Do(request)
+		response, err := testClient.Do(request)
 		if err != nil {
 			answered <- heldAnswer{err: err}
 			return
@@ -300,11 +303,13 @@ func TestPlaybackInfoWaitsForTheAddonsAsked(t *testing.T) {
 // scriptedAddon lists, for every movie, as many streams named after it as
 // the next count sent on replies, holding each request until it comes, as
 // an addon that gathers other addons' streams answers with more of them
-// once they came into its cache.
+// once they came into its cache. askedAt are the times it was asked.
 type scriptedAddon struct {
 	url     string
 	asked   atomic.Int32
 	replies chan int
+	mu      sync.Mutex
+	askedAt []time.Time
 }
 
 func newScriptedAddon(t *testing.T, name string) *scriptedAddon {
@@ -319,6 +324,9 @@ func newScriptedAddon(t *testing.T, name string) *scriptedAddon {
 			_ = json.NewEncoder(w).Encode(stremio.Manifest{ID: strings.ToLower(name), Name: name, Version: "1",
 				Types: []string{"movie"}, IDPrefixes: []string{"tt"}, Resources: []stremio.Resource{{Name: "stream"}}})
 		case strings.HasPrefix(path, "/stream/movie/"):
+			a.mu.Lock()
+			a.askedAt = append(a.askedAt, time.Now())
+			a.mu.Unlock()
 			a.asked.Add(1)
 			var n int
 			select {
@@ -328,11 +336,15 @@ func newScriptedAddon(t *testing.T, name string) *scriptedAddon {
 			case <-closing:
 				return
 			}
+			// Its files announce no size: announced far larger than the one
+			// short answer they all give, they would be their host's error
+			// file (see source.ErrorFiles), refused or analyzed by whichever
+			// of a read and ffprobe ends first.
 			streams := make([]stremio.Stream, n)
 			for i := range streams {
 				file := fmt.Sprintf("%s.%d.mkv", name, i+1)
 				streams[i] = stremio.Stream{Name: fmt.Sprintf("%s %d", name, i+1), URL: server.URL + "/files/" + file,
-					BehaviorHints: stremio.StreamBehavior{Filename: file, VideoSize: stremio.Number(1_000_000_000 * (i + 1))}}
+					BehaviorHints: stremio.StreamBehavior{Filename: file}}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"streams": streams})
 		case strings.HasPrefix(path, "/files/"):
@@ -350,6 +362,13 @@ func newScriptedAddon(t *testing.T, name string) *scriptedAddon {
 	return a
 }
 
+// askedTime is when the addon was asked the n-th time, from 1.
+func (a *scriptedAddon) askedTime(n int) time.Time {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.askedAt[n-1]
+}
+
 // An addon that answers first with part of a title's streams is asked
 // again: the title stays pending meanwhile, its open page then lists the
 // streams that came later, and PlaybackInfo never waits for it.
@@ -363,17 +382,23 @@ func TestFollowUpsAddVersionsToAnOpenTitle(t *testing.T) {
 	t.Cleanup(func() { h.settle(t) })
 
 	h.sources(t)
+	answered := time.Now()
 	gathering.replies <- 1
 	eventually(t, "the first answer", func() bool {
 		sources := h.sources(t)
 		return len(sources) == 1 && strings.HasPrefix(sources[0].Name, "Gathering ")
 	})
-	// The follow-up is scheduled: the title is still pending.
-	if got, asked := h.progress(t), gathering.asked.Load(); got != (VersionProgress{Pending: 1, Count: 1, Known: 1}) || asked != 1 {
-		t.Errorf("follow-up scheduled: %+v, addon asked %d times", got, asked)
+	// The follow-up is scheduled: the title is still pending. It runs a
+	// second after the answer, which the requests above may outlast on a
+	// busy machine: its delay is checked against the time it asked.
+	if got := h.progress(t); got != (VersionProgress{Pending: 1, Count: 1, Known: 1}) {
+		t.Errorf("follow-up scheduled: %+v", got)
 	}
 	// It runs, held: PlaybackInfo answers at once with the version known.
 	eventually(t, "the follow-up", func() bool { return gathering.asked.Load() == 2 })
+	if waited := gathering.askedTime(2).Sub(answered); waited < time.Second {
+		t.Errorf("the follow-up asked %v after the first answer, before its delay", waited)
+	}
 	if got := h.progress(t); got != (VersionProgress{Pending: 1, Count: 1, Known: 1}) {
 		t.Errorf("follow-up running: %+v", got)
 	}
@@ -464,9 +489,17 @@ func TestPlaybackInfoPlaysExpiredVersionsWhileTheAddonIsAskedAgain(t *testing.T)
 // versions.
 func TestPlaybackInfoWaitsForTheAnswerWhenNoExpiredVersionPlays(t *testing.T) {
 	t.Parallel()
-	// The three versions listed before cannot be read; another can.
-	h, gathering := expiredOnProbe(t, scriptedProbe(t, "[ $n -gt 3 ] || { echo 'Invalid data found when processing input' >&2; exit 1; }\nexec cat \"$0.json\"\n"))
+	// The three versions listed before cannot be read; another can. A run
+	// that fails tells so in "$0.failed".
+	probe := scriptedProbe(t, "[ $n -gt 3 ] || { echo >> \"$0.failed\"; echo 'Invalid data found when processing input' >&2; exit 1; }\nexec cat \"$0.json\"\n")
+	h, gathering := expiredOnProbe(t, probe)
 	answered := h.askPlaybackInfo(t, "")
+	// Their three analyses fail first, however slow the probe is to start:
+	// the new version's is the fourth run.
+	eventually(t, "the versions listed before to fail", func() bool {
+		failed, _ := os.ReadFile(probe.path + ".failed")
+		return bytes.Count(failed, []byte("\n")) == 3
+	})
 	select {
 	case got := <-answered:
 		t.Fatalf("PlaybackInfo answered from the expired versions: %d %q %+v", got.status, got.code, got.info.MediaSources)
@@ -518,5 +551,58 @@ func TestAnExpiredVersionPlaysByItsIdentifierUntilTheFollowUpsEnd(t *testing.T) 
 		}
 	case <-time.After(10 * time.Second):
 		t.Fatal("PlaybackInfo did not answer")
+	}
+}
+
+// A title page is told, on the user's jellyfin-web sockets, once a version
+// it lists is analyzed: its track menus lack the tracks details list for
+// the version from then on, which Polyfin's script then shows.
+func TestAnAnalysisIsPushedToTheTitlePage(t *testing.T) {
+	t.Parallel()
+	probe := newFakeProbe(t, false)
+	addon := newHeldAddon(t, "Alpha", false)
+	h := heldOn(t, newProbingServer(t, 10, probe.path), addon.url)
+	// Only the play below analyzes a version.
+	h.setting(t, func(s *accounts.Settings) { s.PrepareAhead = false })
+	socket := h.openWebSocket(t, "member")
+	h.sources(t)
+	addon.answer()
+	h.reaches(t, VersionProgress{Pending: 0, Count: 2, Known: 2}, "Alpha", "Alpha")
+	audio := func(source MediaSourceInfo) bool {
+		return slices.ContainsFunc(source.MediaStreams, func(s playback.MediaStream) bool { return s.Type == "Audio" })
+	}
+	if audio(h.sources(t)[0]) {
+		t.Fatal("an audio track listed before any analysis")
+	}
+	probe.release(t)
+	answered := h.askPlaybackInfo(t, "")
+	deadline := time.After(10 * time.Second)
+	for told := false; !told; {
+		select {
+		case message := <-socket.messages:
+			if message.MessageType != versionsMessage {
+				continue
+			}
+			data, _ := json.Marshal(message.Data)
+			var pushed versionsPush
+			if err := json.Unmarshal(data, &pushed); err != nil {
+				t.Fatal(err)
+			}
+			if !pushed.Tracks {
+				continue
+			}
+			if pushed.ItemId != h.movie || pushed.Count != 2 {
+				t.Errorf("pushed %+v", pushed)
+			}
+			told = true
+		case <-deadline:
+			t.Fatal("no push of the analysis")
+		}
+	}
+	if !audio(h.sources(t)[0]) {
+		t.Error("details list no audio track once told")
+	}
+	if a := <-answered; a.err != nil || a.status != http.StatusOK {
+		t.Errorf("PlaybackInfo: %d %v", a.status, a.err)
 	}
 }

@@ -47,6 +47,7 @@ func (g guideOf) Channels(context.Context, accounts.User) ([]library.Item, error
 // in the server's time zone and a link to the channel; the server's
 // targets, which cannot choose it, and administrators' never get it.
 func TestProgrammeRemindersReachTheUsersOwnTargetsOnly(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	ctx := t.Context()
 	settings := h.store.Settings()
@@ -119,7 +120,7 @@ func TestProgrammeRemindersReachTheUsersOwnTargetsOnly(t *testing.T) {
 		programme["start"] != "2026-10-14T18:30:00Z" || programme["end"] != "2026-10-14T19:30:00Z" {
 		t.Errorf("the programme told: %v", programme)
 	}
-	if admin["title"] != "Commence à 20:30 : Example Show" || admin["message"] != "Example Show commence dans 5 minutes sur Example TV." {
+	if admin["title"] != "Commence à 20:30\u202f: Example Show" || admin["message"] != "Example Show commence dans 5 minutes sur Example TV." {
 		t.Errorf("the reminder set in French: %v", admin)
 	}
 }

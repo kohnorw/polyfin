@@ -50,57 +50,16 @@ var segmentTypes = map[string]string{
 // and that version's chapters may give its own (see versionSegments). A
 // version not analyzed yet is never analyzed for this. An episode's local
 // file without an intro or credits yet may have them found in its audio
-// (see audioSegments). With the skip buttons turned off in the settings,
-// no database is asked and every item has none, as on a Jellyfin server
-// without a segment provider.
+// (see audioSegments). The credits of an analyzed version are then split
+// around the scenes within them (see splitAtStingers). With the skip
+// buttons turned off in the settings, no database is asked and every item
+// has none, as on a Jellyfin server without a segment provider.
 func (h *Handler) mediaSegments(w http.ResponseWriter, r *http.Request) {
-	b := bindErrors{}
-	opened := b.pathID(r, "itemId")
-	if len(b) > 0 {
-		validationProblem(w, b)
+	opened, segments, ok := h.openedSegments(w, r)
+	if !ok {
 		return
 	}
-	user := callerFrom(r.Context()).User
 	result := MediaSegmentDtoQueryResult{Items: []MediaSegmentDto{}}
-	item, err := h.title(r.Context(), user, opened)
-	if errors.Is(err, library.ErrNotFound) {
-		// Jellyfin answers an empty list for an item without segments,
-		// such as a series, and Not Found for an unknown one.
-		if _, err := h.Library.Item(r.Context(), user, opened); err != nil {
-			h.browseError(w, r, err)
-			return
-		}
-		writeJSON(w, http.StatusOK, result)
-		return
-	}
-	if err != nil {
-		h.browseError(w, r, err)
-		return
-	}
-	if !h.Accounts.Settings().SkipButtons {
-		writeJSON(w, http.StatusOK, result)
-		return
-	}
-	var segments []mediasegments.Segment
-	if item.Kind == library.KindRecording {
-		segments = h.Commercials.Segments(r.Context(), item.ID)
-	} else if h.Segments.Asks() {
-		title, err := h.segmentTitle(r.Context(), user, item)
-		if err != nil {
-			h.browseError(w, r, err)
-			return
-		}
-		segments = h.Segments.Segments(r.Context(), title)
-	}
-	if version, ok := h.segmentVersion(r.Context(), user, item, opened); ok {
-		analysis, analyzed := h.Playback.Analyzed(r.Context(), version)
-		if analyzed {
-			segments = versionSegments(segments, analysis, item.Runtime)
-		}
-		if item.Kind == library.KindEpisode {
-			segments = h.audioSegments(r.Context(), segments, version, analysis.Duration, item.Runtime)
-		}
-	}
 	wanted := map[string]bool{}
 	included := listQuery(r, "includeSegmentTypes")
 	for _, name := range included {
@@ -122,6 +81,91 @@ func (h *Handler) mediaSegments(w http.ResponseWriter, r *http.Request) {
 	}
 	result.TotalRecordCount = len(result.Items)
 	writeJSON(w, http.StatusOK, result)
+}
+
+// SegmentOriginDto is a segment as GET /Polyfin/MediaSegments/{itemId}
+// lists it: its Type and times as Jellyfin's, and where it comes from (see
+// mediasegments.Origin): Found, how it was found, empty when unknown;
+// Database, which database gave it; Confidence, that database's rating of
+// it, from 0 to 1, absent when it gives none.
+type SegmentOriginDto struct {
+	Type       string
+	StartTicks int64
+	EndTicks   int64
+	Found      string   `json:",omitempty"`
+	Database   string   `json:",omitempty"`
+	Confidence *float64 `json:",omitempty"`
+}
+
+// segmentOrigins answers GET /Polyfin/MediaSegments/{itemId}: the segments
+// GET /MediaSegments/{itemId} answers, of every type, each with where it
+// comes from, which Jellyfin's segments do not tell. Silo's apps show it
+// (see package silo).
+func (h *Handler) segmentOrigins(w http.ResponseWriter, r *http.Request) {
+	_, segments, ok := h.openedSegments(w, r)
+	if !ok {
+		return
+	}
+	result := struct{ Items []SegmentOriginDto }{Items: []SegmentOriginDto{}}
+	for _, segment := range segments {
+		result.Items = append(result.Items, SegmentOriginDto{Type: string(segment.Type), StartTicks: int64(segment.Start / 100),
+			EndTicks: int64(segment.End / 100), Found: string(segment.Origin.Found), Database: segment.Origin.Database,
+			Confidence: segment.Origin.Confidence})
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// openedSegments are the segments of the item a request's itemId opens, as
+// mediaSegments describes them, answering the request when it cannot.
+func (h *Handler) openedSegments(w http.ResponseWriter, r *http.Request) (accounts.ID, []mediasegments.Segment, bool) {
+	b := bindErrors{}
+	opened := b.pathID(r, "itemId")
+	if len(b) > 0 {
+		validationProblem(w, b)
+		return opened, nil, false
+	}
+	user := callerFrom(r.Context()).User
+	item, err := h.title(r.Context(), user, opened)
+	if errors.Is(err, library.ErrNotFound) {
+		// Jellyfin answers an empty list for an item without segments,
+		// such as a series, and Not Found for an unknown one.
+		if _, err := h.Library.Item(r.Context(), user, opened); err != nil {
+			h.browseError(w, r, err)
+			return opened, nil, false
+		}
+		return opened, nil, true
+	}
+	if err != nil {
+		h.browseError(w, r, err)
+		return opened, nil, false
+	}
+	if !h.Accounts.Settings().SkipButtons {
+		return opened, nil, true
+	}
+	var segments []mediasegments.Segment
+	if item.Kind == library.KindRecording {
+		segments = h.Commercials.Segments(r.Context(), item.ID)
+	} else if h.Segments.Asks() {
+		title, err := h.segmentTitle(r.Context(), user, item)
+		if err != nil {
+			h.browseError(w, r, err)
+			return opened, nil, false
+		}
+		segments = h.Segments.Segments(r.Context(), title)
+	}
+	if version, ok := h.segmentVersion(r.Context(), user, item, opened); ok {
+		analysis, analyzed := h.Playback.Analyzed(r.Context(), version)
+		if analyzed {
+			segments = versionSegments(segments, analysis, item.Runtime)
+		}
+		if item.Kind == library.KindEpisode {
+			segments = h.audioSegments(r.Context(), segments, version, analysis.Duration, item.Runtime)
+		}
+		if analyzed {
+			segments = h.splitAtStingers(r.Context(), segments, version, analysis, item.Runtime)
+		}
+	}
+	return opened, segments, true
 }
 
 // segmentVersion is the version a movie's or an episode's segments are
@@ -191,6 +235,7 @@ func (h *Handler) findInAudio(ctx context.Context, user accounts.User, item libr
 		return
 	}
 	go func() {
+		defer logPanic(h.Logger, "Finding an episode's segments in its audio ended on a panic")
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), audioLookup)
 		defer cancel()
 		// The title's own identifier stands for the version its first
@@ -288,12 +333,7 @@ func chapterSegments(analysis media.Analysis) []mediasegments.Segment {
 	var segments []mediasegments.Segment
 	var previous mediasegments.Type
 	for i, chapter := range chapters {
-		end := chapter.End
-		if i+1 < len(chapters) {
-			end = chapters[i+1].Start
-		} else if analysis.Duration > 0 {
-			end = analysis.Duration
-		}
+		end := chapterEnd(analysis, i)
 		kind := chapterKind(chapter.Title)
 		switch {
 		case kind == "" || end <= chapter.Start:
@@ -302,7 +342,8 @@ func chapterSegments(analysis media.Analysis) []mediasegments.Segment {
 			last := &segments[len(segments)-1]
 			last.End = max(last.End, end)
 		default:
-			segments = append(segments, mediasegments.Segment{Type: kind, Start: chapter.Start, End: end})
+			segments = append(segments, mediasegments.Segment{Type: kind, Start: chapter.Start, End: end,
+				Origin: mediasegments.Origin{Found: mediasegments.InChapters}})
 			previous = kind
 		}
 	}
@@ -330,14 +371,17 @@ var chapterNames = []struct {
 
 // chapterKind tells the segment a chapter's name marks: Intro, Preview,
 // Recap or Outro, matching its whole words in any letter case, with or
-// without accents; none for other names, such as "Chapter 2". The types are
-// tried in that order, as Jellyfin's plugin tries them, so that "Opening
-// Credits" is an intro. The short forms OP and ED count only as the whole
-// name (see shortName), as words such as "Ed" in "Ed Wood" are often
-// something else.
+// without accents; none for other names, such as "Chapter 2", and for a
+// scene during or after the credits (see stingerNames), which is not to be
+// skipped with them. The types are tried in that order, as Jellyfin's
+// plugin tries them, so that "Opening Credits" is an intro. The short forms
+// OP and ED count only as the whole name (see shortName), as words such as
+// "Ed" in "Ed Wood" are often something else.
 func chapterKind(name string) mediasegments.Type {
-	words := strings.FieldsFunc(iptv.Fold(name), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
-	text := " " + strings.Join(words, " ") + " "
+	words, text := chapterWords(name)
+	if stingerText(text) {
+		return ""
+	}
 	for _, kind := range chapterNames {
 		if slices.ContainsFunc(kind.names, func(n string) bool { return strings.Contains(text, " "+n+" ") }) ||
 			kind.kind == mediasegments.Intro && shortName(words, "op") ||
@@ -346,6 +390,27 @@ func chapterKind(name string) mediasegments.Type {
 		}
 	}
 	return ""
+}
+
+// chapterWords are the words of a chapter's name, in lower case and without
+// accents, and text the same words joined by spaces, with a space before
+// and after them, so that whole words are found with " "+words+" ".
+func chapterWords(name string) (words []string, text string) {
+	words = strings.FieldsFunc(iptv.Fold(name), func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+	return words, " " + strings.Join(words, " ") + " "
+}
+
+// chapterEnd is where the chapter at index i of a version ends, as
+// Jellyfin's Chapter Segments Provider has it: at the next chapter's start,
+// the last at the version's end, or at its own end when that is unknown.
+func chapterEnd(analysis media.Analysis, i int) time.Duration {
+	switch {
+	case i+1 < len(analysis.Chapters):
+		return analysis.Chapters[i+1].Start
+	case analysis.Duration > 0:
+		return analysis.Duration
+	}
+	return analysis.Chapters[i].End
 }
 
 // shortName reports whether a name's words are only a short form, maybe
@@ -363,7 +428,13 @@ func shortName(words []string, short string) bool {
 }
 
 // segmentTitle identifies a movie or an episode to the segment databases:
-// an episode by its series' identifiers and its numbers.
+// an episode by its series' identifiers and its numbers, and, while
+// PublicMetaDB is asked, by TMDB's numbers too (see
+// library.Service.TMDBNumbering, which keeps them). PublicMetaDB is not
+// asked for an episode of a series whose TMDB identifier is the
+// moviedb_id of its description when nothing tells TMDB's numbering of
+// it: the addon that gives it may number the series otherwise, and have
+// PublicMetaDB asked for another episode.
 func (h *Handler) segmentTitle(ctx context.Context, user accounts.User, item library.Item) (mediasegments.Title, error) {
 	title := mediasegments.Title{Item: item.ID, Runtime: item.Runtime}
 	ids := item.ProviderIDs
@@ -374,6 +445,15 @@ func (h *Handler) segmentTitle(ctx context.Context, user accounts.User, item lib
 		}
 		ids = series.ProviderIDs
 		title.Season, title.Episode = item.ParentIndexNumber, item.IndexNumber
+		if h.Segments.AsksPublicMetaDB() {
+			// An error leaves the zero numbering: TMDB's alike, unsourced.
+			numbering, _ := h.Library.TMDBNumbering(ctx, item.SeriesID)
+			if series.TMDBFromMoviedb && !numbering.Sourced() {
+				title.SetTMDBNumbers(0, 0, false)
+			} else {
+				title.SetTMDBNumbers(numbering.ToTMDB(title.Season, title.Episode))
+			}
+		}
 	}
 	title.IMDb, title.TMDB = ids["Imdb"], ids["Tmdb"]
 	return title, nil

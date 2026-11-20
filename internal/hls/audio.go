@@ -3,8 +3,6 @@ package hls
 import (
 	"bytes"
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -36,9 +34,11 @@ const (
 	audioKeptBehind = 10
 )
 
-// AudioPlan cuts a track lasting duration into segments of AudioSegment.
+// AudioPlan cuts a track lasting duration into segments of AudioSegment,
+// and no more than media.MaxDuration of it (see planned).
 func AudioPlan(duration time.Duration) Plan {
-	starts := []time.Duration{0}
+	duration = planned(duration)
+	starts := make([]time.Duration, 1, 1+max(duration, 0)/AudioSegment)
 	for at := AudioSegment; at < duration; at += AudioSegment {
 		starts = append(starts, at)
 	}
@@ -95,7 +95,7 @@ func (m *Manager) Convert(ctx context.Context, audio Audio, format string, start
 		args = append(args, "-movflags", "+frag_keyframe+empty_moov+default_base_moof")
 	}
 	args = append(args, "-f", format, "pipe:1")
-	cmd := exec.CommandContext(ctx, m.ffmpeg, args...)
+	cmd := exec.CommandContext(ctx, m.ffmpegPath(), args...)
 	cmd.WaitDelay = 5 * time.Second
 	stderr := &tail{limit: 4096}
 	cmd.Stderr = stderr
@@ -116,16 +116,12 @@ type AudioKey struct {
 	Format  Format
 }
 
-func (k AudioKey) name() string {
-	sum := sha256.Sum256([]byte("audio\x00" + k.Session + "\x00" + k.Format.Extension()))
-	return hex.EncodeToString(sum[:12])
-}
-
 // audioEncoding is one conversion of a track into segments for a play
 // session.
 type audioEncoding struct {
-	m      *Manager
-	key    AudioKey
+	m   *Manager
+	key AudioKey
+	// dir holds the segments, set once opened.
 	dir    string
 	opened chan struct{}
 	audio  Audio
@@ -176,7 +172,7 @@ func (m *Manager) audioFile(ctx context.Context, key AudioKey, open AudioOpener,
 	}
 	e := m.audios[key]
 	if e == nil {
-		e = &audioEncoding{m: m, key: key, dir: filepath.Join(m.dir, key.name()), opened: make(chan struct{}), used: time.Now()}
+		e = &audioEncoding{m: m, key: key, opened: make(chan struct{}), used: time.Now()}
 		m.audios[key] = e
 		m.mu.Unlock()
 		e.open(ctx, open)
@@ -209,11 +205,15 @@ func (e *audioEncoding) open(ctx context.Context, open AudioOpener) {
 		e.err = err
 		return
 	}
-	if err := os.MkdirAll(e.dir, 0o700); err != nil {
+	// A folder of its own: one of the same key started as this one stops
+	// does not have its segments removed with this one's (see stop).
+	dir, err := os.MkdirTemp(e.m.dir, "audio-")
+	if err != nil {
 		free()
 		e.err = err
 		return
 	}
+	e.dir = dir
 	e.audio, e.plan, e.free = audio, plan, free
 }
 
@@ -334,7 +334,7 @@ func (e *audioEncoding) run(ctx context.Context, j *audioJob) {
 		args = append(args, "-hls_segment_type", "mpegts")
 	}
 	args = append(args, filepath.Join(e.dir, "ffmpeg.m3u8"))
-	cmd := exec.CommandContext(ctx, e.m.ffmpeg, args...)
+	cmd := exec.CommandContext(ctx, e.m.ffmpegPath(), args...)
 	cmd.WaitDelay = 5 * time.Second
 	stderr := &tail{limit: 4096}
 	cmd.Stderr = stderr
@@ -378,7 +378,7 @@ func (e *audioEncoding) stop() {
 		return
 	}
 	e.free()
-	if err := os.RemoveAll(e.dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+	if err := removeAllShared(e.dir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		e.m.logger.Warn("The segments of an audio conversion could not be removed", "error", err)
 	}
 }

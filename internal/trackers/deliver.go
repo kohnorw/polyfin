@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"slices"
-	"sync"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -37,14 +36,6 @@ type lane struct {
 	// last is when the lane last sent; notBefore holds it back after the
 	// service asked to wait.
 	last, notBefore time.Time
-}
-
-// pace spaces requests shared by every lane of a service, as limits per
-// address ask.
-type pace struct {
-	mu        sync.Mutex
-	last      time.Time
-	notBefore time.Time
 }
 
 // push queues t in the lane of key, and starts the lane.
@@ -149,6 +140,17 @@ func (s *Service) deliver(key laneKey, l *lane, t ticket) time.Duration {
 		s.forget(t.id)
 		return 0
 	}
+	if kind == kindListAdd || kind == kindListRemove {
+		// The user stopped syncing their watchlist meanwhile.
+		on, err := s.stillSynced(ctx, key)
+		if err != nil {
+			return s.timing.retryFirst
+		}
+		if !on {
+			s.forget(t.id)
+			return 0
+		}
+	}
 	if kind == kindHistoryAdd || kind == kindWatched {
 		// A title the service counted watched lately, from the same
 		// viewing, is not added again.
@@ -171,22 +173,27 @@ func (s *Service) deliver(key laneKey, l *lane, t ticket) time.Duration {
 		l.notBefore = l.last.Add(res.after)
 	}
 	s.mu.Unlock()
-	if p := s.paces[key.service]; p != nil && res.after > 0 {
-		p.mu.Lock()
-		p.notBefore = time.Now().Add(res.after)
-		p.mu.Unlock()
+	if res.after > 0 {
+		s.holdPace(key.service, res.after)
 	}
 
 	switch res.outcome {
 	case delivered:
 		s.forget(t.id)
 		s.delivered(ctx, key, kind, ev, res.watched)
+		if kind == kindListAdd || kind == kindListRemove {
+			// A change went through: the list is no longer told full.
+			s.setWatchlistFull(ctx, key, false)
+		}
 		return 0
 	case reconnect:
 		s.refusedToken(ctx, key)
 		return 0
 	case refused:
 		s.forget(t.id)
+		if res.full {
+			s.setWatchlistFull(ctx, key, true)
+		}
 		if t.id != 0 {
 			s.logger.Info("A tracking service refused a change, which was dropped",
 				"user_id", key.user.String(), "service", key.service, "change", kind, "status", res.status)
@@ -223,17 +230,7 @@ func (s *Service) waitTurn(key laneKey, l *lane) bool {
 	if !s.sleep(time.Until(next)) {
 		return false
 	}
-	p := s.paces[key.service]
-	if p == nil {
-		return true
-	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if !s.sleep(time.Until(latest(p.last.Add(s.timing.sharedGaps[key.service]), p.notBefore))) {
-		return false
-	}
-	p.last = time.Now()
-	return true
+	return s.waitPace(s.ctx, key.service) == nil
 }
 
 // latest is the later of a and b.

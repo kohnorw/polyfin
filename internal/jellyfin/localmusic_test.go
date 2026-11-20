@@ -71,10 +71,11 @@ func TestLocalMusicFoldersPlayInJellyfinApps(t *testing.T) {
 
 	var views QueryResult
 	s.get(t, "/UserViews", token, &views)
-	if len(views.Items) != 1 || views.Items[0].Name != "Records" || views.Items[0].CollectionType != "music" {
+	libraries := libraryViews(views.Items)
+	if len(libraries) != 1 || libraries[0].Name != "Records" || libraries[0].CollectionType != "music" {
 		t.Fatalf("libraries: %+v", views.Items)
 	}
-	records := views.Items[0].Id
+	records := libraries[0].Id
 	var albums QueryResult
 	s.get(t, "/Items?ParentId="+records+"&IncludeItemTypes=MusicAlbum&Recursive=true", token, &albums)
 	if len(albums.Items) != 1 || albums.Items[0].Name != "Sine Studies" || albums.Items[0].AlbumArtist != "Tone Quartet" {
@@ -128,7 +129,8 @@ func TestLocalMusicFoldersPlayInJellyfinApps(t *testing.T) {
 // tracks in order; a song lists under each of its artists, the picture of
 // an artist's folder is theirs; a song's lyrics are those of its lyrics
 // file, else of its lyrics tag, before LRCLIB's, which is never asked
-// about it, and served with LRCLIB's lyrics turned off too.
+// about it, and served with LRCLIB's lyrics turned off too; lyrics an
+// administrator chooses replace them until they are removed.
 func TestLocalMusicPlaylistsArtistsAndLyrics(t *testing.T) {
 	t.Parallel()
 	ffmpeg := os.Getenv("POLYFIN_TEST_FFMPEG")
@@ -139,6 +141,11 @@ func TestLocalMusicPlaylistsArtistsAndLyrics(t *testing.T) {
 	var mu sync.Mutex
 	asked := map[string]int{}
 	lrclib := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The search result an administrator chooses.
+		if r.URL.Path == "/api/get/7" {
+			_, _ = io.WriteString(w, `{"id": 7, "instrumental": false, "plainLyrics": "Chosen words", "syncedLyrics": null}`)
+			return
+		}
 		name := r.URL.Query().Get("track_name")
 		mu.Lock()
 		asked[name]++
@@ -196,10 +203,11 @@ func TestLocalMusicPlaylistsArtistsAndLyrics(t *testing.T) {
 	s.user("listener", nil)
 	token := s.signIn("listener", "web")
 
-	// The playlist, listed as Jellyfin apps list playlists.
+	// The playlist, listed as Jellyfin apps list playlists, beside the
+	// user's Watchlist.
 	var lists QueryResult
 	s.get(t, "/Items?IncludeItemTypes=Playlist&Recursive=true&SortBy=SortName", token, &lists)
-	if len(lists.Items) != 1 || lists.Items[0].Name != "Sine Mix" || lists.Items[0].Type != "Playlist" || lists.TotalRecordCount != 1 {
+	if names := itemNames(lists.Items); !slices.Equal(names, []string{"Sine Mix", "Watchlist"}) || lists.Items[0].Type != "Playlist" || lists.TotalRecordCount != 2 {
 		t.Fatalf("playlists: %+v", lists.Items)
 	}
 	var entries QueryResult
@@ -281,4 +289,58 @@ func TestLocalMusicPlaylistsArtistsAndLyrics(t *testing.T) {
 	if status, _ := lines(songs.Items[2]); status != http.StatusNotFound {
 		t.Errorf("Online with LRCLIB off: %d", status)
 	}
+
+	// Lyrics an administrator chooses replace the song's own; removing
+	// them leaves its lyrics file as it is, and shows it again.
+	s.setting(t, func(settings *accounts.Settings) { settings.Lyrics = true })
+	s.user("admin", func(c *accounts.UserChanges) { c.IsAdministrator = new(true) })
+	admin := app("web", s.signIn("admin", "web"))
+	if status, body := s.call(http.MethodPost, "/Audio/"+filed.Id+"/RemoteSearch/Lyrics/5ef86bcecd71e4b91c950b94ebc1556e_7_plain", admin, nil); status != http.StatusOK {
+		t.Fatalf("choice: %d %s", status, body)
+	}
+	if status, got := lines(filed); status != http.StatusOK || len(got) != 1 || got[0].Text != "Chosen words" {
+		t.Errorf("Filed with lyrics chosen: %d %+v", status, got)
+	}
+	if status, body := s.call(http.MethodDelete, "/Audio/"+filed.Id+"/Lyrics", admin, nil); status != http.StatusNoContent {
+		t.Fatalf("removal: %d %s", status, body)
+	}
+	if status, got := lines(filed); status != http.StatusOK || len(got) != 2 || got[0].Text != "From the file" {
+		t.Errorf("Filed once the lyrics chosen are removed: %d %+v", status, got)
+	}
+	if content, err := os.ReadFile(filepath.Join(dir, "Tone Quartet/Sines/01 Filed.lrc")); err != nil || !bytes.Contains(content, []byte("From the file")) {
+		t.Errorf("the lyrics file: %v %q", err, content)
+	}
+
+	// An upload replaces a song's own lyrics with LRCLIB's lyrics off too;
+	// removing it shows the song's own again, its files untouched.
+	s.setting(t, func(settings *accounts.Settings) { settings.Lyrics = false })
+	request, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, s.url+"/Audio/"+filed.Id+"/Lyrics?fileName=mine.lrc",
+		bytes.NewReader([]byte("[00:00.50]Uploaded words\n")))
+	request.Header.Set("Authorization", admin)
+	request.Header.Set("Content-Type", "text/plain")
+	response, err := testClient.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("upload: %d", response.StatusCode)
+	}
+	if status, got := lines(filed); status != http.StatusOK || len(got) != 1 || got[0].Text != "Uploaded words" || got[0].Start == nil {
+		t.Errorf("Filed with lyrics uploaded: %d %+v", status, got)
+	}
+	if status, body := s.call(http.MethodDelete, "/Audio/"+filed.Id+"/Lyrics", admin, nil); status != http.StatusNoContent {
+		t.Fatalf("removal of the upload: %d %s", status, body)
+	}
+	if status, got := lines(filed); status != http.StatusOK || len(got) != 2 || got[0].Text != "From the file" {
+		t.Errorf("Filed once the upload is removed: %d %+v", status, got)
+	}
+	if content, err := os.ReadFile(filepath.Join(dir, "Tone Quartet/Sines/01 Filed.lrc")); err != nil || bytes.Contains(content, []byte("Uploaded")) {
+		t.Errorf("the lyrics file after the upload: %v %q", err, content)
+	}
+	mu.Lock()
+	if asked["Filed"] != 0 {
+		t.Errorf("LRCLIB was asked about Filed: %v", asked)
+	}
+	mu.Unlock()
 }

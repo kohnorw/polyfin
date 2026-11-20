@@ -7,21 +7,77 @@ import {
   type TextareaHTMLAttributes,
 } from 'react'
 import { useI18n } from '@/i18n'
-import { cx } from './cx'
+import { cx, rem } from './cx'
 import { describedBy, useField } from './Field'
 import { IconButton } from './Button'
 
-/** The box every text control sits in: background, hairline, hover, focus and invalid states. */
-export const fieldBox = cx(
-  'relative flex min-w-0 items-center rounded-field border border-line-2 bg-s2 transition-[border-color,box-shadow] duration-160 ease-nuit',
-  'hover:border-line-3 focus-within:border-accent focus-within:ring-3 focus-within:ring-accent/15',
-  'has-[[aria-invalid]]:border-danger/70 has-[[aria-invalid]]:focus-within:ring-danger/15',
-  'has-disabled:cursor-not-allowed has-disabled:opacity-50 has-disabled:hover:border-line-2',
-)
+/**
+ * The well every text control sits in: a big soft fill, lit while you type in it, with a red edge
+ * when invalid (the `well` utility).
+ */
+export const fieldBox = 'well'
 
-/** The text inside a field box. */
+/**
+ * The sizes of a well. `md` is a 38 px well (32 in Compact, 44 on a phone), the default, for
+ * forms and setting rows; `sm` 34 px for filter bars and toolbars; `compact` 32 px, for compact
+ * rows, table cells and dense filter bars. All light up the same way, and keep 16 px words on a
+ * phone.
+ */
+export type WellSize = 'md' | 'sm' | 'compact'
+
+/**
+ * The classes of each well size: the box, its text (and in mono), an icon at its start, a unit at
+ * its end, and the IconButton size that fits inside it.
+ */
+export const wellSizes: Record<
+  WellSize,
+  {
+    box: string
+    /** The box's least height, for a well that grows (a Select that wraps). */
+    min: string
+    text: string
+    mono: string
+    lead: string
+    icon: number
+    suffix: string
+    button: 'md' | 'sm'
+  }
+> = {
+  md: {
+    box: 'h-9.5 max-sm:h-11',
+    min: 'min-h-9.5 max-sm:min-h-11',
+    text: 'px-3 text-control font-medium',
+    mono: 'px-3 font-mono text-small max-sm:text-base',
+    lead: 'ml-3',
+    icon: 18,
+    suffix: 'pr-3 text-control',
+    button: 'sm',
+  },
+  sm: {
+    box: 'h-8.5 max-sm:h-10',
+    min: 'min-h-8.5 max-sm:min-h-10',
+    text: 'px-2.5 text-control',
+    mono: 'px-2.5 font-mono text-small max-sm:text-base',
+    lead: 'ml-2.5',
+    icon: 17,
+    suffix: 'pr-2.5 text-control',
+    button: 'sm',
+  },
+  compact: {
+    box: 'h-8 [--well-radius:0.5rem]',
+    min: 'min-h-8 [--well-radius:0.5rem]',
+    text: 'px-2.5 text-small max-sm:text-base',
+    mono: 'px-2.5 font-mono text-micro max-sm:text-base',
+    lead: 'ml-2.5',
+    icon: 16,
+    suffix: 'pr-2.5 text-small',
+    button: 'sm',
+  },
+}
+
+/** The text inside a well, with the `text` of its `wellSizes`. */
 export const control =
-  'h-full min-w-0 flex-1 bg-transparent px-3 text-body text-ink outline-none placeholder:text-ink-3 focus-visible:outline-none disabled:cursor-not-allowed'
+  'h-full min-w-0 flex-1 bg-transparent text-ink outline-none placeholder:text-ink-3 focus-visible:outline-none disabled:cursor-not-allowed'
 
 /** The id and `aria-*` a control takes from its Field, unless given its own. */
 export function useControlProps(
@@ -43,7 +99,7 @@ export type TextInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'size' 
   onValue?: (value: string) => void
   /** A Phosphor icon at the start, such as a magnifying glass for a filter. */
   icon?: Icon
-  /** A unit or short text at the end, in mono: "%", "min", "MB". */
+  /** A unit or short text at the end: "%", "min", "MB". */
   suffix?: ReactNode
   /** Controls at the end, inside the box: an IconButton or a Kbd. */
   end?: ReactNode
@@ -51,9 +107,9 @@ export type TextInputProps = Omit<InputHTMLAttributes<HTMLInputElement>, 'size' 
   invalid?: boolean
   /** For `type="password"`: adds an eye that shows what is typed (`aria-pressed`). */
   revealable?: boolean
-  /** `md` is 40 px tall; `sm` 34 px, for filters and toolbars. */
-  size?: 'md' | 'sm'
-  /** Mono with tabular figures, for codes, addresses and numbers. */
+  /** The well's size; see WellSize. Defaults to the 38 px `md`. */
+  size?: WellSize
+  /** Mono with tabular figures, for codes, paths and addresses. */
   mono?: boolean
   /** Classes of the outer box (width, margins). */
   className?: string
@@ -83,12 +139,19 @@ export function TextInput({
   const { t } = useI18n()
   const [shown, setShown] = useState(false)
   const controlProps = useControlProps(id, ownDescribedBy, invalid)
+  const well = wellSizes[size]
   return (
-    <div className={cx(fieldBox, size === 'md' ? 'h-10' : 'h-[34px]', className)}>
-      {Lead && <Lead size={16} aria-hidden="true" className="ml-3 shrink-0 text-ink-3" />}
+    <div className={cx(fieldBox, well.box, className)}>
+      {Lead && (
+        <Lead
+          size={rem(well.icon)}
+          aria-hidden="true"
+          className={cx('shrink-0 text-ink-2', well.lead)}
+        />
+      )}
       <input
         type={revealable && shown ? 'text' : type}
-        className={cx(control, Lead && 'pl-2', mono && 'figures', size === 'sm' && 'text-control')}
+        className={cx(control, mono ? well.mono : well.text, Lead && 'pl-3')}
         onChange={(event) => {
           onChange?.(event)
           onValue?.(event.target.value)
@@ -97,16 +160,17 @@ export function TextInput({
         {...rest}
       />
       {suffix !== undefined && (
-        <span className="shrink-0 pr-3 font-mono text-small text-ink-3">{suffix}</span>
+        <span className={cx('shrink-0 text-ink-2', well.suffix)}>{suffix}</span>
       )}
       {revealable && (
         <IconButton
           label={shown ? t.ui.hide : t.ui.show}
           icon={shown ? EyeSlashIcon : EyeIcon}
+          size={well.button}
           pressed={shown}
           aria-controls={controlProps.id}
           onClick={() => setShown(!shown)}
-          className="mr-[3px] size-8 rounded-md"
+          className="mr-0.5"
         />
       )}
       {end}
@@ -125,12 +189,14 @@ export type NumberInputProps = Omit<
   /** A unit at the end: "%", "min", "h". */
   suffix?: ReactNode
   invalid?: boolean
-  /** Classes of the outer box; it is 120 px wide by default. */
+  /** The well's size; see WellSize. Defaults to the 38 px `md`. */
+  size?: WellSize
+  /** Classes of the outer box; it is 128 px wide by default (96 for `compact`). */
   className?: string
 }
 
 /**
- * A number field, in mono with tabular figures. `min`, `max` and `step` go to the browser; show
+ * A number field, with tabular figures. `min`, `max` and `step` go to the browser; show
  * the range in the Field's help ("From 50 to 100. 90 by default.").
  */
 export function NumberInput({
@@ -138,14 +204,16 @@ export function NumberInput({
   onValue,
   suffix,
   invalid,
+  size = 'md',
   className,
   id,
   'aria-describedby': ownDescribedBy,
   ...rest
 }: NumberInputProps) {
   const controlProps = useControlProps(id, ownDescribedBy, invalid)
+  const well = wellSizes[size]
   return (
-    <div className={cx(fieldBox, 'h-10 w-[120px]', className)}>
+    <div className={cx(fieldBox, well.box, size === 'compact' ? 'w-24' : 'w-32', className)}>
       <input
         type="number"
         inputMode="decimal"
@@ -157,13 +225,14 @@ export function NumberInput({
         }}
         className={cx(
           control,
-          'figures text-lead [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none',
+          well.text,
+          'figures [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none',
         )}
         {...controlProps}
         {...rest}
       />
       {suffix !== undefined && (
-        <span className="shrink-0 pr-3 font-mono text-small text-ink-3">{suffix}</span>
+        <span className={cx('shrink-0 text-ink-2', well.suffix)}>{suffix}</span>
       )}
     </div>
   )
@@ -199,7 +268,11 @@ export function Textarea({
           onChange?.(event)
           onValue?.(event.target.value)
         }}
-        className={cx(control, 'resize-y py-2.5', mono && 'font-mono text-small')}
+        className={cx(
+          control,
+          'resize-y px-3 py-2',
+          mono ? 'font-mono text-small max-sm:text-base' : 'text-body',
+        )}
         {...controlProps}
         {...rest}
       />

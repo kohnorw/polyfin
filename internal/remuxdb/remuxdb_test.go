@@ -1,6 +1,7 @@
 package remuxdb
 
 import (
+	"encoding/json"
 	"io"
 	"log/slog"
 	"maps"
@@ -47,6 +48,9 @@ const movieAnswer = `[
    "sources": [{"kind": "nzb", "filename": "The.Movie.1080p.HLG.mp4", "indexer": "indexer", "indexer_guid": "1e8b"}],
    "tracks": [
      {"kind": "video", "idx": 0, "codec": "h264", "width": 1920, "height": 800, "color_transfer": "arib_std_b67",
+      "is_default": true, "is_forced": false, "is_hearing_impaired": false, "is_external": false,
+      "is_anamorphic": false, "hdr10_plus_present": false},
+     {"kind": "audio", "idx": 1, "codec": "aac", "language": "eng", "channels": 2, "sample_rate": 48000,
       "is_default": true, "is_forced": false, "is_hearing_impaired": false, "is_external": false,
       "is_anamorphic": false, "hdr10_plus_present": false}
    ]}
@@ -137,10 +141,14 @@ func (db *remuxDB) names() (clientIDs, agents []string) {
 	return slices.Clone(db.clientIDs), slices.Clone(db.agents)
 }
 
-// service is a service asking db, with settings turning RemuxDB on.
+// service is a service asking db, with settings turning RemuxDB on. It
+// waits a minute for each answer, so that a loaded machine never has one
+// come late; the tests of late answers wait less.
 func service(db *remuxDB, settings *accounts.Settings) *Service {
 	settings.RemuxDB, settings.RemuxDBURL = true, db.URL
-	return New("0123456789abcdef0123456789abcdef", "test", slog.New(slog.DiscardHandler), func() accounts.Settings { return *settings })
+	s := New("0123456789abcdef0123456789abcdef", "test", slog.New(slog.DiscardHandler), func() accounts.Settings { return *settings })
+	s.wait = time.Minute
+	return s
 }
 
 // version is a version listed for the title of id, a file name and a size
@@ -151,6 +159,7 @@ func version(n byte, id, filename string, size int64) library.Version {
 }
 
 func TestMatchFindsTheFileAVersionIs(t *testing.T) {
+	t.Parallel()
 	probed := func(size int64, duration float64, names ...string) file {
 		f := file{Size: size, Duration: duration}
 		for _, name := range names {
@@ -194,6 +203,7 @@ func TestMatchFindsTheFileAVersionIs(t *testing.T) {
 }
 
 func TestDescriptionsReadAsTheFilesAnalyses(t *testing.T) {
+	t.Parallel()
 	db := newRemuxDB(t)
 	s := service(db, &accounts.Settings{})
 	dolbyVision := version(1, "tt0133093", "The.Movie.2160p.mkv", 10_000_000_000)
@@ -232,12 +242,13 @@ func TestDescriptionsReadAsTheFilesAnalyses(t *testing.T) {
 	}
 
 	analysis, ok = s.Described(hlg)
-	if streams := playback.MediaStreams(analysis, nil, "en"); !ok || len(streams) != 1 || streams[0].VideoRangeType != "HLG" {
+	if streams := playback.MediaStreams(analysis, nil, "en"); !ok || len(streams) != 2 || streams[0].VideoRangeType != "HLG" {
 		t.Errorf("HLG file: %v %+v", ok, streams)
 	}
 }
 
 func TestDescribeAsksRemuxDBOncePerTitle(t *testing.T) {
+	t.Parallel()
 	db := newRemuxDB(t)
 	settings := &accounts.Settings{}
 	s := service(db, settings)
@@ -285,11 +296,13 @@ func TestDescribeAsksRemuxDBOncePerTitle(t *testing.T) {
 }
 
 func TestDescribeLeavesRemuxDBAloneAfterItFails(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct {
 		status int
 		pause  time.Duration
 	}{{http.StatusBadGateway, failedFor}, {http.StatusTooManyRequests, 2 * time.Minute}} {
 		t.Run(strconv.Itoa(test.status), func(t *testing.T) {
+			t.Parallel()
 			db := newRemuxDB(t)
 			db.set(test.status, nil)
 			s := service(db, &accounts.Settings{})
@@ -317,6 +330,7 @@ func TestDescribeLeavesRemuxDBAloneAfterItFails(t *testing.T) {
 }
 
 func TestDescribeKeepsAnAnswerThatCameLate(t *testing.T) {
+	t.Parallel()
 	db := newRemuxDB(t)
 	hold := make(chan struct{})
 	db.set(0, hold)
@@ -345,5 +359,91 @@ func TestDescribeKeepsAnAnswerThatCameLate(t *testing.T) {
 	}
 	if db.requests() != 1 {
 		t.Errorf("asked %v", db.counts())
+	}
+}
+
+// A file RemuxDB lists with video and no audio leaves its version
+// undescribed, as if RemuxDB had not found it; a file with audio, or with
+// audio alone, is described.
+func TestAFileListedWithoutAudioDescribesNothing(t *testing.T) {
+	t.Parallel()
+	listed := func(name, tracks string) file {
+		return file{Container: "matroska,webm", Duration: 8100, Size: 3_000_000_000, Sources: []source{{Filename: name}},
+			Tracks: json.RawMessage(tracks)}
+	}
+	files := []file{
+		listed("Movie.Silent.mkv", `[{"kind":"video","idx":0,"codec":"h264"},{"kind":"subtitle","idx":1,"codec":"subrip"}]`),
+		listed("Movie.Sound.mkv", `[{"kind":"video","idx":0,"codec":"h264"},{"kind":"audio","idx":1,"codec":"ac3"}]`),
+		listed("Movie.Radio.mka", `[{"kind":"audio","idx":0,"codec":"flac"}]`),
+	}
+	for name, want := range map[string]bool{"Movie.Silent.mkv": false, "Movie.Sound.mkv": true, "Movie.Radio.mka": true} {
+		if got := describe(files, version(1, "tt0133093", name, 3_000_000_000)).Found; got != want {
+			t.Errorf("%s described: %v", name, got)
+		}
+	}
+}
+
+// The versions an answer describes are told once Describe stopped waiting
+// for it, those RemuxDB knows only: item details listed them without
+// tracks. An answer Describe waited for is not told, its versions already
+// listed with their tracks.
+func TestALateAnswerIsTold(t *testing.T) {
+	t.Parallel()
+	db := newRemuxDB(t)
+	s := service(db, &accounts.Settings{})
+	var (
+		mu   sync.Mutex
+		told [][]library.Version
+	)
+	telling := make(chan struct{}, 8)
+	s.OnDescribed(func(versions []library.Version) {
+		mu.Lock()
+		told = append(told, versions)
+		mu.Unlock()
+		telling <- struct{}{}
+	})
+	toldIDs := func() []accounts.ID {
+		mu.Lock()
+		defer mu.Unlock()
+		var ids []accounts.ID
+		for _, versions := range told {
+			for _, v := range versions {
+				ids = append(ids, v.ID)
+			}
+		}
+		slices.SortFunc(ids, func(a, b accounts.ID) int { return slices.Compare(a[:], b[:]) })
+		return ids
+	}
+	known := version(1, "tt0133093", "The.Movie.2160p.mkv", 10_000_000_000)
+	unknown := version(2, "tt0133093", "Another.Movie.mkv", 1_000)
+	// Within the wait: the hook runs before Describe hears the answer.
+	s.wait = time.Minute
+	s.Describe(t.Context(), []library.Version{known})
+	if ids := toldIDs(); ids != nil {
+		t.Fatalf("an answer in time told %v", ids)
+	}
+
+	other := version(3, "tt0903747:1:2", "Show.S01E02.mkv", 1_000)
+	hold := make(chan struct{})
+	db.set(0, hold)
+	s.descriptions.Delete(known.ID)
+	s.wait = 20 * time.Millisecond
+	s.Describe(t.Context(), []library.Version{known, unknown, other})
+	s.mu.Lock()
+	asking := []*lookup{s.asking["tt0133093"], s.asking["tt0903747:1:2"]}
+	s.mu.Unlock()
+	close(hold)
+	// The late answer about the movie tells its known version: wait for
+	// the hook, then for both lookups, after which nothing else is told.
+	select {
+	case <-telling:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("a late answer told nothing, told %v", toldIDs())
+	}
+	for _, l := range asking {
+		<-l.done
+	}
+	if ids := toldIDs(); !slices.Equal(ids, []accounts.ID{known.ID}) {
+		t.Errorf("told %v, want the known version alone", ids)
 	}
 }

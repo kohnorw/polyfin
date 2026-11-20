@@ -63,9 +63,11 @@ func (h *handler) userAppImportTarget(w http.ResponseWriter, r *http.Request) (a
 }
 
 // ownAppImport answers whether the user may import from an app, whether
-// they may add their own addons, the import into their account running,
-// else the last one, null when none, their connections, and how often, in
-// minutes, connections are imported.
+// they may add their own addons, and whether parental control or blocked
+// genres keep them from it, the import into their account running, else
+// the last one, null when none, their connections, how often, in minutes,
+// connections are imported, and whether the server has a secret key to
+// encrypt the sign-in a connection keeps.
 func (h *handler) ownAppImport(w http.ResponseWriter, r *http.Request) {
 	user := sessionFrom(r.Context()).User
 	enabled := h.AppImport != nil && h.Accounts.Settings().ServerImports
@@ -81,16 +83,26 @@ func (h *handler) ownAppImport(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, struct {
 		Enabled            bool                `json:"enabled"`
 		AddonsAllowed      bool                `json:"addonsAllowed"`
+		ParentalControl    bool                `json:"parentalControl"`
 		Import             *appImportJSON      `json:"import"`
 		Connections        []appConnectionJSON `json:"connections"`
 		ImportEveryMinutes int                 `json:"importEveryMinutes"`
-	}{enabled, settings.PersonalAddonsAllowed(user), current, connections, settings.ImportEveryMinutes})
+		SecretKey          bool                `json:"secretKey"`
+	}{enabled, appAddonsAllowed(settings, user), user.Restricted(), current, connections, settings.ImportEveryMinutes, h.Health.SecretKey})
+}
+
+// appAddonsAllowed reports whether an import may install addons as user's
+// own: while they may add their own, and no parental control or blocked
+// genres keep them to the server's (see appimport.Service.Start).
+func appAddonsAllowed(settings accounts.Settings, user accounts.User) bool {
+	return settings.PersonalAddonsAllowed(user) && !user.Restricted()
 }
 
 // userAppImport answers, to an administrator, whether the user the path
-// names may add their own addons, the import into their account running,
-// else the last one, their connections, and how often, in minutes,
-// connections are imported.
+// names may add their own addons, and whether parental control or blocked
+// genres keep them from it, the import into their account running, else
+// the last one, their connections, how often, in minutes, connections
+// are imported, and whether the server has a secret key, as ownAppImport.
 func (h *handler) userAppImport(w http.ResponseWriter, r *http.Request) {
 	user, ok := h.userAppImportTarget(w, r)
 	if !ok {
@@ -103,10 +115,13 @@ func (h *handler) userAppImport(w http.ResponseWriter, r *http.Request) {
 	settings := h.Accounts.Settings()
 	writeJSON(w, http.StatusOK, struct {
 		AddonsAllowed      bool                `json:"addonsAllowed"`
+		ParentalControl    bool                `json:"parentalControl"`
 		Import             *appImportJSON      `json:"import"`
 		Connections        []appConnectionJSON `json:"connections"`
 		ImportEveryMinutes int                 `json:"importEveryMinutes"`
-	}{settings.PersonalAddonsAllowed(user), newAppImportJSON(h.AppImport.Current(user.ID)), connections, settings.ImportEveryMinutes})
+		SecretKey          bool                `json:"secretKey"`
+	}{appAddonsAllowed(settings, user), user.Restricted(), newAppImportJSON(h.AppImport.Current(user.ID)), connections, settings.ImportEveryMinutes,
+		h.Health.SecretKey})
 }
 
 // appConnections lists user's connections, or answers why it could not.
@@ -217,7 +232,8 @@ func (h *handler) readNuvio(target appImportTarget) http.HandlerFunc {
 		if !decode(w, r, &body) {
 			return
 		}
-		account, err := h.Nuvio.Read(r.Context(), body.Backend, body.Email, body.Password, body.StayConnected)
+		// A member's backend is on a public address, as their addons are.
+		account, err := h.Nuvio.Read(r.Context(), body.Backend, body.Email, body.Password, body.StayConnected, confined(r))
 		var unsupported *nuvio.BackupError
 		if errors.As(err, &unsupported) {
 			writeJSON(w, http.StatusBadGateway, map[string]any{"error": "nuvio_backup_unsupported", "version": unsupported.Version})
@@ -229,6 +245,7 @@ func (h *handler) readNuvio(target appImportTarget) http.HandlerFunc {
 			code   string
 		}{
 			{nuvio.ErrInvalidAddress, http.StatusBadRequest, "invalid_nuvio_address"},
+			{stremio.ErrPrivateNetwork, http.StatusForbidden, "private_network"},
 			// Not 401, which the admin app reads as its own session ending.
 			{nuvio.ErrSignInRefused, http.StatusBadRequest, "nuvio_sign_in_refused"},
 			{nuvio.ErrUnreachable, http.StatusBadGateway, "nuvio_unreachable"},
@@ -349,6 +366,41 @@ func (h *handler) readStremioKey(target appImportTarget) http.HandlerFunc {
 	}
 }
 
+// unlockStremio opens, with its PIN, the profile of the Stremio account
+// the caller holds that asks for it, and answers the account held, with
+// that profile read. The PIN goes to Stremio only: it is never kept,
+// logged, nor answered.
+func (h *handler) unlockStremio(target appImportTarget) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if !h.stremioReader(target, w, r) {
+			return
+		}
+		var body struct {
+			Key     string `json:"key"`
+			Profile string `json:"profile"`
+			Pin     string `json:"pin"`
+		}
+		if !decode(w, r, &body) {
+			return
+		}
+		account, err := h.AppImport.Unlock(r.Context(), sessionFrom(r.Context()).User.ID, body.Key, body.Profile, body.Pin)
+		switch {
+		case errors.Is(err, appimport.ErrExpired):
+			writeError(w, http.StatusConflict, "app_import_expired")
+			return
+		case errors.Is(err, appimport.ErrUnknownProfile):
+			writeError(w, http.StatusBadRequest, "invalid_request")
+			return
+		case errors.Is(err, stremioimport.ErrPinRefused):
+			writeError(w, http.StatusBadRequest, "stremio_pin_refused")
+			return
+		case h.stremioError(w, r, err):
+			return
+		}
+		writeJSON(w, http.StatusOK, newAppAccountJSON(body.Key, account))
+	}
+}
+
 // holdStremio holds the Stremio account read for the caller, and answers
 // it, or answers why reading it failed.
 func (h *handler) holdStremio(w http.ResponseWriter, r *http.Request, account appimport.Account, err error) {
@@ -412,8 +464,10 @@ func (h *handler) startAppImport(target appImportTarget) http.HandlerFunc {
 		}{
 			{appimport.ErrExpired, http.StatusConflict, "app_import_expired"},
 			{appimport.ErrUnknownProfile, http.StatusBadRequest, "invalid_request"},
+			{appimport.ErrProfileLocked, http.StatusBadRequest, "invalid_request"},
 			{appimport.ErrUnknownAddon, http.StatusBadRequest, "invalid_request"},
 			{appimport.ErrAddonsNotAllowed, http.StatusForbidden, "personal_addons_disabled"},
+			{appimport.ErrAddonsParentalControl, http.StatusForbidden, "parental_control_own_sources"},
 			{appimport.ErrRunning, http.StatusConflict, "app_import_running"},
 		} {
 			if errors.Is(err, known.err) {
@@ -446,6 +500,7 @@ type appAccountJSON struct {
 type appProfileJSON struct {
 	ID      string         `json:"id"`
 	Name    string         `json:"name"`
+	Locked  bool           `json:"locked"`
 	Entries int            `json:"entries"`
 	Played  int            `json:"played"`
 	Resumes int            `json:"resumes"`
@@ -460,10 +515,10 @@ type appAddonJSON struct {
 }
 
 func newAppAccountJSON(key string, account appimport.Account) appAccountJSON {
-	result := appAccountJSON{Key: key, App: account.App, StayConnected: account.SignIn != nil,
+	result := appAccountJSON{Key: key, App: account.App, StayConnected: account.StayConnected,
 		Profiles: make([]appProfileJSON, 0, len(account.Profiles))}
 	for _, p := range account.Profiles {
-		profile := appProfileJSON{ID: p.ID, Name: p.Name, Entries: len(p.Entries), Addons: make([]appAddonJSON, 0, len(p.Addons))}
+		profile := appProfileJSON{ID: p.ID, Name: p.Name, Locked: p.Locked, Entries: len(p.Entries), Addons: make([]appAddonJSON, 0, len(p.Addons))}
 		for _, e := range p.Entries {
 			if e.Played {
 				profile.Played++
@@ -505,20 +560,7 @@ type appImportJSON struct {
 	Resumed        int                     `json:"resumed"`
 	Watchlist      int                     `json:"watchlist"`
 	UnmatchedCount int                     `json:"unmatchedCount"`
-	Unmatched      []appUnmatchedJSON      `json:"unmatched"`
 	Addons         []appAddonInstalledJSON `json:"addons"`
-}
-
-// appUnmatchedJSON is a title of the app no Polyfin title matched: its
-// identifier in the app, its name when the app gives one, and an
-// episode's numbers.
-type appUnmatchedJSON struct {
-	ID      string `json:"id"`
-	Name    string `json:"name"`
-	Type    string `json:"type"`
-	Season  *int   `json:"season"`
-	Episode *int   `json:"episode"`
-	Reason  string `json:"reason"`
 }
 
 // appAddonInstalledJSON is an addon an import installs, and how it went.
@@ -536,16 +578,9 @@ func newAppImportJSON(status *appimport.Status) *appImportJSON {
 	result := &appImportJSON{ID: status.ID, App: status.App, Profile: status.Profile, State: status.State, Problem: optional(status.Problem),
 		StartedAt: status.StartedAt.UTC().Truncate(time.Second), EndedAt: utcSeconds(status.EndedAt), Read: status.Read,
 		Played: status.Played, Resumed: status.Resumed, Watchlist: status.Watchlist, UnmatchedCount: status.UnmatchedCount,
-		Unmatched: make([]appUnmatchedJSON, 0, len(status.Unmatched)), Addons: make([]appAddonInstalledJSON, 0, len(status.Addons))}
+		Addons: make([]appAddonInstalledJSON, 0, len(status.Addons))}
 	result.User.ID, result.User.Name = status.User.String(), status.UserName
 	result.StartedBy.ID, result.StartedBy.Name = status.StartedBy.String(), status.StartedByName
-	for _, u := range status.Unmatched {
-		entry := appUnmatchedJSON{ID: u.ID, Name: u.Name, Type: u.Kind, Reason: u.Reason}
-		if u.Kind == "episode" {
-			entry.Season, entry.Episode = &u.Season, &u.Episode
-		}
-		result.Unmatched = append(result.Unmatched, entry)
-	}
 	for _, a := range status.Addons {
 		result.Addons = append(result.Addons, appAddonInstalledJSON{Name: a.Name, Address: a.Address, Installed: a.Installed,
 			Problem: optional(a.Problem)})

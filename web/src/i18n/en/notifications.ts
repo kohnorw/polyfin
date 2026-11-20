@@ -45,10 +45,15 @@ const notifications = {
     nameHelp: 'Shown here only, 1 to 64 characters.',
     webhookAddress: 'Webhook address',
     discordAddress: 'Discord webhook address',
+    discordSwitched:
+      'This is a Discord webhook: the target is a Discord target, which sends Discord’s own message.',
+    discordAsWebhook:
+      'This is a Discord webhook: Polyfin sends it Discord’s own message, as to a Discord target.',
     addressHelp: {
-      webhook: 'It is kept encrypted and never shown again: only its host is.',
+      webhook:
+        'It is never shown again, only its host is. It is encrypted when the server has a POLYFIN_SECRET_KEY, and stored as is otherwise.',
       discord:
-        'In Discord: the channel’s settings, Integrations, Webhooks, Copy Webhook URL. It is kept encrypted and never shown again.',
+        'In Discord: the channel’s settings, Integrations, Webhooks, Copy Webhook URL. It is never shown again. It is encrypted when the server has a POLYFIN_SECRET_KEY, and stored as is otherwise.',
     },
     savedAddress: (host: string) => `Saved, at ${host}.`,
     ntfyServer: 'ntfy server',
@@ -57,7 +62,8 @@ const notifications = {
     topicHelp:
       'The topic you subscribe to in the ntfy app. Anyone who knows a topic on a public server can read it: choose one that is hard to guess.',
     token: 'Access token',
-    tokenHelp: 'For a topic that needs signing in. It is kept encrypted and never shown again.',
+    tokenHelp:
+      'For a topic that needs signing in. It is never shown again. It is encrypted when the server has a POLYFIN_SECRET_KEY, and stored as is otherwise.',
     emailAddress: 'Email address',
     emailAddressHelp: 'Where the messages go.',
     chat: 'Chat',
@@ -65,25 +71,27 @@ const notifications = {
       'The chat’s number, such as -1001234567890, or a public channel’s name, such as @news_example. Add the bot to the chat first.',
     botToken: 'Bot token',
     botTokenHelp:
-      'BotFather gives it when the bot is created. It is kept encrypted and never shown again.',
+      'BotFather gives it when the bot is created. It is never shown again. It is encrypted when the server has a POLYFIN_SECRET_KEY, and stored as is otherwise.',
     gotifyServer: 'Gotify server',
     gotifyServerHelp: 'Its address, such as https://gotify.example.org.',
     appToken: 'Application token',
     appTokenHelp: {
       gotify:
-        'In Gotify: Apps, Create Application, then copy its token. It is kept encrypted and never shown again.',
+        'In Gotify: Apps, Create Application, then copy its token. It is never shown again. It is encrypted when the server has a POLYFIN_SECRET_KEY, and stored as is otherwise.',
       pushover:
-        'The API token of an application created on Pushover. It is kept encrypted and never shown again.',
+        'The API token of an application created on Pushover. It is never shown again. It is encrypted when the server has a POLYFIN_SECRET_KEY, and stored as is otherwise.',
     },
     userKey: 'User key',
     userKeyHelp:
-      'Shown on Pushover’s dashboard once signed in, or a group key. It is kept encrypted and never shown again.',
+      'Shown on Pushover’s dashboard once signed in, or a group key. It is never shown again. It is encrypted when the server has a POLYFIN_SECRET_KEY, and stored as is otherwise.',
     events: 'Events',
     eventsHelp: {
       server: 'What it is told of, for every user.',
       own: 'What it is told of, about you.',
     },
     eventNames: {
+      server_crashed: 'Server crashed',
+      playback_failed: 'Playback failed',
       new_episode: 'New episodes',
       recording_finished: 'Recording finished',
       recording_failed: 'Recording failed',
@@ -103,8 +111,13 @@ const notifications = {
       new_device: 'Sign-in on a new device',
       share_played: 'Shared link played',
       programme_reminder: 'Programme starting',
+      title_available: 'Watchlist title available',
     },
     eventHelp: {
+      server_crashed:
+        'Polyfin stopped on an error and started again: told as it starts again, with the beginning of the error’s trace, which System › Health shows too.',
+      playback_failed:
+        'A play could not start or broke: no version plays on the app, a limit refused it, or its stream failed. Once an hour per user and title, with the app and the reason.',
       new_episode:
         'An episode of a series played or marked favorite is out: once per episode, never for those already out.',
       recording_finished: 'A Live TV recording ended, whole or with part of it missing.',
@@ -135,6 +148,8 @@ const notifications = {
         'Someone without an account started a movie or an episode through a share link: at most once an hour per link, with the title and who shared it. The server’s targets hear of every link, the others of their own.',
       programme_reminder:
         'A Live TV programme you set a reminder for in the web player starts soon, as long before as Remind me before says, with a link to its channel.',
+      title_available:
+        'Versions were found for a title of your Watchlist playlist that the earlier checks found none for: once per title. A version found has not been tried yet.',
     },
     enabled: 'Send messages to this target',
     create: 'Add',
@@ -147,6 +162,7 @@ const notifications = {
     testing: 'Sending…',
     testDelivered: (name: string) => `${name} received the test message.`,
     testFailed: (name: string) => `${name} did not accept the test message.`,
+    testAnswer: (answer: string) => `It answered: ${answer}`,
     edit: 'Edit',
     delete: 'Delete',
     deleteTitle: (name: string) => `Delete ${name}?`,
@@ -173,6 +189,50 @@ const notifications = {
         'Recent messages could not be delivered: the target did not answer, or answered with errors. Each message is tried again for an hour.',
       unreadable:
         'Its address, token or key cannot be decrypted with POLYFIN_SECRET_KEY: nothing is sent to it until it is entered again.',
+    },
+    perMinute: 'Messages a minute, at most',
+    perMinuteHelp: 'Further messages wait their turn, in order. Empty for no limit; 1 to 60.',
+    groupMinutes: 'Group plays and new episodes, in minutes',
+    groupMinutesHelp:
+      'Playbacks, shared links played and new episodes wait this long, then go as one message. Everything else still goes at once. Empty to send each at once; 1 to 1440.',
+    capped: (n: number) => `At most ${n} a minute`,
+    grouped: (n: number) => `Grouped every ${n} min`,
+    deliveries: {
+      open: 'Recent deliveries',
+      title: (name: string) => `Recent deliveries of ${name}`,
+      help: 'The last 100 messages, newest first, kept 30 days.',
+      loading: 'Loading the deliveries…',
+      empty: 'No message sent yet.',
+      when: 'When',
+      event: 'Message',
+      outcome: 'Outcome',
+      test: 'Test message',
+      grouped: (n: number) => `${n} events in one message`,
+      attempts: (n: number) => `${n} attempts`,
+      outcomes: {
+        delivered: 'Delivered',
+        refused: 'Refused',
+        rejected: 'Message refused',
+        failed: 'Not delivered',
+        dropped: 'Dropped',
+        unreadable: 'Cannot be decrypted',
+      },
+    },
+    preview: {
+      title: 'Preview',
+      help: 'See a summary as an email target would receive it now, of the server or of a user. Nothing is sent.',
+      summary: 'Summary',
+      summaries: {
+        weekly_summary: 'Weekly summary',
+        monthly_summary: 'Month in review',
+        yearly_summary: 'Year in review',
+      },
+      of: 'Of',
+      server: 'The server',
+      show: 'Preview',
+      loading: 'Making the preview…',
+      empty: 'Nothing to tell for this period: this summary would not be sent.',
+      frame: 'The summary’s email',
     },
     lastSent: 'Last message ',
     nothingSent: 'No message sent yet',

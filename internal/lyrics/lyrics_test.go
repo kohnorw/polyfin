@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -23,11 +24,12 @@ import (
 const syncedLRC = "[ar:Tone Quartet]\n[00:01.50] First line\n[00:03.05]Second line\n[00:04.123] \n[00:06.00][01:10.5] Chorus\n"
 
 // fakeLRCLIB answers as LRCLIB's /api/get, by track name: synced and
-// plain lyrics, plain lyrics only, an instrumental, an unknown track, a
-// track it fails on while failing is set (or limits with a Retry-After
-// while limiting is set), and one it answers once release is closed. It
-// counts the requests for each track and keeps the last query and
-// User-Agent.
+// plain lyrics, plain lyrics only, a long line sung many times (see
+// longLine), an instrumental, an unknown track, a track it fails on while
+// failing is set (or limits with a Retry-After while limiting is set),
+// and one it answers once release is closed. It answers its search and
+// its tracks by identifier too (see answerSearch). It counts the requests
+// for each track and keeps the last query and User-Agent.
 type fakeLRCLIB struct {
 	server    *httptest.Server
 	failing   atomic.Bool
@@ -43,7 +45,14 @@ func newFakeLRCLIB(t *testing.T) *fakeLRCLIB {
 	t.Helper()
 	f := &fakeLRCLIB{asked: map[string]int{}, release: make(chan struct{})}
 	f.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/get" {
+		switch {
+		case r.URL.Path == "/api/search":
+			f.answerSearch(w, r)
+			return
+		case strings.HasPrefix(r.URL.Path, "/api/get/"):
+			f.answerID(w, r)
+			return
+		case r.URL.Path != "/api/get":
 			http.NotFound(w, r)
 			return
 		}
@@ -61,6 +70,8 @@ func newFakeLRCLIB(t *testing.T) *fakeLRCLIB {
 			answer(map[string]any{"instrumental": false, "plainLyrics": "First line\nSecond line", "syncedLyrics": syncedLRC})
 		case "Plain Song":
 			answer(map[string]any{"instrumental": false, "plainLyrics": "Line one\r\nLine two\n\nLine three\n", "syncedLyrics": nil})
+		case "Endless Song":
+			answer(map[string]any{"instrumental": false, "plainLyrics": "Plain words", "syncedLyrics": longLine})
 		case "Interlude":
 			answer(map[string]any{"instrumental": true, "plainLyrics": nil, "syncedLyrics": nil})
 		case "Flaky Song":
@@ -145,6 +156,7 @@ func song(title string) Track {
 }
 
 func TestSyncedLyricsAreAskedOnceAndReadLineByLine(t *testing.T) {
+	t.Parallel()
 	f := newFakeLRCLIB(t)
 	s, _, _ := newService(t, f)
 	track := song("Synced Song")
@@ -177,6 +189,7 @@ func TestSyncedLyricsAreAskedOnceAndReadLineByLine(t *testing.T) {
 }
 
 func TestPlainLyricsAreUnsynced(t *testing.T) {
+	t.Parallel()
 	f := newFakeLRCLIB(t)
 	s, _, _ := newService(t, f)
 	track := song("Plain Song")
@@ -197,6 +210,7 @@ func TestPlainLyricsAreUnsynced(t *testing.T) {
 }
 
 func TestTracksWithoutLyricsAreRemembered(t *testing.T) {
+	t.Parallel()
 	f := newFakeLRCLIB(t)
 	s, _, c := newService(t, f)
 	unknown, instrumental, nameless := song("Unknown Song"), song("Interlude"), song("Nameless")
@@ -228,6 +242,7 @@ func TestTracksWithoutLyricsAreRemembered(t *testing.T) {
 }
 
 func TestFailuresAreRetriedLater(t *testing.T) {
+	t.Parallel()
 	f := newFakeLRCLIB(t)
 	s, _, c := newService(t, f)
 	track, other := song("Flaky Song"), song("Synced Song")
@@ -265,6 +280,7 @@ func TestFailuresAreRetriedLater(t *testing.T) {
 }
 
 func TestSlowAnswersDoNotHoldRequests(t *testing.T) {
+	t.Parallel()
 	f := newFakeLRCLIB(t)
 	s, _, _ := newService(t, f)
 	track := song("Slow Song")
@@ -293,6 +309,7 @@ func TestSlowAnswersDoNotHoldRequests(t *testing.T) {
 }
 
 func TestLyricsTurnedOffAskNothing(t *testing.T) {
+	t.Parallel()
 	f := newFakeLRCLIB(t)
 	s, on, _ := newService(t, f)
 	found := song("Synced Song")
@@ -324,6 +341,7 @@ func TestLyricsTurnedOffAskNothing(t *testing.T) {
 }
 
 func TestLookUpKeepsLyricsForLater(t *testing.T) {
+	t.Parallel()
 	f := newFakeLRCLIB(t)
 	s, _, _ := newService(t, f)
 	track := song("Synced Song")
@@ -341,6 +359,7 @@ func TestLookUpKeepsLyricsForLater(t *testing.T) {
 }
 
 func TestParseLRC(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, lrc string
 		want      []Line

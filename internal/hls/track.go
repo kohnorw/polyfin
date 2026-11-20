@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"sync"
 	"time"
@@ -74,7 +75,7 @@ type trackJob struct {
 // it: its input, and its audio, copied or converted. The video is left
 // to the kept video's FFmpeg.
 func (m *Manager) newTrack(key Key, remux Remux, release func()) (*track, error) {
-	remux.Encode, remux.VideoTag = nil, ""
+	remux.Encode, remux.Subtitles, remux.Extracted, remux.VideoTag = nil, nil, nil, ""
 	dir, err := os.MkdirTemp(m.dir, "audio-")
 	if err != nil {
 		return nil, err
@@ -87,7 +88,8 @@ func (m *Manager) newTrack(key Key, remux Remux, release func()) (*track, error)
 // sameTrack reports whether two remuxes make the same audio.
 func sameTrack(a, b Remux) bool {
 	return a.Audio == b.Audio && a.ADTS == b.ADTS && a.AudioCodec == b.AudioCodec && a.AudioChannels == b.AudioChannels &&
-		a.AudioBitrate == b.AudioBitrate && a.AudioFilter == b.AudioFilter && a.Format == b.Format && a.Plan.Len() == b.Plan.Len()
+		a.AudioBitrate == b.AudioBitrate && a.AudioFilter == b.AudioFilter && slices.Equal(a.AudioDecoder, b.AudioDecoder) &&
+		a.Format == b.Format && a.Plan.Len() == b.Plan.Len()
 }
 
 func (t *track) path(n int) string {
@@ -179,14 +181,21 @@ func (t *track) await(ctx context.Context, n int) (*os.File, error) {
 
 // waitProgress waits for a change, or reports ErrStalled once the running
 // job made no progress for the stall timeout, counted from since at the
-// earliest. The caller holds t.mu, held again when it returns.
+// earliest, and stops that job, as encoding.waitProgress does. The caller
+// holds t.mu, held again when it returns.
 func (t *track) waitProgress(ctx context.Context, since time.Time) error {
+	j := t.job
 	last := since
-	if j := t.job; j != nil && j.progressed.After(last) {
+	if j != nil && j.progressed.After(last) {
 		last = j.progressed
 	}
 	left := time.Until(last.Add(t.m.stall))
 	if left <= 0 {
+		if j != nil && !j.done {
+			t.m.logger.Warn("FFmpeg made no progress on a kept video's audio: stopped, to start again on the next request", "from", j.start,
+				"for", time.Since(j.progressed).Round(time.Second))
+			j.cancel()
+		}
 		return ErrStalled
 	}
 	timer := time.NewTimer(left)
@@ -244,7 +253,7 @@ func (t *track) start(n int) {
 
 // run runs FFmpeg for a job and files the audio it writes into segments.
 func (t *track) run(ctx context.Context, j *trackJob) {
-	cmd := exec.CommandContext(ctx, t.m.ffmpeg, t.remux.trackArgs(j.start)...)
+	cmd := exec.CommandContext(ctx, t.m.ffmpegPath(), t.remux.trackArgs(j.start)...)
 	cmd.WaitDelay = 5 * time.Second
 	stderr := &tail{limit: 4096}
 	cmd.Stderr = stderr
@@ -402,7 +411,7 @@ func (t *track) stop() {
 	t.signal()
 	t.mu.Unlock()
 	t.release()
-	if err := os.RemoveAll(t.dir); err != nil {
+	if err := removeAllShared(t.dir); err != nil {
 		t.m.logger.Warn("The audio segments of a kept conversion could not be removed", "error", err)
 	}
 }
@@ -417,6 +426,7 @@ func (r Remux) trackArgs(n int) []string {
 	seek, _ := r.seekArgs(n, r.Lookback)
 	args = append(args, seek...)
 	args = append(args, r.InputOptions...)
+	args = append(args, r.decoderArgs()...)
 	args = append(args, "-copyts", "-i", r.Input, "-map", "0:"+strconv.Itoa(r.Audio), "-map_metadata", "-1", "-map_chapters", "-1", "-c", "copy")
 	args = append(args, r.audioArgs()...)
 	args = append(args, "-bsf:a", r.audioFilters())

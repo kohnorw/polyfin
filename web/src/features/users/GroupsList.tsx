@@ -1,4 +1,4 @@
-import { CaretRightIcon, PlusIcon, UsersThreeIcon } from '@phosphor-icons/react'
+import { PlusIcon, UsersThreeIcon } from '@phosphor-icons/react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useId, useState, type FormEvent } from 'react'
 import { useNavigate } from 'react-router'
@@ -29,10 +29,10 @@ import {
   TextInput,
   useToast,
 } from '@/ui'
-import { UsersTabs } from './shared'
+import { UsersArea } from './shared'
 
 /**
- * `/users/groups`: the groups, each opening its page, and the button creating one. A group holds
+ * `/users/groups`: the groups, each a row opening its page, and the button creating one. A group holds
  * the limits of a user's page, which its members follow.
  */
 export default function GroupsList() {
@@ -51,8 +51,7 @@ export default function GroupsList() {
   )
 
   return (
-    <>
-      <UsersTabs />
+    <UsersArea>
       <PageLayout title={t.groups.title} lede={t.groups.description} actions={create}>
         <Block title={t.groups.listTitle} count={groups.data?.length}>
           {groups.isPending ? (
@@ -74,7 +73,6 @@ export default function GroupsList() {
                   leading={UsersThreeIcon}
                   title={group.name}
                   meta={t.groups.memberCount(group.memberCount)}
-                  trailing={<CaretRightIcon size={16} aria-hidden="true" className="text-ink-3" />}
                 />
               ))}
             </RowList>
@@ -87,7 +85,7 @@ export default function GroupsList() {
         onClose={() => setCreating(false)}
         users={users.data ?? []}
       />
-    </>
+    </UsersArea>
   )
 }
 
@@ -161,7 +159,7 @@ function CreateGroupModal({
         </>
       }
     >
-      <form id={formId} onSubmit={submit} noValidate className="space-y-5 p-5">
+      <form id={formId} onSubmit={submit} noValidate className="space-y-4 p-5">
         <Field label={t.groups.name} help={t.groups.nameRule} error={nameError}>
           <TextInput
             value={name}

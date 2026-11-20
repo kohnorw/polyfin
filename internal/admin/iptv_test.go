@@ -147,7 +147,7 @@ func TestIPTVSources(t *testing.T) {
 	}{
 		{map[string]any{"name": "Wrong", "kind": "xtream", "server": provider, "username": "user", "password": "nope"}, "iptv_login_refused"},
 		{map[string]any{"name": "Page", "kind": "m3u", "url": provider + "/xmltv.php"}, "invalid_channel_list"},
-		{map[string]any{"name": "Bad", "kind": "m3u", "url": "file:///etc/passwd"}, "invalid_source_address"},
+		{map[string]any{"name": "Bad", "kind": "m3u", "url": "ftp://lists.example/list.m3u"}, "invalid_source_address"},
 		{map[string]any{"name": "Kind", "kind": "other", "url": provider + "/get.php"}, "invalid_source_address"},
 		{map[string]any{"name": "", "kind": "m3u", "url": provider + "/get.php?x"}, "invalid_source_name"},
 		{map[string]any{"name": "Again", "kind": "m3u", "url": provider + "/get.php?username=user&password=secret-pw"}, "addon_exists"},
@@ -155,6 +155,46 @@ func TestIPTVSources(t *testing.T) {
 		if status, body, _ := administrator.call(http.MethodPost, "/scopes/shared/iptv", tc.body); body["error"] != tc.code {
 			t.Errorf("%v: %d %v", tc.body, status, body)
 		}
+	}
+}
+
+// An IPTV source's user agent, set on adding it or later, is the one its
+// list is downloaded with, previews included, and shows with the source.
+func TestIPTVSourcesTakeAUserAgent(t *testing.T) {
+	t.Parallel()
+	api := newTestAPI(t, 10)
+	administrator := api.signedIn("administrator", true)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("User-Agent") != "Panel/1" {
+			http.Error(w, "unknown player", http.StatusForbidden)
+			return
+		}
+		_, _ = io.WriteString(w, "#EXTM3U\n#EXTINF:-1 group-title=\"News\",Zeb One\nhttps://live.example/1.ts\n")
+	}))
+	t.Cleanup(server.Close)
+	account := map[string]any{"name": "Panel", "kind": "m3u", "url": server.URL + "/get.php"}
+	if status, body, _ := administrator.call(http.MethodPost, "/scopes/shared/iptv", account); status == http.StatusCreated {
+		t.Fatalf("a list its provider refuses Polyfin: %v", body)
+	}
+	account["userAgent"] = "Panel/1"
+	preview := maps.Clone(account)
+	preview["by"] = "group"
+	if status, body, _ := administrator.call(http.MethodPost, "/scopes/shared/iptv/preview", preview); status != http.StatusOK || body["total"] != 1.0 {
+		t.Errorf("preview with the user agent: %d %v", status, body)
+	}
+	status, body, _ := administrator.call(http.MethodPost, "/scopes/shared/iptv", account)
+	source, _ := body["source"].(map[string]any)
+	if status != http.StatusCreated || source["userAgent"] != "Panel/1" || source["channels"] != 1.0 {
+		t.Fatalf("added with the user agent: %d %v", status, body)
+	}
+	id := body["id"].(string)
+	if status, body, _ := administrator.call(http.MethodPatch, "/scopes/shared/iptv/"+id, map[string]any{"userAgent": "Bell\u0007"}); status != http.StatusBadRequest ||
+		body["error"] != "invalid_user_agent" {
+		t.Errorf("a user agent with a control character: %d %v", status, body)
+	}
+	status, body, _ = administrator.call(http.MethodPatch, "/scopes/shared/iptv/"+id, map[string]any{"name": "Renamed"})
+	if source, _ := body["source"].(map[string]any); status != http.StatusOK || source["userAgent"] != "Panel/1" {
+		t.Errorf("renamed, the user agent kept: %d %v", status, body)
 	}
 }
 

@@ -2,7 +2,6 @@ package jellyfin
 
 import (
 	"bytes"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -44,7 +43,7 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 	if len(bytes.TrimSpace(raw)) == 0 {
 		errs.add("", "A non-empty request body is required.")
 		errs.add("request", "The request field is required.")
-	} else if json.Unmarshal(raw, &body) != nil {
+	} else if unmarshalBody(raw, &body) != nil {
 		errs.add("$", "The JSON value could not be converted.")
 		errs.add("request", "The request field is required.")
 	}
@@ -87,12 +86,21 @@ func (h *Handler) changePassword(w http.ResponseWriter, r *http.Request) {
 	// Unlike Jellyfin, an administrator changing their own password must
 	// also give the current one, so that a token left on a shared device
 	// cannot take the account over.
-	attempt := h.reserve(w, forwarded.Client(r))
+	attempt := h.reserve(w, h.SignIns, forwarded.Client(r))
 	if attempt == nil {
 		return
 	}
 	defer attempt.Cancel()
-	err = h.Accounts.ChangePasswordFromDevice(r.Context(), id, body.CurrentPw, body.NewPw, caller.Device.ID)
+	err = h.Accounts.ChangePasswordFromDeviceAt(r.Context(), id, body.CurrentPw, body.NewPw, caller.Device.ID, forwarded.Client(r))
+	// A wrong current password counts toward the block of the client for
+	// the account, as one at sign-in does, and the one that blocks it is
+	// told the same way.
+	var blocked *accounts.BlockError
+	if errors.As(err, &blocked) && h.AccountBlocked != nil {
+		from := caller.Device.DeviceInfo
+		from.RemoteAddress = forwarded.Client(r)
+		h.AccountBlocked(blocked.User, from)
+	}
 	if errors.Is(err, accounts.ErrWrongPassword) {
 		attempt.Fail()
 		writeJSON(w, http.StatusForbidden, wrongCurrentPassword)

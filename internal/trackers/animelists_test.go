@@ -15,14 +15,12 @@ import (
 	"github.com/moodiness/polyfin/internal/secrets"
 )
 
-// listed is an entry of a fake AniList or MyAnimeList list, with the
-// entry's episode count, as MyAnimeList names its status.
+// listed is an entry of a fake AniList or MyAnimeList list, as MyAnimeList
+// names its status.
 type listed struct {
 	status    string
 	progress  int
 	score     float64
-	episodes  int
-	movie     bool
 	completed string
 }
 
@@ -32,9 +30,7 @@ type listed struct {
 type fakeLists struct {
 	mu      sync.Mutex
 	entries map[string]map[int]*listed
-	// media are the episode counts of the entries not listed.
-	media  map[int]int
-	writes map[string]int
+	writes  map[string]int
 }
 
 func (l *fakeLists) entry(service string, id int) *listed {
@@ -216,6 +212,7 @@ func (h harness) animeUser(t *testing.T, name string) accounts.ID {
 }
 
 func TestPlayedEpisodesRaiseTheirEntrysProgress(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.anime = animeMapping(t)
 	h.listLongSeries(t)
@@ -295,6 +292,7 @@ func TestPlayedEpisodesRaiseTheirEntrysProgress(t *testing.T) {
 }
 
 func TestAPlaybackCountsOncePlayed(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.anime = animeMapping(t)
 	lists := newFakeLists(t, h)
@@ -319,6 +317,7 @@ func TestAPlaybackCountsOncePlayed(t *testing.T) {
 }
 
 func TestListsAreImportedOnlyAdding(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.anime = animeMapping(t)
 	lists := newFakeLists(t, h)
@@ -374,6 +373,7 @@ func TestListsAreImportedOnlyAdding(t *testing.T) {
 // is imported once that import ends: Plan to Watch, turned on while the
 // history import reads the list, reaches the watchlist.
 func TestASwitchTurnedOnDuringAnImportIsImportedWhenItEnds(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.anime = animeMapping(t)
 	lists := newFakeLists(t, h)
@@ -421,6 +421,7 @@ func TestASwitchTurnedOnDuringAnImportIsImportedWhenItEnds(t *testing.T) {
 }
 
 func TestRatingsAreSyncedOnlyWithTheSwitch(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.anime = animeMapping(t)
 	h.listLongSeries(t)
@@ -489,6 +490,7 @@ func TestRatingsAreSyncedOnlyWithTheSwitch(t *testing.T) {
 }
 
 func TestAnExpiredAniListTokenStopsTheConnectionOnce(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.anime = animeMapping(t)
 	lists := newFakeLists(t, h)
@@ -539,6 +541,7 @@ func TestAnExpiredAniListTokenStopsTheConnectionOnce(t *testing.T) {
 }
 
 func TestAniListConnectsWithThePastedCode(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	box, err := secrets.New(make([]byte, 32))
 	if err != nil {
@@ -592,6 +595,7 @@ func TestAniListConnectsWithThePastedCode(t *testing.T) {
 }
 
 func TestMyAnimeListConnectsWithPKCEAndRefreshes(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	lists := newFakeLists(t, h)
 	user := h.user(t, "quinn")
@@ -659,6 +663,7 @@ func TestMyAnimeListConnectsWithPKCEAndRefreshes(t *testing.T) {
 }
 
 func TestPastedCodes(t *testing.T) {
+	t.Parallel()
 	for pasted, want := range map[string][2]string{
 		"abc123":                                {"abc123", ""},
 		"  abc123 \n":                           {"abc123", ""},
@@ -674,6 +679,7 @@ func TestPastedCodes(t *testing.T) {
 }
 
 func TestNextProgress(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		status          string
 		progress, total int

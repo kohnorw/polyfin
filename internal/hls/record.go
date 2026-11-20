@@ -64,6 +64,10 @@ func (m *Manager) userLives(user string) (int, *live) {
 // read. FFmpeg writes nothing more after its second interrupt, so it
 // writes each packet as it comes (see recordArgs): all that is lost is
 // the few packets it was still putting in order, past the recording's end.
+// FFmpeg writes nothing until it has probed the first seconds of its
+// input, then writes what it read at once: a first interrupt that comes
+// while it still writes them out loses the rest of them, so a recording
+// stopped that early keeps less than FFmpeg read.
 // It is killed recordKill after the first interrupt, as a last resort.
 func (m *Manager) Record(ctx context.Context, key Key, open Opener, path string) error {
 	ctx, cancel := context.WithCancel(ctx)
@@ -86,7 +90,7 @@ func (m *Manager) Record(ctx context.Context, key Key, open Opener, path string)
 	case mine >= userLives:
 		replaced = oldest
 		delete(m.lives, replaced.key)
-	case len(m.lives)+len(m.recordings) >= serverLives:
+	case len(m.lives)+len(m.recordings)+len(m.playouts) >= serverLives:
 		m.mu.Unlock()
 		return ErrBusy
 	}
@@ -105,7 +109,7 @@ func (m *Manager) Record(ctx context.Context, key Key, open Opener, path string)
 		return err
 	}
 	defer release()
-	cmd := exec.CommandContext(ctx, m.ffmpeg, remux.recordArgs(path)...)
+	cmd := exec.CommandContext(ctx, m.ffmpegPath(), remux.recordArgs(path)...)
 	interrupt, err := process.Interruptible(cmd)
 	if err != nil {
 		return err
@@ -163,7 +167,7 @@ func (m *Manager) Finish(ctx context.Context, parts []string, path string) error
 	if err := list.Close(); err != nil {
 		return err
 	}
-	cmd := exec.CommandContext(ctx, m.ffmpeg, "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
+	cmd := exec.CommandContext(ctx, m.ffmpegPath(), "-hide_banner", "-nostdin", "-loglevel", "error", "-y",
 		"-f", "concat", "-safe", "0", "-i", list.Name(), "-map", "0", "-c", "copy", "-f", "matroska", path)
 	stderr := &tail{limit: 4096}
 	cmd.Stderr = stderr

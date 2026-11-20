@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -38,6 +39,7 @@ func mustJSON(v any) string {
 }
 
 func TestPlaybackIsScrobbledWithItsProgress(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	user := h.connectAll(t, "alice")
 	// A movie: started, paused at 30%, played on, past the played mark
@@ -114,6 +116,7 @@ func TestPlaybackIsScrobbledWithItsProgress(t *testing.T) {
 }
 
 func TestPlayedMarksChangeTheHistory(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	user := h.connectAll(t, "bob")
 	// A season played, as of now; a movie played on a given day.
@@ -168,6 +171,7 @@ func TestPlayedMarksChangeTheHistory(t *testing.T) {
 }
 
 func TestPublicMetaDBLooksUpTheTMDBIdentifier(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	user := h.user(t, "carol")
 	h.connected(t, user, PublicMetaDB, "pm-carol")
@@ -194,6 +198,7 @@ func TestPublicMetaDBLooksUpTheTMDBIdentifier(t *testing.T) {
 }
 
 func TestOneViewingMakesOneHistoryEntry(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	user := h.connectAll(t, "dave")
 	// Trakt counts the stop at 85% watched; Simkl, as it may, does not.
@@ -229,6 +234,7 @@ func TestOneViewingMakesOneHistoryEntry(t *testing.T) {
 }
 
 func TestTraktTokensAreRefreshed(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	user := h.user(t, "erin")
 	// The token expires within the day.
@@ -237,7 +243,7 @@ func TestTraktTokensAreRefreshed(t *testing.T) {
 		t.Fatal(err)
 	}
 	var refreshes atomic.Int32
-	h.f.on("POST", "/trakt/oauth/token", func(r request) answer {
+	h.f.on("POST", "/trakt-auth/oauth/token", func(r request) answer {
 		n := refreshes.Add(1)
 		return answer{status: http.StatusOK, body: `{"access_token":"access-` + string(rune('0'+n)) + `","token_type":"bearer","expires_in":604800,
 			"refresh_token":"refresh-` + string(rune('0'+n)) + `","scope":"public","created_at":` + strconv.FormatInt(clockStart.Unix(), 10) + `}`}
@@ -254,7 +260,7 @@ func TestTraktTokensAreRefreshed(t *testing.T) {
 	if stops[0].header.Get("Authorization") != "Bearer access-1" {
 		t.Errorf("sent with %q", stops[0].header.Get("Authorization"))
 	}
-	refresh := h.f.sent("trakt", "/oauth/token")[0]
+	refresh := h.f.sent("trakt-auth", "/oauth/token")[0]
 	sameJSON(t, "refresh", refresh.body, `{"refresh_token":"old-refresh","client_id":"trakt-client","client_secret":"trakt-secret",
 		"redirect_uri":"urn:ietf:wg:oauth:2.0:oob","grant_type":"refresh_token"}`)
 
@@ -271,7 +277,7 @@ func TestTraktTokensAreRefreshed(t *testing.T) {
 	if stops[1].header.Get("Authorization") != "Bearer access-1" || stops[2].header.Get("Authorization") != "Bearer access-2" {
 		t.Errorf("sent with %q then %q", stops[1].header.Get("Authorization"), stops[2].header.Get("Authorization"))
 	}
-	if second := h.f.sent("trakt", "/oauth/token")[1]; !strings.Contains(mustJSON(second.body), `"refresh_token":"refresh-1"`) {
+	if second := h.f.sent("trakt-auth", "/oauth/token")[1]; !strings.Contains(mustJSON(second.body), `"refresh_token":"refresh-1"`) {
 		t.Errorf("second refresh: %s", mustJSON(second.body))
 	}
 	h.idle(t)
@@ -285,13 +291,14 @@ func TestTraktTokensAreRefreshed(t *testing.T) {
 }
 
 func TestARefusedTokenAsksTheUserToReconnect(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	user := h.connectAll(t, "frank")
 	h.f.reply("POST", "/trakt/scrobble/stop", http.StatusUnauthorized, `{}`)
-	h.f.reply("POST", "/trakt/oauth/token", http.StatusBadRequest, `{"error":"invalid_grant","error_description":"session not found"}`)
+	h.f.reply("POST", "/trakt-auth/oauth/token", http.StatusBadRequest, `{"error":"invalid_grant","error_description":"session not found"}`)
 	h.f.reply("POST", "/mdblist/scrobble/stop", http.StatusUnauthorized, `{"error":"Invalid API key"}`)
 	h.Playback(user, play(Stopped, movie, 90, false, false))
-	h.f.wait(t, 1, "trakt", "/oauth/token")
+	h.f.wait(t, 1, "trakt-auth", "/oauth/token")
 	eventually(t, "Trakt asking to reconnect", func() bool { return h.status(t, user, Trakt).Problem == ProblemReconnect })
 	eventually(t, "MDBList asking to reconnect", func() bool { return h.status(t, user, MDBList).Problem == ProblemReconnect })
 	if status := h.status(t, user, Simkl); status.Problem != "" {
@@ -341,12 +348,23 @@ func TestARefusedTokenAsksTheUserToReconnect(t *testing.T) {
 }
 
 func TestChangesAreRetriedAfterAnOutage(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	user := h.user(t, "gina")
 	h.connected(t, user, MDBList, "mdblist-gina")
+	// The fourth answer waits until the test saw MDBList shown unreachable,
+	// from the third failure: once answered, the fifth send succeeds, and
+	// a loaded machine could get there before the test looks.
+	seen := make(chan struct{})
+	var release sync.Once
+	defer release.Do(func() { close(seen) })
 	var calls atomic.Int32
 	h.f.on("POST", "/mdblist/sync/watched", func(request) answer {
-		if calls.Add(1) <= 4 {
+		n := calls.Add(1)
+		if n == 4 {
+			<-seen
+		}
+		if n <= 4 {
 			return answer{status: http.StatusServiceUnavailable, body: `{}`}
 		}
 		return answer{status: http.StatusOK, body: `{"updated":{"movies":1}}`}
@@ -357,6 +375,7 @@ func TestChangesAreRetriedAfterAnOutage(t *testing.T) {
 	h.Mark(user, Mark{Played: true, Titles: titles(movie)})
 	h.f.wait(t, 3, "mdblist", "/sync/watched")
 	eventually(t, "MDBList shown unreachable", func() bool { return h.status(t, user, MDBList).Problem == ProblemUnreachable })
+	release.Do(func() { close(seen) })
 	h.f.wait(t, 5, "mdblist", "/sync/watched")
 	eventually(t, "MDBList reachable again", func() bool { return h.status(t, user, MDBList).Problem == "" })
 	h.idle(t)
@@ -387,6 +406,7 @@ func TestChangesAreRetriedAfterAnOutage(t *testing.T) {
 }
 
 func TestQueuedChangesSurviveARestart(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	user := h.user(t, "hank")
 	h.connected(t, user, Simkl, "simkl-hank")
@@ -413,6 +433,7 @@ func TestQueuedChangesSurviveARestart(t *testing.T) {
 }
 
 func TestNothingIsSentForUntrackedTitlesOrToOtherUsers(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	alice := h.connectAll(t, "alice")
 	bob := h.user(t, "bob")

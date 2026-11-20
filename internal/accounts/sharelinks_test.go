@@ -30,6 +30,7 @@ func newShareLink(user User) NewShareLink {
 // administrators included; off, no link is made, and those made are
 // refused without being deleted.
 func TestShareLinksAreOffByDefault(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	if store.Settings().ShareLinks {
@@ -70,6 +71,7 @@ func TestShareLinksAreOffByDefault(t *testing.T) {
 // or another link's ID are unknown; a user who loses the permission, or is
 // disabled, loses their links.
 func TestShareLinkTokensAndRevocations(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	user := sharer(t, store)
@@ -131,6 +133,7 @@ func TestShareLinkTokensAndRevocations(t *testing.T) {
 // A link expires at its time and is recorded once; share_played tells of
 // a link at most once an hour.
 func TestShareLinksExpireAndNotifyOnceAnHour(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	now := time.Now()
@@ -171,5 +174,38 @@ func TestShareLinksExpireAndNotifyOnceAnHour(t *testing.T) {
 	}
 	if _, revoked, _ := store.RevokeShareLink(ctx, link.ID, nil); revoked {
 		t.Error("an expired link was revoked")
+	}
+}
+
+// While share links are off, the links that expire are neither recorded
+// nor deleted; they are recorded once share links are on again.
+func TestExpiredShareLinksWaitWhileShareLinksAreOff(t *testing.T) {
+	t.Parallel()
+	store := newStore(t)
+	ctx := t.Context()
+	now := time.Now()
+	store.now = func() time.Time { return now }
+	user := sharer(t, store)
+	link, _, err := store.CreateShareLink(ctx, NewShareLink{User: user.ID, Item: ID{1}, Kind: ShareMovie, Title: "Example Movie (2008)",
+		Expiry: time.Hour, MaxViewers: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	share := func(on bool) {
+		t.Helper()
+		settings := store.Settings()
+		settings.ShareLinks = on
+		if _, err := store.UpdateSettings(ctx, settings); err != nil {
+			t.Fatal(err)
+		}
+	}
+	share(false)
+	now = now.Add(time.Hour)
+	if expired, err := store.ExpiredShareLinks(ctx); err != nil || len(expired) != 0 {
+		t.Errorf("recorded while share links are off: %+v %v", expired, err)
+	}
+	share(true)
+	if expired, err := store.ExpiredShareLinks(ctx); err != nil || len(expired) != 1 || expired[0].ID != link.ID {
+		t.Errorf("recorded once share links are on: %+v %v", expired, err)
 	}
 }

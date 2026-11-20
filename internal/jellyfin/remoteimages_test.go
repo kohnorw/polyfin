@@ -84,6 +84,9 @@ func newImageSearch(t *testing.T) *imageSearch {
 			"logos":     []any{poster("/logo.svg", "en", 7, 500, 200), poster("/logo.png", "en", 3, 500, 200)},
 		},
 		"/3/tv/77/season/1/episode/1/images": map[string]any{"stills": []any{poster("/still.png", nil, 6, 1920, 1080)}},
+		// Identify's lookups: Show's IMDb identifier, and its TVDB one.
+		"/3/tv/77/external_ids": map[string]any{"imdb_id": "tt20"},
+		"/3/find/9077":          map[string]any{"movie_results": []any{}, "tv_results": []map[string]any{{"id": 77}}},
 	}
 	api := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.mu.Lock()
@@ -145,6 +148,9 @@ func newImageSearch(t *testing.T) *imageSearch {
 	}
 	s.testServer = newProbingServer(t, 10, "ffprobe-not-installed", func(o *Options, _ *pgxpool.Pool) {
 		o.TMDB = tmdb.New(api.URL+"/3", images.URL+"/t/p/", "test", o.Accounts.Settings)
+		// Identify's lookup is the library's, with the same client, as
+		// Polyfin gives both.
+		o.Library.UseTMDB(o.TMDB)
 	})
 	s.user("admin", func(c *accounts.UserChanges) { c.IsAdministrator = new(true) })
 	s.user("member", nil)
@@ -282,17 +288,41 @@ func TestRemoteImagesWithoutTMDBKeyListTheAddonsOnly(t *testing.T) {
 	if all := s.remote(t, s.admin, s.movie, ""); all.TotalRecordCount != 6 {
 		t.Errorf("every type: %v", names(all.Images))
 	}
-	// Members list what they can open; parental control applies.
-	if result := s.remote(t, s.member, s.movie, "type=Primary"); result.TotalRecordCount != 2 {
-		t.Errorf("member: %+v", result)
-	}
-	if status, _ := s.call(http.MethodGet, "/Items/"+s.movie+"/RemoteImages?type=Primary", app("tablet", s.child), nil); status != http.StatusNotFound {
-		t.Errorf("a child kept from the movie: %d", status)
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.tmdbHits) != 0 || s.imageHits["/secret.png"] != 0 {
 		t.Errorf("TMDB asked %v, generated poster fetched %d times", s.tmdbHits, s.imageHits["/secret.png"])
+	}
+}
+
+// Artwork candidates list every server addon's artwork by addon name and
+// ask TMDB on the server's key: only administrators list them.
+func TestArtworkCandidatesAreForAdministrators(t *testing.T) {
+	t.Parallel()
+	s := newImageSearch(t)
+	s.setting(t, func(settings *accounts.Settings) { settings.TMDBKey = "k3y" })
+	tmdbHits := func() int {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		total := 0
+		for _, n := range s.tmdbHits {
+			total += n
+		}
+		return total
+	}
+	before := tmdbHits()
+	for _, token := range []string{app("tv", s.member), app("tablet", s.child)} {
+		for _, path := range []string{"/RemoteImages?type=Primary", "/RemoteImages", "/RemoteImages/Providers"} {
+			if status, body := s.call(http.MethodGet, "/Items/"+s.movie+path, token, nil); status != http.StatusForbidden || len(body) > 0 {
+				t.Errorf("%s as %s: %d %s", path, token, status, body)
+			}
+		}
+	}
+	if hits := tmdbHits(); hits != before {
+		t.Errorf("TMDB asked %d times for members", hits-before)
+	}
+	if result := s.remote(t, s.admin, s.movie, "type=Primary&providerName=TMDB"); len(result.Images) == 0 || tmdbHits() == before {
+		t.Errorf("administrator: %+v", result)
 	}
 }
 
@@ -352,14 +382,14 @@ func TestRemoteImagesSearchTMDBWithAKey(t *testing.T) {
 	}
 }
 
-// A user with a metadata language sees TMDB's images in it first, and
-// without All languages only those and the ones without a language; the
-// others see the server's language first.
+// An administrator with a metadata language sees TMDB's images in it
+// first, and without All languages only those and the ones without a
+// language; the others see the server's language first.
 func TestRemoteImagesFollowTheUsersMetadataLanguage(t *testing.T) {
 	t.Parallel()
 	s := newImageSearch(t)
 	s.setting(t, func(settings *accounts.Settings) { settings.TMDBKey, settings.Language = "k3y", "fr" })
-	s.user("reader", func(c *accounts.UserChanges) { c.MetadataLanguage = new("de-AT") })
+	s.user("reader", func(c *accounts.UserChanges) { c.MetadataLanguage, c.IsAdministrator = new("de-AT"), new(true) })
 	reader := s.signIn("reader", "tv")
 	if got := names(s.remote(t, reader, s.movie, "type=Primary&providerName=TMDB&includeAllLanguages=false").Images); strings.Join(got, ",") !=
 		"TMDB Primary de,TMDB Primary " {
@@ -369,9 +399,9 @@ func TestRemoteImagesFollowTheUsersMetadataLanguage(t *testing.T) {
 		"TMDB Primary de,TMDB Primary ,TMDB Primary fr,TMDB Primary en" {
 		t.Errorf("a German reader's posters in all languages: %v", got)
 	}
-	if got := names(s.remote(t, s.member, s.movie, "type=Primary&providerName=TMDB&includeAllLanguages=false").Images); strings.Join(got, ",") !=
+	if got := names(s.remote(t, s.admin, s.movie, "type=Primary&providerName=TMDB&includeAllLanguages=false").Images); strings.Join(got, ",") !=
 		"TMDB Primary fr,TMDB Primary " {
-		t.Errorf("the server's language for a member without one: %v", got)
+		t.Errorf("the server's language for an administrator without one: %v", got)
 	}
 }
 

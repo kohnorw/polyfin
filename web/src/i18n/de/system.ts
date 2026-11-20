@@ -1,0 +1,716 @@
+import type en from '../en/system'
+
+const system: typeof en = {
+  apiKeys: {
+    title: 'API-Schlüssel',
+    description:
+      'Mit Schlüsseln können Tools und Apps, etwa Request-Manager oder Skripte, die Jellyfin-API dieses Servers mit Administratorrechten nutzen. Wer einen Schlüssel hat, hat diese Rechte: Halte Schlüssel geheim und widerrufe die, die du nicht mehr verwendest.',
+    listTitle: 'Schlüssel',
+    empty: 'Noch kein API-Schlüssel.',
+    created: 'Erstellt',
+    lastUsed: 'Zuletzt verwendet',
+    createTitle: 'Schlüssel erstellen',
+    app: 'App-Name',
+    appHint:
+      'Wer diesen Schlüssel verwendet, damit du ihn später wiedererkennst. 1 bis 64 Zeichen.',
+    create: 'Schlüssel erstellen',
+    creating: 'Wird erstellt…',
+    newKeyTitle: (app: string) => `Schlüssel für ${app}`,
+    newKeyNotice: 'Kopiere diesen Schlüssel jetzt: Er wird nicht noch einmal angezeigt.',
+    copy: 'Kopieren',
+    copied: 'Kopiert.',
+    copyFailed: 'Der Schlüssel konnte nicht kopiert werden. Markiere ihn und kopiere ihn manuell.',
+    done: 'Ich habe ihn kopiert',
+    revoke: 'Widerrufen',
+    revoking: 'Wird widerrufen…',
+    revokeConfirm: (app: string) =>
+      `Schlüssel für ${app} widerrufen? Tools und Apps, die ihn verwenden, funktionieren dann nicht mehr. Dies kann nicht rückgängig gemacht werden.`,
+    revoked: (app: string) => `Der Schlüssel für ${app} wurde widerrufen.`,
+    emptyHint:
+      'Erstelle unten für jedes Tool und jede App einen eigenen Schlüssel, damit du jeden einzeln widerrufen kannst.',
+    revokeTitle: 'Diesen Schlüssel widerrufen?',
+    revokeLabel: (app: string) => `Schlüssel für ${app} widerrufen`,
+  },
+  system: {
+    schedule: {
+      title: 'Zeitplan',
+      description:
+        'Die Aufgaben des Servers, anstehende Aufnahmen und die nächsten Live-TV-Aktualisierungen.',
+      tasksTitle: 'Aufgaben',
+      lastRun: 'Letzte Ausführung',
+      nextRun: 'Nächste Ausführung',
+      notRunYet: 'Noch nicht ausgeführt',
+      byHandOnly: 'Nur manuelle Ausführung',
+      took: (span: string) => `dauerte ${span}`,
+      results: {
+        Completed: 'Abgeschlossen',
+        Failed: 'Fehlgeschlagen',
+        Cancelled: 'Gestoppt',
+      } as Record<string, string>,
+      running: 'Läuft',
+      cancelling: 'Wird gestoppt',
+      runNow: 'Jetzt ausführen',
+      runLabel: (name: string) => `${name} jetzt ausführen`,
+      stop: 'Stoppen',
+      stopLabel: (name: string) => `${name} stoppen`,
+      started: (name: string) => `${name} gestartet.`,
+      triggersButton: 'Auslöser',
+      triggersLabel: (name: string) => `Auslöser von ${name} ändern`,
+      triggers: {
+        title: (name: string) => `Auslöser: ${name}`,
+        serverTime: 'Uhrzeiten gelten in der Zeitzone des Servers.',
+        none: 'Kein Auslöser: Diese Aufgabe läuft nur manuell.',
+        keepOne: 'Diese Aufgabe braucht mindestens einen Auslöser.',
+        locked: {
+          settings: 'Der Zeitplan dieser Aufgabe ist fest: Er folgt ihren Einstellungen.',
+          recordings: 'Der Zeitplan dieser Aufgabe ist fest: Serienaufnahmen hängen von ihm ab.',
+          notifications:
+            'Der Zeitplan dieser Aufgabe ist fest: Die Zusammenfassung wird von selbst gesendet, wie unter Einstellungen › Benachrichtigungen festgelegt.',
+          byHand:
+            'Der Zeitplan dieser Aufgabe ist fest: Sie läuft nur, wenn sie manuell gestartet wird.',
+        },
+        daily: (time: string) => `Täglich um ${time}`,
+        weekly: (day: string, _index: number, time: string) => `Jeden ${day} um ${time}`,
+        interval: (count: number, unit: 'minute' | 'hour' | 'day') =>
+          ({
+            minute: count === 1 ? 'Jede Minute' : `Alle ${count} Minuten`,
+            hour: count === 1 ? 'Jede Stunde' : `Alle ${count} Stunden`,
+            day: count === 1 ? 'Jeden Tag' : `Alle ${count} Tage`,
+          })[unit],
+        startup: 'Beim Start',
+        stopsAfter: (span: string) => `Abbruch nach ${span}`,
+        remove: 'Entfernen',
+        removeLabel: (trigger: string) => `Auslöser „${trigger}“ entfernen`,
+        add: 'Auslöser hinzufügen',
+        type: 'Wann',
+        types: {
+          daily: 'Täglich',
+          weekly: 'Wöchentlich',
+          interval: 'In Abständen',
+          startup: 'Beim Start',
+        },
+        time: 'Uhrzeit',
+        day: 'Tag',
+        intervalLabel: 'Abstand',
+        duplicate: 'Dieser Auslöser steht schon in der Liste.',
+        full: (max: number) => `Eine Aufgabe hat höchstens ${max} Auslöser.`,
+        reset: 'Auf Standard zurücksetzen',
+        saved: (name: string) => `Auslöser gespeichert: ${name}`,
+        resetDone: (name: string) => `Standardauslöser wiederhergestellt: ${name}`,
+      },
+      autoRefresh: 'Wird alle 5 Sekunden aktualisiert.',
+      recordingsTitle: 'Anstehende Aufnahmen',
+      recordingsOff: 'Aufnahmen sind deaktiviert. Aktiviere sie unter Einstellungen › Aufnahmen.',
+      noTimers: 'Keine Aufnahme geplant.',
+      recordingNow: 'Wird aufgenommen',
+      failed: 'Fehlgeschlagen',
+      series: 'Serie',
+      scheduledBy: (name: string) => `Geplant von ${name}`,
+      unknownChannel: 'Kanal nicht gefunden',
+      refreshesTitle: 'Live-TV-Aktualisierungen',
+      refreshesHelp: (hours: number) =>
+        `IPTV-Kanallisten und Fernsehprogramme, die des Servers und die eigenen der Benutzer, werden alle ${hours} h erneut heruntergeladen (Einstellungen › Live-TV), durch die Aufgabe „Live-TV-Fernsehprogramme aktualisieren“.`,
+      noRefreshes: 'Keine IPTV-Quelle und kein Fernsehprogramm.',
+      channelList: 'Kanalliste',
+      iptvLists: 'Kanal-, Film- und Serienlisten',
+      guide: 'Fernsehprogramm',
+      due: 'Bei der nächsten Prüfung',
+      lastDownload: 'Letzter Download',
+      nextDownload: 'Nächster Download',
+      notYet: 'Noch nicht',
+      noTasks: 'Keine Aufgabe.',
+      noTasksHint: 'Der Server listet seine Aufgaben hier auf, sobald er gestartet ist.',
+      recordingsHint:
+        'Aufnahmen, die in einer App oder im Fernsehprogramm geplant werden, erscheinen hier.',
+      refreshesHint:
+        'Füge unter Inhalte › Quellen eine IPTV-Quelle oder einem TV-Katalog ein Fernsehprogramm hinzu, dann erscheinen deren Downloads hier.',
+      backupsTitle: 'Datenbank-Backups',
+      backUpNow: 'Jetzt sichern',
+    },
+    health: {
+      title: 'Systemzustand',
+      noIptv: 'Keine IPTV-Quelle.',
+      owner: { server: 'Server', user: (name: string) => `Add-ons von ${name}` },
+      description:
+        'Zustand des Servers und seiner Quellen, basierend auf dem, was Polyfin bereits aufzeichnet: Diese Seite sendet keine Anfragen an sie.',
+      problemsTitle: 'Zu prüfen',
+      allGood: 'Kein Problem gefunden.',
+      update: (version: string) => `Polyfin ${version} ist verfügbar`,
+      updateRunning: (version: string) => `Auf diesem Server läuft Version ${version}.`,
+      updateKind: 'Update',
+      releaseNotes: 'Versionshinweise',
+      checkedAt: (time: string) => `Geprüft um ${time}. Wird alle 10 Sekunden aktualisiert.`,
+      ok: 'OK',
+      problemAction: {
+        details: 'Details anzeigen',
+        settings: 'Einstellungen öffnen',
+        sources: 'Quellen öffnen',
+        source: 'Quelle öffnen',
+        user: 'Benutzer öffnen',
+        schedule: 'Zeitplan öffnen',
+        open: 'Öffnen',
+      },
+      checksTitle: 'Prüfungen',
+      moreTitle: 'Außerdem auf dieser Seite',
+      checks: {
+        summary: (total: number, parts: string[]) =>
+          `${total === 1 ? '1 Prüfung' : `${total} Prüfungen`}${parts.length > 0 ? ` · ${parts.join(', ')}` : ''}`,
+        fineCount: (count: number) => `${count} in Ordnung`,
+        failingCount: (count: number) => `${count} mit Fehlern`,
+        quietCount: (count: number) => `${count} aus oder wartend`,
+        none: 'Keine',
+        off: 'Aus',
+        ready: 'Bereit',
+        full: 'Ausgelastet',
+        fine: 'In Ordnung',
+        encrypted: 'Verschlüsselt',
+        notEncrypted: 'Nicht verschlüsselt',
+        keySet: 'Geheimer Schlüssel gesetzt',
+        keyNotSet: 'Kein geheimer Schlüssel',
+        processor: 'Nur Prozessor',
+        databaseSize: 'Größe auf der Festplatte',
+        details: 'Details',
+        openSettings: 'Einstellungen › Backups',
+        noKey: 'Kein TMDB-Schlüssel',
+        held: 'Pausiert',
+        unknown: 'Der Server meldet zu diesem Bereich gerade nichts.',
+        addons: (count: number) => (count === 1 ? '1 Add-on' : `${count} Add-ons`),
+        iptv: (count: number) => (count === 1 ? '1 IPTV-Quelle' : `${count} IPTV-Quellen`),
+        guides: (count: number) =>
+          count === 1 ? '1 Fernsehprogramm' : `${count} Fernsehprogramme`,
+        moreFolders: (folder: string, more: number) => `${folder} und ${more} weitere`,
+        versionUptime: (version: string, span: string) => `${version} · läuft seit ${span}`,
+      },
+      problems: {
+        database: 'Die Datenbank antwortet nicht.',
+        disk: (folder: string, free: string) => `Wenig Speicherplatz für ${folder}: ${free} frei.`,
+        addon: (name: string, failure: string) => `${name}: ${failure}`,
+        addonTimingOut: (name: string, until: string) =>
+          `${name} antwortet nicht rechtzeitig auf Anfragen nach Versionen: Polyfins Hintergrundanfragen an seinen Server pausieren bis ${until}. Wiedergaben fragen es weiterhin. Wenn es die Versionen anderer Add-ons sammelt, schalte dort das ab, das nicht mehr antwortet, oder verkürze, wie lange es auf sie wartet; sonst schalte es ab.`,
+        iptv: (name: string) => `${name}: Der letzte Download der Kanalliste ist fehlgeschlagen.`,
+        tuner: (name: string) => `${name}: Der Tuner konnte einen Kanal nicht abspielen.`,
+        tunerUnreachable: (name: string) => `${name}: Der Tuner antwortet nicht.`,
+        folder: (name: string) =>
+          `${name}: Polyfin kann diesen lokalen Ordner nicht lesen. Prüfe, ob er eingehängt und für den Benutzer 65532 lesbar ist.`,
+        share: (name: string) =>
+          `${name}: Polyfin kann diese Netzwerkfreigabe nicht lesen. Prüfe ihre Adresse und ob ihr Benutzer sie lesen darf.`,
+        shareUnreachable: (name: string) =>
+          `${name}: Polyfin kann diese Netzwerkfreigabe nicht erreichen.`,
+        shareRefused: (name: string) =>
+          `${name}: Die Netzwerkfreigabe lehnt den Benutzer oder das Passwort von Polyfin ab.`,
+        shareHostKey: (name: string) =>
+          `${name}: Der SFTP-Server bietet einen anderen Hostschlüssel an als den gespeicherten, und Polyfin lehnt ihn ab, bis er akzeptiert wird.`,
+        shareTooLarge: (name: string) =>
+          `${name}: Diese Netzwerkfreigabe enthält mehr, als Polyfin in einem Scan liest. Ihre Seite nennt das erreichte Limit.`,
+        shareTooSlow: (name: string) =>
+          `${name}: Ein Scan dieser Netzwerkfreigabe dauerte länger als 12 Stunden und wurde angehalten. Der nächste Scan macht dort weiter.`,
+        folderWatchLimit: (name: string) =>
+          `${name}: Polyfin kann diesen lokalen Ordner nicht auf Änderungen überwachen: Das Systemlimit für überwachte Ordner ist erreicht. Er wird weiterhin nach seinem Zeitplan gescannt. Erhöhe fs.inotify.max_user_watches auf dem Host.`,
+        folderInstanceLimit: (name: string) =>
+          `${name}: Polyfin kann diesen lokalen Ordner nicht auf Änderungen überwachen: Das Systemlimit für Überwachungsinstanzen oder offene Dateien ist erreicht. Er wird weiterhin nach seinem Zeitplan gescannt. Erhöhe fs.inotify.max_user_instances auf dem Host oder das Limit für offene Dateien des Containers.`,
+        folderOpenFilesLimit: (name: string) =>
+          `${name}: Polyfin kann diesen lokalen Ordner nicht auf Änderungen überwachen: Das Systemlimit für offene Dateien ist erreicht, da macOS jeden Ordner und jede Datei über eine offene Datei überwacht. Er wird weiterhin nach seinem Zeitplan gescannt. Erhöhe kern.maxfilesperproc und kern.maxfiles mit sysctl.`,
+        folderUnwatched: (name: string) =>
+          `${name}: Polyfin kann diesen lokalen Ordner nicht auf Änderungen überwachen. Er wird weiterhin nach seinem Zeitplan gescannt.`,
+        shareUnwatchedUnreachable: (name: string) =>
+          `${name}: Polyfin kann diese Netzwerkfreigabe nicht auf Änderungen überwachen: Sie ist nicht erreichbar. Sie wird nach ihrem Zeitplan gescannt und erneut, sobald sie antwortet.`,
+        shareUnwatchedRefused: (name: string) =>
+          `${name}: Polyfin kann diese Netzwerkfreigabe nicht auf Änderungen überwachen: Sie lehnt den Benutzer oder das Passwort von Polyfin ab. Prüfe beides und gib es erneut ein.`,
+        shareUnwatched: (name: string) =>
+          `${name}: Polyfin kann diese Netzwerkfreigabe nicht auf Änderungen überwachen. Sie wird weiterhin nach ihrem Zeitplan gescannt.`,
+        folderNoSearch: (name: string) =>
+          `${name}: Kein Add-on des Servers beschreibt und sucht die Titel seiner Dateien, daher bleiben sie nicht zugeordnet. Füge eines unter Inhalte › Quellen hinzu: Die eigenen Add-ons der Benutzer unter „Meine Quellen“ zählen nicht.`,
+        folderSearch: (name: string, addon: string, failure: string) =>
+          `${name}: Die Titel seiner Dateien konnten nicht gesucht werden${addon === '' ? '' : failure === '' ? ` (${addon})` : ` (${addon}: ${failure})`}. Sie bleiben nicht zugeordnet, bis eine Suche gelingt, was Polyfin von selbst erneut versucht, erst nach ein paar Minuten, dann seltener.`,
+        searchLate: (name: string) =>
+          `${name}: Seine Suche hat nicht rechtzeitig geantwortet. Suchen lassen es einige Minuten lang aus und fragen es dann erneut.`,
+        smartListEmpty: (name: string, owner: string | null) =>
+          owner === null
+            ? `Die intelligente Liste ${name} listet nichts: Die Kataloge, aus denen sie ihre Titel nahm, sind verschwunden. Wähle andere Kataloge für sie.`
+            : `Die intelligente Liste ${name} von ${owner} listet nichts: Die Kataloge, aus denen sie ihre Titel nahm, sind verschwunden. Für sie sind andere Kataloge zu wählen.`,
+        virtualChannelSource: (name: string) =>
+          `Der Kanal ${name} sendet eine Quelle, die es nicht mehr gibt. Wähle eine andere Quelle für ihn.`,
+        guide: (name: string) =>
+          `${name}: Der letzte Abruf des Fernsehprogramms ist fehlgeschlagen.`,
+        paused: (host: string) =>
+          `Vorschaubilder für ${host} pausiert: Der Host hat um Verlangsamung gebeten.`,
+        hostErrorFile: (host: string, since: string) =>
+          `Der Host ${host} liefert seit ${since} eine Fehlerdatei statt der Videos.`,
+        hostErrorFileHint:
+          'Das bedeutet oft, dass das Konto bei diesem Dienst Aufmerksamkeit braucht (eine Passwortänderung, ein Abonnement, ein erreichtes Limit) oder dass der Dienst ausgefallen ist: Prüfe es auf seiner Website.',
+        unknownProxy: (address: string) =>
+          `${address} leitet Anfragen weiter (X-Forwarded-For), ist aber kein bekannter Proxy, daher zählen Anfragen über ihn als von außerhalb des lokalen Netzwerks. Benutzer, die sich nur aus dem lokalen Netzwerk verbinden dürfen, werden über ihn abgewiesen, und seine Clients teilen sich ein Limit für fehlgeschlagene Anmeldungen. Wenn es dein Reverse-Proxy ist, füge ihn unter Einstellungen › Sicherheit zu „Bekannte Proxys“ hinzu.`,
+        discoveryPort: (port: number) =>
+          `Polyfin kann nicht auf UDP-Port ${port} lauschen, daher finden Jellyfin-Apps im lokalen Netzwerk den Server nicht von selbst. Wahrscheinlich nutzt ein anderes Programm den Port, etwa ein Jellyfin-Server auf demselben Host. Beim Speichern der Einstellungen wird es erneut versucht.`,
+        torrentRoute: (why: string) =>
+          `Torrent-Streams werden nicht abgespielt: ${why}. Es wird nichts auf anderem Weg gesendet; prüfe die Route unter Einstellungen › Torrents.`,
+        torrentRouteRiding: (why: string, seconds: number) =>
+          `${why}. Laufende Torrents spielen bis zu ${seconds} s weiter; neue können nicht starten. Es wird nichts auf anderem Weg gesendet; prüfe die Route unter Einstellungen › Torrents.`,
+        torrentWhy: {
+          interface_missing: (name: string) => `die Netzwerkschnittstelle ${name} fehlt`,
+          interface_down: (name: string) => `die Netzwerkschnittstelle ${name} ist deaktiviert`,
+          interface_no_address: (name: string) =>
+            `die Netzwerkschnittstelle ${name} hat keine Adresse`,
+          interface_unsupported: () => 'eine Netzwerkschnittstelle funktioniert nur unter Linux',
+          proxy_unreachable: (name: string) => `der SOCKS5-Proxy ${name} antwortet nicht`,
+          proxy_refused: (name: string) =>
+            `der SOCKS5-Proxy ${name} hat Benutzer und Passwort abgelehnt`,
+          wireguard_endpoint: (name: string) =>
+            `der WireGuard-Server ${name} kann nicht aufgelöst werden`,
+          wireguard_down: (name: string) => `der WireGuard-Tunnel zu ${name} kann nicht starten`,
+          wireguard_handshake: (name: string) =>
+            `der WireGuard-Server ${name} antwortet nicht auf den Handshake: Er ist nicht erreichbar, oder ein Schlüssel der Konfiguration ist falsch`,
+          no_route: () => 'es ist keine Route festgelegt',
+        },
+        torrentUdp: (name: string) =>
+          `Der SOCKS5-Proxy ${name} bietet kein UDP ASSOCIATE an: Torrents werden über TCP abgespielt, ohne UDP-Tracker und DHT.`,
+        torrentStart: (why: string) =>
+          `Ein Torrent ist nicht rechtzeitig gestartet: ${why}. Prüfe, ob die Route das Internet erreicht; das Protokoll nennt auf der Debug-Stufe die Antwort jedes Trackers.`,
+        torrentStartWhy: {
+          no_udp:
+            'es wurde kein Peer gefunden, und die Route überträgt kein UDP, das DHT und UDP-Tracker brauchen',
+          refused:
+            'seine Tracker haben die Ankündigung abgelehnt oder nicht geantwortet, und das DHT hat keinen Peer gefunden',
+          no_peers: 'seine Tracker und das DHT haben keinen Peer gefunden',
+          no_trackers:
+            'das Add-on hat keinen Tracker genannt, und das DHT hat keinen Peer gefunden',
+          silent: 'es wurden Peers gefunden, aber keiner hat ihn gesendet',
+        },
+        torrentStopped: (at: string, why: string) =>
+          `Ein Torrent wurde um ${at} während der Wiedergabe beendet: ${why}. Es wurde nichts auf anderem Weg gesendet. Prüfe, ob die Route erreichbar bleibt; die nächste Wiedergabe startet den Torrent erneut.`,
+        torrentStoppedWhy: {
+          interface_missing: (name: string) => `die Netzwerkschnittstelle ${name} ist verschwunden`,
+          interface_down: (name: string) => `die Netzwerkschnittstelle ${name} wurde deaktiviert`,
+          interface_no_address: (name: string) =>
+            `die Netzwerkschnittstelle ${name} hat ihre Adresse verloren`,
+          proxy_unreachable: (name: string) => `der SOCKS5-Proxy ${name} hat nicht geantwortet`,
+          proxy_refused: (name: string) =>
+            `der SOCKS5-Proxy ${name} hat Benutzer und Passwort abgelehnt`,
+          wireguard_endpoint: (name: string) =>
+            `der WireGuard-Server ${name} konnte nicht aufgelöst werden`,
+          wireguard_down: (name: string) => `der WireGuard-Tunnel zu ${name} wurde beendet`,
+          wireguard_handshake: (name: string) =>
+            `der WireGuard-Server ${name} hat nicht auf den Handshake geantwortet`,
+          route: () => 'seine Route hat nicht geantwortet',
+        },
+        torrentStartPeers: (found: number, why: string) =>
+          `${found} ${found === 1 ? 'Peer' : 'Peers'} gefunden: ${why}`,
+        torrentPeerWhy: {
+          connected: (n: number) => `${n} verbunden`,
+          timedOut: (n: number) => `${n} ohne Antwort in der Zeit`,
+          refused: (n: number) => `${n} ${n === 1 ? 'hat' : 'haben'} die Verbindung abgelehnt`,
+          unreachable: (n: number) => `${n} nicht erreichbar`,
+          proxy: (n: number) => `${n} vom Proxy abgelehnt`,
+          closed: (n: number) =>
+            `${n} ${n === 1 ? 'hat' : 'haben'} die Verbindung beim Handshake geschlossen`,
+          left: (n: number) => `${n} verbunden, dann getrennt`,
+          other: (n: number) => `${n} aus anderem Grund gescheitert`,
+          untried: (n: number) => `${n} noch nicht angewählt`,
+        },
+        dlnaPort: (port: number) =>
+          `Polyfin kann nicht auf UDP-Port ${port} lauschen, daher finden DLNA-Geräte im lokalen Netzwerk den Server nicht von selbst. Wahrscheinlich nutzt ein anderes Programm den Port, etwa ein anderer DLNA-Server auf demselben Host. Beim Speichern der Einstellungen wird es erneut versucht.`,
+        discoveryAddress: (address: string) =>
+          `Jellyfin-Apps, die im lokalen Netzwerk nach Servern suchen, erhalten ${address}, eine Adresse des Polyfin-Containers, die sie nicht erreichen können. Lege „Adresse im lokalen Netzwerk“ unter Einstellungen › Allgemein fest.`,
+        proxyNameUnresolved: (name: string) =>
+          `Der bekannte Proxy ${name} wird zu keiner Adresse aufgelöst, daher wird keiner Anfrage vertraut, die von ihm kommt. Prüfe seinen Namen unter Einstellungen › Sicherheit und ob Polyfin ein Netzwerk mit ihm teilt.`,
+        task: (name: string) => `Die Aufgabe „${name}“ ist fehlgeschlagen.`,
+        httpsPort: (port: number) =>
+          `Polyfin kann nicht auf TCP-Port ${port} lauschen, daher wird HTTPS nicht bereitgestellt. HTTP funktioniert weiterhin. Wahrscheinlich nutzt ein anderes Programm den Port, oder er liegt unter 1024. Wähle unter Einstellungen › Sicherheit einen anderen HTTPS-Port.`,
+        httpsFileMissing: (file: string) =>
+          `Die HTTPS-Zertifikatsdatei ${file} existiert nicht. Das zuletzt gelesene Zertifikat bleibt in Verwendung.`,
+        httpsFilesMismatch:
+          'Der private HTTPS-Schlüssel gehört nicht zum Zertifikat. Das zuletzt gelesene Zertifikat bleibt in Verwendung.',
+        httpsFileUnreadable: (file: string) =>
+          `Polyfin kann die HTTPS-Zertifikatsdatei ${file} nicht lesen, oder sie enthält kein lesbares PEM-Zertifikat bzw. keinen lesbaren PEM-Schlüssel. Das zuletzt gelesene Zertifikat bleibt in Verwendung.`,
+        httpsRenewal: (error: string) =>
+          `Let’s Encrypt hat das HTTPS-Zertifikat nicht ausgestellt: ${error}`,
+        httpsExpires: (date: string) => `Das HTTPS-Zertifikat läuft am ${date} ab.`,
+        httpsExpired: (date: string) => `Das HTTPS-Zertifikat ist am ${date} abgelaufen.`,
+        subtitleOcrLanguage: (name: string, file: string) =>
+          `Bilduntertitel in ${name} werden nicht in Text umgewandelt: Tesseract hat keine Daten für diese Sprache. Füge die Datei ${file} dem Ordner hinzu, den POLYFIN_TESSDATA_DIR angibt.`,
+        subtitleOcrDownloadFailed: (error: string) =>
+          `Der letzte Download der Daten ist fehlgeschlagen: ${error}`,
+        metadataLanguages: (name: string) =>
+          `${name}: Jedes Metadaten-Add-on des Servers hat eine Sprache, daher beschreiben sie Titel für jeden Benutzer in ihrer Sprache, unabhängig von seiner Metadatensprache. Belasse „Sprache der Beschreibungen“ bei diesem Add-on oder bei einem weiteren Metadaten-Add-on auf „Keine“.`,
+        desktopRolledBack: (version: string, previous: string, error: string) =>
+          `Polyfin Desktop ist zu Version ${previous} zurückgekehrt, da Version ${version} nicht gestartet ist: ${error}. Diese Version wird nicht mehr angeboten, die nächste schon.`,
+        dataFolderTemporary: (path: string, moveTo: string) =>
+          `Polyfin legt seine Dateien in ${path} ab, dem Standard-Datenordner früherer Versionen im temporären Ordner des Systems, den das System leeren kann. Stoppe Polyfin, verschiebe diesen Ordner nach ${moveTo} und starte Polyfin dann neu; oder gib den zu verwendenden Ordner in POLYFIN_DATA_DIR an.`,
+        dataFolderShared: (failure: 'owner' | 'mode', path: string, command: string) =>
+          failure === 'owner'
+            ? `Der Datenordner von Polyfin, ${path}, gehört einem anderen Benutzer dieses Systems, der die Dateien ändern kann, die Polyfin dort ablegt und ausführt. Übergib ihn mit ${command} dem Benutzer, unter dem Polyfin läuft, und starte Polyfin dann neu.`
+            : `Der Datenordner von Polyfin, ${path}, ist für seine Gruppe oder für andere beschreibbar: Ein anderes Konto dieses Systems kann die Dateien ändern, die Polyfin dort ablegt und ausführt. Entferne dieses Recht mit ${command} und starte Polyfin dann neu.`,
+        collationVersion: (name: string, recorded: string, actual: string) =>
+          `Die Collation-Version der Datenbank ${name} hat sich geändert: PostgreSQL hat ${recorded} vermerkt, und die Collation-Bibliothek des Systems liefert jetzt ${actual}. Ihre Textindizes sind womöglich nicht mehr richtig sortiert, wodurch Zeilen verborgen oder doppelt vorhanden sein können.`,
+        collationRepair:
+          'Zur Reparatur stoppe Polyfin und führe dann, als Eigentümer mit der Datenbank verbunden, diese Befehle nacheinander aus:',
+        collationCopy: 'Befehle kopieren',
+        collationCopied: 'Die Befehle sind kopiert.',
+        collationCopyFailed:
+          'Die Befehle konnten nicht kopiert werden: Markiere sie und kopiere sie von Hand.',
+        collationDocs: 'So reparierst du sie',
+        themeCopyMissing: (missing: number, files: number) =>
+          `Der Kopie des Web-Player-Themes fehlen ${missing} ihrer ${files} Dateien im Datenordner von Polyfin, wie nach dem Wiederherstellen einer Sicherung auf einem anderen System: Browser laden sie bis dahin von ihren ursprünglichen Adressen, was Internet braucht. Aktualisiere die Kopie unter Einstellungen › Web-Player oder wähle ein anderes Theme.`,
+        folderUnwritable: (name: string, path: string) =>
+          `${name} (${path}): Polyfin kann nicht in diesen Ordner schreiben und legt diese Dateien bis dahin im Cache seines Datenordners ab. Mache den Ordner beschreibbar oder wähle einen anderen, und starte Polyfin dann neu.`,
+        folderOccupied: (name: string, path: string, held: string) =>
+          `${name} (${path}): Dieser Ordner enthält bereits „${held}“, das Polyfin nicht angelegt hat. Polyfin lässt es unverändert und legt seine eigenen Dateien bis dahin im Cache seines Datenordners ab. Wähle einen anderen Ordner oder verschiebe „${held}“ an einen anderen Ort, und starte Polyfin dann neu.`,
+        nvidiaDriver: (version: string) =>
+          `Die NVIDIA-Grafikkarte konvertiert keine Videos: Ihr Treiber ist älter als Version ${version}, die FFmpeg für NVENC braucht. Aktualisiere den Treiber, um die Karte zu nutzen.`,
+        nvidiaOlderFFmpeg: (failure: 'download' | 'encode', error: string) =>
+          failure === 'download'
+            ? `Die NVIDIA-Grafikkarte konvertiert keine Videos: Ihr Treiber ist älter als Version 610, und das FFmpeg für solche Treiber konnte nicht heruntergeladen werden: ${error}. Polyfin versucht es beim nächsten Start erneut oder wenn die Konvertierungseinstellungen gespeichert werden.`
+            : `Die NVIDIA-Grafikkarte konvertiert keine Videos, auch nicht mit dem FFmpeg für Treiber älter als Version 610: ${error}`,
+        backupFailed: 'Das letzte Datenbank-Backup ist fehlgeschlagen.',
+        backupStale:
+          'Das letzte Datenbank-Backup ist überfällig: Es ist älter, als sein Zeitplan erlaubt.',
+        backupDestinationFailed: (name: string) =>
+          `${name}: Der letzte Upload der Datenbank-Backups ist fehlgeschlagen.`,
+        backupDestinationStale: (name: string) =>
+          `${name}: Das neueste Datenbank-Backup dort ist älter als zwei Tage.`,
+        conversionsFull:
+          'Videokonvertierungen sind am Limit: Neue warten oder werden anders abgespielt.',
+        unreadableSecrets: (names: string) =>
+          `Gespeicherte Schlüssel können mit POLYFIN_SECRET_KEY nicht entschlüsselt werden und gelten als nicht festgelegt: ${names}. Lege den Schlüssel, mit dem sie verschlüsselt wurden, erneut fest oder gib sie erneut ein.`,
+        plaintextSecrets:
+          'Schlüssel und Tokens werden unverschlüsselt gespeichert. Lege POLYFIN_SECRET_KEY fest, um sie zu verschlüsseln.',
+        appStopped: (app: string, user: string) =>
+          `${app} hat die Anmeldung abgelehnt, die Polyfin für ${user} gespeichert hat: Es wird nichts importiert, bis sich ${user} unter „Mein Konto“ erneut anmeldet, mit aktiviertem „Angemeldet bleiben“.`,
+        trackingStopped: (service: string, user: string) =>
+          `${service} hat das Token oder den Schlüssel abgelehnt, den Polyfin für ${user} gespeichert hat: Es wird nichts dorthin gesendet oder von dort importiert, bis ${user} unter Mein Konto › Tracking erneut auf „Verbinden“ klickt.`,
+      },
+      addonsTitle: 'Add-ons',
+      addonsHelp:
+        'Basierend auf den Anfragen von Apps seit dem Serverstart. „Prüfen“ fragt ein Add-on einmalig nach seinem Manifest, höchstens einmal pro Minute.',
+      noAddons: 'Der Server hat kein Add-on.',
+      addonStatus: {
+        ok: 'Antwortet',
+        failing: 'Fehlerhaft',
+        unknown: 'Keine Anfrage seit dem Start',
+        off: 'Ausgeschaltet',
+      },
+      failures: {
+        unreachable: 'war nicht erreichbar',
+        timeout: 'hat nicht rechtzeitig geantwortet',
+        private_network: 'befindet sich in einem lokalen Netzwerk',
+        rate_limited: 'hat um Verlangsamung gebeten (zu viele Anfragen)',
+        server_error: 'hat mit einem Serverfehler geantwortet',
+        http_error: 'hat die Anfrage abgelehnt',
+        invalid_response: 'hat eine zu große Antwort gesendet',
+      } as Record<string, string>,
+      lastSuccess: 'Letzte Antwort',
+      lastFailure: 'Letzter Fehler',
+      responseTime: 'Antwortzeit',
+      requestsTerm: 'Anfragen',
+      requests: (count: number, failures: number) =>
+        `${count} ${count === 1 ? 'Anfrage' : 'Anfragen'}, ${failures} fehlgeschlagen`,
+      check: 'Prüfen',
+      checkLabel: (name: string) => `${name} jetzt prüfen`,
+      checking: 'Wird geprüft…',
+      downloadLanguage: 'Herunterladen',
+      downloadLanguageLabel: (name: string) => `Tesseract-Daten für ${name} herunterladen`,
+      downloadingLanguage: 'Wird heruntergeladen…',
+      iptvTitle: 'IPTV-Quellen',
+      guidesTitle: 'Fernsehprogramme',
+      sharesTitle: 'Netzwerkfreigaben',
+      shareKinds: {
+        smb: 'SMB',
+        webdav: 'WebDAV',
+        s3: 'S3',
+        sftp: 'SFTP',
+        rclone: 'rclone',
+      } as Record<string, string>,
+      shareStatus: {
+        notified: 'Benachrichtigt',
+        polled: 'Abgefragt',
+        unwatched: 'Nicht überwacht',
+        scans: 'Nur bei Scans',
+      },
+      sharePolledEvery: (share: string, minutes: number) =>
+        `${share === 's3' ? 'S3-Buckets melden' : share === 'sftp' ? 'SFTP-Server melden' : 'rclone-Remotes melden'} keine Änderungen: Die Unterordner des Ordners werden ${minutes === 1 ? 'jede Minute' : `alle ${minutes} Minuten`} erneut aufgelistet, wie in seinen Einstellungen festgelegt.`,
+      shareScansOnly:
+        'Laut seinen Einstellungen wird nur bei Scans nach Änderungen gesucht: Der Ordner wird nach seinem Zeitplan gelesen und wenn er manuell gescannt wird.',
+      shareNotified:
+        'Der Server meldet Polyfin jede Änderung: Die Freigabe wird wenige Sekunden danach erneut gescannt. Ihre Ordner werden außerdem alle 10 Minuten aufgelistet, falls eine Änderung nicht gemeldet wird.',
+      sharePartial:
+        'Der Server meldet Polyfin die über das Netzwerk vorgenommenen Änderungen, hat aber eine in einem Ordner der Freigabe verpasst, etwa eine direkt auf der Festplatte des Servers: Die Ordner der Freigabe werden außerdem alle 2 Minuten erneut aufgelistet.',
+      sharePolled: {
+        webdav:
+          'WebDAV-Server melden keine Änderungen: Die Ordner der Freigabe werden alle 2 Minuten erneut aufgelistet.',
+        unsupported:
+          'Dieser SMB-Server meldet keine Änderungen: Die Ordner der Freigabe werden alle 2 Minuten erneut aufgelistet.',
+        silent:
+          'Dieser SMB-Server hat eine Änderung nicht gemeldet, die beim Auflisten gefunden wurde: Die Ordner der Freigabe werden alle 2 Minuten erneut aufgelistet.',
+        failed:
+          'Polyfin hat die Benachrichtigungen des Servers verloren und fordert sie in Kürze erneut an. Bis dahin werden die Ordner der Freigabe alle 2 Minuten erneut aufgelistet.',
+        starting:
+          'Polyfin bittet den Server, Änderungen zu melden. Bis dahin werden die Ordner der Freigabe alle 2 Minuten erneut aufgelistet.',
+      } as Record<string, string>,
+      shareUnwatched: {
+        unreachable:
+          'Die Freigabe ist nicht erreichbar. Sie wird nach ihrem Zeitplan gescannt und erneut, sobald sie antwortet.',
+        refused:
+          'Die Freigabe lehnt den Benutzer oder das Passwort von Polyfin ab. Prüfe beides und gib es erneut ein.',
+        host_key_changed:
+          'Der SFTP-Server bietet einen anderen Hostschlüssel an als den gespeicherten. Akzeptiere ihn unter „Ordner bearbeiten“, wenn die Änderung erwartet ist.',
+        failed:
+          'Polyfin kann diese Freigabe nicht überwachen. Sie wird weiterhin nach ihrem Zeitplan gescannt.',
+      } as Record<string, string>,
+      sharesOff:
+        'Die Überwachung auf Änderungen ist in den Einstellungen ausgeschaltet: Freigaben werden nur nach ihrem Zeitplan gescannt.',
+      transcoderTitle: 'Transkodierung',
+      gpu: 'GPU',
+      noGpu: 'Keine: Videos werden auf der CPU konvertiert',
+      toneMapping: 'HDR zu SDR auf der GPU',
+      cpuEncoders: 'CPU-Encoder',
+      ffmpeg: 'FFmpeg',
+      ffmpegShipped: 'Das von Polyfin mitgelieferte',
+      ffmpegOlderDrivers: 'Für NVIDIA-Treiber älter als 610',
+      ffmpegOlderDownloading: 'Das für NVIDIA-Treiber älter als 610 wird heruntergeladen',
+      conversions: 'Videokonvertierungen',
+      noLimit: 'unbegrenzt',
+      remuxes: 'Remuxe',
+      maxHeight: 'Konvertiert bis',
+      transcodingOff: 'Die Konvertierung ist in den Einstellungen ausgeschaltet.',
+      databaseTitle: 'Datenbank',
+      reachable: 'Antwortet',
+      busy: 'Antwortet, ausgelastet',
+      unreachable: 'Antwortet nicht',
+      size: 'Größe',
+      cacheTitle: 'Quellen-Cache',
+      cacheHelp:
+        'Teile der abgespielten Dateien, auf der Festplatte gespeichert bis zur unter Einstellungen › Wiedergabe festgelegten Größe, auch über Neustarts hinweg. Ein voller Cache ist normal: Die am längsten nicht gelesenen Teile machen Platz, die erneut abgespielter Titel zuletzt.',
+      cacheUse: (used: string, limit: string) => `${used} von ${limit}`,
+      imagesTitle: 'Bild-Cache',
+      imagesHelp:
+        'Die an die Apps weitergereichten Bilder, ihre verkleinerten Kopien und die Bilder, die Polyfin zeichnet, auf der Festplatte bis zu seiner Grenze gespeichert, die am längsten ungenutzten zuerst entfernt. Ihn zu leeren lässt jedes Bild bei seiner nächsten Anfrage erneut herunterladen, verkleinern oder zeichnen. Die Vorschaubilder zum Spulen, hochgeladene Bilder, die Bilder lokaler Ordner und das Design des Webplayers gehören nicht dazu.',
+      imagesFiles: 'Bilder auf der Festplatte',
+      imagesMemory: 'Im Arbeitsspeicher',
+      clearImages: 'Bild-Cache leeren',
+      imagesCleared: (images: string, bytes: string) =>
+        `Bild-Cache geleert: ${images} Bilder, ${bytes} auf der Festplatte freigegeben.`,
+      sourcesOpen: 'Geöffnete Dateien',
+      torrentPieces: 'Davon Torrent-Teile',
+      sourcesKept: 'Behaltene Dateien',
+      hitRatio: 'Von der Festplatte gelesen',
+      hitRatioValue: (percent: string, read: string) =>
+        `${percent} der seit dem Start gelesenen ${read}`,
+      keptFor: (days: number) =>
+        days > 0
+          ? `${days} Tage nach dem letzten Lesen behalten, auch über Neustarts`
+          : 'Bei jedem Start geleert',
+      torrentsTitle: 'Torrents',
+      torrentsHelp:
+        'Die Torrents, die die Wiedergabe gerade liest, ausschließlich über ihre Route. Ein Torrent stoppt, wenn seine Wiedergabe endet: keine Peers mehr, kein Teilen mehr.',
+      torrentRoute: {
+        interface: 'Netzwerkschnittstelle',
+        proxy: 'SOCKS5-Proxy',
+        wireguard: 'WireGuard-Tunnel',
+        '': 'Keine Route',
+      },
+      torrentAddresses: 'Tunneladressen',
+      torrentHandshake: 'Letzter Handshake',
+      torrentNoHandshake: 'Noch keiner',
+      torrentsPlaying: 'Laufende Torrents',
+      torrentsPlayingOf: (playing: number, atOnce: number) => `${playing} von ${atOnce}`,
+      torrentPeers: 'Peers',
+      torrentUTPPeers: 'Peers über uTP',
+      torrentsShared: 'Geteilt seit dem Start',
+      torrentOutageAt: (at: string) => `Ausfall um ${at}`,
+      torrentOutage: {
+        interface: (span: string) =>
+          `die Netzwerkschnittstelle hat ${span} lang nicht geantwortet; die Wiedergabe lief weiter`,
+        proxy: (span: string) =>
+          `der Proxy hat ${span} lang nicht geantwortet; die Wiedergabe lief weiter`,
+        wireguard: (span: string) =>
+          `der WireGuard-Server hat ${span} lang nicht geantwortet; die Wiedergabe lief weiter`,
+        '': (span: string) =>
+          `die Route hat ${span} lang nicht geantwortet; die Wiedergabe lief weiter`,
+      },
+      disksTitle: 'Speicherplatz',
+      folders: {
+        cache: 'Cache',
+        conversion: 'Konvertierungsordner',
+        reading: 'gelesene Dateien',
+        recordings: 'Aufnahmen',
+        backups: 'Backups',
+      } as Record<string, string>,
+      folderTitle: {
+        cache: 'Cache-Ordner',
+        conversion: 'Konvertierungsordner',
+        reading: 'Ordner für gelesene Dateien',
+        recordings: 'Aufnahmeordner',
+        backups: 'Backup-Ordner',
+      } as Record<string, string>,
+      free: (free: string) => `${free} frei`,
+      notMeasured: 'Kann hier nicht gemessen werden.',
+      thumbnailsTitle: 'Miniaturansichten (Trickplay)',
+      thumbnailsOff:
+        'Miniaturansichten und Kapitelbilder sind unter Einstellungen › Vorschaubilder (Trickplay) deaktiviert.',
+      waiting: (count: number, length: number) => `${count} von ${length} wartend`,
+      working: 'Bilder werden gerade erstellt',
+      idle: 'Inaktiv',
+      pausedHosts: 'Pausierte Quellen',
+      noPausedHosts: 'Keine Quelle ist pausiert.',
+      localMade: 'Lokale Dateien mit Vorschaubildern',
+      localCannot: 'Lokale Dateien, die keine haben können',
+      localFailed: 'Lokale Dateien mit Fehler',
+      until: (time: string) => `bis ${time}`,
+      ratingsTitle: 'Bewertungen von MDBList',
+      ratingsHelp:
+        'Die Anfragen, die MDBList dem Bewertungsschlüssel des Servers pro Tag erlaubt, und die bis zum täglichen Zurücksetzen verbleibenden. Titel, deren Bewertungen nicht gespeichert sind, werden im Hintergrund stapelweise abgefragt.',
+      requestsLeft: 'Verbleibende Anfragen heute',
+      requestsLeftOf: (left: string, limit: string) => `${left} von ${limit}`,
+      notToldYet: 'Bekannt nach der nächsten Anfrage an MDBList',
+      resets: 'Tägliches Zurücksetzen',
+      ratingsHeld: 'Erneute Anfrage',
+      heldReasons: {
+        limit: 'MDBList begrenzt die Anfragen',
+        refused: 'MDBList hat den Schlüssel abgelehnt',
+        failed: 'MDBList hat nicht geantwortet',
+      } as Record<string, string>,
+      notHeld: 'Jetzt',
+      titlesWaiting: 'Wartende Titel',
+      titlesKept: 'Titel mit gespeicherten Bewertungen',
+      artworkTitle: 'Artwork',
+      artworkHelp:
+        'Artwork-Downloads von den Bildservern der Add-ons, die in der letzten Stunde fehlgeschlagen sind. Ein fehlgeschlagenes Bild wird später erneut angefragt, mit jedem Fehlschlag später; ein Server, der um Warten bittet, wird bis dahin nicht angefragt.',
+      artworkFailed: 'Fehlgeschlagen in der letzten Stunde',
+      artworkKinds: {
+        not_found: 'Nicht gefunden',
+        rate_limited: 'Um Drosselung gebeten',
+        timeout: 'Zeitüberschreitung',
+        server_error: 'Serverfehler',
+        other: 'Andere Fehler',
+      } as Record<string, string>,
+      artworkHosts: 'Fehlgeschlagene Server',
+      artworkNoFailures: 'In der letzten Stunde ist kein Artwork-Download fehlgeschlagen.',
+      artworkWaiting: 'Abgewartete Server',
+      artworkNoWaiting: 'Kein Server wird abgewartet.',
+      artworkWaitingUntil: (time: string) => `nicht angefragt bis ${time}`,
+      artworkSparedUntil: (time: string) => `weniger gleichzeitig angefragt bis ${time}`,
+      peopleTitle: 'Personen',
+      peopleHelp:
+        'Fotos und Biografien von Personen von TMDB. Eine Person wird nachgeschlagen, sobald die Besetzung eines Titels sie ohne Foto zeigt oder ihre Seite geöffnet wird.',
+      peopleNoKey:
+        'Unter Einstellungen › Inhalte ist kein TMDB-API-Schlüssel gespeichert: Personen und Besetzungen zeigen nur, was die Add-ons liefern. Ein Schlüssel eines kostenlosen TMDB-Kontos bringt:',
+      peopleNoKeyBrings: [
+        'Fotos und Biografien von Personen',
+        'Besetzung und Stab jedes Titels von TMDB, in der Reihenfolge des Abspanns, mit Fotos',
+        'Personenseiten mit jedem Bibliothekstitel, in dem sie genannt werden',
+        'Die Titel, für die TMDB jede Person am besten kennt, auf ihrer Seite, über die Bibliotheken hinaus',
+        'Poster für Filme und Serien, deren Add-on keines liefert',
+        'Box-Sets in den Apps von Silo',
+        'TMDB-Bilder in „Bilder bearbeiten“',
+      ],
+      peopleNoKeyLink: 'Schlüssel unter Einstellungen › Inhalte hinzufügen',
+      tmdbKey: 'TMDB-API-Schlüssel',
+      tmdbKeySaved: 'Gespeichert',
+      peopleFound: 'Auf TMDB gefunden',
+      peopleNotFound: 'Nicht gefunden',
+      peopleFailing: 'Fehlgeschlagene Abfragen',
+      peopleWaiting: 'Wartende Abfragen',
+      tmdbLimited: 'Letzte Drosselung durch TMDB',
+      tmdbNeverLimited: 'Keine seit dem Serverstart',
+      tmdbLimitedAt: (time: string, wait: string) => (wait ? `${time}, Wartezeit ${wait}` : time),
+      backupTitle: 'Backups',
+      backupOff: 'Backups sind deaktiviert. Aktiviere sie unter Einstellungen › Backups.',
+      backup: {
+        result: 'Letzte Ausführung',
+        none: 'Noch kein Backup',
+        succeeded: 'Erfolgreich',
+        failed: 'Fehlgeschlagen',
+        made: 'Letztes Backup erstellt',
+        file: 'Datei',
+        size: 'Größe',
+        next: 'Nächstes Backup',
+        runHint:
+          'Führe „Datenbank sichern“ auf der Seite „Zeitplan“ aus, um jetzt ein Backup zu erstellen.',
+      },
+      processTitle: 'Polyfin',
+      version: 'Version',
+      uptime: 'Läuft seit',
+      memory: 'Arbeitsspeicher',
+      heap: 'Belegt',
+      goroutines: 'Goroutinen',
+      goroutinesDownload: 'Goroutinen herunterladen',
+      goroutinesHelp:
+        'Wenn eine Anfrage nie beantwortet wird, laden Sie herunter, was der Server gerade tut, und senden Sie es mit Ihrer Meldung. Es enthält keine Adressen und keine Geheimnisse.',
+      lastCrash: 'Letzter Absturz',
+      noCrash: 'Keiner',
+      lastCrashHelp:
+        'Der Anfang des Traces des Fehlers, der Polyfin zuletzt beendet hat, beim Neustart gelesen. Von Adressen bleibt nur der Host, Tokens und Schlüssel werden ausgeblendet.',
+      secretsTitle: 'Gespeicherte Schlüssel',
+      secretsHelp:
+        'Die Schlüssel des Servers, die Tracking-Tokens und -Schlüssel der Benutzer und die Passwörter der Netzwerkfreigaben, in der Datenbank verschlüsselt mit POLYFIN_SECRET_KEY (openssl rand -base64 32).',
+      encryption: 'Verschlüsselung',
+      encrypted: 'Ein',
+      notEncrypted: 'Aus: POLYFIN_SECRET_KEY ist nicht gesetzt',
+      storedPlain: 'Unverschlüsselt gespeichert',
+      unreadable: 'Nicht entschlüsselbar',
+      noneUnreadable: 'Keine',
+      proxiesTitle: 'Bekannte Proxys',
+      proxiesHelp:
+        'Die unter „Bekannte Proxys“ eingetragenen Hostnamen, aufgelöst bei jeder Änderung der Einstellungen, jede Minute und sobald eine unbekannte Adresse Anfragen weiterleitet. Jeder Adresse, zu der ein Name aufgelöst wird, wird als Proxy vertraut.',
+      resolvesToNothing: 'Wird zu keiner Adresse aufgelöst',
+      secretNames: {
+        publicMetaDbKey: 'PublicMetaDB-Schlüssel',
+        theIntroDbKey: 'TheIntroDB-Schlüssel',
+        mdblistRatingsKey: 'MDBList-API-Schlüssel für Bewertungen',
+        tmdbKey: 'TMDB-API-Schlüssel',
+        traktClientSecret: 'Trakt-Client-Secret',
+        lastFmSecret: 'Last.fm-Shared-Secret',
+        aniListClientSecret: 'AniList-Client-Secret',
+        myAnimeListClientSecret: 'MyAnimeList-Client-Secret',
+        smtpPassword: 'SMTP-Passwort',
+        backupPassphrase: 'Backup-Passphrase',
+        torrentProxyPassword: 'Passwort des SOCKS5-Proxys für Torrents',
+        torrentWireGuard: 'WireGuard-Konfiguration der Torrents',
+        metricsToken: 'Metrik-Token',
+        updateToolToken: 'Token des Update-Werkzeugs',
+      },
+      connectionOf: (service: string, user: string) => `${service}-Verbindung von ${user}`,
+      targetOf: (target: string, user: string) => `Benachrichtigungsziel „${target}“ von ${user}`,
+      serverTargetOf: (target: string) => `Server-Benachrichtigungsziel „${target}“`,
+      sharePasswordOf: (folder: string) => `Passwort oder Schlüssel der Freigabe „${folder}“`,
+      destinationSecretOf: (name: string) => `Passwort oder Schlüssel des Backup-Ziels „${name}“`,
+      certificateKeys: 'Schlüssel des Let’s-Encrypt-Zertifikats',
+      twoStepOf: (user: string) => `Schlüssel der zweistufigen Anmeldung von ${user}`,
+      noAddonsHint: 'Füge unter Inhalte › Quellen ein Stremio-Add-on hinzu.',
+      noIptvHint: 'Füge unter Inhalte › Quellen ein IPTV-Konto hinzu.',
+      noGuides: 'Kein Fernsehprogramm.',
+      noGuidesHint: 'Füge unter Inhalte › Live-TV einem TV-Katalog ein Fernsehprogramm hinzu.',
+    },
+    logs: {
+      title: 'Protokolle',
+      description:
+        'Die neuesten Zeilen des Serverprotokolls, im Arbeitsspeicher gehalten. Von Adressen bleibt nur der Host erhalten, Passwörter, Tokens und Schlüssel werden ausgeblendet.',
+      follow: 'Mitverfolgen',
+      pause: 'Pausieren',
+      level: 'Stufe',
+      levels: {
+        all: 'Alle',
+        info: 'Info und höher',
+        warn: 'Warnungen und Fehler',
+        error: 'Nur Fehler',
+      },
+      search: 'Suchen',
+      download: 'Herunterladen',
+      clear: 'Ansicht leeren',
+      empty: 'Noch keine Zeile.',
+      noMatch: 'Keine Zeile passt.',
+      shown: (shown: number, total: number) => `${shown} von ${total} Zeilen angezeigt.`,
+      following: 'Live-Verfolgung: Neue Zeilen erscheinen alle 2 Sekunden.',
+      paused:
+        'Pausiert: Die zwischenzeitlich geschriebenen Zeilen erscheinen, sobald du wieder mitverfolgst.',
+      detailedHint:
+        'Debug-Zeilen erscheinen, sobald „Detailliertes Protokoll“ unter Einstellungen › Diagnose aktiviert ist.',
+      region: 'Serverprotokoll',
+      emptyHint: 'Hier erscheinen Zeilen, sobald der Server sie schreibt.',
+      noMatchHint: 'Wähle eine andere Stufe oder ändere die Suche.',
+      filters: 'Protokoll filtern',
+    },
+  },
+}
+
+export default system

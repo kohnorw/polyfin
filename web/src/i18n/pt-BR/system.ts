@@ -1,0 +1,708 @@
+import type en from '../en/system'
+
+const system: typeof en = {
+  apiKeys: {
+    title: 'Chaves da API',
+    description:
+      'As chaves permitem que ferramentas e aplicativos, como gerenciadores de solicitações ou scripts, usem a API Jellyfin deste servidor com direitos de administrador. Qualquer pessoa que tenha uma chave tem esses direitos: mantenha as chaves em sigilo e revogue as que você não usa mais.',
+    listTitle: 'Chaves',
+    empty: 'Nenhuma chave da API ainda.',
+    created: 'Criada',
+    lastUsed: 'Último uso',
+    createTitle: 'Criar uma chave',
+    app: 'Nome do aplicativo',
+    appHint: 'Quem vai usar esta chave, para reconhecê-la depois. De 1 a 64 caracteres.',
+    create: 'Criar chave',
+    creating: 'Criando…',
+    newKeyTitle: (app: string) => `Chave para ${app}`,
+    newKeyNotice: 'Copie esta chave agora: ela não será exibida novamente.',
+    copy: 'Copiar',
+    copied: 'Copiada.',
+    copyFailed: 'Não foi possível copiar a chave. Selecione-a e copie-a manualmente.',
+    done: 'Já copiei',
+    revoke: 'Revogar',
+    revoking: 'Revogando…',
+    revokeConfirm: (app: string) =>
+      `Revogar a chave para ${app}? As ferramentas e os aplicativos que a usam deixarão de funcionar. Esta ação não pode ser desfeita.`,
+    revoked: (app: string) => `A chave para ${app} foi revogada.`,
+    emptyHint:
+      'Crie uma abaixo para cada ferramenta ou aplicativo, para que cada uma possa ser revogada separadamente.',
+    revokeTitle: 'Revogar esta chave?',
+    revokeLabel: (app: string) => `Revogar a chave para ${app}`,
+  },
+  system: {
+    schedule: {
+      title: 'Agenda',
+      description:
+        'As tarefas do servidor, as próximas gravações e as próximas atualizações da TV ao Vivo.',
+      tasksTitle: 'Tarefas',
+      lastRun: 'Última execução',
+      nextRun: 'Próxima execução',
+      notRunYet: 'Ainda não executada',
+      byHandOnly: 'Executada somente manualmente',
+      took: (span: string) => `levou ${span}`,
+      results: {
+        Completed: 'Concluída',
+        Failed: 'Falhou',
+        Cancelled: 'Interrompida',
+      } as Record<string, string>,
+      running: 'Em execução',
+      cancelling: 'Interrompendo',
+      runNow: 'Executar agora',
+      runLabel: (name: string) => `Executar ${name} agora`,
+      stop: 'Interromper',
+      stopLabel: (name: string) => `Interromper ${name}`,
+      started: (name: string) => `${name} iniciada.`,
+      triggersButton: 'Gatilhos',
+      triggersLabel: (name: string) => `Alterar os gatilhos de ${name}`,
+      triggers: {
+        title: (name: string) => `Gatilhos: ${name}`,
+        serverTime: 'Os horários seguem o fuso horário do servidor.',
+        none: 'Nenhum gatilho: esta tarefa só é executada manualmente.',
+        keepOne: 'Esta tarefa precisa de pelo menos um gatilho.',
+        locked: {
+          settings: 'O agendamento desta tarefa é fixo: ele segue as configurações dela.',
+          recordings: 'O agendamento desta tarefa é fixo: as gravações de séries dependem dele.',
+          notifications:
+            'O agendamento desta tarefa é fixo: o resumo é enviado sozinho, conforme Configurações › Notificações.',
+          byHand:
+            'O agendamento desta tarefa é fixo: ela só é executada quando iniciada manualmente.',
+        },
+        daily: (time: string) => `Todos os dias às ${time}`,
+        weekly: (day: string, index: number, time: string) =>
+          `${index === 0 || index === 6 ? 'Todo' : 'Toda'} ${day} às ${time}`,
+        interval: (count: number, unit: 'minute' | 'hour' | 'day') =>
+          ({
+            minute: count === 1 ? 'A cada minuto' : `A cada ${count} minutos`,
+            hour: count === 1 ? 'A cada hora' : `A cada ${count} horas`,
+            day: count === 1 ? 'Todos os dias' : `A cada ${count} dias`,
+          })[unit],
+        startup: 'Na inicialização',
+        stopsAfter: (span: string) => `Interrompida após ${span}`,
+        remove: 'Remover',
+        removeLabel: (trigger: string) => `Remover o gatilho “${trigger}”`,
+        add: 'Adicionar um gatilho',
+        type: 'Quando',
+        types: {
+          daily: 'Todos os dias',
+          weekly: 'Toda semana',
+          interval: 'Em intervalos',
+          startup: 'Na inicialização',
+        },
+        time: 'Horário',
+        day: 'Dia',
+        intervalLabel: 'Intervalo',
+        duplicate: 'Este gatilho já está na lista.',
+        full: (max: number) => `Uma tarefa tem no máximo ${max} gatilhos.`,
+        reset: 'Restaurar os padrões',
+        saved: (name: string) => `Gatilhos salvos: ${name}`,
+        resetDone: (name: string) => `Gatilhos padrão restaurados: ${name}`,
+      },
+      autoRefresh: 'Atualiza a cada 5 segundos.',
+      recordingsTitle: 'Próximas gravações',
+      recordingsOff: 'A gravação está desativada. Ative-a em Configurações › Gravações.',
+      noTimers: 'Nenhuma gravação agendada.',
+      recordingNow: 'Gravando',
+      failed: 'Falhou',
+      series: 'Série',
+      scheduledBy: (name: string) => `Agendada por ${name}`,
+      unknownChannel: 'Canal não encontrado',
+      refreshesTitle: 'Atualizações da TV ao Vivo',
+      refreshesHelp: (hours: number) =>
+        `As listas de canais IPTV e os guias de programação, tanto os do servidor quanto os dos próprios usuários, são baixados novamente a cada ${hours} h (Configurações › TV ao Vivo), pela tarefa “Atualizar guias da TV ao Vivo”.`,
+      noRefreshes: 'Nenhuma fonte IPTV ou guia de programação.',
+      channelList: 'Lista de canais',
+      iptvLists: 'Listas de canais, filmes e séries',
+      guide: 'Guia de programação',
+      due: 'Na próxima verificação',
+      lastDownload: 'Último download',
+      nextDownload: 'Próximo download',
+      notYet: 'Ainda não',
+      noTasks: 'Nenhuma tarefa.',
+      noTasksHint: 'O servidor lista suas tarefas aqui depois de iniciado.',
+      recordingsHint: 'As gravações agendadas por um aplicativo ou pelo guia aparecem aqui.',
+      refreshesHint:
+        'Adicione uma fonte IPTV em Conteúdo › Fontes, ou um guia de programação a um catálogo de TV, e os downloads aparecerão aqui.',
+      backupsTitle: 'Backups do banco de dados',
+      backUpNow: 'Criar backup agora',
+    },
+    health: {
+      title: 'Integridade',
+      noIptv: 'Nenhuma fonte IPTV.',
+      owner: { server: 'Servidor', user: (name: string) => `Complementos de ${name}` },
+      description:
+        'Como estão o servidor e suas fontes, com base no que o Polyfin já registra: esta página não envia nenhuma solicitação a eles.',
+      problemsTitle: 'Para verificar',
+      allGood: 'Nenhum problema encontrado.',
+      update: (version: string) => `Polyfin ${version} está disponível`,
+      updateRunning: (version: string) => `Este servidor executa a versão ${version}.`,
+      updateKind: 'Atualização',
+      releaseNotes: 'Notas de versão',
+      checkedAt: (time: string) => `Verificado às ${time}. Atualiza a cada 10 segundos.`,
+      ok: 'OK',
+      problemAction: {
+        details: 'Ver os detalhes',
+        settings: 'Abrir as configurações',
+        sources: 'Abrir Fontes',
+        source: 'Abrir a fonte',
+        user: 'Abrir o usuário',
+        schedule: 'Abrir o agendamento',
+        open: 'Abrir',
+      },
+      checksTitle: 'Verificações',
+      moreTitle: 'Também nesta página',
+      checks: {
+        summary: (total: number, parts: string[]) =>
+          `${total === 1 ? '1 verificação' : `${total} verificações`}${parts.length > 0 ? ` · ${parts.join(', ')}` : ''}`,
+        fineCount: (count: number) => `${count} em ordem`,
+        failingCount: (count: number) => `${count} com falhas`,
+        quietCount: (count: number) => `${count} desativadas ou aguardando`,
+        none: 'Nenhum',
+        off: 'Desativado',
+        ready: 'Pronto',
+        full: 'No limite',
+        fine: 'Em ordem',
+        encrypted: 'Criptografadas',
+        notEncrypted: 'Sem criptografia',
+        keySet: 'Chave secreta definida',
+        keyNotSet: 'Sem chave secreta',
+        processor: 'Só o processador',
+        databaseSize: 'Tamanho em disco',
+        details: 'Detalhes',
+        openSettings: 'Configurações › Backups',
+        noKey: 'Sem chave do TMDB',
+        held: 'Em pausa',
+        unknown: 'O servidor não informa nada desta parte agora.',
+        addons: (count: number) => (count === 1 ? '1 complemento' : `${count} complementos`),
+        iptv: (count: number) => (count === 1 ? '1 fonte IPTV' : `${count} fontes IPTV`),
+        guides: (count: number) =>
+          count === 1 ? '1 guia de programação' : `${count} guias de programação`,
+        moreFolders: (folder: string, more: number) => `${folder} e mais ${more}`,
+        versionUptime: (version: string, span: string) => `${version} · ativo há ${span}`,
+      },
+      problems: {
+        database: 'O banco de dados não responde.',
+        disk: (folder: string, free: string) =>
+          `Pouco espaço restante para ${folder}: ${free} livres.`,
+        addon: (name: string, failure: string) => `${name}: ${failure}`,
+        addonTimingOut: (name: string, until: string) =>
+          `${name} não responde a tempo quando versões são pedidas: as requisições em segundo plano do Polyfin ao servidor dele estão pausadas até as ${until}. As reproduções continuam consultando-o. Se ele reúne as versões de outros complementos, desative nele o que não responde mais ou encurte o tempo que ele espera por eles; caso contrário, desative-o.`,
+        iptv: (name: string) => `${name}: o último download da lista de canais falhou.`,
+        tuner: (name: string) => `${name}: o sintonizador não conseguiu reproduzir um canal.`,
+        tunerUnreachable: (name: string) => `${name}: o sintonizador não responde.`,
+        folder: (name: string) =>
+          `${name}: o Polyfin não consegue ler esta pasta local. Verifique se ela está montada e pode ser lida pelo usuário 65532.`,
+        share: (name: string) =>
+          `${name}: o Polyfin não consegue ler este compartilhamento de rede. Verifique o endereço dele e se o usuário dele tem permissão de leitura.`,
+        shareUnreachable: (name: string) =>
+          `${name}: o Polyfin não consegue acessar este compartilhamento de rede.`,
+        shareRefused: (name: string) =>
+          `${name}: o compartilhamento de rede recusa o usuário ou a senha do Polyfin.`,
+        shareHostKey: (name: string) =>
+          `${name}: o servidor SFTP apresenta uma chave de host diferente da salva, e o Polyfin a recusa até que ela seja aceita.`,
+        shareTooLarge: (name: string) =>
+          `${name}: este compartilhamento de rede contém mais do que o Polyfin lê em um rastreamento. A página dele indica o limite atingido.`,
+        shareTooSlow: (name: string) =>
+          `${name}: um rastreamento deste compartilhamento de rede durou mais de 12 horas e foi interrompido. O próximo rastreamento continua a partir daí.`,
+        folderWatchLimit: (name: string) =>
+          `${name}: o Polyfin não consegue monitorar alterações nesta pasta local: o limite de pastas monitoradas do sistema foi atingido. Ela continua sendo rastreada conforme o agendamento. Aumente fs.inotify.max_user_watches no host.`,
+        folderInstanceLimit: (name: string) =>
+          `${name}: o Polyfin não consegue monitorar alterações nesta pasta local: o limite de monitores ou de arquivos abertos do sistema foi atingido. Ela continua sendo rastreada conforme o agendamento. Aumente fs.inotify.max_user_instances no host, ou o limite de arquivos abertos do contêiner.`,
+        folderOpenFilesLimit: (name: string) =>
+          `${name}: o Polyfin não consegue monitorar alterações nesta pasta local: o limite de arquivos abertos do sistema foi atingido, pois o macOS monitora cada pasta e arquivo por meio de um deles. Ela continua sendo rastreada conforme o agendamento. Aumente kern.maxfilesperproc e kern.maxfiles com sysctl.`,
+        folderUnwatched: (name: string) =>
+          `${name}: o Polyfin não consegue monitorar alterações nesta pasta local. Ela continua sendo rastreada conforme o agendamento.`,
+        shareUnwatchedUnreachable: (name: string) =>
+          `${name}: o Polyfin não consegue monitorar alterações neste compartilhamento de rede: ele está inacessível. Ele é rastreado conforme o agendamento e novamente assim que responder.`,
+        shareUnwatchedRefused: (name: string) =>
+          `${name}: o Polyfin não consegue monitorar alterações neste compartilhamento de rede: ele recusa o usuário ou a senha do Polyfin. Verifique-os e digite-os novamente.`,
+        shareUnwatched: (name: string) =>
+          `${name}: o Polyfin não consegue monitorar alterações neste compartilhamento de rede. Ele continua sendo rastreado conforme o agendamento.`,
+        folderNoSearch: (name: string) =>
+          `${name}: nenhum complemento do servidor descreve e pesquisa os títulos dos arquivos, então eles continuam sem associação. Adicione um em Conteúdo › Fontes: os complementos próprios dos usuários, em Minhas fontes, não contam.`,
+        folderSearch: (name: string, addon: string, failure: string) =>
+          `${name}: não foi possível pesquisar os títulos dos arquivos${addon === '' ? '' : failure === '' ? ` (${addon})` : ` (${addon}: ${failure})`}. Eles continuam sem associação até que uma pesquisa dê certo, o que o Polyfin tenta de novo sozinho, depois de alguns minutos e, então, com menos frequência.`,
+        searchLate: (name: string) =>
+          `${name}: a pesquisa dele não respondeu a tempo. As pesquisas o deixam de fora por alguns minutos e depois o consultam de novo.`,
+        smartListEmpty: (name: string, owner: string | null) =>
+          owner === null
+            ? `A lista inteligente ${name} não lista nada: os catálogos de onde tirava os títulos sumiram. Escolha outros catálogos para ela.`
+            : `A lista inteligente ${name} de ${owner} não lista nada: os catálogos de onde tirava os títulos sumiram. É preciso escolher outros para ela.`,
+        virtualChannelSource: (name: string) =>
+          `O canal ${name} transmite uma fonte que não existe mais. Escolha outra fonte para ele.`,
+        guide: (name: string) => `${name}: a última obtenção do guia de programação falhou.`,
+        paused: (host: string) =>
+          `Miniaturas pausadas para ${host}: ele pediu para diminuir o ritmo.`,
+        hostErrorFile: (host: string, since: string) =>
+          `O host ${host} responde com um arquivo de erro em vez dos vídeos, desde as ${since}.`,
+        hostErrorFileHint:
+          'Isso costuma significar que a conta nesse serviço precisa de atenção (uma troca de senha, uma assinatura, um limite atingido) ou que o serviço está fora do ar: verifique no site dele.',
+        unknownProxy: (address: string) =>
+          `${address} encaminha requisições (X-Forwarded-For), mas não é um proxy conhecido, então as requisições que passam por ele contam como vindas de fora da rede local. Os usuários que só podem se conectar da rede local são recusados por meio dele, e os clientes dele compartilham um único limite de falhas de login. Se for o seu proxy reverso, adicione-o em Proxies conhecidos, em Configurações › Segurança.`,
+        discoveryPort: (port: number) =>
+          `O Polyfin não consegue escutar na porta UDP ${port}, então os aplicativos Jellyfin na rede local não o encontram sozinhos. Provavelmente outro programa a está usando, como um servidor Jellyfin no mesmo host. Salvar as configurações tenta novamente.`,
+        torrentRoute: (why: string) =>
+          `As streams de torrent não são reproduzidas: ${why}. Nada é enviado por outro caminho; verifique a rota em Configurações › Torrents.`,
+        torrentRouteRiding: (why: string, seconds: number) =>
+          `${why}. Os torrents em reprodução continuam por até ${seconds} s; os novos não podem começar. Nada é enviado por outro caminho; verifique a rota em Configurações › Torrents.`,
+        torrentWhy: {
+          interface_missing: (name: string) => `a interface de rede ${name} não existe`,
+          interface_down: (name: string) => `a interface de rede ${name} está inativa`,
+          interface_no_address: (name: string) => `a interface de rede ${name} não tem endereço`,
+          interface_unsupported: () => 'uma interface de rede só funciona no Linux',
+          proxy_unreachable: (name: string) => `o proxy SOCKS5 ${name} não responde`,
+          proxy_refused: (name: string) => `o proxy SOCKS5 ${name} recusou o usuário e a senha`,
+          wireguard_endpoint: (name: string) =>
+            `o servidor WireGuard ${name} não pode ser encontrado`,
+          wireguard_down: (name: string) => `o túnel WireGuard para ${name} não pode iniciar`,
+          wireguard_handshake: (name: string) =>
+            `o servidor WireGuard ${name} não responde ao handshake: ele está inacessível ou uma chave da configuração está errada`,
+          no_route: () => 'nenhuma rota está definida',
+        },
+        torrentUdp: (name: string) =>
+          `O proxy SOCKS5 ${name} não oferece UDP ASSOCIATE: os torrents são reproduzidos via TCP, com os trackers UDP e o DHT desligados.`,
+        torrentStart: (why: string) =>
+          `Um torrent não começou a tempo: ${why}. Verifique se a rota alcança a internet; o registro mostra a resposta de cada tracker no nível de depuração.`,
+        torrentStartWhy: {
+          no_udp:
+            'nenhum peer foi encontrado, e a rota não transporta UDP, de que a DHT e os trackers UDP precisam',
+          refused:
+            'os trackers recusaram o anúncio ou não responderam, e a DHT não encontrou nenhum peer',
+          no_peers: 'os trackers e a DHT não encontraram nenhum peer',
+          no_trackers:
+            'o complemento não indicou nenhum tracker, e a DHT não encontrou nenhum peer',
+          silent: 'foram encontrados peers, mas nenhum o enviou',
+        },
+        torrentStopped: (at: string, why: string) =>
+          `Um torrent parou durante a reprodução às ${at}: ${why}. Nada foi enviado por outro caminho. Verifique se a rota continua acessível; a próxima reprodução inicia o torrent de novo.`,
+        torrentStoppedWhy: {
+          interface_missing: (name: string) => `a interface de rede ${name} desapareceu`,
+          interface_down: (name: string) => `a interface de rede ${name} ficou inativa`,
+          interface_no_address: (name: string) => `a interface de rede ${name} perdeu o endereço`,
+          proxy_unreachable: (name: string) => `o proxy SOCKS5 ${name} não respondeu`,
+          proxy_refused: (name: string) => `o proxy SOCKS5 ${name} recusou o usuário e a senha`,
+          wireguard_endpoint: (name: string) =>
+            `não foi possível encontrar o servidor WireGuard ${name}`,
+          wireguard_down: (name: string) => `o túnel WireGuard para ${name} parou`,
+          wireguard_handshake: (name: string) =>
+            `o servidor WireGuard ${name} não respondeu ao handshake`,
+          route: () => 'a rota não respondeu',
+        },
+        torrentStartPeers: (found: number, why: string) =>
+          `${found} ${found === 1 ? 'peer encontrado' : 'peers encontrados'}: ${why}`,
+        torrentPeerWhy: {
+          connected: (n: number) => `${n} ${n === 1 ? 'conectado' : 'conectados'}`,
+          timedOut: (n: number) => `${n} sem resposta a tempo`,
+          refused: (n: number) => `${n} ${n === 1 ? 'recusou' : 'recusaram'} a conexão`,
+          unreachable: (n: number) => `${n} ${n === 1 ? 'inacessível' : 'inacessíveis'}`,
+          proxy: (n: number) => `${n} ${n === 1 ? 'recusado' : 'recusados'} pelo proxy`,
+          closed: (n: number) => `${n} ${n === 1 ? 'fechou' : 'fecharam'} a conexão no handshake`,
+          left: (n: number) =>
+            `${n} ${n === 1 ? 'conectado, depois saiu' : 'conectados, depois saíram'}`,
+          other: (n: number) => `${n} ${n === 1 ? 'falhou' : 'falharam'} por outro motivo`,
+          untried: (n: number) => `${n} ainda não ${n === 1 ? 'contatado' : 'contatados'}`,
+        },
+        dlnaPort: (port: number) =>
+          `O Polyfin não consegue escutar na porta UDP ${port}, então os dispositivos DLNA na rede local não o encontram sozinhos. Provavelmente outro programa a está usando, como outro servidor DLNA no mesmo host. Salvar as configurações tenta novamente.`,
+        discoveryAddress: (address: string) =>
+          `Os aplicativos Jellyfin que procuram servidores na rede local recebem ${address}, um endereço do contêiner do Polyfin que eles não conseguem acessar. Defina Endereço na rede local em Configurações › Geral.`,
+        proxyNameUnresolved: (name: string) =>
+          `O proxy conhecido ${name} não resolve para nenhum endereço, então nenhuma requisição é considerada confiável como vinda dele. Verifique o nome dele em Configurações › Segurança e se o Polyfin compartilha uma rede com ele.`,
+        task: (name: string) => `A tarefa “${name}” falhou.`,
+        httpsPort: (port: number) =>
+          `O Polyfin não consegue escutar na porta TCP ${port}, então o HTTPS não é servido. O HTTP continua funcionando. Provavelmente outro programa a está usando, ou ela é inferior a 1024. Escolha outra porta HTTPS em Configurações › Segurança.`,
+        httpsFileMissing: (file: string) =>
+          `O arquivo de certificado HTTPS ${file} não existe. O último certificado lido continua em uso.`,
+        httpsFilesMismatch:
+          'A chave privada HTTPS não corresponde ao certificado. O último certificado lido continua em uso.',
+        httpsFileUnreadable: (file: string) =>
+          `O Polyfin não consegue ler o arquivo de certificado HTTPS ${file}, ou ele não contém nenhum certificado ou chave PEM que o Polyfin consiga ler. O último certificado lido continua em uso.`,
+        httpsRenewal: (error: string) => `O Let’s Encrypt não emitiu o certificado HTTPS: ${error}`,
+        httpsExpires: (date: string) => `O certificado HTTPS expira em ${date}.`,
+        httpsExpired: (date: string) => `O certificado HTTPS expirou em ${date}.`,
+        subtitleOcrLanguage: (name: string, file: string) =>
+          `As legendas em imagem em ${name} não são convertidas em texto: o Tesseract não tem dados para este idioma. Adicione o arquivo ${file} à pasta indicada por POLYFIN_TESSDATA_DIR.`,
+        subtitleOcrDownloadFailed: (error: string) =>
+          `O último download dos dados falhou: ${error}`,
+        metadataLanguages: (name: string) =>
+          `${name}: todos os complementos de metadados do servidor têm um idioma, então eles descrevem os títulos no idioma deles para todos os usuários, seja qual for o idioma dos metadados de cada um. Mantenha Idioma das descrições como Nenhum neste complemento, ou em mais um complemento de metadados.`,
+        desktopRolledBack: (version: string, previous: string, error: string) =>
+          `O Polyfin Desktop voltou para a versão ${previous}, pois a versão ${version} não iniciou: ${error}. Essa versão não é mais oferecida; a próxima será.`,
+        dataFolderTemporary: (path: string, moveTo: string) =>
+          `O Polyfin guarda seus arquivos em ${path}, a pasta de dados padrão das versões anteriores, na pasta temporária do sistema, que o sistema pode esvaziar. Pare o Polyfin, mova essa pasta para ${moveTo} e inicie o Polyfin novamente; ou indique a pasta a usar em POLYFIN_DATA_DIR.`,
+        dataFolderShared: (failure: 'owner' | 'mode', path: string, command: string) =>
+          failure === 'owner'
+            ? `A pasta de dados do Polyfin, ${path}, pertence a outro usuário deste sistema, que pode alterar os arquivos que o Polyfin guarda e executa nela. Passe-a para o usuário com que o Polyfin é executado usando ${command}, depois reinicie o Polyfin.`
+            : `A pasta de dados do Polyfin, ${path}, pode ser gravada pelo grupo dela ou por outros: outra conta deste sistema pode alterar os arquivos que o Polyfin guarda e executa nela. Retire essa permissão com ${command}, depois reinicie o Polyfin.`,
+        collationVersion: (name: string, recorded: string, actual: string) =>
+          `A versão de collation do banco de dados ${name} mudou: o PostgreSQL registrou ${recorded}, e a biblioteca de collation do sistema agora fornece ${actual}. Os índices de texto dele podem estar fora de ordem, o que pode esconder linhas ou duplicá-las.`,
+        collationRepair:
+          'Para repará-los, pare o Polyfin e depois, conectado como dono do banco de dados, execute estes comandos um após o outro:',
+        collationCopy: 'Copiar os comandos',
+        collationCopied: 'Os comandos foram copiados.',
+        collationCopyFailed: 'Não foi possível copiar os comandos: selecione-os e copie-os à mão.',
+        collationDocs: 'Como reparar',
+        themeCopyMissing: (missing: number, files: number) =>
+          `Faltam à cópia do tema do player web ${missing} dos seus ${files} arquivos na pasta de dados do Polyfin, como depois de restaurar um backup em outro sistema: enquanto isso, os navegadores os carregam dos endereços originais, o que exige internet. Atualize a cópia em Configurações › Player web, ou escolha outro tema.`,
+        folderUnwritable: (name: string, path: string) =>
+          `${name} (${path}): o Polyfin não consegue gravar nesta pasta e, enquanto isso, guarda esses arquivos no cache da sua pasta de dados. Torne a pasta gravável ou escolha outra, depois reinicie o Polyfin.`,
+        folderOccupied: (name: string, path: string, held: string) =>
+          `${name} (${path}): esta pasta já contém “${held}”, que o Polyfin não criou. O Polyfin o deixa como está e, enquanto isso, guarda seus próprios arquivos no cache da sua pasta de dados. Escolha outra pasta, ou mova “${held}” para outro lugar, depois reinicie o Polyfin.`,
+        nvidiaDriver: (version: string) =>
+          `A placa de vídeo NVIDIA não converte vídeo: o driver dela é anterior à versão ${version}, de que o FFmpeg precisa para o NVENC. Atualize o driver para usar a placa.`,
+        nvidiaOlderFFmpeg: (failure: 'download' | 'encode', error: string) =>
+          failure === 'download'
+            ? `A placa de vídeo NVIDIA não converte vídeo: o driver dela é anterior à versão 610, e não foi possível baixar o FFmpeg para esses drivers: ${error}. O Polyfin tenta de novo na próxima inicialização, ou quando as configurações de conversão são salvas.`
+            : `A placa de vídeo NVIDIA não converte vídeo, nem com o FFmpeg para drivers anteriores à versão 610: ${error}`,
+        backupFailed: 'O último backup do banco de dados falhou.',
+        backupStale:
+          'O último backup do banco de dados está atrasado: é mais antigo do que a agenda permite.',
+        backupDestinationFailed: (name: string) =>
+          `${name}: o último envio dos backups do banco de dados falhou.`,
+        backupDestinationStale: (name: string) =>
+          `${name}: o backup do banco de dados mais recente nesse destino tem mais de dois dias.`,
+        conversionsFull:
+          'As conversões de vídeo estão no limite: as novas aguardam ou são reproduzidas de outra forma.',
+        unreadableSecrets: (names: string) =>
+          `Chaves armazenadas não podem ser descriptografadas com POLYFIN_SECRET_KEY e são consideradas não definidas: ${names}. Defina novamente a chave com a qual elas foram criptografadas, ou digite-as novamente.`,
+        plaintextSecrets:
+          'Chaves e tokens são armazenados sem criptografia. Defina POLYFIN_SECRET_KEY para criptografá-los.',
+        appStopped: (app: string, user: string) =>
+          `${app} recusou o login que o Polyfin mantinha para ${user}: nada é importado até que ${user} entre novamente em Minha conta, com Manter conectado marcado.`,
+        trackingStopped: (service: string, user: string) =>
+          `${service} recusou o token ou a chave que o Polyfin mantinha para ${user}: nada é enviado a ele nem importado até que ${user} clique em Conectar novamente em Minha conta › Acompanhamento.`,
+      },
+      addonsTitle: 'Complementos',
+      addonsHelp:
+        'Com base nas requisições feitas para os aplicativos desde que o servidor foi iniciado. “Verificar” solicita o manifesto a um complemento uma vez, no máximo uma vez por minuto.',
+      noAddons: 'O servidor não tem nenhum complemento.',
+      addonStatus: {
+        ok: 'Respondendo',
+        failing: 'Com falha',
+        unknown: 'Nenhuma requisição desde o início',
+        off: 'Desativado',
+      },
+      failures: {
+        unreachable: 'não pôde ser acessado',
+        timeout: 'não respondeu a tempo',
+        private_network: 'está em uma rede local',
+        rate_limited: 'pediu para diminuir o ritmo (requisições demais)',
+        server_error: 'respondeu com um erro do servidor',
+        http_error: 'recusou a requisição',
+        invalid_response: 'enviou uma resposta grande demais',
+      } as Record<string, string>,
+      lastSuccess: 'Última resposta',
+      lastFailure: 'Última falha',
+      responseTime: 'Tempo de resposta',
+      requestsTerm: 'Requisições',
+      requests: (count: number, failures: number) =>
+        `${count} ${count === 1 ? 'requisição' : 'requisições'}, ${failures} com falha`,
+      check: 'Verificar',
+      checkLabel: (name: string) => `Verificar ${name} agora`,
+      checking: 'Verificando…',
+      downloadLanguage: 'Baixar',
+      downloadLanguageLabel: (name: string) => `Baixar os dados do Tesseract para ${name}`,
+      downloadingLanguage: 'Baixando…',
+      iptvTitle: 'Fontes IPTV',
+      guidesTitle: 'Guias de programação',
+      sharesTitle: 'Compartilhamentos de rede',
+      shareKinds: {
+        smb: 'SMB',
+        webdav: 'WebDAV',
+        s3: 'S3',
+        sftp: 'SFTP',
+        rclone: 'rclone',
+      } as Record<string, string>,
+      shareStatus: {
+        notified: 'Notificado',
+        polled: 'Consultado periodicamente',
+        unwatched: 'Não monitorado',
+        scans: 'Apenas nos rastreamentos',
+      },
+      sharePolledEvery: (share: string, minutes: number) =>
+        `${share === 's3' ? 'Buckets S3 não informam' : share === 'sftp' ? 'Servidores SFTP não informam' : 'Remotes rclone não informam'} alterações: as pastas da pasta são listadas novamente ${minutes === 1 ? 'a cada minuto' : `a cada ${minutes} minutos`}, conforme suas configurações.`,
+      shareScansOnly:
+        'Suas configurações pedem para procurar alterações apenas nos rastreamentos: a pasta é lida conforme o agendamento e quando rastreada manualmente.',
+      shareNotified:
+        'O servidor informa ao Polyfin cada alteração: o compartilhamento é rastreado novamente alguns segundos depois. Suas pastas também são listadas a cada 10 minutos, caso alguma alteração não seja informada.',
+      sharePartial:
+        'O servidor informa ao Polyfin as alterações feitas pela rede, mas deixou de informar uma em uma pasta do compartilhamento, como uma feita no próprio disco do servidor: as pastas do compartilhamento também são listadas novamente a cada 2 minutos.',
+      sharePolled: {
+        webdav:
+          'Servidores WebDAV não informam alterações: as pastas do compartilhamento são listadas novamente a cada 2 minutos.',
+        unsupported:
+          'Este servidor SMB não informa alterações: as pastas do compartilhamento são listadas novamente a cada 2 minutos.',
+        silent:
+          'Este servidor SMB não informou uma alteração encontrada em uma listagem: as pastas do compartilhamento são listadas novamente a cada 2 minutos.',
+        failed:
+          'O Polyfin perdeu as notificações do servidor e vai solicitá-las novamente em breve. Enquanto isso, as pastas do compartilhamento são listadas novamente a cada 2 minutos.',
+        starting:
+          'O Polyfin está pedindo ao servidor que informe as alterações. Enquanto isso, as pastas do compartilhamento são listadas novamente a cada 2 minutos.',
+      } as Record<string, string>,
+      shareUnwatched: {
+        unreachable:
+          'O compartilhamento não pode ser acessado. Ele é rastreado conforme o agendamento e novamente assim que responder.',
+        refused:
+          'O compartilhamento recusa o usuário ou a senha do Polyfin. Verifique-os e digite-os novamente.',
+        host_key_changed:
+          'O servidor SFTP apresenta uma chave de host diferente da salva. Aceite-a em Editar a pasta se a alteração for esperada.',
+        failed:
+          'O Polyfin não consegue monitorar este compartilhamento. Ele continua sendo rastreado conforme o agendamento.',
+      } as Record<string, string>,
+      sharesOff:
+        'O monitoramento de alterações está desativado nas configurações: os compartilhamentos são rastreados apenas conforme o agendamento.',
+      transcoderTitle: 'Transcodificador',
+      gpu: 'GPU',
+      noGpu: 'Nenhuma: o vídeo é convertido na CPU',
+      toneMapping: 'HDR para SDR na GPU',
+      cpuEncoders: 'Codificadores de CPU',
+      ffmpeg: 'FFmpeg',
+      ffmpegShipped: 'O que acompanha o Polyfin',
+      ffmpegOlderDrivers: 'Para drivers NVIDIA anteriores ao 610',
+      ffmpegOlderDownloading: 'Baixando o dos drivers NVIDIA anteriores ao 610',
+      conversions: 'Conversões de vídeo',
+      noLimit: 'sem limite',
+      remuxes: 'Remuxes',
+      maxHeight: 'Convertido até',
+      transcodingOff: 'A conversão está desativada nas configurações.',
+      databaseTitle: 'Banco de dados',
+      reachable: 'Respondendo',
+      busy: 'Respondendo, ocupado',
+      unreachable: 'Sem resposta',
+      size: 'Tamanho',
+      cacheTitle: 'Cache das fontes',
+      cacheHelp:
+        'Partes dos arquivos reproduzidos, mantidas em disco até o tamanho definido em Configurações › Reprodução, de uma inicialização para a outra. Um cache cheio é normal: as partes lidas há mais tempo abrem espaço, as dos títulos reproduzidos de novo por último.',
+      cacheUse: (used: string, limit: string) => `${used} de ${limit}`,
+      imagesTitle: 'Cache de imagens',
+      imagesHelp:
+        'As imagens repassadas aos aplicativos, suas cópias redimensionadas e as imagens que o Polyfin desenha, guardadas em disco até o limite, saindo primeiro as usadas há mais tempo. Esvaziá-lo faz cada imagem ser baixada, redimensionada ou desenhada de novo no próximo pedido. As miniaturas para avançar, as imagens enviadas, as imagens das pastas locais e o tema do player web não fazem parte dele.',
+      imagesFiles: 'Imagens em disco',
+      imagesMemory: 'Na memória',
+      clearImages: 'Esvaziar o cache de imagens',
+      imagesCleared: (images: string, bytes: string) =>
+        `Cache de imagens esvaziado: ${images} imagens, ${bytes} liberados em disco.`,
+      sourcesOpen: 'Arquivos abertos',
+      torrentPieces: 'Dos quais partes de torrents',
+      sourcesKept: 'Arquivos mantidos',
+      hitRatio: 'Lido do disco',
+      hitRatioValue: (percent: string, read: string) =>
+        `${percent} dos ${read} lidos desde a inicialização`,
+      keptFor: (days: number) =>
+        days > 0
+          ? `Mantidos ${days} dias após a última leitura, reinicializações incluídas`
+          : 'Esvaziado a cada inicialização',
+      torrentsTitle: 'Torrents',
+      torrentsHelp:
+        'Os torrents que a reprodução está lendo agora, somente pela rota deles. Um torrent para quando a reprodução dele termina: sem mais pares, sem mais compartilhamento.',
+      torrentRoute: {
+        interface: 'Interface de rede',
+        proxy: 'Proxy SOCKS5',
+        wireguard: 'Túnel WireGuard',
+        '': 'Nenhuma rota',
+      },
+      torrentAddresses: 'Endereços do túnel',
+      torrentHandshake: 'Último handshake',
+      torrentNoHandshake: 'Nenhum ainda',
+      torrentsPlaying: 'Torrents em reprodução',
+      torrentsPlayingOf: (playing: number, atOnce: number) => `${playing} de ${atOnce}`,
+      torrentPeers: 'Pares',
+      torrentUTPPeers: 'Pares via uTP',
+      torrentsShared: 'Compartilhado desde o início',
+      torrentOutageAt: (at: string) => `Queda às ${at}`,
+      torrentOutage: {
+        interface: (span: string) =>
+          `a interface de rede não respondeu por ${span}; a reprodução continuou`,
+        proxy: (span: string) => `o proxy não respondeu por ${span}; a reprodução continuou`,
+        wireguard: (span: string) =>
+          `o servidor WireGuard não respondeu por ${span}; a reprodução continuou`,
+        '': (span: string) => `a rota não respondeu por ${span}; a reprodução continuou`,
+      },
+      disksTitle: 'Espaço em disco',
+      folders: {
+        cache: 'cache',
+        conversion: 'a pasta de conversão',
+        reading: 'os arquivos em leitura',
+        recordings: 'gravações',
+        backups: 'backups',
+      } as Record<string, string>,
+      folderTitle: {
+        cache: 'Pasta do cache',
+        conversion: 'Pasta de conversão',
+        reading: 'Pasta de arquivos em leitura',
+        recordings: 'Pasta das gravações',
+        backups: 'Pasta dos backups',
+      } as Record<string, string>,
+      free: (free: string) => `${free} livres`,
+      notMeasured: 'Não é possível medir aqui.',
+      thumbnailsTitle: 'Miniaturas (trickplay)',
+      thumbnailsOff:
+        'As miniaturas e as imagens de capítulos estão desativadas em Configurações › Miniaturas (trickplay).',
+      waiting: (count: number, length: number) => `${count} de ${length} aguardando`,
+      working: 'Criando imagens agora',
+      idle: 'Ocioso',
+      pausedHosts: 'Fontes pausadas',
+      noPausedHosts: 'Nenhuma fonte está pausada.',
+      localMade: 'Arquivos locais com miniaturas',
+      localCannot: 'Arquivos locais que não podem tê-las',
+      localFailed: 'Arquivos locais com falha',
+      until: (time: string) => `até ${time}`,
+      ratingsTitle: 'Avaliações do MDBList',
+      ratingsHelp:
+        'As solicitações que o MDBList permite por dia à chave de avaliações do servidor, e as que restam até a redefinição diária. Os títulos cujas avaliações não estão guardadas são consultados em lotes, em segundo plano.',
+      requestsLeft: 'Solicitações restantes hoje',
+      requestsLeftOf: (left: string, limit: string) => `${left} de ${limit}`,
+      notToldYet: 'Conhecido na próxima consulta ao MDBList',
+      resets: 'Redefinição diária',
+      ratingsHeld: 'Nova consulta',
+      heldReasons: {
+        limit: 'O MDBList limita as solicitações',
+        refused: 'O MDBList recusou a chave',
+        failed: 'O MDBList não respondeu',
+      } as Record<string, string>,
+      notHeld: 'Agora',
+      titlesWaiting: 'Títulos aguardando',
+      titlesKept: 'Títulos com avaliações guardadas',
+      artworkTitle: 'Artes',
+      artworkHelp:
+        'Downloads de artes dos servidores de imagens dos complementos que falharam na última hora. Uma imagem que falhou é pedida de novo mais tarde, cada vez mais tarde se continuar falhando; um servidor que pede para esperar não recebe pedidos até lá.',
+      artworkFailed: 'Falhas na última hora',
+      artworkKinds: {
+        not_found: 'Não encontradas',
+        rate_limited: 'Pediram para desacelerar',
+        timeout: 'Tempo esgotado',
+        server_error: 'Erros do servidor',
+        other: 'Outras falhas',
+      } as Record<string, string>,
+      artworkHosts: 'Servidores com falhas',
+      artworkNoFailures: 'Nenhum download de arte falhou na última hora.',
+      artworkWaiting: 'Servidores aguardados',
+      artworkNoWaiting: 'Nenhum servidor é aguardado.',
+      artworkWaitingUntil: (time: string) => `sem pedidos até ${time}`,
+      artworkSparedUntil: (time: string) => `menos pedidos de uma vez até ${time}`,
+      peopleTitle: 'Pessoas',
+      peopleHelp:
+        'Fotos e biografias de pessoas do TMDB. Uma pessoa é consultada assim que o elenco de um título a mostra sem foto, ou sua página é aberta.',
+      peopleNoKey:
+        'Nenhuma chave da API do TMDB está salva em Configurações › Conteúdo: as pessoas e os elencos mostram só o que os complementos dão. Uma chave de uma conta gratuita do TMDB traz:',
+      peopleNoKeyBrings: [
+        'Fotos e biografias das pessoas',
+        'Elenco e equipe de cada título do TMDB, na ordem dos créditos, com fotos',
+        'Páginas de pessoas com cada título das bibliotecas em que aparecem',
+        'Os títulos pelos quais o TMDB mais conhece cada pessoa, na página dela, além das bibliotecas',
+        'Pôsteres de filmes e séries cujo complemento não fornece nenhum',
+        'Coleções nos apps do Silo',
+        'Imagens do TMDB no Editar imagens',
+      ],
+      peopleNoKeyLink: 'Adicionar a chave em Configurações › Conteúdo',
+      tmdbKey: 'Chave da API do TMDB',
+      tmdbKeySaved: 'Salva',
+      peopleFound: 'Encontradas no TMDB',
+      peopleNotFound: 'Não encontradas',
+      peopleFailing: 'Consultas com falha',
+      peopleWaiting: 'Consultas aguardando',
+      tmdbLimited: 'Último limite do TMDB',
+      tmdbNeverLimited: 'Nenhum desde que o servidor iniciou',
+      tmdbLimitedAt: (time: string, wait: string) =>
+        wait ? `${time}, pediu para esperar ${wait}` : time,
+      backupTitle: 'Backups',
+      backupOff: 'Os backups estão desativados. Ative-os em Configurações › Backups.',
+      backup: {
+        result: 'Última execução',
+        none: 'Nenhum backup ainda',
+        succeeded: 'Concluído',
+        failed: 'Falhou',
+        made: 'Último backup feito',
+        file: 'Arquivo',
+        size: 'Tamanho',
+        next: 'Próximo backup',
+        runHint:
+          'Execute “Fazer backup do banco de dados” na página Agendamento para fazer o backup agora.',
+      },
+      processTitle: 'Polyfin',
+      version: 'Versão',
+      uptime: 'Em execução há',
+      memory: 'Memória',
+      heap: 'Em uso',
+      goroutines: 'Goroutines',
+      goroutinesDownload: 'Baixar as goroutines',
+      goroutinesHelp:
+        'Quando uma solicitação nunca recebe resposta, baixe o que o servidor está fazendo e envie com seu relato. Não contém endereços nem segredos.',
+      lastCrash: 'Última falha',
+      noCrash: 'Nenhuma',
+      lastCrashHelp:
+        'O começo do rastreamento do erro que parou o Polyfin pela última vez, lido ao reiniciar. Os endereços mantêm apenas o host, e tokens e chaves ficam ocultos.',
+      secretsTitle: 'Chaves armazenadas',
+      secretsHelp:
+        'As chaves do servidor, os tokens e chaves de rastreamento dos usuários e as senhas dos compartilhamentos de rede, criptografados no banco de dados com POLYFIN_SECRET_KEY (openssl rand -base64 32).',
+      encryption: 'Criptografia',
+      encrypted: 'Ativada',
+      notEncrypted: 'Desativada: POLYFIN_SECRET_KEY não está definida',
+      storedPlain: 'Armazenadas sem criptografia',
+      unreadable: 'Não é possível descriptografar',
+      noneUnreadable: 'Nenhuma',
+      proxiesTitle: 'Proxies conhecidos',
+      proxiesHelp:
+        'Os nomes de host listados em Proxies conhecidos, resolvidos a cada alteração das configurações, a cada minuto e assim que um endereço desconhecido encaminha solicitações. Todo endereço para o qual um nome é resolvido é considerado confiável como proxy.',
+      resolvesToNothing: 'Não resolve para nenhum endereço',
+      secretNames: {
+        publicMetaDbKey: 'Chave do PublicMetaDB',
+        theIntroDbKey: 'Chave do TheIntroDB',
+        mdblistRatingsKey: 'Chave da API do MDBList para avaliações',
+        tmdbKey: 'Chave da API do TMDB',
+        traktClientSecret: 'Client secret do Trakt',
+        lastFmSecret: 'Segredo compartilhado do Last.fm',
+        aniListClientSecret: 'Client secret do AniList',
+        myAnimeListClientSecret: 'Client secret do MyAnimeList',
+        smtpPassword: 'Senha SMTP',
+        backupPassphrase: 'Frase secreta dos backups',
+        torrentProxyPassword: 'Senha do proxy SOCKS5 dos torrents',
+        torrentWireGuard: 'Configuração do WireGuard dos torrents',
+        metricsToken: 'Token de métricas',
+        updateToolToken: 'Token da ferramenta de atualização',
+      },
+      connectionOf: (service: string, user: string) => `conexão ${service} de ${user}`,
+      targetOf: (target: string, user: string) => `destino da notificação “${target}” de ${user}`,
+      serverTargetOf: (target: string) => `destino da notificação do servidor “${target}”`,
+      sharePasswordOf: (folder: string) => `senha ou chave do compartilhamento “${folder}”`,
+      destinationSecretOf: (name: string) => `senha ou chave do destino do backup “${name}”`,
+      certificateKeys: 'chaves do certificado Let’s Encrypt',
+      twoStepOf: (user: string) => `chave do login em duas etapas de ${user}`,
+      noAddonsHint: 'Adicione um complemento Stremio em Conteúdo › Fontes.',
+      noIptvHint: 'Adicione uma conta IPTV em Conteúdo › Fontes.',
+      noGuides: 'Nenhum guia de programação.',
+      noGuidesHint: 'Adicione um guia de programação a um catálogo de TV em Conteúdo › TV ao Vivo.',
+    },
+    logs: {
+      title: 'Registros',
+      description:
+        'As últimas linhas do registro do servidor, mantidas na memória. Os endereços mantêm apenas o host, e senhas, tokens e chaves ficam ocultos.',
+      follow: 'Acompanhar',
+      pause: 'Pausar',
+      level: 'Nível',
+      levels: {
+        all: 'Todos',
+        info: 'Info e acima',
+        warn: 'Avisos e erros',
+        error: 'Somente erros',
+      },
+      search: 'Pesquisar',
+      download: 'Baixar',
+      clear: 'Limpar a exibição',
+      empty: 'Nenhuma linha ainda.',
+      noMatch: 'Nenhuma linha corresponde.',
+      shown: (shown: number, total: number) => `${shown} de ${total} linhas exibidas.`,
+      following: 'Acompanhando: novas linhas aparecem a cada 2 segundos.',
+      paused:
+        'Pausado: as linhas escritas nesse meio-tempo aparecem quando você voltar a acompanhar.',
+      detailedHint:
+        'As linhas de depuração aparecem quando “Registro detalhado” está ativado, em Configurações › Diagnóstico.',
+      region: 'Registro do servidor',
+      emptyHint: 'As linhas aparecem aqui à medida que o servidor as escreve.',
+      noMatchHint: 'Escolha outro nível ou altere a pesquisa.',
+      filters: 'Filtrar o registro',
+    },
+  },
+}
+
+export default system

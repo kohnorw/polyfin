@@ -8,6 +8,7 @@ import {
   queryKeys,
   updateIptvSource,
   type Addon,
+  type UsedBy,
   type IptvAccount,
   type IptvOptions,
   type IptvSource,
@@ -15,6 +16,7 @@ import {
   type Scope,
 } from '@/api'
 import { optionsValid, SourceOptions } from '@/features/iptv/ImportOptions'
+import { useSessionUser } from '@/app/session'
 import { errorMessage } from '@/format'
 import { useI18n } from '@/i18n'
 import type { Messages } from '@/i18n'
@@ -22,11 +24,20 @@ import { Button, Checkbox, cx, Field, FieldError, Segmented, TextInput } from '@
 import { invalidateScope } from './model'
 
 type Kind = 'm3u' | 'xtream'
-type Account = { url: string; server: string; username: string; password: string }
+type Account = {
+  url: string
+  server: string
+  username: string
+  password: string
+  userAgent: string
+}
 
-const emptyAccount: Account = { url: '', server: '', username: '', password: '' }
+const emptyAccount: Account = { url: '', server: '', username: '', password: '', userAgent: '' }
 
-/** The account fields of a source: a playlist address, or an Xtream server and its login. */
+/**
+ * The account fields of a source: a playlist address, or an Xtream server and its login; then
+ * the user agent its list and channels are requested with.
+ */
 function AccountFields({
   kind,
   values,
@@ -40,55 +51,71 @@ function AccountFields({
 }) {
   const { t } = useI18n()
   const text = t.sourceAdd
-  if (kind === 'm3u') {
-    return (
-      <Field label={text.playlistUrl} help={editing ? text.keepHint : text.playlistUrlHint}>
-        <TextInput
-          type="url"
-          inputMode="url"
-          value={values.url}
-          onValue={(url) => onChange({ url })}
-          placeholder="https://…/playlist.m3u"
-          autoComplete="off"
-          spellCheck={false}
-          required={!editing}
-          mono
-        />
-      </Field>
-    )
-  }
+  // An administrator may give a file of the server instead of an address.
+  const files = useSessionUser().isAdministrator
   return (
     <>
-      <Field label={text.server} help={editing ? text.keepHint : text.serverHint}>
+      {kind === 'm3u' ? (
+        <Field
+          label={files ? text.playlistUrlOrFile : text.playlistUrl}
+          help={editing ? text.keepHint : files ? text.playlistUrlOrFileHint : text.playlistUrlHint}
+        >
+          <TextInput
+            type={files ? 'text' : 'url'}
+            inputMode="url"
+            value={values.url}
+            onValue={(url) => onChange({ url })}
+            placeholder="https://…/playlist.m3u"
+            autoComplete="off"
+            spellCheck={false}
+            required={!editing}
+            mono
+          />
+        </Field>
+      ) : (
+        <>
+          <Field label={text.server} help={editing ? text.keepHint : text.serverHint}>
+            <TextInput
+              type="url"
+              inputMode="url"
+              value={values.server}
+              onValue={(server) => onChange({ server })}
+              placeholder="https://…:8080"
+              autoComplete="off"
+              spellCheck={false}
+              required={!editing}
+              mono
+            />
+          </Field>
+          <Field label={text.username}>
+            <TextInput
+              value={values.username}
+              onValue={(username) => onChange({ username })}
+              autoComplete="off"
+              spellCheck={false}
+              required={!editing}
+            />
+          </Field>
+          <Field label={text.password} help={editing ? text.passwordKeepHint : undefined}>
+            <TextInput
+              type="password"
+              revealable
+              value={values.password}
+              onValue={(password) => onChange({ password })}
+              autoComplete="new-password"
+              required={!editing}
+            />
+          </Field>
+        </>
+      )}
+      <Field label={text.userAgent} help={text.userAgentHint}>
         <TextInput
-          type="url"
-          inputMode="url"
-          value={values.server}
-          onValue={(server) => onChange({ server })}
-          placeholder="https://…:8080"
+          value={values.userAgent}
+          onValue={(userAgent) => onChange({ userAgent })}
+          maxLength={512}
           autoComplete="off"
           spellCheck={false}
-          required={!editing}
           mono
-        />
-      </Field>
-      <Field label={text.username}>
-        <TextInput
-          value={values.username}
-          onValue={(username) => onChange({ username })}
-          autoComplete="off"
-          spellCheck={false}
-          required={!editing}
-        />
-      </Field>
-      <Field label={text.password} help={editing ? text.passwordKeepHint : undefined}>
-        <TextInput
-          type="password"
-          revealable
-          value={values.password}
-          onValue={(password) => onChange({ password })}
-          autoComplete="new-password"
-          required={!editing}
         />
       </Field>
     </>
@@ -110,9 +137,19 @@ export function addedParts(t: Messages, language: string, source: IptvSource): s
  * Adds an IPTV source to a scope in two steps: the account (an M3U playlist or an Xtream Codes
  * account, with its guide), then which categories to import and how, from a preview of its list.
  */
-export function IptvAddFlow({ scope, onAdded }: { scope: Scope; onAdded: (added: Addon) => void }) {
+export function IptvAddFlow({
+  scope,
+  usedBy,
+  onAdded,
+}: {
+  scope: Scope
+  /** Who uses a server source; left out for a member's own. */
+  usedBy?: UsedBy
+  onAdded: (added: Addon) => void
+}) {
   const { t } = useI18n()
   const text = t.sourceAdd
+  const files = useSessionUser().isAdministrator
   const [step, setStep] = useState<'account' | 'categories'>('account')
   const [name, setName] = useState('')
   const [kind, setKind] = useState<Kind>('m3u')
@@ -124,16 +161,18 @@ export function IptvAddFlow({ scope, onAdded }: { scope: Scope; onAdded: (added:
   const [previewOf, setPreviewOf] = useState(0)
   const accountJSON: IptvAccount =
     kind === 'm3u'
-      ? { kind, url: account.url.trim() }
+      ? { kind, url: account.url.trim(), userAgent: account.userAgent.trim() }
       : {
           kind,
           server: account.server.trim(),
           username: account.username,
           password: account.password,
+          userAgent: account.userAgent.trim(),
         }
   const mutation = useMutation({
     mutationFn: () =>
       addIptvSource(scope, {
+        usedBy,
         name: name.trim(),
         ...accountJSON,
         providerGuide: kind === 'xtream' && providerGuide,
@@ -163,7 +202,7 @@ export function IptvAddFlow({ scope, onAdded }: { scope: Scope; onAdded: (added:
   }
 
   return (
-    <div className="flex flex-col gap-5">
+    <div className="flex flex-col gap-4">
       <p className="text-small text-ink-3">{text.iptvHelp}</p>
       <ol aria-label={text.steps} className="flex flex-wrap gap-2">
         {(['account', 'categories'] as const).map((id, index) => (
@@ -171,8 +210,8 @@ export function IptvAddFlow({ scope, onAdded }: { scope: Scope; onAdded: (added:
             key={id}
             aria-current={step === id ? 'step' : undefined}
             className={cx(
-              'inline-flex h-7 items-center gap-2 rounded-field border px-2.5 text-small font-medium',
-              step === id ? 'border-accent/55 bg-s3 text-ink' : 'border-line-2 text-ink-3',
+              'inline-flex min-h-9 items-center gap-2 rounded-control px-3 text-control font-semibold',
+              step === id ? 'bg-s2 text-ink' : 'text-ink-3',
             )}
           >
             <span className="figures">{index + 1}</span>
@@ -181,7 +220,7 @@ export function IptvAddFlow({ scope, onAdded }: { scope: Scope; onAdded: (added:
         ))}
       </ol>
       {step === 'account' ? (
-        <form onSubmit={next} noValidate className="flex flex-col gap-5">
+        <form onSubmit={next} noValidate className="flex flex-col gap-4">
           <Field label={text.name}>
             <TextInput
               value={name}
@@ -224,9 +263,12 @@ export function IptvAddFlow({ scope, onAdded }: { scope: Scope; onAdded: (added:
             />
           )}
           {(kind === 'm3u' || !providerGuide) && (
-            <Field label={text.guideUrl} help={text.guideUrlHint}>
+            <Field
+              label={files ? text.guideUrlOrFile : text.guideUrl}
+              help={files ? text.guideUrlOrFileHint : text.guideUrlHint}
+            >
               <TextInput
-                type="url"
+                type={files ? 'text' : 'url'}
                 inputMode="url"
                 value={guideUrl}
                 onValue={(value) => {
@@ -254,7 +296,7 @@ export function IptvAddFlow({ scope, onAdded }: { scope: Scope; onAdded: (added:
           </div>
         </form>
       ) : (
-        <div className="flex flex-col gap-5">
+        <div className="flex flex-col gap-4">
           <SourceOptions
             value={options}
             onChange={(patch) => {
@@ -306,7 +348,8 @@ export function IptvEditForm({
   const { t } = useI18n()
   const kind = addon.kind as Kind | 'hdhomerun'
   const [name, setName] = useState(addon.name)
-  const [account, setAccount] = useState(emptyAccount)
+  const currentAgent = addon.source?.userAgent ?? ''
+  const [account, setAccount] = useState({ ...emptyAccount, userAgent: currentAgent })
   const mutation = useMutation({
     mutationFn: (patch: IptvSourcePatch) => updateIptvSource(scope, addon.id, patch),
     onSuccess: onSaved,
@@ -329,11 +372,14 @@ export function IptvEditForm({
         password: account.password,
       })
     }
+    if (kind !== 'hdhomerun' && account.userAgent.trim() !== currentAgent) {
+      patch.userAgent = account.userAgent.trim()
+    }
     mutation.mutate(patch)
   }
 
   return (
-    <form onSubmit={submit} noValidate className="flex flex-col gap-5">
+    <form onSubmit={submit} noValidate className="flex flex-col gap-4">
       <Field label={t.sourceAdd.name}>
         <TextInput
           value={name}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/library"
 )
 
@@ -21,16 +22,17 @@ func TestUsenetStreamsHaveASizeRecordOfTheirOwn(t *testing.T) {
 	playback := func(file map[string]any) string {
 		return "https://aio.example/api/v1/debrid/playback/" + auth + "/" + segment(file) + "/Friends.S01E04.mkv"
 	}
+	addon := accounts.ID{1}
 	for _, test := range []struct {
 		link string
 		want string
 	}{
-		{playback(map[string]any{"type": "usenet", "nzb": "https://indexer.example/get/1", "title": "Friends"}), "SELection (Usenet)"},
-		{playback(map[string]any{"type": "torrent", "hash": "abc", "index": 0}), "SELection"},
-		{"https://cdn.example/d/ABCDEF/Friends.S01E04.mkv", "SELection"},
-		{"https://cdn.example/eyJub3QgYmFzZTY0/file.mkv", "SELection"},
+		{playback(map[string]any{"type": "usenet", "nzb": "https://indexer.example/get/1", "title": "Friends"}), addon.String() + " (Usenet)"},
+		{playback(map[string]any{"type": "torrent", "hash": "abc", "index": 0}), addon.String()},
+		{"https://cdn.example/d/ABCDEF/Friends.S01E04.mkv", addon.String()},
+		{"https://cdn.example/eyJub3QgYmFzZTY0/file.mkv", addon.String()},
 	} {
-		if got := sizeAnnouncer(library.Version{Addon: "SELection", URL: test.link}); got != test.want {
+		if got := announcerOf(library.Version{Origin: library.Origin{Addon: addon}, URL: test.link}); got != test.want {
 			t.Errorf("%s: %q, want %q", test.link, got, test.want)
 		}
 	}

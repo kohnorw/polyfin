@@ -13,6 +13,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/stremio"
@@ -29,7 +32,25 @@ type env struct {
 
 func newEnv(t *testing.T) env {
 	t.Helper()
-	pool := migrated.New(t)
+	return envOn(t, migrated.New(t))
+}
+
+// tracedEnv is an env whose statements tracer sees.
+func tracedEnv(t *testing.T, tracer pgx.QueryTracer) env {
+	t.Helper()
+	config := migrated.New(t).Config()
+	config.ConnConfig.Tracer = tracer
+	pool, err := pgxpool.NewWithConfig(t.Context(), config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(pool.Close)
+	return envOn(t, pool)
+}
+
+// envOn is an env on pool.
+func envOn(t *testing.T, pool *pgxpool.Pool) env {
+	t.Helper()
 	users, err := accounts.Open(t.Context(), pool)
 	if err != nil {
 		t.Fatal(err)
@@ -174,6 +195,93 @@ func TestSourcesListTheirChannels(t *testing.T) {
 	member, _ := e.users.CreateUser(t.Context(), accounts.NewUser{Name: "member", Password: "correct horse"})
 	if _, err := e.service.Add(t.Context(), addons.Personal(member.ID), NewSource{Name: "Mine", Account: Account{Kind: addons.KindM3U, URL: list.url}}, true); !errors.Is(err, stremio.ErrPrivateNetwork) {
 		t.Errorf("a member's local source: %v", err)
+	}
+}
+
+// A source's streams are requested with the user agent its list gives
+// them, else the one its administrator set, else a browser's, as Jellyfin
+// requests its M3U tuners' streams. Only the first two are headers the
+// stream needs. The set one also goes with the list's downloads: setting
+// it downloads the list again, and is refused when the list cannot be
+// read with it.
+func TestSourcesRequestTheirStreamsWithAUserAgent(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	var mu sync.Mutex
+	var listAgent string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		listAgent = r.Header.Get("User-Agent")
+		mu.Unlock()
+		if r.Header.Get("User-Agent") == "Refused/1" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		_, _ = io.WriteString(w, "#EXTM3U\n#EXTINF:-1,Plain\nhttps://live.example/plain.ts\n"+
+			"#EXTINF:-1,Own\n#EXTVLCOPT:http-user-agent=Player/1.0\nhttps://live.example/own.ts\n")
+	}))
+	t.Cleanup(server.Close)
+	downloadedWith := func() string {
+		mu.Lock()
+		defer mu.Unlock()
+		return listAgent
+	}
+	addon, err := e.service.Add(t.Context(), addons.Shared(), NewSource{Name: "Agents", Account: Account{Kind: addons.KindM3U, URL: server.URL + "/get.php"}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := downloadedWith(); got != "Polyfin/test" {
+		t.Errorf("the list downloaded with %q", got)
+	}
+	channels, err := e.service.Channels(t.Context(), addon.ID)
+	if err != nil || len(channels) != 2 {
+		t.Fatalf("channels: %q %v", names(channels), err)
+	}
+	stream := func(channel int) stremio.Stream {
+		t.Helper()
+		streams, err := e.service.Streams(t.Context(), addon.ID, channels[channel].ID)
+		if err != nil || len(streams) != 1 {
+			t.Fatalf("streams of %s: %+v %v", channels[channel].Name, streams, err)
+		}
+		return streams[0]
+	}
+	if plain := stream(0); plain.UserAgent != BrowserUserAgent || plain.RequestHeaders() != nil {
+		t.Errorf("a stream its list names no user agent for: %q %v", plain.UserAgent, plain.RequestHeaders())
+	}
+	if own := stream(1); own.UserAgent != "" || own.RequestHeaders()["User-Agent"] != "Player/1.0" {
+		t.Errorf("a stream with its list's user agent: %q %v", own.UserAgent, own.RequestHeaders())
+	}
+
+	if err := e.service.Update(t.Context(), addons.Shared(), addon.ID, Changes{UserAgent: new(" Panel/1 ")}, false); err != nil {
+		t.Fatal(err)
+	}
+	if source, err := e.service.Source(t.Context(), addons.Shared(), addon.ID); err != nil || source.UserAgent != "Panel/1" || downloadedWith() != "Panel/1" {
+		t.Errorf("the source's user agent: %q, the list downloaded with %q, %v", source.UserAgent, downloadedWith(), err)
+	}
+	if plain := stream(0); plain.UserAgent != "" || plain.RequestHeaders()["User-Agent"] != "Panel/1" {
+		t.Errorf("a stream with its source's user agent: %q %v", plain.UserAgent, plain.RequestHeaders())
+	}
+	if own := stream(1); own.RequestHeaders()["User-Agent"] != "Player/1.0" {
+		t.Errorf("the list's own user agent comes first: %v", own.RequestHeaders())
+	}
+	if err := e.service.Refresh(t.Context(), addons.Shared(), addon.ID, false); err != nil || downloadedWith() != "Panel/1" {
+		t.Errorf("refreshed with %q: %v", downloadedWith(), err)
+	}
+
+	if err := e.service.Update(t.Context(), addons.Shared(), addon.ID, Changes{UserAgent: new("Refused/1")}, false); !errors.Is(err, stremio.ErrUnreachable) {
+		t.Errorf("a user agent the list is refused with: %v", err)
+	}
+	if err := e.service.Update(t.Context(), addons.Shared(), addon.ID, Changes{UserAgent: new("Tab\tbed")}, false); !errors.Is(err, ErrInvalidUserAgent) {
+		t.Errorf("a user agent with a control character: %v", err)
+	}
+	if source, _ := e.service.Source(t.Context(), addons.Shared(), addon.ID); source.UserAgent != "Panel/1" {
+		t.Errorf("a refused user agent replaced the source's: %q", source.UserAgent)
+	}
+	if err := e.service.Update(t.Context(), addons.Shared(), addon.ID, Changes{UserAgent: new("")}, false); err != nil {
+		t.Fatal(err)
+	}
+	if plain := stream(0); plain.UserAgent != BrowserUserAgent || downloadedWith() != "Polyfin/test" {
+		t.Errorf("back to the default: %q, the list downloaded with %q", plain.UserAgent, downloadedWith())
 	}
 }
 

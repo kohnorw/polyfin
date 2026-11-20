@@ -6,7 +6,9 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"runtime"
 	"strings"
+	"testing"
 
 	"golang.org/x/crypto/argon2"
 )
@@ -21,16 +23,67 @@ const (
 	argonSaltLen = 16
 )
 
+// passwordCost is the cost of the hashes made: OWASP's, except in the
+// test binaries that lower it (see LowerPasswordCostForTests). A hash
+// records its own, which verifyPassword reads.
+var passwordCost = argonCost{memory: argonMemory, time: argonTime, threads: argonThreads}
+
+// argonCost is the cost of an Argon2id hash: its memory in KiB, its
+// passes and its lanes.
+type argonCost struct {
+	memory, time uint32
+	threads      uint8
+}
+
+// LowerPasswordCostForTests hashes the passwords of this test binary at a
+// small fraction of OWASP's cost: every test user and every sign-in hashes
+// one, and a hash at the server's cost takes a quarter of a second under
+// the race detector. Called from a TestMain, before any test runs. The
+// hashes made then still verify as the server's do, since each records
+// its cost. It panics outside a test binary: the server always hashes at
+// OWASP's cost.
+func LowerPasswordCostForTests() {
+	if !testing.Testing() {
+		panic("accounts: LowerPasswordCostForTests called outside a test binary")
+	}
+	passwordCost = argonCost{memory: 64, time: 1, threads: 1}
+	unknownUserHash = hashPassword("polyfin-unknown-user")
+}
+
+// hashTurns holds a turn for each Argon2id hash under way in the process,
+// those made and those verified together: one for each two of the
+// processors Go runs on, two at least. A hash keeps a processor busy and
+// holds its memory, 19 MiB at the server's cost, until it ends. The other
+// hashes wait for a turn, however many they are: one waiting costs its
+// goroutine alone, and making a hash has no error to give up with.
+var hashTurns = make(chan struct{}, max(2, runtime.GOMAXPROCS(0)/2))
+
+// argonKey is argon2.IDKey, which a test replaces to count the hashes
+// under way.
+var argonKey = argon2.IDKey
+
+// hashInTurn is argon2.IDKey, once a turn is free (see hashTurns).
+func hashInTurn(password, salt []byte, passes, memory uint32, threads uint8, keyLen uint32) []byte {
+	hashTurns <- struct{}{}
+	defer func() { <-hashTurns }()
+	return argonKey(password, salt, passes, memory, threads, keyLen)
+}
+
 var errMalformedHash = errors.New("malformed password hash")
 
-// hashPassword returns a PHC-formatted Argon2id hash.
+// hashPassword returns a PHC-formatted Argon2id hash, at passwordCost.
 func hashPassword(password string) string {
+	return hashAt(passwordCost, password)
+}
+
+// hashAt returns a PHC-formatted Argon2id hash of password at cost.
+func hashAt(cost argonCost, password string) string {
 	salt := make([]byte, argonSaltLen)
 	_, _ = rand.Read(salt)
-	key := argon2.IDKey([]byte(password), salt, argonTime, argonMemory, argonThreads, argonKeyLen)
+	key := hashInTurn([]byte(password), salt, cost.time, cost.memory, cost.threads, argonKeyLen)
 	encode := base64.RawStdEncoding.EncodeToString
 	return fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
-		argon2.Version, argonMemory, argonTime, argonThreads, encode(salt), encode(key))
+		argon2.Version, cost.memory, cost.time, cost.threads, encode(salt), encode(key))
 }
 
 // verifyPassword checks password against a hash produced by hashPassword,
@@ -57,7 +110,7 @@ func verifyPassword(password, encoded string) (bool, error) {
 	if err != nil || len(want) == 0 {
 		return false, errMalformedHash
 	}
-	got := argon2.IDKey([]byte(password), salt, passes, memory, threads, uint32(len(want)))
+	got := hashInTurn([]byte(password), salt, passes, memory, threads, uint32(len(want)))
 	return subtle.ConstantTimeCompare(got, want) == 1, nil
 }
 

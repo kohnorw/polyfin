@@ -3,6 +3,7 @@ package jellyfin
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -117,7 +118,7 @@ func TestPlaybackReportsMoveTheResumePoint(t *testing.T) {
 	if data := tr.userData(t, tr.movie); data.PlayCount != 1 || data.LastPlayedDate == nil || data.Played || data.PlaybackPositionTicks != 0 {
 		t.Errorf("after starting: %+v", data)
 	}
-	tr.report(t, "/Sessions/Playing/Progress", map[string]any{"ItemId": tr.movie, "PositionTicks": 27_000_000_000})
+	tr.report(t, "/Sessions/Playing/Progress", map[string]any{"ItemId": tr.movie, "PositionTicks": int64(27_000_000_000)})
 	data := tr.userData(t, tr.movie)
 	if data.PlaybackPositionTicks != 27_000_000_000 || data.PlayedPercentage == nil || *data.PlayedPercentage != 50 {
 		t.Errorf("halfway: %+v", data)
@@ -125,7 +126,7 @@ func TestPlaybackReportsMoveTheResumePoint(t *testing.T) {
 	if resume := tr.list(t, "/UserItems/Resume?mediaTypes=Video"); !slices.Equal(resume, []string{tr.movie}) {
 		t.Errorf("resume: %v", resume)
 	}
-	tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": tr.movie, "PositionTicks": 52_000_000_000})
+	tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": tr.movie, "PositionTicks": int64(52_000_000_000)})
 	if data := tr.userData(t, tr.movie); !data.Played || data.PlaybackPositionTicks != 0 || data.PlayCount != 1 || data.PlayedPercentage != nil {
 		t.Errorf("stopped near the end: %+v", data)
 	}
@@ -271,7 +272,7 @@ func TestNextUpFollowsTheFurthestPlayedEpisode(t *testing.T) {
 	}
 	// An episode under way is next up, unless resumable ones are left out:
 	// then the series is.
-	tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": tr.episodes[2], "PositionTicks": 10_000_000_000})
+	tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": tr.episodes[2], "PositionTicks": int64(10_000_000_000)})
 	if got := nextUp("enableResumable=false"); len(got) != 0 {
 		t.Errorf("without resumable episodes: %v", got)
 	}
@@ -281,6 +282,230 @@ func TestNextUpFollowsTheFurthestPlayedEpisode(t *testing.T) {
 	tr.mark(t, http.MethodPost, "/UserPlayedItems/"+tr.episodes[2])
 	if got := nextUp(""); len(got) != 0 {
 		t.Errorf("after the last episode: %v", got)
+	}
+}
+
+// TestNextUpFollowsARewatch checks enableRewatching against Jellyfin
+// 12.4's rules (TVSeriesManager.GetNextUpBatched): the next played episode
+// after the one played last, beside the next unplayed one.
+func TestNextUpFollowsARewatch(t *testing.T) {
+	t.Parallel()
+	// played marks episodes played on the given days of January 2026.
+	played := func(t *testing.T, tr tracking, marks ...any) {
+		t.Helper()
+		for i := 0; i < len(marks); i += 2 {
+			tr.mark(t, http.MethodPost, fmt.Sprintf("/UserPlayedItems/%s?datePlayed=2026-01-%02dT20:00:00Z", marks[i], marks[i+1]))
+		}
+	}
+	nextUp := func(t *testing.T, tr tracking, query string) []string {
+		t.Helper()
+		return tr.list(t, "/Shows/NextUp?"+query)
+	}
+	t.Run("a series watched to the end and started again", func(t *testing.T) {
+		t.Parallel()
+		tr := newTracking(t)
+		if len(tr.episodes) != 3 {
+			t.Fatalf("episodes: %v", tr.episodes)
+		}
+		played(t, tr, tr.episodes[0], 1, tr.episodes[1], 2, tr.episodes[2], 3, tr.episodes[0], 4)
+		if got := nextUp(t, tr, ""); len(got) != 0 {
+			t.Errorf("without rewatching: %v", got)
+		}
+		if got := nextUp(t, tr, "enableRewatching=false"); len(got) != 0 {
+			t.Errorf("rewatching off: %v", got)
+		}
+		if got := nextUp(t, tr, "enableRewatching=true&enableResumable=false"); !slices.Equal(got, tr.episodes[1:2]) {
+			t.Errorf("rewatching: %v", got)
+		}
+		// A series asked for follows the parameter too, as in Jellyfin.
+		if got := nextUp(t, tr, "seriesId="+tr.series+"&enableRewatching=true"); !slices.Equal(got, tr.episodes[1:2]) {
+			t.Errorf("the series, rewatching: %v", got)
+		}
+	})
+	t.Run("a rewatch before the end lists both episodes", func(t *testing.T) {
+		t.Parallel()
+		tr := newTracking(t)
+		played(t, tr, tr.episodes[0], 1, tr.episodes[1], 2, tr.episodes[0], 3)
+		if got := nextUp(t, tr, ""); !slices.Equal(got, tr.episodes[2:3]) {
+			t.Errorf("without rewatching: %v", got)
+		}
+		// Each dated with the play it follows: the rewatch, played last,
+		// first.
+		if got := nextUp(t, tr, "enableRewatching=true"); !slices.Equal(got, []string{tr.episodes[1], tr.episodes[2]}) {
+			t.Errorf("rewatching: %v", got)
+		}
+	})
+	t.Run("a rewatch episode under way is left out", func(t *testing.T) {
+		t.Parallel()
+		tr := newTracking(t)
+		played(t, tr, tr.episodes[0], 1, tr.episodes[1], 2, tr.episodes[2], 3)
+		// The second episode, played, keeps a resume point from an older
+		// play.
+		if status, body := tr.call(http.MethodPost, "/UserItems/"+tr.episodes[1]+"/UserData", app("tv", tr.token),
+			map[string]any{"PlaybackPositionTicks": int64(10_000_000_000)}); status != http.StatusOK {
+			t.Fatalf("a resume point: %d %s", status, body)
+		}
+		played(t, tr, tr.episodes[0], 4)
+		if got := nextUp(t, tr, "enableRewatching=true"); len(got) != 0 {
+			t.Errorf("rewatch under way: %v", got)
+		}
+		// Finishing it moves the rewatch on.
+		played(t, tr, tr.episodes[1], 5)
+		if got := nextUp(t, tr, "enableRewatching=true"); !slices.Equal(got, tr.episodes[2:3]) {
+			t.Errorf("rewatch past the second episode: %v", got)
+		}
+	})
+}
+
+// startedAddon serves a catalog of five series of 45-minute episodes, a
+// special and three regular ones each, aired long ago: Arc, Bend, Cove
+// (the only horror one), Dune and Eden.
+func startedAddon(t *testing.T) string {
+	t.Helper()
+	var shows []stremio.Meta
+	for i, name := range []string{"Arc", "Bend", "Cove", "Dune", "Eden"} {
+		id := fmt.Sprintf("tt05%02d", i)
+		genre := "Drama"
+		if name == "Cove" {
+			genre = "Horror"
+		}
+		show := stremio.Meta{ID: id, Type: "series", Name: name, Genres: []string{genre}, Runtime: "45min"}
+		show.Videos = append(show.Videos, stremio.Video{ID: id + ":0:1", Title: name + " special", Season: 0, Episode: 1,
+			Released: "2019-12-01T00:00:00.000Z", Runtime: "45min"})
+		for episode := 1; episode <= 3; episode++ {
+			show.Videos = append(show.Videos, stremio.Video{ID: fmt.Sprintf("%s:1:%d", id, episode), Title: fmt.Sprintf("%s %d", name, episode),
+				Season: 1, Episode: stremio.Number(episode), Released: fmt.Sprintf("2020-01-%02dT00:00:00.000Z", episode), Runtime: "45min"})
+		}
+		shows = append(shows, show)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.EscapedPath()
+		switch {
+		case path == "/manifest.json":
+			_ = json.NewEncoder(w).Encode(stremio.Manifest{ID: "started", Name: "Started", Version: "1", Types: []string{"series"},
+				Resources: []stremio.Resource{{Name: "catalog"}, {Name: "meta"}},
+				Catalogs:  []stremio.Catalog{{Type: "series", ID: "series", Name: "Series"}}})
+		case strings.HasPrefix(path, "/catalog/series/series"):
+			previews := make([]stremio.Meta, 0, len(shows))
+			for _, show := range shows {
+				show.Videos = nil
+				previews = append(previews, show)
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"metas": previews})
+		case strings.HasPrefix(path, "/meta/series/"):
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "/meta/series/"), ".json")
+			for _, show := range shows {
+				if show.ID == id {
+					_ = json.NewEncoder(w).Encode(map[string]any{"meta": show})
+					return
+				}
+			}
+			http.NotFound(w, r)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server.URL + "/manifest.json"
+}
+
+// As in Jellyfin 12.4, a series one of whose episodes was only started,
+// none played, is in Next Up with its first unplayed episode, after the
+// series with a played episode, and the cutoff looks at the latest
+// episode played or started.
+func TestNextUpTakesSeriesOnlyStarted(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, 10)
+	member := s.user("member", nil)
+	addon, err := s.addons.Install(t.Context(), addons.Shared(), startedAddon(t), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.addons.SetLibraries(t.Context(), addons.Shared(), []addons.LibraryChoice{
+		{AddonID: addon.ID, CatalogType: "series", CatalogID: "series"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	token := s.signIn("member", "tv")
+	tr := tracking{testServer: s, token: token, user: member.ID.String(), views: map[string]string{}}
+	var page QueryResult
+	s.get(t, "/UserViews", token, &page)
+	for _, view := range page.Items {
+		tr.views[view.Name] = view.Id
+	}
+	series := map[string]string{}
+	episodes := map[string]string{}
+	s.get(t, "/Items?ParentId="+tr.views["Series"], token, &page)
+	for _, show := range page.Items {
+		series[show.Name] = show.Id
+		var listed QueryResult
+		s.get(t, "/Shows/"+show.Id+"/Episodes", token, &listed)
+		for _, episode := range listed.Items {
+			episodes[episode.Name] = episode.Id
+		}
+	}
+	if len(series) != 5 || len(episodes) != 20 {
+		t.Fatalf("series %v, episodes %d", series, len(episodes))
+	}
+	named := func(names ...string) []string {
+		ids := make([]string, 0, len(names))
+		for _, name := range names {
+			ids = append(ids, episodes[name])
+		}
+		return ids
+	}
+	minute := int64(60 * 10_000_000)
+	play := func(name string, stoppedAt int64) {
+		tr.report(t, "/Sessions/Playing", map[string]any{"ItemId": episodes[name], "PositionTicks": 0})
+		tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": episodes[name], "PositionTicks": stoppedAt})
+	}
+	nextUp := func(query string) []string { return tr.list(t, "/Shows/NextUp?"+query) }
+
+	// Arc's first episode was played long ago.
+	tr.mark(t, http.MethodPost, "/UserPlayedItems/"+episodes["Arc 1"]+"?datePlayed=2021-01-02T03:04:05Z")
+	// Bend's second, Cove's second and Eden's first are under way; Dune's
+	// first was stopped before the resume threshold, keeping no resume
+	// point. Arc's second was just started the same way.
+	play("Bend 2", 15*minute)
+	play("Dune 1", minute)
+	play("Cove 2", 15*minute)
+	play("Eden 1", 15*minute)
+	play("Arc 2", minute)
+
+	// The series with a played episode first; then those only started, the
+	// latest first, each from its first episode. Eden's is under way: the
+	// web player's home, leaving such episodes out, leaves Eden out.
+	web := "enableResumable=false"
+	if got, want := nextUp(web), named("Arc 2", "Cove 1", "Dune 1", "Bend 1"); !slices.Equal(got, want) {
+		t.Errorf("as the web player asks: %v, want %v", got, want)
+	}
+	if got, want := nextUp(""), named("Arc 2", "Eden 1", "Cove 1", "Dune 1", "Bend 1"); !slices.Equal(got, want) {
+		t.Errorf("with episodes under way: %v, want %v", got, want)
+	}
+	// Arc was played before the cutoff, but started after it.
+	if got, want := nextUp(web+"&nextUpDateCutoff=2025-01-01"), named("Arc 2", "Cove 1", "Dune 1", "Bend 1"); !slices.Equal(got, want) {
+		t.Errorf("after a cutoff before today: %v, want %v", got, want)
+	}
+	if got := nextUp(web + "&nextUpDateCutoff=2099-01-01"); len(got) != 0 {
+		t.Errorf("after a cutoff to come: %v", got)
+	}
+
+	// A hidden series, and one of a blocked genre, are left out; the
+	// hidden one still opens on its page.
+	if status, body := s.call(http.MethodPost, "/Polyfin/UserItems/"+series["Bend"]+"/Hidden", app("tv", token), nil); status != http.StatusNoContent {
+		t.Fatalf("hiding Bend: %d %s", status, body)
+	}
+	if got, want := nextUp(web), named("Arc 2", "Cove 1", "Dune 1"); !slices.Equal(got, want) {
+		t.Errorf("with Bend hidden: %v, want %v", got, want)
+	}
+	if got, want := nextUp("seriesId="+series["Bend"]), named("Bend 1"); !slices.Equal(got, want) {
+		t.Errorf("Bend's own: %v, want %v", got, want)
+	}
+	if _, err := s.store.UpdateUser(t.Context(), member.ID, accounts.UserChanges{BlockedGenres: &[]string{"Horror"}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := nextUp(web), named("Arc 2", "Dune 1"); !slices.Equal(got, want) {
+		t.Errorf("with horror blocked: %v, want %v", got, want)
 	}
 }
 
@@ -498,7 +723,7 @@ func TestUserDataCanBeReadAndChanged(t *testing.T) {
 	// Apps upload what was played offline as it is: a position near the end
 	// stays a position.
 	status, body := tr.call(http.MethodPost, "/UserItems/"+tr.movie+"/UserData", app("tv", tr.token),
-		map[string]any{"PlaybackPositionTicks": 52_000_000_000, "IsFavorite": true, "PlayedPercentage": 12.5, "LastPlayedDate": nil})
+		map[string]any{"PlaybackPositionTicks": int64(52_000_000_000), "IsFavorite": true, "PlayedPercentage": 12.5, "LastPlayedDate": nil})
 	var data UserItemData
 	if status != http.StatusOK {
 		t.Fatalf("update: %d %s", status, body)
@@ -641,5 +866,9 @@ var userDataShapes = shapeRules{
 	returned: map[string][]string{
 		// The recorded episode had no air date.
 		"PremiereDate": {"resume-items"}, "ProductionYear": {"resume-items"},
+		// The test addon gives the series' actor a photo in the movie, opened
+		// before: the series' cast shows it, as Jellyfin shows a person's
+		// image wherever they are credited. The recorded actor had none.
+		"PrimaryImageTag": {"series-in-progress"},
 	},
 }

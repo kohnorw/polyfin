@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"path/filepath"
 	"sync"
 	"sync/atomic"
@@ -83,7 +82,7 @@ func (f *fakeShares) rescan() {
 // davRemote reads a share served by serveWebDAV.
 func davRemote(t *testing.T, address, user, password string) remote {
 	t.Helper()
-	r, err := newRemote(shareAccess{address: address, user: user, password: password}, hostKeys{})
+	r, err := newRemote(shareAccess{address: address, user: user, password: password}, hostKeys{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -91,10 +90,11 @@ func davRemote(t *testing.T, address, user, password string) remote {
 	return r
 }
 
-// newShareWatchTest polls a WebDAV share of movies serving dir, scanned
-// first; each scan of the watch is a scan of the fake, and told.
+// newShareWatchTest polls a WebDAV share of movies serving dir, at its
+// server's /movies, scanned first; each scan of the watch is a scan of
+// the fake, and told.
 func newShareWatchTest(t *testing.T, dir string, folders func(address string) func(context.Context) ([]watchFolder, error)) (*watchTest,
-	*fakeShares, string) {
+	*fakeShares, *davServer) {
 	t.Helper()
 	server := serveWebDAV(t, dir, "reader", "pass phrase")
 	address := server.URL + "/movies"
@@ -112,7 +112,7 @@ func newShareWatchTest(t *testing.T, dir string, folders func(address string) fu
 		cancel()
 		wg.Wait()
 	})
-	return &watchTest{t: t, w: w, wg: wg, scans: scans}, shares, address
+	return &watchTest{t: t, w: w, wg: wg, scans: scans}, shares, server
 }
 
 // oneShare lists the share at an address as the folder id.
@@ -123,11 +123,12 @@ func oneShare(id accounts.ID) func(address string) func(context.Context) ([]watc
 // A file added to a share's folder, deep or at its root, has the share
 // scanned within a few polls, once.
 func TestShareWatchScansAfterFilesAdded(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "movies", "Nosferatu (1922)", "Nosferatu (1922).mkv"), 10)
 	write(t, filepath.Join(dir, "movies", "Shows", "Old", "The General (1926).mkv"), 10)
 	id := testID(1)
-	wt, _, _ := newShareWatchTest(t, dir, oneShare(id))
+	wt, _, server := newShareWatchTest(t, dir, oneShare(id))
 	wt.start()
 
 	write(t, filepath.Join(dir, "movies", "Shows", "Old", "The Gold Rush (1925).mkv"), 10)
@@ -146,9 +147,7 @@ func TestShareWatchScansAfterFilesAdded(t *testing.T) {
 	write(t, filepath.Join(dir, "movies", "Nosferatu (1922)", "poster.jpg"), 10)
 	wt.scanned(id)
 	wt.still()
-	if err := os.Remove(filepath.Join(dir, "movies", "Shows", "Old", "The General (1926).mkv")); err != nil {
-		t.Fatal(err)
-	}
+	server.remove(t, filepath.Join(dir, "movies", "Shows", "Old", "The General (1926).mkv"))
 	wt.scanned(id)
 	wt.still()
 }
@@ -156,6 +155,7 @@ func TestShareWatchScansAfterFilesAdded(t *testing.T) {
 // A share whose listings are those of its last scan is not scanned, nor
 // one where only files a scan does not read change.
 func TestShareWatchQuietWhenUnchanged(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "movies", "Nosferatu (1922)", "Nosferatu (1922).mkv"), 10)
 	id := testID(1)
@@ -172,6 +172,7 @@ func TestShareWatchQuietWhenUnchanged(t *testing.T) {
 
 // With the setting off, shares are not polled.
 func TestShareWatchOff(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "movies", "Nosferatu (1922).mkv"), 10)
 	settings := accounts.DefaultSettings()
@@ -192,10 +193,12 @@ func TestShareWatchOff(t *testing.T) {
 // A share that refuses the user, or cannot be reached, is unwatched with
 // why; once it answers again, it is scanned and watched.
 func TestShareWatchFailure(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "movies", "Nosferatu (1922).mkv"), 10)
 	id := testID(1)
-	wt, shares, address := newShareWatchTest(t, dir, oneShare(id))
+	wt, shares, server := newShareWatchTest(t, dir, oneShare(id))
+	address := server.URL + "/movies"
 	good := shares.r
 	wt.start()
 
@@ -235,6 +238,7 @@ func (c *countedRemote) list(ctx context.Context, rel string) ([]remoteEntry, er
 // A round lists at most lists folders, its root first; the next ones go
 // on where it stopped, so that every folder is listed over a few rounds.
 func TestShareWatchRoundsAreBounded(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	for i := range 7 {
 		write(t, filepath.Join(dir, "movies", fmt.Sprintf("Movie %d (19%d0)", i, 2+i), "movie.mkv"), 10)
@@ -273,10 +277,12 @@ func TestShareWatchRoundsAreBounded(t *testing.T) {
 // round compares with what that scan kept. A poll that compared the last
 // prints has the share scanned.
 func TestShareWatchDropsStalePolls(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "movies", "Nosferatu (1922)", "Nosferatu (1922).mkv"), 10)
 	id := testID(1)
-	wt, shares, address := newShareWatchTest(t, dir, oneShare(id))
+	wt, shares, server := newShareWatchTest(t, dir, oneShare(id))
+	address := server.URL + "/movies"
 	wt.w.polls[id] = &polling{address: address, cancel: func() {}}
 	wt.w.polled = make(chan sharePolled, 1)
 	p := newSharePoll(id, address, testEvery)
@@ -311,6 +317,7 @@ func TestShareWatchDropsStalePolls(t *testing.T) {
 // A movie copied to a WebDAV share is scanned and matched without a scan
 // asked for; with nothing changed, the share is not scanned.
 func TestShareWatchFindsNewMovie(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	box, err := secrets.New(bytes.Repeat([]byte{7}, secrets.KeySize))
 	if err != nil {
@@ -372,6 +379,7 @@ func TestShareWatchFindsNewMovie(t *testing.T) {
 // poll sees them change: a disc image, a DVD's video files and a Blu-ray
 // disc's playlists. A file a scan does not walk does not.
 func TestFolderPrintCountsDiscFiles(t *testing.T) {
+	t.Parallel()
 	at := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	for _, c := range []struct{ rel, name string }{
 		{"", "Box (2010).iso"},

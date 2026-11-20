@@ -4,6 +4,7 @@ import (
 	"slices"
 	"testing"
 
+	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/stremio"
 )
@@ -23,6 +24,8 @@ func (e env) showSpecials(t *testing.T) {
 func TestSpecialsAreHiddenByDefault(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+	// The test environment has upstream's defaults: this fork's is on.
+	e.setting(func(s *accounts.Settings) { s.HideSpecials = true })
 	show := stremio.Meta{ID: "tt300", Type: "series", Name: "Show", Videos: []stremio.Video{
 		{ID: "tt300:0:1", Title: "Special", Season: 0, Episode: 1, Released: "2019-12-01T00:00:00Z"},
 		{ID: "tt300:1:1", Title: "Pilot", Season: 1, Episode: 1, Released: "2020-01-01T00:00:00Z"},

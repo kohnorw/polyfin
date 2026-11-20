@@ -56,12 +56,22 @@ type CollectionCreationResult struct {
 // server.
 var collectionsViewID, _ = accounts.ParseID(nameID("view", "collections"))
 
+// ownView reports whether id is one of the views Polyfin answers itself
+// that hold no title of a library: the Live TV view, the Playlists view
+// and the recordings folder. No item has their identifier, and looking
+// one up would search the guide's programmes before failing (see
+// library.Service.Item), so listings that ask what they hold name them
+// first.
+func ownView(id accounts.ID) bool {
+	return id == liveTvViewID || id == playlistsViewID || id == recordingsFolderID
+}
+
 // collectionKinds are the items a collection holds. Like Jellyfin's, a
 // collection holds titles, home videos among them, their seasons and
-// episodes, other groups and channels; Polyfin leaves out people and
-// programmes, which its guide replaces.
+// episodes, folders of videos, other groups and channels; Polyfin leaves
+// out people and programmes, which its guide replaces.
 var collectionKinds = []library.Kind{library.KindMovie, library.KindVideo, library.KindSeries, library.KindSeason, library.KindEpisode,
-	library.KindCollection, library.KindChannel}
+	library.KindFolder, library.KindCollection, library.KindChannel}
 
 // collectionItems checks the items ids names for a collection: each must be
 // an item user can reach that a collection may hold. Jellyfin answers an
@@ -235,14 +245,17 @@ func mayDeleteCollections(user accounts.User) bool {
 
 // Browsing collections.
 
-// collectionsViewItem is the Collections view, among the user's libraries.
-func collectionsViewItem() library.Item {
-	return library.Item{ID: collectionsViewID, Kind: library.KindLibrary, Name: "Collections", CollectionType: "boxsets"}
+// collectionsViewItem is the Collections view, among the user's libraries,
+// named in the server's language, with its emblem.
+func (h *Handler) collectionsViewItem() library.Item {
+	return withEmblem(library.Item{ID: collectionsViewID, Kind: library.KindLibrary, Name: library.CollectionsName(h.Accounts.Settings().Language),
+		CollectionType: "boxsets"})
 }
 
 // addCollectionsView adds the Collections view to views once a collection
 // exists, as Jellyfin shows it once there is one: one made by users, or a
-// smart list the user sees as a collection.
+// smart list the user sees as a collection, whether or not it holds a
+// title they may see, which would cost a read of each list.
 func (h *Handler) addCollectionsView(r *http.Request, user accounts.User, views []BaseItemDto) ([]BaseItemDto, error) {
 	exists, err := h.Collections.Any(r.Context())
 	if err != nil {
@@ -254,7 +267,7 @@ func (h *Handler) addCollectionsView(r *http.Request, user accounts.User, views 
 			return views, err
 		}
 	}
-	view, err := h.folderDtos(r, user, []library.Item{collectionsViewItem()})
+	view, err := h.folderDtos(r, user, []library.Item{h.collectionsViewItem()})
 	if err != nil {
 		return nil, err
 	}
@@ -265,7 +278,7 @@ func (h *Handler) addCollectionsView(r *http.Request, user accounts.User, views 
 // a collection. It reports whether id named one.
 func (h *Handler) describeCollection(w http.ResponseWriter, r *http.Request, user accounts.User, id accounts.ID) bool {
 	if id == collectionsViewID {
-		views, err := h.folderDtos(r, user, []library.Item{collectionsViewItem()})
+		views, err := h.folderDtos(r, user, []library.Item{h.collectionsViewItem()})
 		if err != nil {
 			h.internalError(w, r, err)
 			return true
@@ -277,9 +290,16 @@ func (h *Handler) describeCollection(w http.ResponseWriter, r *http.Request, use
 	if errors.Is(err, collections.ErrNotFound) {
 		return false
 	}
+	var shown []collections.Collection
+	if err == nil {
+		shown, err = h.shownCollections(r.Context(), user, []collections.Collection{c})
+	}
 	if err != nil {
 		h.internalError(w, r, err)
 		return true
+	}
+	if len(shown) == 0 {
+		return false
 	}
 	dtos, err := h.collectionDtos(r, user, []collections.Collection{c}, requestedFields(r), true)
 	if err != nil {
@@ -301,7 +321,7 @@ func (h *Handler) collectionAncestors(w http.ResponseWriter, r *http.Request, us
 		h.internalError(w, r, err)
 		return true
 	}
-	views, err := h.folderDtos(r, user, []library.Item{collectionsViewItem()})
+	views, err := h.folderDtos(r, user, []library.Item{h.collectionsViewItem()})
 	if err != nil {
 		h.internalError(w, r, err)
 		return true
@@ -321,7 +341,15 @@ func (h *Handler) collectionAncestors(w http.ResponseWriter, r *http.Request, us
 func (h *Handler) collectionListing(w http.ResponseWriter, r *http.Request, user accounts.User, parent accounts.ID, hasParent bool, start, limit int) bool {
 	if hasParent && parent != collectionsViewID {
 		c, err := h.Collections.Get(r.Context(), parent)
+		var shown []collections.Collection
 		if err == nil {
+			shown, err = h.shownCollections(r.Context(), user, []collections.Collection{c})
+		}
+		if err == nil {
+			if len(shown) == 0 {
+				notFoundProblem(w)
+				return true
+			}
 			if wholeListing(r) {
 				limit = library.WholeListing
 			}
@@ -338,6 +366,10 @@ func (h *Handler) collectionListing(w http.ResponseWriter, r *http.Request, user
 	var within accounts.ID
 	if hasParent && parent != collectionsViewID {
 		if !onlyCollections {
+			return false
+		}
+		// Polyfin's own views are no library: they list as they do.
+		if ownView(parent) {
 			return false
 		}
 		folder, err := h.Library.Item(r.Context(), user, parent)
@@ -357,6 +389,9 @@ func (h *Handler) collectionListing(w http.ResponseWriter, r *http.Request, user
 	if err == nil && within != (accounts.ID{}) {
 		all, err = h.listedUnder(r.Context(), all, within)
 	}
+	if err == nil {
+		all, err = h.shownCollections(r.Context(), user, all)
+	}
 	if err != nil {
 		h.internalError(w, r, err)
 		return true
@@ -367,11 +402,11 @@ func (h *Handler) collectionListing(w http.ResponseWriter, r *http.Request, user
 	}
 	fields := requestedFields(r)
 	filter, filtered := stateFilterOf(r)
-	// The Collections view lists the smart lists the user sees as
+	// The Collections view lists the smart lists the user is shown as
 	// collections beside those made by users, by name.
 	var smart []library.Item
 	if within == (accounts.ID{}) && hasParent {
-		if smart, err = h.Library.SmartCollections(r.Context(), user); err != nil {
+		if smart, err = h.Library.ShownSmartCollections(r.Context(), user); err != nil {
 			h.internalError(w, r, err)
 			return true
 		}
@@ -426,7 +461,7 @@ func (h *Handler) listedUnder(ctx context.Context, all []collections.Collection,
 // writeCollectionsAcrossServer answers a listing of collections across the
 // server as Jellyfin answers one, with every BoxSet the user sees: the
 // collections made by users, those the user's collection libraries list,
-// each once, and the smart lists the user sees as collections, by name.
+// each once, and the smart lists the user is shown as collections, by name.
 // Strand builds its shelves from such a listing. jellyfin-web makes one
 // only for its Add to collection dialog, where a title can go to
 // collections made by users alone: collectionListing answers it with
@@ -437,7 +472,7 @@ func (h *Handler) writeCollectionsAcrossServer(w http.ResponseWriter, r *http.Re
 		h.browseError(w, r, err)
 		return
 	}
-	smart, err := h.Library.SmartCollections(r.Context(), user)
+	smart, err := h.Library.ShownSmartCollections(r.Context(), user)
 	if err != nil {
 		h.internalError(w, r, err)
 		return
@@ -581,7 +616,8 @@ func premiere(item library.Item) time.Time {
 }
 
 // collectionTitles lists, for each collection, the titles in it user may
-// see, in the order they were added: the titles user hid are left out.
+// see, in the order they were added: the titles user hid are left out, and
+// those the request's rating filter does not keep.
 func (h *Handler) collectionTitles(ctx context.Context, user accounts.User, lists ...collections.Collection) ([][]library.Item, error) {
 	var ids []accounts.ID
 	seen := map[accounts.ID]bool{}
@@ -596,6 +632,9 @@ func (h *Handler) collectionTitles(ctx context.Context, user accounts.User, list
 	byID := map[accounts.ID]library.Item{}
 	if len(ids) > 0 {
 		items, err := h.Library.Items(ctx, user, ids)
+		if err == nil {
+			items, err = h.Library.RatingFiltered(ctx, user, items)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -635,6 +674,9 @@ func (h *Handler) collectionDtos(r *http.Request, user accounts.User, lists []co
 			if title.Kind == library.KindSeries || title.Kind == library.KindSeason {
 				parents = append(parents, title.ID)
 			}
+			if title.Kind == library.KindFolder && title.Contents != nil {
+				ids = append(ids, title.Contents.Videos...)
+			}
 		}
 	}
 	data, err := h.UserData.Get(r.Context(), user.ID, ids)
@@ -645,10 +687,10 @@ func (h *Handler) collectionDtos(r *http.Request, user accounts.User, lists []co
 	if err != nil {
 		return nil, err
 	}
-	state := userState{data: data, counts: map[accounts.ID]userdata.Counts{}}
+	state := userState{reader: user.ID, data: data, counts: map[accounts.ID]userdata.Counts{}}
 	result := make([]BaseItemDto, 0, len(lists))
 	for i, c := range lists {
-		item, played := collectionItem(c, titles[i], data, counts)
+		item, played := collectionItem(c, titles[i], data, counts, h.Accounts.RatingCountry())
 		state.counts[c.ID] = userdata.Counts{Played: played}
 		dto := h.newItemDto(item, fields, detail, state)
 		if !detail && fields.has("ChildCount") {
@@ -671,9 +713,11 @@ func (h *Handler) collectionDtos(r *http.Request, user accounts.User, lists []co
 // collectionItem describes a collection from the titles in it a user may
 // see, and counts the movies and episodes under them the user played. Like
 // Jellyfin, a collection takes its titles' genres, their least restrictive
-// rating, and the earliest premiere date or year; its poster is that of
-// its first title with one (see collectionArtwork).
-func collectionItem(c collections.Collection, titles []library.Item, data map[accounts.ID]userdata.Data, counts map[accounts.ID]userdata.Counts) (library.Item, int) {
+// rating, scored under country, the server's rating country, and the
+// earliest premiere date or year; its poster is that of its first title
+// with one (see collectionArtwork).
+func collectionItem(c collections.Collection, titles []library.Item, data map[accounts.ID]userdata.Data, counts map[accounts.ID]userdata.Counts,
+	country string) (library.Item, int) {
 	item := library.Item{ID: c.ID, Kind: library.KindCollection, Name: c.Name, ParentID: collectionsViewID,
 		Contents: &library.Contents{Children: len(titles), LastReleased: c.LastAdded}}
 	played := 0
@@ -689,6 +733,15 @@ func collectionItem(c collections.Collection, titles []library.Item, data map[ac
 			if title.Contents != nil {
 				item.Contents.Released += title.Contents.Released
 				played += min(counts[title.ID].Played, title.Contents.Released)
+			}
+		case library.KindFolder:
+			if title.Contents != nil {
+				item.Contents.Released += title.Contents.Released
+				for _, video := range title.Contents.Videos {
+					if data[video].Played {
+						played++
+					}
+				}
 			}
 		}
 		for _, genre := range title.Genres {
@@ -713,16 +766,17 @@ func collectionItem(c collections.Collection, titles []library.Item, data map[ac
 		item.ProductionYear = item.PremiereDate.Year()
 	}
 	if len(ratings) > 0 {
-		item.OfficialRating = slices.MinFunc(ratings, compareRatings)
+		item.OfficialRating = slices.MinFunc(ratings, func(a, b string) int { return compareRatings(a, b, country) })
 	}
 	return item, played
 }
 
-// compareRatings orders ratings from the least restrictive, those Polyfin
-// does not know last, as Jellyfin picks a collection's rating.
-func compareRatings(a, b string) int {
+// compareRatings orders ratings from the least restrictive, scored under
+// country, those Polyfin does not know last, as Jellyfin picks a
+// collection's rating.
+func compareRatings(a, b, country string) int {
 	rank := func(rating string) (int, int) {
-		score, ok := localization.RatingScore(rating)
+		score, ok := localization.RatingScore(rating, country)
 		if !ok {
 			return 1001, 1001
 		}

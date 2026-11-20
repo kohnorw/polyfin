@@ -1,15 +1,15 @@
 package library
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
-	"os"
 	"slices"
-	"strconv"
 	"sync"
 	"time"
 
@@ -18,7 +18,9 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/iptv"
+	"github.com/moodiness/polyfin/internal/serverfile"
 	"github.com/moodiness/polyfin/internal/stremio"
+	"github.com/moodiness/polyfin/internal/workfolder"
 	"github.com/moodiness/polyfin/internal/xmltv"
 )
 
@@ -57,6 +59,10 @@ const (
 	// guideChannelsUnreachable is a guide fetched for a catalog whose
 	// channels could not be listed to map them.
 	guideChannelsUnreachable = "channels_unreachable"
+	// A guide that is a file of the server is missing or unreadable, or
+	// is a member's (see iptv.ErrLocalFile).
+	guideFileUnreadable = "file_unreadable"
+	guideFileRefused    = "file_refused"
 )
 
 var errTooManyProgrammes = errors.New("too many programmes")
@@ -64,12 +70,11 @@ var errTooManyProgrammes = errors.New("too many programmes")
 // SpoolGuidesIn sets the folder XMLTV guides in ZIP archives are written
 // to while they are read, which reading one needs: a folder of Polyfin's
 // cache, writable in a read-only container. What a previous run left there
-// is removed. It is called before guides are fetched.
+// is removed, unless Polyfin did not make the folder: it is then left as
+// it is and refused (see workfolder.ErrOccupied). It is called before
+// guides are fetched.
 func (s *Service) SpoolGuidesIn(dir string) error {
-	if err := os.RemoveAll(dir); err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
+	if err := workfolder.Guides.Empty(dir); err != nil {
 		return err
 	}
 	s.guideDir = dir
@@ -95,7 +100,8 @@ func (s *Service) RefreshGuides(ctx context.Context, all bool) error {
 	}
 	for _, c := range catalogs {
 		due := slices.DeleteFunc(slices.Clone(c.Guides), func(g addons.Guide) bool {
-			return !all && !iptv.Due(g.CheckedAt, retries[g.ID], interval, s.now())
+			return !all && !iptv.Due(g.CheckedAt, retries[g.ID], interval, s.now()) &&
+				!serverfile.Changed(g.URL, g.CheckedAt, g.Error == guideFileUnreadable)
 		})
 		if len(due) > 0 {
 			if err := s.refreshCatalog(ctx, c, due); err != nil {
@@ -256,6 +262,10 @@ func (s *Service) fetchGuide(ctx context.Context, c addons.LiveCatalog, g addons
 			code = guideMalformed
 		case errors.Is(err, iptv.ErrRateLimited):
 			code = guideRateLimited
+		case errors.Is(err, serverfile.ErrMissing), errors.Is(err, serverfile.ErrUnreadable):
+			code = guideFileUnreadable
+		case errors.Is(err, iptv.ErrLocalFile):
+			code = guideFileRefused
 		default:
 			var pgErr interface{ SQLState() string }
 			if errors.As(err, &pgErr) {
@@ -284,7 +294,7 @@ func (s *Service) fetchGuide(ctx context.Context, c addons.LiveCatalog, g addons
 			s.rememberRetry(g.ID, next)
 			return nil, err
 		}
-		return nil, pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 			kept, err := keepArchived(ctx, tx, g, generation, at, archives)
 			if err != nil {
 				return err
@@ -302,6 +312,14 @@ func (s *Service) fetchGuide(ctx context.Context, c addons.LiveCatalog, g addons
 			}
 			return nil
 		})
+		if err != nil {
+			return nil, err
+		}
+		s.analyzeGuides(ctx)
+		// The programmes an archive kept are copied without their folded
+		// titles, and those stored before Polyfin kept them may remain:
+		// they are folded now, as a download writes, not at each check.
+		return nil, s.foldGuideTitles(ctx)
 	})
 	return err
 }
@@ -379,7 +397,7 @@ func (s *Service) downloadGuide(ctx context.Context, c addons.LiveCatalog, g add
 				}
 				select {
 				case rows <- []any{g.ID, generation, p.Channel, p.Start, p.Stop, p.Title, p.SubTitle, p.Description, nonNilStrings(p.Categories),
-					positive(p.Season), positive(p.Episode), p.Icon, p.New, p.PreviouslyShown}:
+					positive(p.Season), positive(p.Episode), p.Icon, p.New, p.PreviouslyShown, iptv.Fold(p.Title)}:
 					return nil
 				case <-ctx.Done():
 					return ctx.Err()
@@ -388,7 +406,7 @@ func (s *Service) downloadGuide(ctx context.Context, c addons.LiveCatalog, g add
 	}()
 	source := &programmeRows{rows: rows}
 	written, copyErr := s.db.CopyFrom(ctx, pgx.Identifier{"live_guide_programmes"}, []string{"guide_id", "generation", "xmltv_id", "starts_at",
-		"ends_at", "title", "subtitle", "description", "categories", "season", "episode", "icon", "is_new", "previously_shown"}, source)
+		"ends_at", "title", "subtitle", "description", "categories", "season", "episode", "icon", "is_new", "previously_shown", "search"}, source)
 	if copyErr != nil {
 		cancel()
 		for range rows {
@@ -430,9 +448,23 @@ func positive(n int) *int {
 // readGuide downloads a guide and reads it (see xmltv.Read). The address
 // never appears in errors: it may embed credentials. A provider that asks
 // to slow down fails it with an iptv.RateLimitError, retried after a
-// backoff (see RefreshGuides).
+// backoff (see RefreshGuides). A guide's address is its catalog's owner's
+// choice, not its addon's: it is reached as that owner may, a member's on
+// public addresses only, whose guide may not be a file of the server
+// either.
 func (s *Service) readGuide(ctx context.Context, c addons.LiveCatalog, address string, options xmltv.Options,
 	channel func(xmltv.Channel) error, programme func(xmltv.Programme) error) error {
+	if path, ok := serverfile.Path(address); ok {
+		if c.Member {
+			return iptv.ErrLocalFile
+		}
+		file, err := serverfile.Open(path)
+		if err != nil {
+			return err
+		}
+		defer file.Close()
+		return xmltv.Read(file, options, channel, programme)
+	}
 	ctx, cancel := context.WithTimeout(ctx, guideTimeout)
 	defer cancel()
 	// The guide of an IPTV source is mostly its provider's, whose host its
@@ -443,7 +475,7 @@ func (s *Service) readGuide(ctx context.Context, c addons.LiveCatalog, address s
 		}
 	}
 	answered := time.AfterFunc(guideAnswer, cancel)
-	response, err := s.client.Open(ctx, http.MethodGet, address, http.Header{"Accept": {"application/xml, text/xml, */*"}}, c.Confined)
+	response, err := s.client.Open(ctx, http.MethodGet, address, http.Header{"Accept": {"application/xml, text/xml, */*"}}, c.Member)
 	answered.Stop()
 	if err != nil {
 		return err
@@ -483,8 +515,9 @@ func (r *stallReader) Read(p []byte) (int, error) {
 // mapped to. A channel two catalogs list takes the programmes of the first
 // one's mapping; a channel has one programme from each start. With a limit,
 // the guide is read a window at a time from q.From until enough are kept.
-// Every programme read is remembered by its identifier (see
-// unsavedProgram).
+// A listing marked by WithProgrammeNames reads only the programmes whose
+// folded title holds its text (see guidesearch.go). Every programme read
+// is remembered by its identifier (see unsavedProgram).
 func (s *Service) guidePrograms(ctx context.Context, v view, channels map[string]Item, skip map[string]bool, q GuideQuery,
 	keep func(Item) bool) ([]Item, error) {
 	order := map[addons.LibraryKey]int{}
@@ -538,12 +571,15 @@ func (s *Service) guidePrograms(ctx context.Context, v view, channels map[string
 	if len(mapped) == 0 {
 		return nil, nil
 	}
-	var channelIDs, guideIDs []accounts.ID
-	var xmltvIDs []string
-	var numbers []int
-	for id, m := range mapped {
-		number, _ := strconv.Atoi(byID[id].Number)
-		channelIDs, guideIDs, xmltvIDs, numbers = append(channelIDs, id), append(guideIDs, m.guide), append(xmltvIDs, m.xmltvID), append(numbers, number)
+	// The channels in the order of their numbers ("104.5" after "104"),
+	// which programmes of the same start follow: each one's rank.
+	channelIDs := slices.Collect(maps.Keys(mapped))
+	slices.SortFunc(channelIDs, func(a, b accounts.ID) int {
+		return cmp.Or(CompareChannelNumbers(byID[a].Number, byID[b].Number), bytes.Compare(a[:], b[:]))
+	})
+	guideIDs, xmltvIDs, ranks := make([]accounts.ID, len(channelIDs)), make([]string, len(channelIDs)), make([]int, len(channelIDs))
+	for i, id := range channelIDs {
+		guideIDs[i], xmltvIDs[i], ranks[i] = mapped[id].guide, mapped[id].xmltvID, i
 	}
 	var items []Item
 	type start struct {
@@ -551,13 +587,23 @@ func (s *Service) guidePrograms(ctx context.Context, v view, channels map[string
 		at      int64
 	}
 	starts := map[start]bool{}
+	named, filtered := programmeNames(ctx)
+	if filtered {
+		if err := s.foldGuideTitles(ctx); err != nil {
+			return nil, err
+		}
+	}
 	read := func(from, to time.Time) error {
-		rows, err := s.db.Query(ctx, `SELECT c.channel_id, p.guide_id, p.xmltv_id, p.starts_at, p.ends_at, p.title, p.subtitle, p.description,
+		query, args := `SELECT c.channel_id, p.guide_id, p.xmltv_id, p.starts_at, p.ends_at, p.title, p.subtitle, p.description,
 			p.categories, coalesce(p.season, 0), coalesce(p.episode, 0), p.icon, p.is_new, p.previously_shown
-			FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::int[]) AS c (channel_id, guide_id, xmltv_id, number)
+			FROM unnest($1::uuid[], $2::uuid[], $3::text[], $4::int[]) AS c (channel_id, guide_id, xmltv_id, rank)
 			JOIN live_guides g ON g.id = c.guide_id
 			JOIN live_guide_programmes p ON p.guide_id = g.id AND p.generation = g.generation AND p.xmltv_id = c.xmltv_id
-			WHERE p.ends_at > $5 AND p.starts_at < $6 ORDER BY p.starts_at, c.number, c.channel_id`, channelIDs, guideIDs, xmltvIDs, numbers, from, to)
+			WHERE p.ends_at > $5 AND p.starts_at < $6 ORDER BY p.starts_at, c.rank`, []any{channelIDs, guideIDs, xmltvIDs, ranks, from, to}
+		if filtered {
+			query, args = searchedProgrammes, append([]any{pgx.QueryExecModeDescribeExec}, append(args, containsPattern(named))...)
+		}
+		rows, err := s.db.Query(ctx, query, args...)
 		if err != nil {
 			return err
 		}
@@ -574,7 +620,7 @@ func (s *Service) guidePrograms(ctx context.Context, v view, channels map[string
 			if !ok {
 				return nil
 			}
-			rememberProgram(program.ID, programRef{channel: byID[channel].StremioID, guide: guide, xmltvID: xmltvID, start: p.Start})
+			s.rememberProgram(program.ID, programRef{channel: byID[channel].StremioID, guide: guide, xmltvID: xmltvID, start: p.Start})
 			if keep(program) {
 				items = append(items, program)
 			}

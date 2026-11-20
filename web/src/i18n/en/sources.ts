@@ -2,7 +2,6 @@
 const sources = {
   sources: {
     title: 'Sources',
-    lede: 'Your Stremio addons. The server’s sources serve every user; a member’s own sources serve only them.',
     add: 'Add a source',
     listLabel: 'Sources',
     listNote: 'Members’ own sources only serve their owner.',
@@ -47,19 +46,25 @@ const sources = {
     channelsShown: (count: string) => `${count} channels shown`,
     notDownloaded: 'Not downloaded yet',
     moreActions: (name: string) => `More actions for ${name}`,
-    openPage: 'Open its page',
     enabled: 'Enabled',
+    enabledLabel: (name: string) => `Enabled: ${name}`,
+    forWhom: 'For whom',
+    descriptions: 'Descriptions',
     enabledHelp: 'Turning a source off hides its libraries in Jellyfin apps without losing them.',
     order: 'Order',
     position: (position: number, count: number) => `${position} of ${count}`,
-    moveUp: (name: string) => `Move ${name} up`,
-    moveDown: (name: string) => `Move ${name} down`,
     moved: (name: string, position: number, count: number) =>
       `${name} moved to position ${position} of ${count}.`,
     description: 'Description',
     details: 'Details',
     manifestUrl: 'Manifest address',
     address: 'Address',
+    network: 'Network',
+    networks: {
+      local: 'Local. What it names may be on the local network too.',
+      public:
+        'Internet. What it names on the local network is refused: to allow it, add the source by its address on the local network.',
+    },
     version: 'Version',
     provides: 'Provides',
     types: 'Types',
@@ -74,12 +79,6 @@ const sources = {
     lastFetch: 'Last download',
     nextFetch: 'Next download',
     never: 'Never',
-    figures: {
-      entries: 'Entries in the source',
-      shown: 'Channels shown',
-      mapped: 'With a guide',
-      unmapped: 'Without a guide',
-    },
     openSource: 'Open the source',
     iptvHint:
       'What to import, categories, channels, numbers and guides are set on the source page.',
@@ -87,25 +86,63 @@ const sources = {
     refreshLabel: (name: string) => `Refresh ${name}`,
     refreshed: (name: string) => `${name}: the manifest was downloaded again.`,
     refreshedList: (name: string) => `${name}: the list was downloaded again.`,
+    refreshAll: 'Refresh everything',
+    refreshAllTitle: (name: string) => `Refresh everything from ${name}?`,
+    refreshAllBody:
+      'Its manifest is downloaded again. Its catalog pages, descriptions and version lists are asked for again as they are next needed, not all at once, and its libraries keep their settings.',
+    refreshedAll: (name: string) =>
+      `${name}: the manifest was downloaded again, and the rest is asked for again as it is needed.`,
     replace: 'Replace the address',
     newManifestUrl: 'New manifest address',
     replaceHint:
-      'Use this after reconfiguring the addon on its configure page. Its libraries are kept.',
+      'Use this after reconfiguring the addon on its configure page. Its libraries are kept, and its version lists are forgotten, so that each title asks it again.',
     replaceSubmit: 'Replace',
     replaced: 'The manifest address was replaced.',
+    configure: 'Configure',
+    configureLabel: (name: string) => `Configure ${name}`,
+    configureHelp: 'Opens its configure page in a new tab.',
+    configured: 'Once configured',
+    configuredHelp:
+      'If the configure page gave a new install link, paste it here and replace the address; if it kept your settings on its side and its link stayed the same, choose “The address didn’t change” to read its manifest again.',
+    installLink: 'New install link',
+    installLinkHint:
+      'Its libraries are kept, and its version lists are forgotten, so that each title asks it again.',
+    addressUnchanged: 'The address didn’t change',
+    librariesFollowed: (names: string) =>
+      `Libraries that followed their catalog’s new identifier: ${names}.`,
+    librariesRemoved: (names: string) => `Libraries removed with their catalog: ${names}.`,
     language: 'Language of its descriptions',
     languageHelp:
       'Leave it at None on the server’s only metadata addon, whatever language its configure page sets: an addon with a language describes titles for the users who chose that language only, unless no addon left at None describes them. To let users read titles in other languages, add the same metadata addon once more for each language, configured in that language on its configure page, and name the language here on each of these extra copies only: users who choose that metadata language see its names, overviews and images. An addon with a language and no library of its own only describes titles.',
     languageNone: 'None',
     languageSaved: (name: string) => `${name}: the language of its descriptions was saved.`,
+    name: 'Name',
+    nameHelp:
+      'The name shown wherever Polyfin names this addon. Leave it empty to give back its manifest’s name.',
+    manifestCalls: (name: string) => `Its manifest calls it “${name}”.`,
+    nameSaved: (name: string) => `${name}: its name was saved.`,
     edit: 'Edit the account',
     saved: 'Source saved.',
-    settings: 'Settings',
     remove: 'Remove',
     removeTitle: (name: string) => `Remove ${name}?`,
     removeShared:
       'Its libraries disappear from Jellyfin apps for every user. This cannot be undone.',
     removeMine: 'Its libraries disappear from your Jellyfin apps. This cannot be undone.',
+    removal: {
+      lead: 'Also lost with it:',
+      homeRows: (count: number, figure: string) =>
+        count === 1 ? '1 home row' : `${figure} home rows`,
+      libraries: (count: number, figure: string) =>
+        count === 1
+          ? '1 library, with its name, image and settings'
+          : `${figure} libraries, with their names, images and settings`,
+      hiddenLibraries: (count: number, figure: string) =>
+        count === 1
+          ? 'Its libraries hidden from 1 user (if you add it again, they will see them)'
+          : `Its libraries hidden from ${figure} users (if you add it again, they will see them)`,
+      recordings: (count: number, figure: string) =>
+        count === 1 ? '1 scheduled recording' : `${figure} scheduled recordings`,
+    },
     removed: (name: string) => `${name} was removed.`,
     readOnly: (name: string) =>
       `This is ${name}’s own source. Only they can change it, from their My sources page.`,
@@ -133,6 +170,16 @@ const sources = {
       'Copy the install link from the addon’s configure page. It often contains your settings or keys: Polyfin keeps it private and only ever shows a shortened form.',
     install: 'Install',
     installed: (name: string) => `${name} was installed.`,
+    installedNoLibraries: (name: string) =>
+      `${name} was installed. None of its catalogs is a library yet: enable them under Content › Libraries.`,
+    installedNoLibrariesMine: (name: string) =>
+      `${name} was installed. None of its catalogs is a library yet: enable them under My sources.`,
+    installedLibraryLimit: (name: string, limit: number) =>
+      `${name} was installed. The server already has ${limit} libraries, the most Polyfin makes automatically, so none of its catalogs became one: enable them under Content › Libraries.`,
+    installedLibraryLimitMine: (name: string, limit: number) =>
+      `${name} was installed. You already have ${limit} libraries, the most Polyfin makes automatically, so none of its catalogs became one: enable them under My sources.`,
+    installedMyMusic: (name: string) =>
+      `${name} was installed. It has no catalogs of its own, so its library is My music, which starts empty: it lists what each user plays or marks favorite. Find its music with search in the apps.`,
     iptvHelp:
       'Import the channels of an M3U playlist or an Xtream Codes account directly. They appear in Live TV like a TV catalog, which you can order under Libraries. The list is downloaded again at the interval set under Settings › Live TV.',
     steps: 'Steps',
@@ -145,18 +192,27 @@ const sources = {
     playlistUrl: 'Playlist address',
     playlistUrlHint:
       'The M3U address your provider gives. It may contain your login: it is never shown in full.',
+    playlistUrlOrFile: 'Playlist address or file',
+    playlistUrlOrFileHint:
+      'The M3U address your provider gives, or the path of a file on the server, such as /iptv/custom.m3u, or C:\\IPTV\\custom.m3u on Windows. With Docker, the file must be in a mounted volume, by its path in the container. An address may contain your login: it is never shown in full.',
     server: 'Server address',
     serverHint: 'For example https://server:8080, as your provider gives it.',
     username: 'Username',
     password: 'Password',
     keepHint: 'Leave empty to keep the current one.',
     passwordKeepHint: 'Leave empty to keep the current password.',
+    userAgent: 'User agent (optional)',
+    userAgentHint:
+      'Left empty, channels are requested as a web browser requests them. Set the one your provider asks for when it only serves certain players: the list and the channels are then requested with it. A user agent the list gives a channel comes first.',
     providerGuide: 'Use the provider’s programme guide',
     providerGuideHelp:
       'Xtream Codes servers publish a guide for the account: it fills the channels’ programmes.',
     guideUrl: 'Programme guide address (XMLTV, optional)',
     guideUrlHint:
       'Plain or compressed XMLTV file. You can also add or change it later under Libraries.',
+    guideUrlOrFile: 'Programme guide address or file (XMLTV, optional)',
+    guideUrlOrFileHint:
+      'Plain or compressed XMLTV file, by its address or its path on the server. You can also add or change it later under Libraries.',
     next: 'Next: choose what to import',
     back: 'Back to the account',
     import: 'Import',
@@ -264,6 +320,7 @@ const sources = {
     hostKeyHint:
       'Saved at the first connection. Polyfin refuses the server when it offers another one.',
     hostKeyNone: 'Saved at the first connection',
+    hostKeyForgotten: 'Shown at the next connection, to accept',
     hostKeyOffered: (fingerprint: string) =>
       `The server now offers another host key, ${fingerprint}, and Polyfin refuses it. Accept it only if the server was reinstalled or its key was changed on purpose.`,
     acceptHostKey: 'Accept the new key',
@@ -378,7 +435,12 @@ const sources = {
       name: (count: string) => `${count} by an identifier in the name`,
       nfo: (count: string) => `${count} by an NFO file`,
       search: (count: string) => `${count} by a search`,
+      year: (count: string) => `${count} by a search, of a year one apart`,
+      numerals: (count: string) => `${count} by a search, with numerals read alike`,
+      yearNumerals: (count: string) =>
+        `${count} by a search, of a year one apart and with numerals read alike`,
       link: (count: string) => `${count} by hand`,
+      tmdb: (count: string) => `${count} by a TMDB search, as the metadata addons’ searches failed`,
     },
     holds: 'Holds',
     lastScan: 'Last scan',
@@ -402,6 +464,16 @@ const sources = {
       refused: 'The share refuses the user or password: check them, and enter them again.',
       host_key_changed:
         'The SFTP server offers another host key than the one saved at the first connection, and Polyfin refuses it. If the change is expected, accept the new key under Edit the folder.',
+      too_deep:
+        'The share’s folders go more than 32 deep, and Polyfin stopped there. A link on the server that leads back to a folder above it makes such folders: remove it, or add a folder of the share that leaves it out.',
+      too_many_folders:
+        'The share holds more than 1,000,000 folders, more than Polyfin reads in one scan. Add parts of it as separate folders.',
+      too_many_files:
+        'The share holds more than 4,000,000 files, more than Polyfin reads in one scan. Add parts of it as separate folders.',
+      listing_too_large:
+        'A folder of the share lists more than Polyfin reads of one folder: more than 500,000 entries, a name longer than 1,024 bytes, or an answer from the server too large. The server’s log tells which, and in which folder.',
+      too_slow:
+        'A scan of the share lasted more than 12 hours, and Polyfin stopped it. What it read stays, and the next scan goes on from there. If the share is this slow at every scan, check the server and the network, or add parts of it as separate folders.',
     } as Record<string, string>,
     keptNote: 'The files found before stay in the library until the folder can be read again.',
     unmatchedTitle: 'Unmatched files',
@@ -418,13 +490,55 @@ const sources = {
       disc_title: 'Another movie of the disc: link it to its title',
       disc_episode: 'A title of a show’s disc: give its episode',
       lone_extra: 'An extra without its title beside it: link it to make it a title',
+      no_season:
+        'Its name gives an episode number but no season: put it in its season’s folder, such as Season 02, or name it with its season, such as S02E05',
+      air_date:
+        'Its name gives an air date, which Polyfin does not read: name it with the catalog’s season and number, such as S02E05',
+      no_episode_number:
+        'Its name gives no episode number: name it with the catalog’s season and number, such as S02E05',
       not_found: 'The metadata addons know no title of this name',
+      no_search: 'No addon of the server describes and searches titles of this kind',
       ambiguous: 'Several titles have this name: add the year to it, or link it',
       other_year: 'Titles of this name are of other years',
       search_failed: 'The metadata addons could not be searched',
       no_title: 'Its tags and name give no title',
       no_album: 'Its tags and folders give no album',
     } as Record<string, string>,
+    searchFailedBy: (addon: string, failure: string) =>
+      failure === '' ? `The search of ${addon} failed` : `The search failed: ${addon} ${failure}`,
+    searchFailures: {
+      unreachable: 'could not be reached',
+      timeout: 'did not answer in time',
+      private_network: 'is on a local network',
+      rate_limited: 'asked to slow down (too many requests)',
+      server_error: 'answered with a server error',
+      http_error: 'refused the request',
+      invalid_response: 'sent an answer Polyfin cannot read',
+    } as Record<string, string>,
+    noSearchTitle: (count: number, figure: string) =>
+      count === 1
+        ? 'No addon can search the title of 1 file'
+        : `No addon can search the titles of ${figure} files`,
+    noSearchHelp:
+      'Matching needs an addon of the server, under Content › Sources, that describes these titles and has a search catalog. Users’ own addons, under My sources, do not count. Once one is added, scan the folder.',
+    absoluteTitle: (count: number, figure: string) =>
+      count === 1
+        ? '1 file is matched by its absolute number'
+        : `${figure} files are matched by their absolute number`,
+    absoluteHelp:
+      'Named as Show - 41, they are versions of the 41st episode their show’s metadata addon lists, specials left out, at that episode’s season and number.',
+    searchFailedTitle: (count: number, figure: string) =>
+      count === 1
+        ? 'The title of 1 file could not be searched'
+        : `The titles of ${figure} files could not be searched`,
+    searchRetry: (at: string) =>
+      `Polyfin searches again on its own, next on ${at}, then less often while the search fails, and at each scan.`,
+    searchIdentifier: (shows: boolean): string =>
+      shows
+        ? 'To match a show without a search, add its IMDb identifier to its folder’s name, as in “Show (2010) [imdbid-tt0123456]”, then scan.'
+        : 'To match a movie without a search, add its IMDb identifier to its file’s name, or its own folder’s, as in “Movie (2010) [imdbid-tt0123456]”, then scan.',
+    searchHelp:
+      'Matching needs a server addon that describes these titles and has a search catalog. If its searches keep failing, check it under System › Health, or link the files by hand below.',
     read: (title: string) => `Read as “${title}”`,
     showFolder: (unit: string) => `Show folder: ${unit}`,
     discTitle: (disc: string, title: number) => `${disc} · title ${title}`,
@@ -461,6 +575,67 @@ const sources = {
     titlesFound: (query: string) => `Titles found for “${query}”`,
     titleKinds: { movie: 'Movie', show: 'Show' },
     pickTitle: (name: string, details: string) => `Link to ${name}, ${details}`,
+    unlistedTitle: (count: number, figure: string) =>
+      count === 1 ? '1 episode is only in the files' : `${figure} episodes are only in the files`,
+    unlistedHelp:
+      'The metadata addon that describes their shows does not list them, as when it numbers seasons or specials otherwise. They are listed all the same, named after their files, and play. Their shows and numbers are under Episodes only in the files.',
+    unlistedListTitle: 'Episodes only in the files',
+    unlistedListHelp:
+      'A file becomes a version of a catalog episode only when its season and episode number are the catalog’s. These files are numbered otherwise, so each is an episode of its own, next to the catalog’s. Rename them to the catalog’s numbers, then scan. Or choose how the show’s files are numbered: they then become versions of the catalog’s episodes without renaming.',
+    unlistedSeason: (season: number) => (season === 0 ? 'Specials' : `Season ${season}`),
+    unlistedFiles: (episodes: string) => `In the files: ${episodes}`,
+    unlistedCatalog: (episodes: string) => `In the catalog: ${episodes}`,
+    unlistedCatalogNoSeason: (season: number, range: string) =>
+      `The catalog has ${season === 0 ? 'no specials' : `no season ${season}`}: ${range}`,
+    unlistedCatalogRange: (first: string, last: string) => `it lists ${first} to ${last}`,
+    unlistedCatalogEmpty: 'it lists no episodes',
+    unlistedNotDescribed: 'The catalog’s numbers show once an app opens the show again',
+    numberingTitle: 'How shows’ files are numbered',
+    numberingHelp:
+      'A file is a version of the catalog’s episode of its season and number. When a show’s files are numbered otherwise, choose how: Polyfin maps them to the catalog’s episodes without renaming them, and played marks, resume points and favorites move with them. A file the numbering cannot place stays an episode of its own, with why.',
+    numberingLabel: (name: string) => `How the files of ${name} are numbered`,
+    numberings: {
+      catalog: 'As the catalog',
+      per_season: 'Per season',
+      continuing: 'Continuing from season 1',
+      absolute: 'Absolute',
+      order: 'An episode order',
+    },
+    numberingHints: {
+      catalog: 'S02E05 is the catalog’s S02E05.',
+      per_season:
+        'Each season starts at 1: S02E01 is the first episode the catalog lists in season 2.',
+      continuing:
+        'The numbers run on across seasons: after 12 episodes in season 1, S02E13 is the catalog’s S02E01.',
+      absolute:
+        'Each number is the episode’s place among all the show’s episodes, specials left out: E41 is the 41st.',
+      order: 'The files follow one of the show’s TMDB episode groups, such as its DVD order.',
+    },
+    numberingGroupLabel: (name: string) => `The episode order the files of ${name} follow`,
+    numberingGroupPlaceholder: 'Choose an episode order',
+    numberingLookup: {
+      no_key: 'Add a TMDB key in Settings › Content first: the episode orders come from TMDB.',
+      unknown: 'TMDB does not know this show, or no metadata addon of the server describes it.',
+      failed: 'TMDB could not be reached to list the show’s episode orders. Try again in a moment.',
+      none: 'TMDB gives this show no episode order.',
+    },
+    numberingSaved: (name: string) => `The files of ${name} are numbered anew`,
+    numberingFileCount: (files: number) => (files === 1 ? '1 file' : `${files} files`),
+    numberingMapped: (mapped: number, files: number) =>
+      `${mapped} of ${files} files mapped to the catalog’s episodes`,
+    unmappedReasons: {
+      no_catalog: 'No metadata addon of the server describes the show',
+      outside_season: 'The catalog’s season has no episode at that place',
+      beyond_catalog: 'The catalog lists fewer episodes than that number',
+      not_in_order: 'The episode order has no episode at that place',
+      not_listed: 'The catalog does not list the episode order’s episode at that place',
+      no_order: 'TMDB cannot tell the episode order for now',
+    } as Record<string, string>,
+    unmappedListed: (listed: string) => `Listed as an episode of its own, ${listed}`,
+    linkNotDescribedShow:
+      'No metadata addon of the server describes this identifier as a show. Check that it is the show’s, not an episode’s.',
+    linkNotDescribedMovie:
+      'No metadata addon of the server describes this identifier as a movie. Check that it is the movie’s.',
     linksTitle: 'Linked by hand',
     unlink: 'Remove the link',
     unlinkLabel: (unit: string) => `Remove the link of ${unit}`,
@@ -469,32 +644,56 @@ const sources = {
     removeEpisodeLabel: (title: string) => `Remove the episode of ${title}`,
     episodeRemoved: (title: string) =>
       `The episode of ${title} was removed: its disc’s name numbers it, or it is suggested again.`,
-    openPage: 'Open the folder’s page',
+    looserTitle: 'Matched by a looser rule',
+    looserHelp:
+      'No title has the exact name and year of these files, so Polyfin matched the only title a looser rule leaves: one of the year before or after, or one named alike once numerals are read, such as 2 for II or Part 1 for Part One. Check them. Unlink a wrong one: it is then matched by its exact name and year only, and stays unmatched until you link it to its title.',
+    looserRules: {
+      year: 'A title of a year one apart',
+      numerals: 'Numerals read alike',
+      year_numerals: 'A title of a year one apart, numerals read alike',
+    } as Record<string, string>,
+    matchedTo: (title: string) => `Matched to “${title}”`,
+    fileCount: (count: number, figure: string) => (count === 1 ? '1 file' : `${figure} files`),
+    looserUnlinkLabel: (unit: string) => `Unlink ${unit} from its title`,
+    looserUnlinked: (unit: string) =>
+      `${unit} was unlinked: it is matched by its exact name and year only.`,
   },
   mySources: {
     lede: 'Add your own Stremio, Eclipse and IPTV sources and choose which of their catalogs appear as libraries in your Jellyfin apps.',
-    preferenceTitle: 'The server’s sources',
     useShared: 'Use the server’s sources',
     useSharedHelp:
       'On: you get the server’s sources and libraries, followed by your own. Off: you only get your own sources and libraries.',
     preferenceSaved: 'Preference saved.',
     parentalControl:
-      'Parental control applies to your account: your Jellyfin apps show the server’s sources and libraries only, as they give the ratings it relies on. Your own sources are kept but not used.',
+      'Parental control applies to your account: your Jellyfin apps show the server’s sources and libraries only, as they give the ratings it relies on. Your own sources and smart lists are kept but not used.',
     personalAddonsOff:
-      'An administrator turned your own sources off: your Jellyfin apps show the server’s sources and libraries only. Your own sources are kept but not used.',
+      'An administrator turned your own sources off: your Jellyfin apps show the server’s sources and libraries only. Your own sources and smart lists are kept but not used.',
     listTitle: 'Your sources',
+  },
+  usedBy: {
+    title: 'Used by',
+    help: 'Who gets this source in their Jellyfin apps: its libraries, its titles, versions, subtitles and channels. Everyone includes the users created later; with Only these groups and users, a new user gets nothing from it until their group or they are ticked.',
+    everyone: 'Everyone',
+    listed: 'Only these groups and users',
+    groups: 'Groups',
+    users: 'Users',
+    members: (count: number) => (count === 1 ? '1 member' : `${count} members`),
+    noGroups: 'No group yet.',
+    nobody: 'No one uses this source until you tick a group or a user.',
+    selfLeftOut: 'You still manage this source here, but your own apps will not use it.',
+    ownAddons:
+      'A user who may add their own sources can still add the same addon for themselves: turn off Can add their own addons on their page or their group’s to prevent it.',
+    save: 'Save',
+    cancel: 'Cancel',
+    saved: (name: string) => `${name}: who uses it was saved.`,
+    chip: (names: string) => `Used by ${names}`,
+    chipNone: 'Used by no one',
   },
   music: {
     content: { music: 'Music', audiobook: 'Audiobooks', podcast: 'Podcasts' } as Record<
       string,
       string
     >,
-    library: {
-      music: 'Music library',
-      audiobook: 'Books library',
-      podcast: 'Music library',
-    } as Record<string, string>,
-    settings: 'Settings',
     settingsTitle: 'Addon settings',
     settingsHelp:
       'Declared by the addon and sent with every request Polyfin makes to it. They may hold your account details: only you, or the administrators for the server’s addons, can see them.',

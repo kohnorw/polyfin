@@ -17,10 +17,15 @@ import {
   type AppImportStatus,
   type AppKind,
   type AppReaders,
+  type ImportTitlesScope,
   type NuvioSignIn,
   type StremioLink,
+  type StremioUnlock,
 } from '@/api'
-import { dateTime, errorMessage, formatEpisode } from '@/format'
+import { docsUrl } from '@/app/Brand'
+import { useSessionUser } from '@/app/session'
+import { TitlesNotFound } from '@/features/imports/TitlesNotFound'
+import { dateTime, errorMessage } from '@/format'
 import { useI18n } from '@/i18n'
 import {
   Button,
@@ -28,7 +33,6 @@ import {
   ConfirmDialog,
   ExternalButtonLink,
   Field,
-  Modal,
   Notice,
   Panel,
   PanelFooter,
@@ -36,7 +40,6 @@ import {
   Segmented,
   Select,
   StatusPill,
-  Table,
   TextInput,
   useToast,
   type StatusTone,
@@ -56,28 +59,36 @@ const apps: readonly AppKind[] = ['nuvio', 'stremio']
  * account, or a user's, for an administrator. `current` is the import running into that account,
  * else the last one. The app chosen signs in with a form of its own, through `readers`, and the
  * account read then has its profile chosen with its addons: the server holds what it read a few
- * minutes only. `importEveryMinutes` is how often a connection kept is imported again.
+ * minutes only. `importEveryMinutes` is how often a connection kept is imported again, and
+ * `secretKey` whether the server encrypts the sign-in it keeps.
  */
 export default function AppImport({
   current,
   addonsAllowed,
+  parentalControl,
   readers,
   start,
   onStarted,
   own,
   importEveryMinutes,
+  secretKey,
 }: {
   current: AppImportStatus | null
   /** Whether the account's user may add their own addons: the app's are offered only then. */
   addonsAllowed: boolean
+  /** Why the app's addons are not offered: parental control or blocked genres, else own addons off. */
+  parentalControl: boolean
   readers: AppReaders
   start: (body: AppImportChoice) => Promise<AppImportStatus>
   onStarted: (started: AppImportStatus) => void
   /** The user's own account, under My account. */
   own: boolean
   importEveryMinutes: number
+  /** The server has POLYFIN_SECRET_KEY; without it, a sign-in kept is stored unencrypted. */
+  secretKey: boolean
 }) {
   const { t } = useI18n()
+  const { isAdministrator } = useSessionUser()
   const text = t.account.appImport
   const every = t.account.importEvery(importEveryMinutes)
   const toast = useToast()
@@ -114,7 +125,7 @@ export default function AppImport({
       {current !== null && <AppImportProgress current={current} own={own} />}
       {!running && account === null && (
         <Panel as="div" flush>
-          <div className="flex max-w-lg flex-col gap-2 px-6 pt-6 max-sm:px-4">
+          <div className="flex max-w-[38rem] flex-col gap-2 px-5 max-md:px-4">
             <span aria-hidden className="text-control font-medium text-ink">
               {text.app}
             </span>
@@ -135,6 +146,28 @@ export default function AppImport({
               help={text.stayConnectedHelp[app](every)}
               className="mt-3"
             />
+            {!secretKey && (
+              // Administrators can set the key; members only learn how their sign-in is kept.
+              <Notice
+                tone="warn"
+                action={
+                  isAdministrator && (
+                    <ExternalButtonLink
+                      size="sm"
+                      href={`${docsUrl}/configuration#stored-keys-and-tokens`}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      iconEnd={ArrowSquareOutIcon}
+                    >
+                      {text.unencryptedDocs}
+                    </ExternalButtonLink>
+                  )
+                }
+                className="mt-1"
+              >
+                {isAdministrator ? text.unencryptedAdministrator : text.unencrypted}
+              </Notice>
+            )}
           </div>
           {app === 'nuvio' ? (
             <NuvioSignInForm
@@ -161,13 +194,15 @@ export default function AppImport({
           titleAs="h3"
           description={text.chooseHelp[account.app]}
         >
-          <div className="flex max-w-lg flex-col gap-5 px-6 py-6 max-sm:px-4">
+          <div className="flex max-w-[38rem] flex-col gap-4 px-5 max-md:px-4">
             <Field
               label={text.profile}
               help={
                 chosen === undefined
                   ? undefined
-                  : text.profileCounts(chosen.played, chosen.resumes, chosen.library)
+                  : chosen.locked
+                    ? text.pinHelp
+                    : text.profileCounts(chosen.played, chosen.resumes, chosen.library)
               }
             >
               <Select
@@ -176,7 +211,9 @@ export default function AppImport({
                   value: p.id,
                   label:
                     p.name !== ''
-                      ? p.name
+                      ? p.locked
+                        ? text.lockedProfile(p.name)
+                        : p.name
                       : account.profiles.length === 1
                         ? text.wholeAccount
                         : text.profileNumber(p.id),
@@ -188,11 +225,25 @@ export default function AppImport({
                 }}
               />
             </Field>
-            {chosen !== undefined && (
+            {chosen?.locked === true && (
+              <StremioPinForm
+                key={chosen.id}
+                unlock={readers.stremio.unlock}
+                accountKey={account.key}
+                profile={chosen.id}
+                onOpened={(opened) => {
+                  begin.reset()
+                  setAccount(opened)
+                }}
+              />
+            )}
+            {chosen !== undefined && !chosen.locked && (
               <div className="flex flex-col gap-3">
                 <span className="text-control font-medium text-ink">{text.addons}</span>
                 {!addonsAllowed ? (
-                  <p className="text-small text-ink-3">{text.addonsOff}</p>
+                  <p className="text-small text-ink-3">
+                    {parentalControl ? text.addonsParental : text.addonsOff}
+                  </p>
                 ) : chosen.addons.length === 0 ? (
                   <p className="text-small text-ink-3">{text.noAddons}</p>
                 ) : (
@@ -237,7 +288,7 @@ export default function AppImport({
               variant="primary"
               icon={ArrowSquareInIcon}
               loading={begin.isPending}
-              disabled={chosen === undefined}
+              disabled={chosen === undefined || chosen.locked}
               onClick={() => begin.mutate({ key: account.key, profile, addons })}
             >
               {begin.isPending ? text.starting : text.start}
@@ -249,8 +300,70 @@ export default function AppImport({
   )
 }
 
+/**
+ * Asks for the PIN of a Stremio profile that has one, and opens it: the server sends the PIN to
+ * Stremio, for this request only, and never keeps it. `onOpened` gets the account with the profile
+ * read.
+ */
+function StremioPinForm({
+  unlock,
+  accountKey,
+  profile,
+  onOpened,
+}: {
+  unlock: AppReaders['stremio']['unlock']
+  accountKey: string
+  profile: string
+  onOpened: (account: AppAccount) => void
+}) {
+  const { t } = useI18n()
+  const text = t.account.appImport
+  const [pin, setPin] = useState('')
+  const opening = useMutation({
+    mutationFn: (body: StremioUnlock) => unlock(body),
+    onSuccess: (account) => {
+      setPin('')
+      onOpened(account)
+    },
+    onError: () => setPin(''),
+  })
+
+  function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault()
+    opening.mutate({ key: accountKey, profile, pin: pin.trim() })
+  }
+
+  return (
+    <form onSubmit={submit} noValidate className="flex flex-col gap-3">
+      <Field label={text.pin} error={opening.isError ? errorMessage(t, opening.error) : undefined}>
+        <TextInput
+          type="password"
+          value={pin}
+          onValue={(value) => {
+            opening.reset()
+            setPin(value)
+          }}
+          inputMode="numeric"
+          autoComplete="off"
+          spellCheck={false}
+          required
+        />
+      </Field>
+      <Button
+        type="submit"
+        icon={KeyIcon}
+        loading={opening.isPending}
+        disabled={pin.trim() === ''}
+        className="self-start"
+      >
+        {opening.isPending ? text.unlocking : text.unlock}
+      </Button>
+    </form>
+  )
+}
+
 /** Sign-in codes about the backend's address, or the account, shown under that field. */
-const backendCodes = ['invalid_nuvio_address', 'nuvio_unreachable', 'not_nuvio']
+const backendCodes = ['invalid_nuvio_address', 'private_network', 'nuvio_unreachable', 'not_nuvio']
 const accountCodes = ['nuvio_sign_in_refused']
 
 /**
@@ -284,7 +397,12 @@ function NuvioSignInForm({
   })
 
   const code = signIn.error instanceof ApiError ? signIn.error.code : null
-  const message = signIn.isError ? errorMessage(t, signIn.error) : undefined
+  // A member's backend on a local network answers as their addons do; the words are the backend's.
+  const message = !signIn.isError
+    ? undefined
+    : code === 'private_network'
+      ? text.backendPrivateNetwork
+      : errorMessage(t, signIn.error)
   const backendError = code !== null && backendCodes.includes(code) ? message : undefined
   const passwordError = code !== null && accountCodes.includes(code) ? message : undefined
   const otherError = signIn.isError
@@ -305,7 +423,7 @@ function NuvioSignInForm({
 
   return (
     <form onSubmit={submit} noValidate>
-      <div className="flex max-w-lg flex-col gap-5 px-6 pt-5 pb-6 max-sm:px-4">
+      <div className="flex max-w-[38rem] flex-col gap-4 px-5 pt-4 max-md:px-4">
         <Field label={text.backend} help={text.backendHelp} error={backendError}>
           <TextInput
             type="url"
@@ -388,7 +506,7 @@ function StremioSignIn({
 
   return (
     <>
-      <div className="flex max-w-lg flex-col gap-2 px-6 pt-5 max-sm:px-4">
+      <div className="flex max-w-[38rem] flex-col gap-2 px-5 pt-4 max-md:px-4">
         <span aria-hidden className="text-control font-medium text-ink">
           {text.way}
         </span>
@@ -489,16 +607,16 @@ function StremioLinkForm({
 
   return (
     <>
-      <div className="flex max-w-lg flex-col gap-4 px-6 pt-5 pb-6 max-sm:px-4">
+      <div className="flex max-w-[38rem] flex-col gap-4 px-5 pt-4 max-md:px-4">
         {link === null ? (
           <p className="text-small text-ink-3">{text.linkHelp}</p>
         ) : (
-          <div className="flex flex-col gap-4 rounded-row border border-line bg-bg px-[18px] py-4 max-sm:p-3.5">
+          <div className="flex flex-col gap-3 rounded-row bg-s2 px-4 py-3">
             <p className="text-control text-ink">{text.approve}</p>
             <div className="flex flex-wrap items-center gap-3">
               <p
                 aria-label={text.codeLabel}
-                className="rounded-field border border-accent/50 bg-s2 px-5 py-2 font-mono text-[26px] font-semibold tracking-[0.2em] text-ink select-all"
+                className="rounded-field bg-s3 px-4 py-1.5 font-mono text-[1.375rem] font-semibold tracking-[0.2em] text-ink select-all"
               >
                 {link.code}
               </p>
@@ -587,7 +705,7 @@ function StremioPasswordForm({
 
   return (
     <form onSubmit={submit} noValidate>
-      <div className="flex max-w-lg flex-col gap-5 px-6 pt-5 pb-6 max-sm:px-4">
+      <div className="flex max-w-[38rem] flex-col gap-4 px-5 pt-4 max-md:px-4">
         <Field label={text.email}>
           <TextInput
             type="email"
@@ -665,7 +783,7 @@ function StremioKeyForm({
 
   return (
     <form onSubmit={submit} noValidate>
-      <div className="flex max-w-lg flex-col gap-5 px-6 pt-5 pb-6 max-sm:px-4">
+      <div className="flex max-w-[38rem] flex-col gap-4 px-5 pt-4 max-md:px-4">
         <Field label={text.key} help={text.keyHelp} error={refused ? message : undefined}>
           <TextInput
             type="password"
@@ -709,7 +827,7 @@ function StremioKeyForm({
 function AppImportProgress({ current, own }: { current: AppImportStatus; own: boolean }) {
   const { t } = useI18n()
   const text = t.account.appImport
-  const [showUnmatched, setShowUnmatched] = useState(false)
+  const scope: ImportTitlesScope = own ? 'own' : { userId: current.user.id }
   const running = current.state === 'running'
   const title = running ? text.currentTitle : own ? text.ownLastTitle : text.lastTitle
   const app = text.apps[current.app]
@@ -738,23 +856,18 @@ function AppImportProgress({ current, own }: { current: AppImportStatus; own: bo
       }
     >
       <div className="flex flex-col gap-4">
-        {running && <p className="text-small text-ink-3">{text.runningHelp}</p>}
+        {running && <p className="text-small text-ink-3">{t.common.importRunningHelp}</p>}
         {current.problem !== null && <Notice tone="danger">{text.problem}</Notice>}
         <p className="text-body text-ink">
           {running
             ? text.read(current.read)
             : text.counts(current.read, current.played, current.resumed, current.watchlist)}
         </p>
-        {current.unmatchedCount > 0 && (
-          <Button
-            variant="ghost"
-            size="sm"
-            className="self-start"
-            onClick={() => setShowUnmatched(true)}
-          >
-            {text.unmatched(current.unmatchedCount)}
-          </Button>
-        )}
+        <TitlesNotFound
+          scope={scope}
+          source={current.app}
+          stamp={`${current.id}:${current.state}:${current.unmatchedCount}`}
+        />
         {current.addons.length > 0 && (
           <ul className="flex flex-col gap-1 text-small">
             {current.addons.map((addon, index) => (
@@ -770,50 +883,6 @@ function AppImportProgress({ current, own }: { current: AppImportStatus; own: bo
             ))}
           </ul>
         )}
-        <Modal
-          open={showUnmatched}
-          onClose={() => setShowUnmatched(false)}
-          title={text.unmatchedTitle}
-          width={640}
-          footer={<Button onClick={() => setShowUnmatched(false)}>{t.users.close}</Button>}
-        >
-          <div className="space-y-4 p-5">
-            <p className="text-small text-ink-3">{text.unmatchedHelp}</p>
-            <Table label={text.unmatchedTitle} minWidth={520}>
-              <thead>
-                <tr>
-                  <th scope="col">{text.titleColumn}</th>
-                  <th scope="col">{text.kindColumn}</th>
-                  <th scope="col">{text.reasonColumn}</th>
-                </tr>
-              </thead>
-              <tbody>
-                {current.unmatched.map((entry, index) => (
-                  <tr key={index}>
-                    <td>
-                      <span className="block text-ink">
-                        {entry.name === '' ? entry.id : entry.name}
-                      </span>
-                      <span className="block font-mono text-small text-ink-3">
-                        {entry.id}
-                        {entry.season !== null && entry.episode !== null
-                          ? ` · ${formatEpisode(entry.season, entry.episode)}`
-                          : ''}
-                      </span>
-                    </td>
-                    <td>{t.users.jellyfinImport.kinds[entry.type]}</td>
-                    <td>{text.reasons[entry.reason]}</td>
-                  </tr>
-                ))}
-              </tbody>
-            </Table>
-            {current.unmatchedCount > current.unmatched.length && (
-              <p className="text-small text-ink-3">
-                {t.users.jellyfinImport.more(current.unmatchedCount - current.unmatched.length)}
-              </p>
-            )}
-          </div>
-        </Modal>
       </div>
     </Panel>
   )
@@ -821,21 +890,22 @@ function AppImportProgress({ current, own }: { current: AppImportStatus; own: bo
 
 /**
  * A user's connections to apps, imported every `importEveryMinutes`: under My account, the user's
- * own, or a user's, for an administrator. Each shows its account, its last and next import, and why
- * it stopped or is paused, with Import now and Disconnect. `own` is the user's own account, where a
- * paused connection cannot be imported. `onChanged` tells that the connections changed.
+ * own, or a user's, for an administrator: `scope` tells whose. Each shows its account, its last
+ * and next import, how many titles it did not find, with their list, and why it stopped or is
+ * paused, with Import now and Disconnect. Under My account, a paused connection cannot be
+ * imported. `onChanged` tells that the connections changed.
  */
 export function AppConnections({
   connections,
   actions,
   onChanged,
-  own,
+  scope,
   importEveryMinutes,
 }: {
   connections: AppConnection[]
   actions: AppConnectionActions
   onChanged: () => void
-  own: boolean
+  scope: ImportTitlesScope
   importEveryMinutes: number
 }) {
   const { t } = useI18n()
@@ -848,14 +918,14 @@ export function AppConnections({
       description={text.help(t.account.importEvery(importEveryMinutes))}
       flush
     >
-      <ul>
+      <ul className="flex flex-col gap-2">
         {connections.map((connection) => (
           <AppConnectionRow
             key={connection.app}
             connection={connection}
             actions={actions}
             onChanged={onChanged}
-            own={own}
+            scope={scope}
           />
         ))}
       </ul>
@@ -867,12 +937,12 @@ function AppConnectionRow({
   connection,
   actions,
   onChanged,
-  own,
+  scope,
 }: {
   connection: AppConnection
   actions: AppConnectionActions
   onChanged: () => void
-  own: boolean
+  scope: ImportTitlesScope
 }) {
   const { language, t } = useI18n()
   const text = t.account.appImport.connections
@@ -902,15 +972,15 @@ function AppConnectionRow({
         : { tone: 'ok', label: text.status.connected }
 
   return (
-    <li className="flex flex-col gap-3 px-6 py-5 max-sm:px-4 [&+&]:border-t [&+&]:border-line">
+    <li className="flex flex-col gap-2.5 px-5 py-3 max-md:px-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="min-w-0">
-          <h4 className="text-[15px] font-semibold tracking-[-0.01em] text-ink">{name}</h4>
+          <h4 className="text-h3 font-semibold text-ink">{name}</h4>
           <p className="text-control text-ink-2">
             {connection.account !== null ? (
               <>
                 {text.connectedAs}
-                <span className="font-mono text-ink">{connection.account}</span>
+                <span className="font-semibold text-ink">{connection.account}</span>
               </>
             ) : (
               text.connected
@@ -926,10 +996,10 @@ function AppConnectionRow({
           </Button>
         </div>
       </div>
-      <div className="flex items-center justify-between gap-4 rounded-row border border-line bg-bg px-[18px] py-3 max-sm:flex-col max-sm:items-start max-sm:p-3.5">
+      <div className="flex items-center justify-between gap-3 rounded-row bg-s2 px-4 py-3 max-sm:flex-col max-sm:items-start">
         <p role="status" className="flex min-w-0 items-start gap-2 text-control text-ink-2">
           <ClockCounterClockwiseIcon
-            size={16}
+            size="1rem"
             aria-hidden="true"
             className="mt-0.5 shrink-0 text-ink-3"
           />
@@ -942,6 +1012,7 @@ function AppConnectionRow({
                 <RelativeTime iso={last.at} />
                 {text.colon}
                 {t.account.appImport.counts(last.read, last.played, last.resumed, last.watchlist)}
+                {last.unmatched > 0 && ` ${t.importTitles.notFound(last.unmatched)}.`}
               </>
             )}
             {connection.nextImportAt !== null && !connection.importing && (
@@ -956,13 +1027,18 @@ function AppConnectionRow({
         <Button
           icon={DownloadSimpleIcon}
           loading={importNow.isPending || connection.importing}
-          disabled={stopped || (own && connection.paused)}
+          disabled={stopped || (scope === 'own' && connection.paused)}
           onClick={() => importNow.mutate()}
           className="shrink-0"
         >
           {connection.importing ? text.importing : text.importNow}
         </Button>
       </div>
+      <TitlesNotFound
+        scope={scope}
+        source={connection.app}
+        stamp={`${last?.at ?? ''}:${connection.importing}`}
+      />
       {stopped ? (
         <Notice tone="danger">{text.stopped(name)}</Notice>
       ) : (

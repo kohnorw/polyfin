@@ -99,7 +99,7 @@ func catalogAddon(t *testing.T) string {
 			http.NotFound(w, r)
 		case path == "/poster.jpg":
 			w.Header().Set("Content-Type", "image/jpeg")
-			_, _ = w.Write([]byte("jpeg bytes"))
+			_, _ = w.Write([]byte(jpegBytes))
 		default:
 			http.NotFound(w, r)
 		}
@@ -163,8 +163,171 @@ func episodeStreams(t *testing.T) string {
 	return server.URL + "/manifest.json"
 }
 
-// Apps play an episode with its series' episodes from it on, asked from
-// startItemId: the episode, or the version the user picked.
+// checkNarrowedListings lists library view by each of want's item types,
+// recursively as apps ask for a library's titles, in pages of one and of
+// two from every start, and checks that the pages walk want's names in
+// order to the end and that each tells their number as its total. A
+// listing of every kind the library lists, which reads its catalog a
+// page at a time, may tell one more while the catalog may go on: unread
+// names it as the types for which that holds.
+func checkNarrowedListings(t *testing.T, s testServer, token, view, unread string, want map[string][]string) {
+	t.Helper()
+	for types, names := range want {
+		for _, limit := range []int{1, 2} {
+			var walked []string
+			for start := 0; start < len(names)+1; start += limit {
+				var page QueryResult
+				path := fmt.Sprintf("/Items?ParentId=%s&Recursive=true&IncludeItemTypes=%s&StartIndex=%d&Limit=%d", view, types, start, limit)
+				if status := s.get(t, path, token, &page); status != http.StatusOK {
+					t.Fatalf("%s: %d", path, status)
+				}
+				if total := page.TotalRecordCount; total != len(names) && (types != unread || total != len(names)+1) {
+					t.Errorf("%s: a total of %d, want %d", path, total, len(names))
+				}
+				for _, item := range page.Items {
+					walked = append(walked, item.Name)
+				}
+			}
+			if !slices.Equal(walked, names) {
+				t.Errorf("%s by %d: %v, want %v", types, limit, walked, names)
+			}
+		}
+	}
+}
+
+// animeCatalog serves an addon of one anime catalog, "mixed", of three
+// series and two movies, and returns its manifest's address.
+func animeCatalog(t *testing.T) string {
+	t.Helper()
+	titles := []stremio.Meta{
+		{ID: "kitsu:1", Type: "anime.series", Name: "Series One"},
+		{ID: "kitsu:2", Type: "anime.movie", Name: "Movie One"},
+		{ID: "kitsu:3", Type: "anime.series", Name: "Series Two"},
+		{ID: "kitsu:4", Type: "anime.movie", Name: "Movie Two"},
+		{ID: "kitsu:5", Type: "anime.series", Name: "Series Three"},
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch path := r.URL.EscapedPath(); {
+		case path == "/manifest.json":
+			_ = json.NewEncoder(w).Encode(stremio.Manifest{ID: "anime", Name: "Anime", Version: "1", Types: []string{"anime"},
+				Resources: []stremio.Resource{{Name: "catalog"}},
+				Catalogs:  []stremio.Catalog{{Type: "anime", ID: "mixed", Name: "Mixed", Extra: []stremio.Extra{{Name: "skip"}}}}})
+		case strings.HasPrefix(path, "/catalog/anime/mixed"):
+			metas := titles
+			if strings.Contains(path, "skip=") {
+				metas = nil
+			}
+			_ = json.NewEncoder(w).Encode(map[string]any{"metas": metas})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	return server.URL + "/manifest.json"
+}
+
+// A library of an anime catalog shown as shows or as movies has that type
+// in apps, which then ask it for series or for movies only; it still
+// lists and counts exactly each kind asked for, keeps the other kind in
+// its latest titles, and its items keep their ids and played state when
+// an administrator switches between the choices.
+func TestAnimeLibraryShowAs(t *testing.T) {
+	t.Parallel()
+	manifest := animeCatalog(t)
+	s := newTestServer(t, 10)
+	s.user("member", nil)
+	addon, err := s.addons.Install(t.Context(), addons.Shared(), manifest, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := s.signIn("member", "tv")
+	var played string
+	ids := map[string]string{}
+	for _, choice := range []struct{ showAs, collectionType string }{
+		{"", ""}, {addons.ShowAsShows, "tvshows"}, {addons.ShowAsMovies, "movies"}, {addons.ShowAsMoviesAndShows, ""},
+	} {
+		if _, err := s.addons.SetLibraries(t.Context(), addons.Shared(), []addons.LibraryChoice{
+			{AddonID: addon.ID, CatalogType: "anime", CatalogID: "mixed", ShowAs: choice.showAs}}); err != nil {
+			t.Fatal(err)
+		}
+		var views QueryResult
+		s.get(t, "/UserViews", token, &views)
+		views.Items = libraryViews(views.Items)
+		if len(views.Items) != 1 || views.Items[0].CollectionType != choice.collectionType {
+			t.Fatalf("%q: the views: %+v", choice.showAs, views.Items)
+		}
+		view := views.Items[0].Id
+		checkNarrowedListings(t, s, token, view, "", map[string][]string{
+			"Series": {"Series One", "Series Two", "Series Three"},
+			"Movie":  {"Movie One", "Movie Two"},
+		})
+		var latest []BaseItemDto
+		s.get(t, "/Items/Latest?ParentId="+view+"&Limit=10", token, &latest)
+		// Latest leaves out the movie played, as Jellyfin does.
+		kinds, movies := map[string]int{}, 2
+		for _, item := range latest {
+			kinds[item.Type]++
+		}
+		if played != "" {
+			movies = 1
+		}
+		if kinds["Series"] != 3 || kinds["Movie"] != movies {
+			t.Errorf("%q: the latest: %v", choice.showAs, itemNames(latest))
+		}
+		var all QueryResult
+		s.get(t, "/Items?ParentId="+view+"&Recursive=true&IncludeItemTypes=Movie,Series", token, &all)
+		for _, item := range all.Items {
+			if id, ok := ids[item.Name]; ok && id != item.Id {
+				t.Errorf("%q: %s is now %s, was %s", choice.showAs, item.Name, item.Id, id)
+			}
+			ids[item.Name] = item.Id
+			if item.Name == "Movie One" && played != "" && !item.UserData.Played {
+				t.Errorf("%q: %s is no longer played", choice.showAs, item.Name)
+			}
+		}
+		if len(all.Items) != 5 {
+			t.Errorf("%q: the titles: %v", choice.showAs, itemNames(all.Items))
+		}
+		if played == "" {
+			played = ids["Movie One"]
+			s.expectStatus(t, http.StatusOK, http.MethodPost, "/UserPlayedItems/"+played, token, nil)
+		}
+	}
+}
+
+// A library of an anime catalog, whose type does not tell its titles'
+// kind, lists and counts only the kinds asked for, as Jellyfin counts a
+// mixed library's items of the types asked for, so that apps page
+// through movies or series to their end.
+func TestAnimeLibraryCountsTheKindsAsked(t *testing.T) {
+	t.Parallel()
+	manifest := animeCatalog(t)
+	s := newTestServer(t, 10)
+	s.user("member", nil)
+	addon, err := s.addons.Install(t.Context(), addons.Shared(), manifest, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.addons.SetLibraries(t.Context(), addons.Shared(), []addons.LibraryChoice{
+		{AddonID: addon.ID, CatalogType: "anime", CatalogID: "mixed"}}); err != nil {
+		t.Fatal(err)
+	}
+	token := s.signIn("member", "tv")
+	var views QueryResult
+	s.get(t, "/UserViews", token, &views)
+	views.Items = libraryViews(views.Items)
+	if len(views.Items) != 1 {
+		t.Fatalf("the views: %+v", views.Items)
+	}
+	checkNarrowedListings(t, s, token, views.Items[0].Id, "", map[string][]string{
+		"Series":       {"Series One", "Series Two", "Series Three"},
+		"Movie":        {"Movie One", "Movie Two"},
+		"Movie,Series": {"Series One", "Movie One", "Series Two", "Movie Two", "Series Three"},
+	})
+}
+
+// jellyfin-web plays an episode with its series' episodes from it on,
+// asked from startItemId: the episode, or the version the user picked.
 func TestEpisodeListsStartAtTheItemAsked(t *testing.T) {
 	t.Parallel()
 	tr := newTracking(t)
@@ -196,8 +359,9 @@ func TestEpisodeListsStartAtTheItemAsked(t *testing.T) {
 		t.Fatalf("versions: %v %v", versions, err)
 	}
 	// From a version the user picked, the list starts with the episode as
-	// that version opens it: apps that play the list, such as Jellyfin for
-	// Android TV, play the source carrying the item's identifier.
+	// that version opens it (this fork): apps that play the list, such as
+	// Jellyfin for Android TV, play the source carrying the item's
+	// identifier.
 	picked := versions[1].ID.String()
 	if page := list(picked); !slices.Equal(ids(page), []string{picked, tr.episodes[2]}) {
 		t.Errorf("from the second episode's other version: %v", ids(page))
@@ -209,55 +373,6 @@ func TestEpisodeListsStartAtTheItemAsked(t *testing.T) {
 	}
 	if page := list(strings.Repeat("ab", 16)); len(page.Items) != 0 {
 		t.Errorf("from an item the list does not have: %v", ids(page))
-	}
-}
-
-// Apps such as Swiftfin find the episode after the one that plays as its
-// neighbours, from the series' episodes or from /Items, as Jellyfin
-// answers adjacentTo: the episode with the ones before and after it.
-func TestEpisodesAdjacentToAnEpisodeAreItsNeighbours(t *testing.T) {
-	t.Parallel()
-	tr := newTracking(t)
-	if _, err := tr.addons.Install(t.Context(), addons.Shared(), episodeStreams(t), false); err != nil {
-		t.Fatal(err)
-	}
-	ids := func(page QueryResult) []string {
-		result := []string{}
-		for _, item := range page.Items {
-			result = append(result, item.Id)
-		}
-		return result
-	}
-	for _, c := range []struct {
-		path string
-		want []string
-	}{
-		{"/Shows/" + tr.series + "/Episodes?adjacentTo=" + tr.episodes[0], tr.episodes[:2]},
-		{"/Shows/" + tr.series + "/Episodes?adjacentTo=" + tr.episodes[1], tr.episodes[:3]},
-		{"/Shows/" + tr.series + "/Episodes?adjacentTo=" + tr.episodes[2], tr.episodes[1:]},
-		{"/Shows/" + tr.series + "/Episodes?adjacentTo=" + strings.Repeat("ab", 16), []string{}},
-		{"/Items?parentId=" + tr.series + "&adjacentTo=" + tr.episodes[1], tr.episodes[:3]},
-		{"/Items?adjacentTo=" + tr.episodes[2], tr.episodes[1:]},
-		// jellyfin-web plays what follows among the episodes not missing.
-		{"/Shows/" + tr.series + "/Episodes?isMissing=false&startItemId=" + tr.episodes[1], tr.episodes[1:]},
-		{"/Shows/" + tr.series + "/Episodes?isMissing=true", []string{}},
-	} {
-		var page QueryResult
-		if status := tr.get(t, c.path, tr.token, &page); status != http.StatusOK || !slices.Equal(ids(page), c.want) {
-			t.Errorf("%s: %d %v, want %v", c.path, status, ids(page), c.want)
-		}
-	}
-	// A version stands for its episode.
-	member, _ := tr.store.Authenticate(t.Context(), "member", "correct horse")
-	second, _ := accounts.ParseID(tr.episodes[1])
-	versions, err := tr.library.Versions(t.Context(), member, second)
-	if err != nil || len(versions) != 2 {
-		t.Fatalf("versions: %v %v", versions, err)
-	}
-	var page QueryResult
-	tr.get(t, "/Shows/"+tr.series+"/Episodes?adjacentTo="+versions[1].ID.String(), tr.token, &page)
-	if !slices.Equal(ids(page), []string{tr.episodes[0], versions[1].ID.String(), tr.episodes[2]}) {
-		t.Errorf("adjacent to a version: %v", ids(page))
 	}
 }
 
@@ -473,23 +588,23 @@ func TestImagesAreRelayedWithoutCredentials(t *testing.T) {
 	if movie.ImageTags["Primary"] == "" {
 		t.Fatalf("no Primary image tag: %+v", movie.ImageTags)
 	}
-	response, err := http.Get(s.url + "/Items/" + movie.Id + "/Images/Primary?tag=" + movie.ImageTags["Primary"])
+	response, err := testClient.Get(s.url + "/Items/" + movie.Id + "/Images/Primary?tag=" + movie.ImageTags["Primary"])
 	if err != nil {
 		t.Fatal(err)
 	}
 	body := make([]byte, 64)
 	n, _ := response.Body.Read(body)
 	_ = response.Body.Close()
-	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/jpeg" || string(body[:n]) != "jpeg bytes" {
+	if response.StatusCode != http.StatusOK || response.Header.Get("Content-Type") != "image/jpeg" || string(body[:n]) != jpegBytes {
 		t.Fatalf("image: %d %s %q", response.StatusCode, response.Header.Get("Content-Type"), body[:n])
 	}
 	request, _ := http.NewRequest(http.MethodGet, s.url+"/Items/"+movie.Id+"/Images/Primary", nil)
 	request.Header.Set("If-None-Match", response.Header.Get("ETag"))
-	if cached, err := http.DefaultClient.Do(request); err != nil || cached.StatusCode != http.StatusNotModified {
+	if cached, err := testClient.Do(request); err != nil || cached.StatusCode != http.StatusNotModified {
 		t.Errorf("revalidation: %v %v", cached.StatusCode, err)
 	}
 	for _, path := range []string{"/Images/Logo", "/Images/Primary/1"} {
-		if response, _ := http.Get(s.url + "/Items/" + movie.Id + path); response.StatusCode != http.StatusNotFound {
+		if response, _ := testClient.Get(s.url + "/Items/" + movie.Id + path); response.StatusCode != http.StatusNotFound {
 			t.Errorf("%s: %d", path, response.StatusCode)
 		}
 	}
@@ -498,7 +613,7 @@ func TestImagesAreRelayedWithoutCredentials(t *testing.T) {
 	if len(movie.BackdropImageTags) == 0 {
 		t.Fatalf("no backdrop: %+v", movie.BackdropImageTags)
 	}
-	if response, _ := http.Get(s.url + "/Items/" + movie.Id + "/Images/Backdrop/0?tag=" + movie.BackdropImageTags[0]); response.StatusCode != http.StatusNotFound {
+	if response, _ := testClient.Get(s.url + "/Items/" + movie.Id + "/Images/Backdrop/0?tag=" + movie.BackdropImageTags[0]); response.StatusCode != http.StatusNotFound {
 		t.Errorf("a backdrop the artwork server does not have: %d", response.StatusCode)
 	}
 }
@@ -514,7 +629,7 @@ func TestCreditedPeopleHavePhotosAndPages(t *testing.T) {
 		t.Fatalf("people: %+v", movie.People)
 	}
 	actor := (*movie.People)[0]
-	response, err := http.Get(s.url + "/Items/" + actor.Id + "/Images/Primary?tag=" + actor.PrimaryImageTag)
+	response, err := testClient.Get(s.url + "/Items/" + actor.Id + "/Images/Primary?tag=" + actor.PrimaryImageTag)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -556,9 +671,20 @@ var browseShapes = shapeRules{
 		"PrimaryImageItemId": {"virtual-folders"},
 	},
 	returned: map[string][]string{
-		// The recorded items lacked the rating and cast photo the fake addon
-		// provides.
-		"OfficialRating": {"latest"}, "PrimaryImageTag": {"movie"},
+		// The recorded items lacked the rating the fake addon provides.
+		"OfficialRating": {"latest"},
+		// The recorded actors had no photo. The test addon gives the movie's
+		// actor one, and the series' actor, the same person, none: the
+		// series' cast shows the photo kept of them, as Jellyfin shows a
+		// person's image wherever they are credited.
+		"PrimaryImageTag": {"movie", "series"},
+		// The recorded libraries and collections had no image. Polyfin's
+		// new libraries, and collections without a poster, draw one as soon
+		// as their titles are read, which may come before the listing or
+		// after it, and tell its shape as Jellyfin does: its UserViews always
+		// asks for the field, and an item gets it only with an image
+		// (DtoService.GetPrimaryImageAspectRatio).
+		"PrimaryImageAspectRatio": {"views", "boxsets", "boxset"},
 	},
 }
 
@@ -586,6 +712,13 @@ func TestBrowseResponsesMatchJellyfin(t *testing.T) {
 	season := first("/Shows/"+series+"/Seasons", func(item BaseItemDto) bool { return *item.IndexNumber == 1 })
 	episode := first("/Shows/"+series+"/Episodes?seasonId="+season, nil)
 	boxset := first("/Items?ParentId="+views["Groups"], nil)
+
+	// The movie's description gives its actor a photo, which the series'
+	// cast then shows (see browseShapes): the movie is read first, so that
+	// the answers do not depend on the order the fixtures are asked in.
+	if status, body := s.call(http.MethodGet, "/Users/"+user+"/Items/"+movie, app("tv", token), nil); status != http.StatusOK {
+		t.Fatalf("the movie: %d %s", status, body)
+	}
 
 	library := "/Items?userId=" + user + "&startIndex=0&limit=100&recursive=true&sortOrder=Ascending&fields=MediaSourceCount" +
 		"&fields=PrimaryImageAspectRatio&sortBy=SortName&imageTypeLimit=1&enableImageTypes=Primary&enableImageTypes=Backdrop"
@@ -653,6 +786,8 @@ func TestVirtualFoldersDescribeTheLibraries(t *testing.T) {
 	}
 	var views QueryResult
 	s.get(t, "/UserViews", token, &views)
+	// The Playlists view is no virtual folder.
+	views.Items = libraryViews(views.Items)
 	if len(folders) != len(views.Items) || len(folders) == 0 {
 		t.Fatalf("got %d folders for %d views", len(folders), len(views.Items))
 	}
@@ -684,5 +819,56 @@ func TestVirtualFoldersDescribeTheLibraries(t *testing.T) {
 	// Like Jellyfin, a member is refused with an empty 403.
 	if status, body := s.call(http.MethodGet, "/Library/VirtualFolders", app("tv", memberToken), nil); status != http.StatusForbidden || len(body) != 0 {
 		t.Errorf("member: %d %q", status, body)
+	}
+}
+
+// Tests of this fork (kohnorw/polyfin).
+
+// Apps such as Swiftfin find the episode after the one that plays as its
+// neighbours, from the series' episodes or from /Items, as Jellyfin
+// answers adjacentTo: the episode with the ones before and after it.
+func TestEpisodesAdjacentToAnEpisodeAreItsNeighbours(t *testing.T) {
+	t.Parallel()
+	tr := newTracking(t)
+	if _, err := tr.addons.Install(t.Context(), addons.Shared(), episodeStreams(t), false); err != nil {
+		t.Fatal(err)
+	}
+	ids := func(page QueryResult) []string {
+		result := []string{}
+		for _, item := range page.Items {
+			result = append(result, item.Id)
+		}
+		return result
+	}
+	for _, c := range []struct {
+		path string
+		want []string
+	}{
+		{"/Shows/" + tr.series + "/Episodes?adjacentTo=" + tr.episodes[0], tr.episodes[:2]},
+		{"/Shows/" + tr.series + "/Episodes?adjacentTo=" + tr.episodes[1], tr.episodes[:3]},
+		{"/Shows/" + tr.series + "/Episodes?adjacentTo=" + tr.episodes[2], tr.episodes[1:]},
+		{"/Shows/" + tr.series + "/Episodes?adjacentTo=" + strings.Repeat("ab", 16), []string{}},
+		{"/Items?parentId=" + tr.series + "&adjacentTo=" + tr.episodes[1], tr.episodes[:3]},
+		{"/Items?adjacentTo=" + tr.episodes[2], tr.episodes[1:]},
+		// jellyfin-web plays what follows among the episodes not missing.
+		{"/Shows/" + tr.series + "/Episodes?isMissing=false&startItemId=" + tr.episodes[1], tr.episodes[1:]},
+		{"/Shows/" + tr.series + "/Episodes?isMissing=true", []string{}},
+	} {
+		var page QueryResult
+		if status := tr.get(t, c.path, tr.token, &page); status != http.StatusOK || !slices.Equal(ids(page), c.want) {
+			t.Errorf("%s: %d %v, want %v", c.path, status, ids(page), c.want)
+		}
+	}
+	// A version stands for its episode.
+	member, _ := tr.store.Authenticate(t.Context(), "member", "correct horse")
+	second, _ := accounts.ParseID(tr.episodes[1])
+	versions, err := tr.library.Versions(t.Context(), member, second)
+	if err != nil || len(versions) != 2 {
+		t.Fatalf("versions: %v %v", versions, err)
+	}
+	var page QueryResult
+	tr.get(t, "/Shows/"+tr.series+"/Episodes?adjacentTo="+versions[1].ID.String(), tr.token, &page)
+	if !slices.Equal(ids(page), []string{tr.episodes[0], versions[1].ID.String(), tr.episodes[2]}) {
+		t.Errorf("adjacent to a version: %v", ids(page))
 	}
 }

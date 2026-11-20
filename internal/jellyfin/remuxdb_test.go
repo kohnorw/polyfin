@@ -8,6 +8,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -15,19 +16,28 @@ import (
 )
 
 // remuxDBAnswer is what a fake RemuxDB knows of the streaming addon's
-// movie: the files of both its versions.
+// movie: the files of both its versions, of the sizes the addon announces.
 const remuxDBAnswer = `[
-  {"container": "matroska,webm", "duration": 7210.5, "size": 80000000000,
+  {"container": "matroska,webm", "duration": 7210.5, "size": 52341,
    "sources": [{"kind": "torrent", "filename": "Movie.2160p/Movie.2160p.mkv", "torrent_info_hash": "aa", "torrent_file_idx": 0}],
    "tracks": [
      {"kind": "video", "idx": 0, "codec": "hevc", "width": 3840, "height": 1600, "color_transfer": "smpte2084", "is_default": true},
      {"kind": "audio", "idx": 1, "codec": "eac3", "language": "eng", "channels": 6, "is_default": true},
      {"kind": "audio", "idx": 2, "codec": "ac3", "language": "fre", "channels": 6},
      {"kind": "subtitle", "idx": 3, "codec": "subrip", "language": "fre", "is_forced": true}]},
-  {"container": "matroska,webm", "duration": 7200, "size": 3000000000,
+  {"container": "matroska,webm", "duration": 7200, "size": 16,
    "sources": [{"kind": "nzb", "filename": "Movie.1080p.mp4", "indexer": "indexer", "indexer_guid": "1e8b"}],
    "tracks": [{"kind": "video", "idx": 0, "codec": "hevc", "width": 1920, "height": 1036}]}
 ]`
+
+// describing returns the service describing versions for a server whose
+// options are o: its item details wait for every answer, however long a
+// busy machine takes (see remuxdb.Service.SetWaitEnd).
+func describing(o *Options) *remuxdb.Service {
+	described := remuxdb.New(testServerID, "test", slog.New(slog.DiscardHandler), o.Accounts.Settings)
+	described.SetWaitEnd(func(time.Duration) <-chan time.Time { return nil })
+	return described
+}
 
 func TestItemDetailsDescribeVersionsFromRemuxDB(t *testing.T) {
 	t.Parallel()
@@ -42,7 +52,7 @@ func TestItemDetailsDescribeVersionsFromRemuxDB(t *testing.T) {
 	}))
 	t.Cleanup(remux.Close)
 	s := newProbingServer(t, 10, "ffprobe-not-installed", func(o *Options, _ *pgxpool.Pool) {
-		o.RemuxDB = remuxdb.New(testServerID, "test", slog.New(slog.DiscardHandler), o.Accounts.Settings)
+		o.RemuxDB = describing(o)
 	})
 	settings := s.store.Settings()
 	settings.RemuxDB, settings.RemuxDBURL = true, remux.URL
@@ -50,7 +60,6 @@ func TestItemDetailsDescribeVersionsFromRemuxDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := playingOn(t, s)
-	p.frenchSubtitle(t)
 
 	for range 2 {
 		var movie BaseItemDto

@@ -2,21 +2,27 @@ package accounts
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
+	"fmt"
 	"net"
 	"net/mail"
 	"net/netip"
 	"net/url"
 	"path/filepath"
 	"regexp"
+	"regexp/syntax"
 	"runtime"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 	"unicode/utf8"
+
+	"github.com/moodiness/polyfin/internal/i18n"
+	"github.com/moodiness/polyfin/internal/localization"
+	"github.com/moodiness/polyfin/internal/torrent"
 )
 
 // ErrInvalidServerName reports an empty, too long or unprintable server name.
@@ -24,6 +30,10 @@ var ErrInvalidServerName = errors.New("invalid server name")
 
 // ErrInvalidLanguage reports a server language Polyfin does not speak.
 var ErrInvalidLanguage = errors.New("invalid server language")
+
+// ErrInvalidRatingCountry reports a rating country Polyfin has no ratings
+// of (see localization.RatingCountries).
+var ErrInvalidRatingCountry = errors.New("invalid rating country")
 
 // ErrInvalidCatalogLimit reports a CatalogLimit outside [MinCatalogLimit,
 // MaxCatalogLimit].
@@ -247,6 +257,48 @@ var ErrInvalidMaxConversions = errors.New("invalid maximum of conversions")
 // one of ConversionHeights.
 var ErrInvalidMaxConversionHeight = errors.New("invalid maximum height of converted video")
 
+// ErrInvalidSubtitleOCR reports a SubtitleOCR not among SubtitleOCRModes,
+// and ErrInvalidSubtitleOCRTracks a SubtitleOCRTracks outside
+// [MinSubtitleOCRTracks, MaxSubtitleOCRTracks].
+var (
+	ErrInvalidSubtitleOCR       = errors.New("invalid choice of picture subtitles read into text")
+	ErrInvalidSubtitleOCRTracks = errors.New("invalid number of picture subtitle tracks read at once")
+)
+
+// SubtitleOCRModes are the values Settings.SubtitleOCR takes, the first by
+// default: picture subtitles never read into text, read when an app that
+// cannot draw them plays a version, or also after the scans of local
+// folders.
+var SubtitleOCRModes = []string{"off", "played", "scans"}
+
+// The bounds and default of Settings.SubtitleOCRTracks.
+const (
+	MinSubtitleOCRTracks     = 1
+	MaxSubtitleOCRTracks     = 4
+	DefaultSubtitleOCRTracks = 1
+)
+
+// ErrInvalidDefaultLanguage reports a DefaultAudioLanguage or a
+// DefaultSubtitleLanguage not among TrackLanguages.
+var ErrInvalidDefaultLanguage = errors.New("invalid default track language")
+
+// TrackLanguages are the values DefaultAudioLanguage and
+// DefaultSubtitleLanguage take: "" for none, the default, then the ISO
+// 639-2/B code of each of localization.Languages, the codes jellyfin-web
+// saves as a user's own preferences (from /Localization/Cultures).
+var TrackLanguages = sync.OnceValue(func() []string {
+	codes := []string{""}
+	for _, language := range localization.Languages() {
+		codes = append(codes, language.Bibliographic)
+	}
+	return codes
+})
+
+// validTrackLanguage reports whether code is one of TrackLanguages.
+func validTrackLanguage(code string) bool {
+	return slices.Contains(TrackLanguages(), code)
+}
+
 // The bounds and defaults of Settings.AnalysisTimeout, in seconds,
 // VersionAttempts and MaxConversions. A source that does not answer within
 // 20 seconds is given up by default, which still lets a slow 2160p file be
@@ -271,45 +323,46 @@ var ConversionHeights = []int{0, 480, 720, 1080, 1440, 2160}
 // VersionCriteria are the values Settings.VersionOrder holds, each once
 // at most and one of each kind: the user's preferred audio language, the
 // height of the video, highest or lowest first, the size, largest or
-// smallest first, the video codec, in the order of
-// Settings.VersionCodecOrder, HDR or Dolby Vision, first or last, and the
-// source, in the order of Settings.VersionSourceOrder.
-var VersionCriteria = []string{"language", "resolution-high", "resolution-low", "size-large", "size-small", "codec", "hdr-first", "hdr-last",
-	"source"}
+// smallest first, or by minute (see Settings.VersionMBPerMinute), the
+// video codec, in the order of Settings.VersionCodecOrder, HDR or Dolby
+// Vision, first or last, the source, in the order of
+// Settings.VersionSourceOrder, the source tier, a disc's full copy
+// first, then a Blu-ray encode, web, DVD and TV, the audio format,
+// lossless and object-based first, then by channels, the edition, in the
+// order of Settings.VersionEditionOrder, and the score of the label rules
+// (see Settings.VersionLabelRules), highest first.
+var VersionCriteria = []string{"language", "resolution-high", "resolution-low", "size-large", "size-small", "size-per-minute", "codec",
+	"hdr-first", "hdr-last", "source", "tier", "audio", "edition", "labels"}
 
 // VersionCodecs are the video codecs the version rules know, by FFmpeg's
 // names, in the default order of Settings.VersionCodecOrder: the most
 // efficient first.
 var VersionCodecs = []string{"av1", "hevc", "vp9", "h264", "vc1", "mpeg4", "mpeg2video"}
 
-// RipTypes are the kinds of pre-release rips Settings.HiddenRipTypes can
-// exclude: recordings made in a cinema with a camera (cam) or from its
-// audio and projection feeds (telesync, telecine), copies sent out ahead of
-// release (screener, R5 included) and unfinished cuts (workprint). Each is
-// told by the release tags of its labels and file name (see RipTags).
-var RipTypes = []string{"cam", "telesync", "telecine", "screener", "workprint"}
-
-// RipTags are the release tags naming each of RipTypes, in lower case,
-// matched as whole words of a version's labels and file name.
-var RipTags = map[string][]string{
-	"cam":       {"cam", "camrip", "hdcam", "hqcam", "tscam", "newcam"},
-	"telesync":  {"ts", "hdts", "tsrip", "telesync", "pdvd", "predvd", "predvdrip", "hqts"},
-	"telecine":  {"tc", "hdtc", "telecine", "tcrip"},
-	"screener":  {"scr", "screener", "dvdscr", "dvdscreener", "bdscr", "webscr", "webscreener", "r5", "r6"},
-	"workprint": {"workprint", "wp"},
-}
+// VersionEditions are the editions of a movie the version rules know, in
+// the default order of Settings.VersionEditionOrder: the theatrical cut,
+// an extended cut, the director's cut and an IMAX cut.
+var VersionEditions = []string{"theatrical", "extended", "directors", "imax"}
 
 // The bounds of the version rules: MaxVersionCriteria criteria order the
 // versions at most, MaxVersionSources sources are placed at most, versions
 // are hidden above MaxHideVersionsLargerGB at most, and
 // MaxHiddenVersionWords words, of MaxHiddenVersionWordLength characters at
-// most, hide versions.
+// most, hide versions. The size-per-minute criterion aims at
+// MaxVersionMBPerMinute megabytes a minute at most. MaxVersionLabelRules
+// label rules, of MaxVersionLabelRuleLength characters at most, scoring
+// between -MaxVersionLabelScore and MaxVersionLabelScore, read versions'
+// labels.
 const (
-	MaxVersionCriteria         = 4
+	MaxVersionCriteria         = 6
 	MaxVersionSources          = 500
 	MaxHideVersionsLargerGB    = 1000
 	MaxHiddenVersionWords      = 50
 	MaxHiddenVersionWordLength = 100
+	MaxVersionMBPerMinute      = 1000
+	MaxVersionLabelRules       = 40
+	MaxVersionLabelRuleLength  = 200
+	MaxVersionLabelScore       = 100
 )
 
 // The errors of the version rules: ErrInvalidVersionOrder reports a
@@ -332,12 +385,14 @@ var (
 	ErrInvalidHideVersionsLarger  = errors.New("invalid size above which versions are hidden")
 	ErrInvalidHiddenVersionCodecs = errors.New("invalid hidden video codecs")
 	ErrInvalidHiddenVersionWords  = errors.New("invalid words hiding versions")
-	// ErrInvalidHiddenRipTypes reports a HiddenRipTypes holding a value
-	// that is not one of RipTypes, or one twice.
-	ErrInvalidHiddenRipTypes = errors.New("invalid rip types excluded")
-	// ErrInvalidDefaultLanguage reports a default language that is not an
-	// ISO 639-2 code of three letters.
-	ErrInvalidDefaultLanguage = errors.New("invalid default language")
+	// ErrInvalidVersionEditionOrder reports a VersionEditionOrder that is
+	// not every one of VersionEditions once; ErrInvalidVersionMBPerMinute
+	// a VersionMBPerMinute outside [0, MaxVersionMBPerMinute]; and
+	// ErrInvalidVersionLabelRules VersionLabelRules not as
+	// VersionLabelRule tells.
+	ErrInvalidVersionEditionOrder = errors.New("invalid version edition order")
+	ErrInvalidVersionMBPerMinute  = errors.New("invalid size per minute of versions")
+	ErrInvalidVersionLabelRules   = errors.New("invalid version label rules")
 )
 
 // VersionCriterionKind is what a criterion of VersionCriteria looks at,
@@ -357,16 +412,6 @@ func validVersionOrder(order []string) bool {
 	for i, criterion := range order {
 		if !slices.Contains(VersionCriteria, criterion) ||
 			slices.ContainsFunc(order[:i], func(before string) bool { return VersionCriterionKind(before) == VersionCriterionKind(criterion) }) {
-			return false
-		}
-	}
-	return true
-}
-
-// validRipTypes reports whether types are some of RipTypes, each once.
-func validRipTypes(types []string) bool {
-	for i, kind := range types {
-		if !slices.Contains(RipTypes, kind) || slices.Contains(types[:i], kind) {
 			return false
 		}
 	}
@@ -422,6 +467,84 @@ func canonicalHiddenVersionWords(words []string) ([]string, error) {
 	return canonical, nil
 }
 
+// VersionLabelRule scores or hides the versions whose labels, their name
+// and description and their file name, match it. Text is a word, found
+// anywhere in them whatever its letter case, or, with Regex, a regular
+// expression in the syntax of package regexp, matched without case. A
+// rule with Hide hides the versions it matches, and scores none; another
+// adds Score, other than 0, to their score, which the labels criterion
+// orders by.
+type VersionLabelRule struct {
+	Text  string `json:"text"`
+	Regex bool   `json:"regex"`
+	Score int    `json:"score"`
+	Hide  bool   `json:"hide"`
+}
+
+// maxLabelRuleInstructions bounds a label rule's regular expression once
+// compiled. Package regexp matches in a time proportional to the
+// expression's size times the labels', so that, with both bounded, no
+// rule takes long to match however it is written.
+const maxLabelRuleInstructions = 2000
+
+// CompileLabelRule compiles the regular expression of a rule with Regex,
+// to be matched without case; ErrInvalidVersionLabelRules when it is not
+// one, or too large once compiled.
+func CompileLabelRule(text string) (*regexp.Regexp, error) {
+	parsed, err := syntax.Parse(text, syntax.Perl|syntax.FoldCase)
+	if err != nil {
+		return nil, ErrInvalidVersionLabelRules
+	}
+	program, err := syntax.Compile(parsed.Simplify())
+	if err != nil || len(program.Inst) > maxLabelRuleInstructions {
+		return nil, ErrInvalidVersionLabelRules
+	}
+	compiled, err := regexp.Compile("(?i)" + text)
+	if err != nil {
+		return nil, ErrInvalidVersionLabelRules
+	}
+	return compiled, nil
+}
+
+// canonicalVersionLabelRules checks the label rules and returns them with
+// their text trimmed; empty, not nil, for none, as the column holds no
+// NULL. A rule hiding versions is kept with no score.
+func canonicalVersionLabelRules(rules []VersionLabelRule) ([]VersionLabelRule, error) {
+	if len(rules) > MaxVersionLabelRules {
+		return nil, ErrInvalidVersionLabelRules
+	}
+	canonical := make([]VersionLabelRule, 0, len(rules))
+	for _, rule := range rules {
+		rule.Text = strings.TrimSpace(rule.Text)
+		if rule.Text == "" || !utf8.ValidString(rule.Text) || utf8.RuneCountInString(rule.Text) > MaxVersionLabelRuleLength ||
+			strings.ContainsFunc(rule.Text, unicode.IsControl) {
+			return nil, ErrInvalidVersionLabelRules
+		}
+		if rule.Regex {
+			if _, err := CompileLabelRule(rule.Text); err != nil {
+				return nil, err
+			}
+		}
+		if rule.Hide {
+			rule.Score = 0
+		} else if rule.Score == 0 || rule.Score < -MaxVersionLabelScore || rule.Score > MaxVersionLabelScore {
+			return nil, ErrInvalidVersionLabelRules
+		}
+		canonical = append(canonical, rule)
+	}
+	return canonical, nil
+}
+
+// ReleaseKinds are the kinds of low-quality releases the version rules may
+// hide, by the tags their names hold (see library.ReleaseKinds): camera
+// copies (CAM, HDCAM), telesyncs (TS, HDTS, TELESYNC), telecines (TC,
+// TELECINE), screeners (SCR, DVDSCR) and early copies (R5, WORKPRINT).
+var ReleaseKinds = []string{"cam", "telesync", "telecine", "screener", "early"}
+
+// ErrInvalidHiddenReleases reports a Settings.HiddenReleases holding a
+// kind that is not one of ReleaseKinds, or one twice.
+var ErrInvalidHiddenReleases = errors.New("invalid kinds of releases hidden")
+
 // The errors of the settings tuning conversions, reporting a value
 // outside the bounds or choices below.
 var (
@@ -436,6 +559,7 @@ var (
 	ErrInvalidDeinterlaceMethod      = errors.New("invalid deinterlace method")
 	ErrInvalidDownmixAlgorithm       = errors.New("invalid downmix algorithm")
 	ErrInvalidDownmixBoost           = errors.New("invalid downmix boost")
+	ErrInvalidDynamicRange           = errors.New("invalid dynamic range compression")
 	ErrInvalidMaxAudioChannels       = errors.New("invalid maximum of audio channels")
 	ErrInvalidAudioBitrate           = errors.New("invalid audio bitrate")
 	ErrInvalidEncodingThreads        = errors.New("invalid encoding threads")
@@ -466,6 +590,9 @@ var (
 	// DownmixAlgorithms are the values of Settings.DownmixAlgorithm: None
 	// leaves FFmpeg's own downmix.
 	DownmixAlgorithms = []string{"None", "Dave750", "NightmodeDialogue", "Rfc7845", "Ac4"}
+	// DynamicRangeCompressions are the values of
+	// Settings.DynamicRangeCompression.
+	DynamicRangeCompressions = []string{"encoded", "none", "night"}
 	// AudioChannelLimits are the values of Settings.MaxAudioChannels: 0
 	// leaves the app's limit alone.
 	AudioChannelLimits = []int{0, 1, 2, 6}
@@ -505,9 +632,10 @@ const (
 
 // The bounds and defaults of the numbers tuning conversions. The defaults
 // are what Polyfin did before they were settings: 0 quality aims for the
-// bitrate alone, 0 peak keeps the video's, a boost of 1 changes nothing,
-// 0 audio bitrate keeps Polyfin's per channel count, and 0 threads lets
-// FFmpeg choose.
+// bitrate alone, 0 peak keeps the video's, 0 audio bitrate keeps
+// Polyfin's per channel count, and 0 threads lets FFmpeg choose; but the
+// boost of a stereo mix, Jellyfin's 2 (EncodingOptions.cs), where 1 would
+// change nothing.
 const (
 	MinVideoQuality           = 1
 	MaxVideoQuality           = 51
@@ -516,7 +644,7 @@ const (
 	MaxToneMappingDesat       = 10
 	MinDownmixBoost           = 0.5
 	MaxDownmixBoost           = 3
-	DefaultDownmixBoost       = 1
+	DefaultDownmixBoost       = 2
 	MinAudioBitratePerChannel = 32
 	MaxAudioBitratePerChannel = 320
 	MaxEncodingThreads        = 64
@@ -655,17 +783,93 @@ const (
 	DefaultLocalScanHours = 6
 )
 
+// ErrInvalidWatchlistCheckHours reports a WatchlistCheckHours outside
+// [0, MaxWatchlistCheckHours].
+var ErrInvalidWatchlistCheckHours = errors.New("invalid watchlist check hours")
+
+// The bound and default of Settings.WatchlistCheckHours: by default, each
+// title of a watchlist is checked for versions every 6 hours.
+const (
+	MaxWatchlistCheckHours     = 168
+	DefaultWatchlistCheckHours = 6
+)
+
+// The web player's looks, Settings.WebTheme: the LumaaGlaass theme Polyfin
+// bundles (LumaaGlaassCss and LumaaGlaassJs), jellyfin-web's own look, with
+// no custom CSS or script, and the administrator's CustomCss and CustomJs.
+const (
+	WebThemeLumaaGlaass = "lumaaglaass"
+	WebThemeNone        = "none"
+	WebThemeCustom      = "custom"
+	// WebThemeAIOStreams is this fork's AIOStreams look (see
+	// fork_settings.go), the default.
+	WebThemeAIOStreams = "aiostreams"
+)
+
+// WebThemes are the values of Settings.WebTheme, the default first, and
+// those of User.WebTheme but its empty one.
+var WebThemes = []string{WebThemeAIOStreams, WebThemeLumaaGlaass, WebThemeNone, WebThemeCustom}
+
+// ServedCss is the custom CSS the web player gets for WebTheme: Jellyfin's
+// branding CSS.
+func (settings Settings) ServedCss() string {
+	return settings.ThemeCss(settings.WebTheme)
+}
+
+// ServedJs is the script Polyfin adds to the web player's page for
+// WebTheme.
+func (settings Settings) ServedJs() string {
+	return settings.ThemeJs(settings.WebTheme)
+}
+
+// ThemeCss is the custom CSS of theme, one of WebThemes, empty for another.
+func (settings Settings) ThemeCss(theme string) string {
+	switch theme {
+	case WebThemeAIOStreams:
+		return AIOStreamsCss
+	case WebThemeLumaaGlaass:
+		return LumaaGlaassCss
+	case WebThemeCustom:
+		return settings.CustomCss
+	}
+	return ""
+}
+
+// ThemeJs is the script of theme, one of WebThemes, empty for another.
+func (settings Settings) ThemeJs(theme string) string {
+	switch theme {
+	case WebThemeLumaaGlaass:
+		return LumaaGlaassJs
+	case WebThemeCustom:
+		return settings.CustomJs
+	}
+	return ""
+}
+
+// WebThemeOf is the theme the web player shows user: theirs, else the
+// server's WebTheme.
+func (settings Settings) WebThemeOf(user User) string {
+	if user.WebTheme != "" {
+		return user.WebTheme
+	}
+	return settings.WebTheme
+}
+
+// CustomThemeSet reports whether the Custom theme has a text, which a user
+// needs to be given it as their own theme.
+func (settings Settings) CustomThemeSet() bool {
+	return settings.CustomCss != "" || settings.CustomJs != ""
+}
+
+// ErrInvalidWebTheme reports a Settings.WebTheme not in WebThemes.
 // ErrInvalidCustomCss, ErrInvalidCustomJs and ErrInvalidLoginDisclaimer
 // report a Settings.CustomCss, CustomJs or LoginDisclaimer longer than its
 // maximum, or holding a NUL character, which no web page has.
 var (
+	ErrInvalidWebTheme        = errors.New("invalid web player theme")
 	ErrInvalidCustomCss       = errors.New("invalid custom CSS")
 	ErrInvalidCustomJs        = errors.New("invalid custom JavaScript")
 	ErrInvalidLoginDisclaimer = errors.New("invalid login disclaimer")
-	// ErrInvalidBrandLogo reports a Settings.BrandLogo that is not an
-	// image of BrandLogoTypes as a base64 data URL, or larger than
-	// MaxBrandLogoBytes once decoded.
-	ErrInvalidBrandLogo = errors.New("invalid brand logo")
 )
 
 // The largest Settings.CustomCss and CustomJs, and LoginDisclaimer, in
@@ -704,7 +908,7 @@ func ValidSegmentKey(key string) bool {
 
 // SegmentSources are the segment databases, by the names POLYFIN_SEGMENTS
 // gives them, in the default order of preference.
-var SegmentSources = []string{"theintrodb", "introdb", "publicmetadb"}
+var SegmentSources = []string{"theintrodb", "introdb", "publicmetadb", "skipdb"}
 
 // ErrInvalidSegmentOrder reports a Settings.SegmentOrder that is not every
 // one of SegmentSources once, and ErrInvalidSegmentSourcesOff a
@@ -731,11 +935,13 @@ func validSegmentSources(names []string) bool {
 }
 
 // ErrInvalidMDBListRatingsKey reports a Settings.MDBListRatingsKey that is
-// not a valid key (see ValidRatingsKey), and ErrInvalidCriticRatingShows a
-// CriticRatingShows not among CriticRatingChoices.
+// not a valid key (see ValidRatingsKey), ErrInvalidCriticRatingShows a
+// CriticRatingShows not among CriticRatingChoices, and
+// ErrInvalidVersionNames a VersionNames not among VersionNameChoices.
 var (
 	ErrInvalidMDBListRatingsKey = errors.New("invalid MDBList ratings key")
 	ErrInvalidCriticRatingShows = errors.New("invalid critic rating choice")
+	ErrInvalidVersionNames      = errors.New("invalid version names choice")
 )
 
 // MaxRatingsKeyBytes is the longest Settings.MDBListRatingsKey.
@@ -760,6 +966,40 @@ func ValidRatingsKey(key string) bool {
 // Settings.CriticRatingShows), the first by default: the critics' score
 // or the audience score.
 var CriticRatingChoices = []string{"critics", "audience"}
+
+// VersionNameChoices are the ways of writing version names (see
+// Settings.VersionNames), the first by default: as the addon writes them,
+// or short.
+var VersionNameChoices = []string{"addon", "short"}
+
+// PosterBadgeSizes are the size presets of the badges drawn over posters
+// (see Settings.PosterBadgeSize), the first by default.
+var PosterBadgeSizes = []string{"medium", "small", "large"}
+
+// ErrInvalidPosterBadgeSize reports a Settings.PosterBadgeSize not among
+// PosterBadgeSizes, and ErrInvalidPosterTemplate a Settings.PosterTemplate
+// that is not valid (see ValidPosterTemplate).
+var (
+	ErrInvalidPosterBadgeSize = errors.New("invalid poster badge size")
+	ErrInvalidPosterTemplate  = errors.New("invalid poster address template")
+)
+
+// MaxPosterTemplateBytes is the longest Settings.PosterTemplate.
+const MaxPosterTemplateBytes = 1024
+
+// ValidPosterTemplate reports whether template may be the poster address
+// template: empty, or an absolute http or https URL with a host, without
+// user info or fragment, of at most MaxPosterTemplateBytes, holding no
+// spaces or control characters, that names {imdb_id} or {tmdb_id}.
+func ValidPosterTemplate(template string) bool {
+	if template == "" {
+		return true
+	}
+	if !strings.Contains(template, "{imdb_id}") && !strings.Contains(template, "{tmdb_id}") {
+		return false
+	}
+	return ValidUpdateToolURL(template)
+}
 
 // ErrInvalidTMDBKey reports a Settings.TMDBKey that is not a valid key
 // (see ValidTMDBKey).
@@ -812,26 +1052,16 @@ var (
 // app, in bytes.
 const MaxTrackingAppBytes = 256
 
-// ErrInvalidBackupHour reports a BackupHour outside [0, 23],
-// ErrInvalidBackupsKept a BackupsKept outside [MinBackupsKept,
-// MaxBackupsKept], and ErrInvalidCollectionReadHour a CollectionReadHour
-// outside [-1, 23].
-var (
-	ErrInvalidBackupHour         = errors.New("invalid backup hour")
-	ErrInvalidBackupsKept        = errors.New("invalid number of backups kept")
-	ErrInvalidCollectionReadHour = errors.New("invalid collection read hour")
-)
+// ErrInvalidBackupsKept reports a BackupsKept outside [MinBackupsKept,
+// MaxBackupsKept].
+var ErrInvalidBackupsKept = errors.New("invalid number of backups kept")
 
-// The bounds and defaults of Settings.BackupHour, BackupsKept and
-// CollectionReadHour: by default, the database is backed up at 4 in the
-// morning, the last week of backups is kept, and collections are never
-// all read.
+// The bounds and default of Settings.BackupsKept: by default, the last
+// week of backups is kept.
 const (
-	DefaultBackupHour         = 4
-	MinBackupsKept            = 1
-	MaxBackupsKept            = 90
-	DefaultBackupsKept        = 7
-	DefaultCollectionReadHour = -1
+	MinBackupsKept     = 1
+	MaxBackupsKept     = 90
+	DefaultBackupsKept = 7
 )
 
 // ErrInvalidCollectionLibraryApps reports a Settings.CollectionLibraryApps
@@ -898,6 +1128,38 @@ func ValidRemuxDBURL(address string) bool {
 	}
 	// A question mark or a number sign would start a query or a fragment.
 	if strings.ContainsAny(address, "?#") {
+		return false
+	}
+	parsed, err := url.Parse(address)
+	return err == nil && parsed.Hostname() != "" && parsed.User == nil
+}
+
+// ErrInvalidUpdateToolURL reports a Settings.UpdateToolURL that is not
+// empty nor a valid address (see ValidUpdateToolURL), and
+// ErrInvalidUpdateToolToken a Settings.UpdateToolToken longer than
+// MaxUpdateToolTokenBytes or holding spaces or control characters.
+var (
+	ErrInvalidUpdateToolURL   = errors.New("invalid update tool address")
+	ErrInvalidUpdateToolToken = errors.New("invalid update tool token")
+)
+
+// MaxUpdateToolURLBytes is the longest Settings.UpdateToolURL, and
+// MaxUpdateToolTokenBytes the longest Settings.UpdateToolToken.
+const (
+	MaxUpdateToolURLBytes   = 1024
+	MaxUpdateToolTokenBytes = 1024
+)
+
+// ValidUpdateToolURL reports whether address may be the update API of an
+// update tool: empty, or an absolute http or https URL with a host, a path
+// and a query, without user info or fragment, of at most
+// MaxUpdateToolURLBytes, holding no spaces or control characters.
+func ValidUpdateToolURL(address string) bool {
+	if address == "" {
+		return true
+	}
+	if !strings.HasPrefix(address, "http://") && !strings.HasPrefix(address, "https://") || len(address) > MaxUpdateToolURLBytes ||
+		strings.ContainsFunc(address, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) }) || strings.Contains(address, "#") {
 		return false
 	}
 	parsed, err := url.Parse(address)
@@ -1006,6 +1268,83 @@ const (
 	DefaultCacheSizeGB = 10
 )
 
+// ErrInvalidSourceCache reports a SourceCachePreset not among
+// SourceCachePresets, or a SourceCacheDays or SourceCacheCreditDays out of
+// their bounds; ErrInvalidPreload a PreloadEpisodes, PreloadMbps or
+// PreloadReserveGB out of theirs.
+var (
+	ErrInvalidSourceCache = errors.New("invalid source cache retention")
+	ErrInvalidPreload     = errors.New("invalid next-episode preloading")
+)
+
+// The presets of the source cache (see Settings.SourceCachePreset): Off
+// keeps nothing across restarts, Small, Everyday and Large keep more for
+// longer, and Custom keeps the values set one by one.
+const (
+	SourceCacheOff      = "off"
+	SourceCacheSmall    = "small"
+	SourceCacheEveryday = "everyday"
+	SourceCacheLarge    = "large"
+	SourceCacheCustom   = "custom"
+)
+
+// SourceCachePresets are the values SourceCachePreset takes.
+var SourceCachePresets = []string{SourceCacheOff, SourceCacheSmall, SourceCacheEveryday, SourceCacheLarge, SourceCacheCustom}
+
+// SourceCacheLimits are the values a source cache preset sets: the
+// settings' CacheSizeGB, SourceCacheDays, SourceCacheCreditDays and
+// PreloadWholeFiles.
+type SourceCacheLimits struct {
+	SizeGB, Days, CreditDays int
+	WholeFiles               bool
+}
+
+// SourceCachePresetLimits are the limits each preset but Custom sets. Off
+// keeps 2 GB, room for a playback's reads ahead, and nothing past a
+// restart; Large is for a disk of its own, and preloads whole episodes.
+var SourceCachePresetLimits = map[string]SourceCacheLimits{
+	SourceCacheOff:      {SizeGB: 2, Days: 0, CreditDays: 0},
+	SourceCacheSmall:    {SizeGB: 10, Days: 3, CreditDays: 1},
+	SourceCacheEveryday: {SizeGB: 50, Days: 14, CreditDays: 3},
+	SourceCacheLarge:    {SizeGB: 250, Days: 60, CreditDays: 7, WholeFiles: true},
+}
+
+// The bounds and defaults of SourceCacheDays and SourceCacheCreditDays,
+// and the bounds and defaults of the next-episode preloading's
+// PreloadEpisodes, PreloadMbps and PreloadReserveGB.
+const (
+	MaxSourceCacheDays           = 365
+	DefaultSourceCacheDays       = 3
+	MaxSourceCacheCreditDays     = 30
+	DefaultSourceCacheCreditDays = 1
+	MinPreloadEpisodes           = 1
+	MaxPreloadEpisodes           = 3
+	DefaultPreloadEpisodes       = 1
+	MinPreloadMbps               = 1
+	MaxPreloadMbps               = 1000
+	DefaultPreloadMbps           = 20
+	MinPreloadReserveGB          = 1
+	MaxPreloadReserveGB          = 1000
+	DefaultPreloadReserveGB      = 20
+)
+
+// applySourceCachePreset sets the limits of the source cache's preset,
+// unless it is Custom, and checks them.
+func (s *Settings) applySourceCachePreset() error {
+	if !slices.Contains(SourceCachePresets, s.SourceCachePreset) {
+		return ErrInvalidSourceCache
+	}
+	if limits, ok := SourceCachePresetLimits[s.SourceCachePreset]; ok {
+		s.CacheSizeGB, s.SourceCacheDays, s.SourceCacheCreditDays, s.PreloadWholeFiles =
+			limits.SizeGB, limits.Days, limits.CreditDays, limits.WholeFiles
+	}
+	if s.SourceCacheDays < 0 || s.SourceCacheDays > MaxSourceCacheDays ||
+		s.SourceCacheCreditDays < 0 || s.SourceCacheCreditDays > MaxSourceCacheCreditDays {
+		return ErrInvalidSourceCache
+	}
+	return nil
+}
+
 // vaapiDevice matches the render nodes VAAPI may open.
 var vaapiDevice = regexp.MustCompile(`^/dev/dri/renderD[0-9]{1,4}$`)
 
@@ -1026,6 +1365,25 @@ var (
 
 // MaxFolderBytes is the longest RecordingsFolder or BackupFolder, in bytes.
 const MaxFolderBytes = 512
+
+// The bounds of Settings.BackupPassphrase when it is set: at least
+// MinBackupPassphraseRunes characters, at most MaxBackupPassphraseBytes
+// bytes.
+const (
+	MinBackupPassphraseRunes = 12
+	MaxBackupPassphraseBytes = 256
+)
+
+// ErrInvalidBackupPassphrase reports a BackupPassphrase that is neither
+// empty nor within its bounds, or that holds control characters.
+var ErrInvalidBackupPassphrase = errors.New("invalid backup passphrase")
+
+// validBackupPassphrase reports whether passphrase may be saved as the
+// backup passphrase: empty turns encryption off.
+func validBackupPassphrase(passphrase string) bool {
+	return passphrase == "" || (utf8.RuneCountInString(passphrase) >= MinBackupPassphraseRunes &&
+		validLine(passphrase, MaxBackupPassphraseBytes))
+}
 
 // CleanFolder returns folder as Settings.RecordingsFolder and BackupFolder
 // keep it, cleaned (see filepath.Clean), and whether it may be one: empty,
@@ -1080,13 +1438,22 @@ func (s Settings) BackupDir(dataDir string) string {
 	return DefaultBackupFolder(dataDir)
 }
 
-// Languages are the server languages, as ISO 639-1 codes. The first is the
-// default.
-var Languages = []string{"en", "fr"}
+// ErrInvalidConversionFolder, ErrInvalidReadingFolder and
+// ErrInvalidCacheFolder report a ConversionFolder, a ReadingFolder or a
+// CacheFolder that is not a folder's path (see CleanFolder), or, from the
+// admin API, a folder Polyfin cannot write into.
+var (
+	ErrInvalidConversionFolder = errors.New("invalid conversion folder")
+	ErrInvalidReadingFolder    = errors.New("invalid folder for files being read")
+	ErrInvalidCacheFolder      = errors.New("invalid cache folder")
+)
 
-// ValidLanguage reports whether language is one of Languages.
-func ValidLanguage(language string) bool {
-	return slices.Contains(Languages, language)
+// DefaultCacheFolder is the cache in the data folder dataDir: the folder
+// the segments of conversions, the files being read and the cache are
+// kept in when the settings name no ConversionFolder, ReadingFolder or
+// CacheFolder.
+func DefaultCacheFolder(dataDir string) string {
+	return filepath.Join(dataDir, "cache")
 }
 
 // Settings are the server-wide options set from the admin interface.
@@ -1095,11 +1462,27 @@ type Settings struct {
 	ServerName          string
 	QuickConnectEnabled bool
 	// LegacyAuthorization accepts the X-Emby-* headers, the api_key query
-	// parameter and the Emby scheme, which Jellyfin 12.2 refuses by default.
+	// parameter and the Emby scheme, which Jellyfin 12.4 refuses by default.
 	LegacyAuthorization bool
 	// UpdateCheck asks GitHub once a day for Polyfin's latest release, to
 	// tell administrators about a new version (see package updates).
 	UpdateCheck bool
+	// IncludePrereleases has that check, and Polyfin Desktop's updates,
+	// consider pre-releases too.
+	IncludePrereleases bool
+	// RestartConfirmed tells that an administrator confirmed that Polyfin
+	// is started again when it exits, by its container's restart policy
+	// or its service manager: Restart in the admin app then asks no more
+	// than a confirmation. Polyfin cannot see its container's restart
+	// policy without the Docker socket.
+	RestartConfirmed bool
+	// UpdateToolURL is the address Update now sends its request to, the
+	// update API of a tool the administrator runs beside Polyfin, empty
+	// for none (see ValidUpdateToolURL and package updatetool), and
+	// UpdateToolToken the bearer token sent with it, empty for none. The
+	// token is a secret, like PublicMetaDBKey.
+	UpdateToolURL   string
+	UpdateToolToken string
 	// LocalDiscovery answers the discovery messages Jellyfin apps
 	// broadcast on the local network (see package discovery).
 	LocalDiscovery bool
@@ -1124,8 +1507,14 @@ type Settings struct {
 	// time they ask for stand for it.
 	DLNAMarkPlayed bool
 	// Language is the language of the names Polyfin generates for Jellyfin
-	// apps, one of Languages.
+	// apps, one of i18n.Languages.
 	Language string
+	// RatingCountry is the country whose ratings titles show and are
+	// judged by, Jellyfin's MetadataCountryCode: one of
+	// localization.RatingCountries. A title's rating is the one its
+	// description gives for that country (see library's certification),
+	// scored by that country's system (see localization.RatingScore).
+	RatingCountry string
 	// PrepareAhead analyzes the version a title would play as soon as its
 	// details open, and readies the next episode near the end of the one
 	// playing, so that playback starts at once.
@@ -1185,6 +1574,12 @@ type Settings struct {
 	// only the addons' images are listed and TMDB is never asked. A
 	// secret, like PublicMetaDBKey.
 	TMDBKey string
+	// WaitDigitalRelease hides a movie of the addons' catalogs until it is
+	// out at home: its first digital or physical release, else 90 days
+	// after it was first shown in cinemas, as TMDB tells with TMDBKey (see
+	// the library package's releases.go). A movie TMDB cannot tell of
+	// stays listed. Off, or without TMDBKey, no movie waits.
+	WaitDigitalRelease bool
 	// Lyrics looks music tracks up on LRCLIB and serves their lyrics to
 	// apps, synced line by line when LRCLIB has them; off, LRCLIB is never
 	// asked and tracks have no lyrics.
@@ -1218,17 +1613,6 @@ type Settings struct {
 	// ShareLink). Off, no link is made and every link is refused, without
 	// being deleted.
 	ShareLinks bool
-	// Registration lets anyone who opens /register create a member
-	// account with the default settings; closed, the page says so. On by
-	// default.
-	Registration bool
-	// RegistrationCodes asks /register for an unused registration code
-	// before its form (see RegistrationCode).
-	RegistrationCodes bool
-	// DefaultAudioLanguage and DefaultSubtitleLanguage are the ISO 639-2
-	// languages played for users who chose none, empty for none.
-	DefaultAudioLanguage    string
-	DefaultSubtitleLanguage string
 	// LoginAttempts is how many wrong passwords in a row block an account
 	// for LoginBlock; 0 never blocks.
 	LoginAttempts int
@@ -1241,8 +1625,11 @@ type Settings struct {
 	InactiveDeviceDays int
 	// KnownProxies are the addresses and networks of the reverse proxies
 	// whose forwarded headers tell the client of their requests (see
-	// forwarded.Resolve). Empty by default: no forwarded header is
-	// trusted.
+	// forwarded.Resolve). Empty by default: X-Forwarded-For and X-Real-IP
+	// are trusted from no address, so the client is the connection's.
+	// Where the code does not ask forwarded.ViaProxy, X-Forwarded-Proto
+	// and X-Forwarded-Host are read from any address: for the admin app's
+	// cookies, and for the addresses PlaybackInfo gives.
 	KnownProxies []netip.Prefix
 	// KnownProxyNames are the host names of reverse proxies, in lower
 	// case, trusted at the addresses they resolve to (see
@@ -1283,6 +1670,14 @@ type Settings struct {
 	// it is, or repackaged with its tracks copied) rather than the first
 	// that plays at all.
 	PreferDirectPlay bool
+	// SendAppsToSource lets every app be sent to the source of the version
+	// it plays as it is, when it can reach it: the source's address, with
+	// any key or account in it, is then told to the user who plays. Off,
+	// the default, a version of an IPTV source is always relayed, and one
+	// of a server addon is to users who are not administrators, which
+	// costs the server their bandwidth (see
+	// playback.Service.SendsToSource).
+	SendAppsToSource bool
 	// VersionOrder are the criteria ordering a title's versions, of
 	// VersionCriteria, each grouping them and the next sorting within
 	// them; ties keep the addons' order, as does none, the default.
@@ -1304,29 +1699,36 @@ type Settings struct {
 	HideVersionsLargerGB int
 	HiddenVersionCodecs  []string
 	HiddenVersionWords   []string
-	// HiddenRipTypes excludes the versions whose labels or file name tag
-	// them as one of these kinds of pre-release rips, of RipTypes: CAM,
-	// telesync and the like. Unlike the rules above, these are excluded
-	// even when no other version is left. Every kind by default.
-	HiddenRipTypes []string
-	// HideSpecials leaves series' specials (season 0) out of their seasons,
-	// episode lists and Next Up. On by default.
-	HideSpecials bool
-	// ExactTitleMatch leaves out the versions whose file names a title
-	// other than the movie's or the series' own: Smiling Friends for
-	// Friends. On by default.
-	ExactTitleMatch bool
-	// SubtitleExtraction extracts, while an app waits, the text subtitles
-	// inside a file that go out as files, as Jellyfin's "Allow subtitle
-	// extraction on the fly" does. Off, a track inside a file goes out as a
-	// file only once Polyfin kept it, read ahead or by a remux, so that no
-	// app waits for it (jellyfin-web's "Fetching additional data"); one an
-	// app takes no other way is burned in, or left out. On by default.
-	SubtitleExtraction bool
+	// HiddenReleases hides the versions whose labels tag them as a
+	// low-quality release of one of these kinds, of ReleaseKinds; none by
+	// default. Like the rules above, it never hides every version of a
+	// title.
+	HiddenReleases []string
+	// VersionEditionOrder is the order of the editions for the edition
+	// criterion, every one of VersionEditions once; a version whose labels
+	// name no edition counts as the theatrical cut. VersionMBPerMinute is
+	// the size, in megabytes (10^6 bytes) a minute of the version's
+	// runtime, the size-per-minute criterion puts the closest to first; 0,
+	// the default, puts the largest a minute first.
+	VersionEditionOrder []string
+	VersionMBPerMinute  int
+	// VersionLabelRules score or hide versions by their labels, in this
+	// order, MaxVersionLabelRules at most; none by default. The rules
+	// hiding versions hide them after those above, and with them never
+	// every version of a title.
+	VersionLabelRules []VersionLabelRule
 	// NameHowVersionsPlay ends the names of a movie's or an episode's
 	// versions with how the app asking plays each, as the device profile of
 	// its last PlaybackInfo decides it.
 	NameHowVersionsPlay bool
+	// VersionNames is how the names of a movie's or an episode's versions
+	// are written, one of VersionNameChoices: as the addon writes them, the
+	// default, or short, as Polyfin writes them from what it knows of each
+	// (see library.VersionBadges), with its size and its addon.
+	VersionNames string
+	// SyncAddonSubtitles times the addons' subtitles to the version played,
+	// against when the version has speech (see playback.Service.FindSpeech).
+	SyncAddonSubtitles bool
 	// MaxConversions bounds the playbacks whose video the server converts
 	// at once, files and live alike, 0 for no limit.
 	MaxConversions int
@@ -1340,10 +1742,19 @@ type Settings struct {
 	// do, for users who may download. Off, such apps download the version
 	// as it is.
 	ConvertedDownloads bool
-	// WebSafeVideo offers the web player (jellyfin-web, in a browser) no
-	// HEVC, Dolby Vision or AV1 video, which browsers claim and then often
-	// show black: such versions play converted to H.264. On by default.
-	WebSafeVideo bool
+	// SubtitleOCR reads picture subtitles into text with Tesseract, one of
+	// SubtitleOCRModes; SubtitleOCRTracks bounds the tracks read at once.
+	// SubtitleOCRDownload downloads the data of a language Tesseract lacks
+	// the first time a track needs it.
+	SubtitleOCR         string
+	SubtitleOCRTracks   int
+	SubtitleOCRDownload bool
+	// DefaultAudioLanguage and DefaultSubtitleLanguage are the audio and
+	// subtitle languages of the users who chose none, ISO 639-2/B codes
+	// as their own preferences take them, empty for none (see
+	// jellyfin.trackPreferences). A user's own choice always wins.
+	DefaultAudioLanguage    string
+	DefaultSubtitleLanguage string
 	// The settings below tune the conversions of files and Live TV alike,
 	// as Jellyfin's Transcoding page does (recordings copy the stream).
 	// EncoderPreset trades encoding speed for quality, one of
@@ -1391,12 +1802,20 @@ type Settings struct {
 	// DownmixAlgorithms, and DownmixBoost the volume it is multiplied by
 	// then. MaxAudioChannels caps converted audio, one of
 	// AudioChannelLimits, and AudioBitratePerChannel, in kb/s, sets its
-	// bitrate; 0 keeps Polyfin's (192 kb/s in stereo, 64 kb/s a channel
-	// above).
+	// bitrate; 0 keeps Jellyfin's (128 kb/s in mono, 384 kb/s in stereo,
+	// 640 kb/s in 5.1).
 	DownmixAlgorithm       string
 	DownmixBoost           float64
 	MaxAudioChannels       int
 	AudioBitratePerChannel int
+	// NormalizeConvertedAudio evens the loudness of the audio of the
+	// videos the server converts at -16 LUFS; direct play, copied audio,
+	// music and audiobooks keep theirs.
+	NormalizeConvertedAudio bool
+	// DynamicRangeCompression is how converted AC-3 and E-AC-3 apply the
+	// dynamic range compression their tracks carry: encoded as the track
+	// says, none, or night, which lifts quiet passages twice as much.
+	DynamicRangeCompression string
 	// EncodingThreads is how many threads FFmpeg converts with, 0 letting
 	// it choose.
 	EncodingThreads int
@@ -1409,6 +1828,11 @@ type Settings struct {
 	// play session takes over the video converted, and only the new track
 	// is made.
 	KeepConvertedVideo bool
+	// FastStart starts the repackaged and converted HLS plays of remote
+	// sources with fast segments where their first segment is long: 2
+	// seconds each, converted quickly at 720p at most, then the play goes
+	// on as before (see hls.Plan.FastFrom).
+	FastStart bool
 	// Trickplay makes scrubbing thumbnails of the versions played, one
 	// every TrickplayInterval seconds, TrickplayWidth pixels wide, and
 	// ChapterImages an image of each of their chapters. Both read keyframes
@@ -1450,41 +1874,55 @@ type Settings struct {
 	// scanned at startup, when an administrator asks and, when watched,
 	// when they change.
 	LocalScanHours int
+	// WatchlistCheckHours is how many hours after its last check a title
+	// of a user's watchlist is checked again for versions, 0 for never
+	// (see package watchlist).
+	WatchlistCheckHours int
 	// WatchLocalFolders watches the local folders for changes: those
 	// mounted in the container, each scanned again a few seconds after its
 	// files stop changing, and network shares, scanned again a few seconds
 	// after an SMB server tells of a change, or once a listing made every
 	// few minutes changed.
 	WatchLocalFolders bool
-	// CustomCss and LoginDisclaimer are Jellyfin's branding: the CSS
-	// jellyfin-web applies to every page, unless a user turns it off in
-	// their display settings, and the text, Markdown or HTML it shows
-	// under its sign-in form. CustomJs is a script Polyfin adds to
-	// jellyfin-web's page, which Jellyfin has no setting for. CustomCss and
-	// CustomJs load the LumaaGlaass theme by default (see DefaultCustomCss);
-	// LoginDisclaimer is empty by default, which shows nothing.
+	// WebTheme is the web player's look, one of WebThemes: the LumaaGlaass
+	// theme Polyfin bundles, the default, jellyfin-web's own look, or the
+	// administrator's CustomCss and CustomJs. ServedCss and ServedJs are
+	// what the web player gets for it.
+	WebTheme string
+	// CustomCss and CustomJs are the administrator's own theme, served
+	// while WebTheme is WebThemeCustom and kept while another is chosen:
+	// the CSS jellyfin-web applies to every page, unless a user turns it
+	// off in their display settings, which is Jellyfin's branding, and a
+	// script Polyfin adds to jellyfin-web's page, which Jellyfin has no
+	// setting for. Both are empty by default. LoginDisclaimer, Jellyfin's
+	// branding too, is the text, Markdown or HTML jellyfin-web shows under
+	// its sign-in form, empty by default, which shows nothing.
 	CustomCss       string
 	CustomJs        string
 	LoginDisclaimer string
-	// BrandLogo is the logo the web player shows in place of Jellyfin's
-	// (its header, menu, splash and sign-in screens, the TV layout and the
-	// browser tab), as a base64 data URL of one of BrandLogoTypes, served at
-	// /Branding/Logo; empty for Jellyfin's own.
-	BrandLogo string
 	// AddVersionsToOpenPage has the web player add the versions the
 	// addons find to a title's page while it is open (see
 	// /Polyfin/Items/{id}/Versions). When off, it only replaces the
 	// placeholder with the versions, and the later ones show when the page
 	// is opened again.
 	AddVersionsToOpenPage bool
+	// VersionBadges has the web player show the badges of the version
+	// picked under a title's Version menu, and of the version played in
+	// the playback controls (see library.VersionBadges). On by default.
+	VersionBadges bool
 	// TraktClientID and TraktClientSecret identify the app an
 	// administrator registered with Trakt, and SimklClientID the one
 	// registered with Simkl, through which users connect their accounts
 	// to have what they watch sent there. Empty by default, which offers
-	// neither service.
+	// neither service. Trakt apps created since October 2026 have no
+	// secret: TraktClientSecret then stays empty.
 	TraktClientID     string
 	TraktClientSecret string
 	SimklClientID     string
+	// traktSecretUnreadable: a Trakt client secret is stored, but the key
+	// cannot open it. It reads as empty, yet the app has one: Trakt is not
+	// offered until the key or the secret is corrected.
+	traktSecretUnreadable bool
 	// LastFMAPIKey and LastFMSecret are the API key and shared secret of
 	// the API account an administrator created on Last.fm, through which
 	// users connect their Last.fm accounts to have the songs they play
@@ -1500,15 +1938,9 @@ type Settings struct {
 	AniListClientSecret     string
 	MyAnimeListClientID     string
 	MyAnimeListClientSecret string
-	// BackupHour is the hour of the server's time zone, 0 to 23, the
-	// database is backed up at every day, and BackupsKept how many of the
-	// newest backups are kept, while Backups is on.
-	BackupHour  int
+	// BackupsKept is how many of the newest backups are kept, while
+	// Backups is on.
 	BackupsKept int
-	// CollectionReadHour is the hour of the server's time zone, 0 to 23,
-	// at which every collection of the server's collection libraries is
-	// read each day; -1 never.
-	CollectionReadHour int
 	// CollectionLibraryApps are the apps, by the name they send in the
 	// Client field of their authorization, told an addon's collection
 	// library holds collections, as Jellyfin's Collections view does;
@@ -1524,8 +1956,26 @@ type Settings struct {
 	RemuxDBURL string
 	// CacheSizeGB bounds the space the blocks of the sources being played
 	// take, in gigabytes (10^9 bytes); lowered, the cache evicts down to it
-	// at its next write.
+	// at its next write. A SourceCachePreset other than Custom sets it.
 	CacheSizeGB int
+	// SourceCachePreset is one of SourceCachePresets, which sets
+	// CacheSizeGB, SourceCacheDays, SourceCacheCreditDays and
+	// PreloadWholeFiles as UpdateSettings saves them, but for Custom (see
+	// SourceCachePresetLimits).
+	SourceCachePreset string
+	// SourceCacheDays is how many days the source cache keeps a block once
+	// last read, across restarts; 0 empties it at each start.
+	// SourceCacheCreditDays is how many days longer it keeps those of a
+	// title for each time it was played again.
+	SourceCacheDays, SourceCacheCreditDays int
+	// PreloadNextEpisodes has the source cache read ahead the next
+	// PreloadEpisodes episodes of the series the users watch lately, while
+	// nothing plays, at PreloadMbps megabits a second at most, as long as
+	// the disk keeps PreloadReserveGB free: their opening, or the whole
+	// file with PreloadWholeFiles.
+	PreloadNextEpisodes                            bool
+	PreloadEpisodes, PreloadMbps, PreloadReserveGB int
+	PreloadWholeFiles                              bool
 	// VAAPIDevice is the render node VAAPI opens, such as
 	// /dev/dri/renderD128; empty tries each in turn (see ValidVAAPIDevice).
 	VAAPIDevice string
@@ -1536,9 +1986,11 @@ type Settings struct {
 	RecordingsFolder string
 	// Backups turns the daily database backups on. BackupFolder is the
 	// folder they are written to, empty for the default one under the data
-	// folder (see BackupDir).
-	Backups      bool
-	BackupFolder string
+	// folder (see BackupDir). BackupPassphrase, when set, encrypts them,
+	// sealed with the other secrets.
+	Backups          bool
+	BackupFolder     string
+	BackupPassphrase string
 	// PublicAddress is the address people open Polyfin at, such as
 	// https://media.example.org, without a trailing slash: links in
 	// notifications start with it. Empty, messages carry no link.
@@ -1579,19 +2031,134 @@ type Settings struct {
 	MetricsToken string
 	// TorrentStreams plays the torrents addons list, to the users allowed
 	// to (see TorrentsAllowed), over one route alone: TorrentInterface, the
-	// network interface every torrent socket is bound to (Linux only), or
+	// network interface every torrent socket is bound to (Linux only),
 	// else TorrentProxy, a SOCKS5 proxy (host:port) with TorrentProxyUser
-	// and TorrentProxyPassword when it asks for them. TorrentProxyPassword
-	// is a secret, like PublicMetaDBKey. TorrentDownloadMbps bounds the
-	// download, 0 for no limit; TorrentUploadMbps the upload, 0 for no
-	// sharing.
+	// and TorrentProxyPassword when it asks for them, else
+	// TorrentWireGuard, the configuration of a WireGuard tunnel Polyfin
+	// runs (see torrent.ParseWireGuardConfig), stored as Marshal writes
+	// it. TorrentProxyPassword and TorrentWireGuard, which holds the
+	// tunnel's private key, are secrets, like PublicMetaDBKey.
+	// TorrentDownloadMbps bounds the download, 0 for no limit;
+	// TorrentUploadMbps the upload, 0 for no sharing. TorrentsAtOnce
+	// bounds the torrents running at once, server-wide, 0 for no limit
+	// (see torrent.ErrAtCap), DefaultTorrentsAtOnce on a new server.
 	TorrentStreams       bool
 	TorrentInterface     string
 	TorrentProxy         string
 	TorrentProxyUser     string
 	TorrentProxyPassword string
+	TorrentWireGuard     string
 	TorrentDownloadMbps  int
 	TorrentUploadMbps    int
+	TorrentsAtOnce       int
+	// TorrentTrackers are announce URLs of trackers asked for every
+	// torrent besides those its addon names (see torrent.Settings), none
+	// by default: Polyfin ships no list.
+	TorrentTrackers []string
+	// ConversionFolder keeps the segments of conversions and
+	// repackagings; ReadingFolder the files being read, the blocks of
+	// addons' files and torrents' pieces; CacheFolder the cache, relayed
+	// images, guides and picture subtitles being read. Each is empty for
+	// the cache in the data folder (see DefaultCacheFolder), and applies
+	// at the next start (see config.ChooseFolders).
+	ConversionFolder string
+	ReadingFolder    string
+	CacheFolder      string
+
+	// SiloApps lets Silo's apps sign in and play through Silo's API under
+	// /api/v2 (see package silo); off, the API answers nothing.
+	SiloApps bool
+
+	// PosterRatings has the web player show a title's ratings on its
+	// poster as the pointer or the focus comes to it (see
+	// /Polyfin/Items/Ratings); off, it shows none there.
+	PosterRatings bool
+
+	// PosterBadges draws a movie's or a series' ratings, and a series' new
+	// episode or season, over its Primary image, for every app, at the
+	// size of PosterBadgeSize, one of PosterBadgeSizes; the web player then
+	// shows no ratings on hover (see PosterRatings).
+	PosterBadges    bool
+	PosterBadgeSize string
+	// PosterTemplate is the address of a movie's or a series' poster in
+	// place of its addon's, with {imdb_id}, {tmdb_id}, {type} and
+	// {tmdb_type} filled in, empty for none (see ValidPosterTemplate and
+	// library.PosterAddress).
+	PosterTemplate string
+
+	// The OpenID Connect provider people may sign in with (see
+	// ProviderSignIn): its issuer, the name its button shows, empty for
+	// the issuer's host, and Polyfin's client at it, the secret empty for
+	// a public client. ProviderUserClaim names the claim compared with
+	// account names, the verified email after it; ProviderCreateAccounts
+	// creates an account for someone no account matches. While both
+	// ProviderAdminClaim and ProviderAdminValue are set, the people whose
+	// claim is the value, or a list holding it, become administrators.
+	ProviderIssuer         string
+	ProviderName           string
+	ProviderClientID       string
+	ProviderClientSecret   string
+	ProviderUserClaim      string
+	ProviderCreateAccounts bool
+	ProviderAdminClaim     string
+	ProviderAdminValue     string
+
+	// This fork's own settings (see fork_settings.go).
+	ForkSettings
+}
+
+// ProviderSignIn reports whether people may sign in with the provider:
+// its issuer and Polyfin's client ID are set.
+func (s Settings) ProviderSignIn() bool {
+	return s.ProviderIssuer != "" && s.ProviderClientID != ""
+}
+
+// ProviderButton is the name the button of the provider shows: its name,
+// else its issuer's host.
+func (s Settings) ProviderButton() string {
+	if s.ProviderName != "" {
+		return s.ProviderName
+	}
+	if issuer, err := url.Parse(s.ProviderIssuer); err == nil && issuer.Host != "" {
+		return issuer.Hostname()
+	}
+	return s.ProviderIssuer
+}
+
+// The bounds of the provider's settings, in bytes.
+const (
+	MaxProviderIssuerBytes = 500
+	MaxProviderNameBytes   = 64
+	MaxProviderClientBytes = 255
+	MaxProviderClaimBytes  = 64
+	MaxProviderValueBytes  = 255
+)
+
+// ErrInvalidProvider reports provider settings refused: an issuer that is
+// not an http or https address without a query, a fragment or a user, a
+// name too long or holding control characters, a client ID, a secret or
+// a claim's name too long or holding spaces or control characters, no
+// claim naming the user, or an administrators' value too long or holding
+// control characters.
+var ErrInvalidProvider = errors.New("invalid identity provider")
+
+// validProvider checks the provider's settings, trimmed.
+func validProvider(s Settings) bool {
+	if s.ProviderIssuer != "" {
+		issuer, err := url.Parse(s.ProviderIssuer)
+		if err != nil || (issuer.Scheme != "https" && issuer.Scheme != "http") || issuer.Host == "" ||
+			issuer.User != nil || strings.ContainsAny(s.ProviderIssuer, "?#") || len(s.ProviderIssuer) > MaxProviderIssuerBytes {
+			return false
+		}
+	}
+	token := func(text string, max int) bool {
+		return len(text) <= max && utf8.ValidString(text) &&
+			!strings.ContainsFunc(text, func(r rune) bool { return unicode.IsSpace(r) || unicode.IsControl(r) })
+	}
+	return validLine(s.ProviderName, MaxProviderNameBytes) &&
+		token(s.ProviderClientID, MaxProviderClientBytes) && token(s.ProviderClientSecret, MaxProviderClientBytes) &&
+		s.ProviderUserClaim != "" && token(s.ProviderUserClaim, MaxProviderClaimBytes) &&
+		token(s.ProviderAdminClaim, MaxProviderClaimBytes) && validLine(s.ProviderAdminValue, MaxProviderValueBytes)
 }
 
 // TorrentsAllowed reports whether user is offered torrents' files: the
@@ -1605,25 +2172,74 @@ func (s Settings) TorrentsAllowed(user User) bool {
 const InterfaceRoutes = runtime.GOOS == "linux"
 
 // The bounds of Settings.TorrentDownloadMbps and TorrentUploadMbps, and
-// of the fields of the torrents' route.
+// of the fields of the torrents' route; MaxTorrentTrackers trackers of
+// MaxTorrentTrackerBytes at most are added to every torrent.
 const (
 	MaxTorrentMbps          = 10000
+	MaxTorrentsAtOnce       = 100
 	MaxTorrentInterfaceName = 15
 	MaxTorrentProxyBytes    = 255
+	MaxTorrentTrackers      = torrent.MaxTrackers
+	MaxTorrentTrackerBytes  = 500
 )
 
+// DefaultTorrentsAtOnce is Settings.TorrentsAtOnce on a new server. A
+// play tries up to three torrent versions at once, each running until 30
+// seconds after its last read: 10 lets three plays start together. Each
+// torrent running holds its info dictionary and, past the bytes in flight
+// all torrents share, one piece (see torrent.Engine's admit): the bound
+// keeps that a sum a server can hold.
+const DefaultTorrentsAtOnce = 10
+
 // ErrInvalidTorrentRoute reports torrent settings without a route while
-// torrents play, with both, with an interface name or a proxy address not
-// valid, or with an interface on a system other than Linux; and
-// ErrInvalidTorrentLimit a limit outside [0, MaxTorrentMbps].
+// torrents play, with more than one, with an interface name or a proxy
+// address not valid, or with an interface on a system other than Linux;
+// ErrInvalidTorrentLimit a limit outside [0, MaxTorrentMbps], or torrents
+// at once outside [0, MaxTorrentsAtOnce];
+// ErrInvalidWireGuardConfig a WireGuard configuration refused, wrapped
+// with the *torrent.WireGuardConfigError that tells why; and
+// ErrInvalidTorrentTrackers more than MaxTorrentTrackers trackers, or one
+// that is not an HTTP, HTTPS or UDP announce URL of
+// MaxTorrentTrackerBytes at most.
 var (
-	ErrInvalidTorrentRoute = errors.New("invalid route for torrents")
-	ErrInvalidTorrentLimit = errors.New("invalid limit for torrents")
+	ErrInvalidTorrentRoute    = errors.New("invalid route for torrents")
+	ErrInvalidTorrentLimit    = errors.New("invalid limit for torrents")
+	ErrInvalidWireGuardConfig = errors.New("invalid WireGuard configuration")
+	ErrInvalidTorrentTrackers = errors.New("invalid trackers for torrents")
 )
+
+// canonicalTorrentTrackers checks the trackers added to every torrent and
+// returns them trimmed, each once, in the order given, empty lines left
+// out; empty, not nil, for none, as the column holds no NULL.
+func canonicalTorrentTrackers(trackers []string) ([]string, error) {
+	canonical := make([]string, 0, len(trackers))
+	for _, tracker := range trackers {
+		tracker = strings.TrimSpace(tracker)
+		if tracker == "" {
+			continue
+		}
+		if len(tracker) > MaxTorrentTrackerBytes || !torrent.ValidTracker(tracker) {
+			return nil, ErrInvalidTorrentTrackers
+		}
+		if !slices.Contains(canonical, tracker) {
+			canonical = append(canonical, tracker)
+		}
+	}
+	if len(canonical) > MaxTorrentTrackers {
+		return nil, ErrInvalidTorrentTrackers
+	}
+	return canonical, nil
+}
 
 // validTorrentRoute checks the torrent settings' route.
 func validTorrentRoute(s Settings) bool {
-	if s.TorrentInterface != "" && s.TorrentProxy != "" {
+	routes := 0
+	for _, route := range []string{s.TorrentInterface, s.TorrentProxy, s.TorrentWireGuard} {
+		if route != "" {
+			routes++
+		}
+	}
+	if routes > 1 {
 		return false
 	}
 	if s.TorrentInterface != "" && (!InterfaceRoutes || !ValidInterfaceName(s.TorrentInterface)) {
@@ -1636,7 +2252,7 @@ func validTorrentRoute(s Settings) bool {
 		strings.ContainsRune(s.TorrentProxyUser, 0) || strings.ContainsRune(s.TorrentProxyPassword, 0) {
 		return false
 	}
-	return !s.TorrentStreams || s.TorrentInterface != "" || s.TorrentProxy != ""
+	return !s.TorrentStreams || routes == 1
 }
 
 // ValidInterfaceName reports whether name may name a Linux network
@@ -1673,10 +2289,11 @@ func (s Settings) SMTPAvailable() bool {
 	return s.SMTPHost != "" && s.SMTPFrom != ""
 }
 
-// TraktAvailable reports whether users can connect Trakt: its app's ID and
-// secret are saved.
+// TraktAvailable reports whether users can connect Trakt: its app's ID is
+// saved, and its secret, which Trakt's newer apps lack, is readable when
+// one is stored.
 func (s Settings) TraktAvailable() bool {
-	return s.TraktClientID != "" && s.TraktClientSecret != ""
+	return s.TraktClientID != "" && !s.traktSecretUnreadable
 }
 
 // SimklAvailable reports whether users can connect Simkl: its app's ID is
@@ -1725,65 +2342,54 @@ func validTrackingApp(credential string) bool {
 }
 
 // validWebText reports whether text fits in max bytes and holds no NUL.
-// MaxBrandLogoBytes is the largest Settings.BrandLogo image, decoded.
-const MaxBrandLogoBytes = 1 << 20
-
-// BrandLogoTypes are the image types a Settings.BrandLogo may be.
-var BrandLogoTypes = []string{"image/png", "image/jpeg", "image/webp", "image/gif", "image/svg+xml"}
-
-// BrandLogoImage decodes a Settings.BrandLogo data URL into its type and
-// bytes; ok is false for anything else.
-func BrandLogoImage(logo string) (contentType string, image []byte, ok bool) {
-	header, data, found := strings.Cut(strings.TrimPrefix(logo, "data:"), ",")
-	if !found || !strings.HasPrefix(logo, "data:") {
-		return "", nil, false
-	}
-	contentType, encoding, _ := strings.Cut(header, ";")
-	if encoding != "base64" || !slices.Contains(BrandLogoTypes, contentType) ||
-		base64.StdEncoding.DecodedLen(len(data)) > MaxBrandLogoBytes+3 {
-		return "", nil, false
-	}
-	image, err := base64.StdEncoding.DecodeString(data)
-	if err != nil || len(image) == 0 || len(image) > MaxBrandLogoBytes {
-		return "", nil, false
-	}
-	return contentType, image, true
-}
-
 func validWebText(text string, max int) bool {
 	return len(text) <= max && !strings.ContainsRune(text, 0)
 }
 
 // settingsColumns are the columns of the settings, in the order of
 // Settings.fields.
-const settingsColumns = "server_name, quick_connect_enabled, legacy_authorization, language, prepare_ahead, transcoding, catalog_limit, channel_limit, " +
+const upstreamSettingsColumns = "server_name, quick_connect_enabled, legacy_authorization, language, rating_country, prepare_ahead, transcoding, catalog_limit, channel_limit, " +
 	"update_check, local_discovery, local_address, " +
+	"include_prereleases, " +
 	"dlna, dlna_name, dlna_new_devices_user, dlna_mark_played, " +
 	"skip_buttons, publicmetadb_key, theintrodb_key, segment_order, segment_sources_off, audio_intros, similar_titles, generate_images, lyrics, even_volume, measure_loudness, played_percent, resume_percent, version_list_minutes, catalog_refresh_minutes, " +
 	"mdblist_ratings_key, critic_rating_shows, tmdb_key, " +
-	"personal_addons, server_imports, share_links, registration, registration_codes, default_audio_language, default_subtitle_language, login_attempts, inactive_device_days, known_proxies, known_proxy_names, " +
+	"wait_digital_release, " +
+	"personal_addons, server_imports, share_links, login_attempts, inactive_device_days, known_proxies, known_proxy_names, " +
 	"two_step_administrators, " +
 	"https_mode, https_port, https_redirect, https_certificate, https_private_key, acme_hosts, acme_email, acme_terms, acme_challenge, detailed_log, " +
-	"analysis_timeout, version_attempts, prefer_direct_play, " +
-	"version_order, version_codec_order, version_source_order, hide_versions_larger_gb, hidden_version_codecs, hidden_version_words, hidden_rip_types, hide_specials, exact_title_match, subtitle_extraction, name_how_versions_play, " +
-	"max_conversions, max_conversion_height, converted_downloads, web_safe_video, " +
+	"analysis_timeout, version_attempts, prefer_direct_play, send_apps_to_source, " +
+	"version_order, version_codec_order, version_source_order, hide_versions_larger_gb, hidden_version_codecs, hidden_version_words, name_how_versions_play, version_names, " +
+	"hidden_releases, version_edition_order, version_mb_per_minute, version_label_rules, " +
+	"sync_addon_subtitles, max_conversions, max_conversion_height, converted_downloads, subtitle_ocr, subtitle_ocr_tracks, subtitle_ocr_download, " +
+	"default_audio_language, default_subtitle_language, " +
 	"encoder_preset, h264_quality, hevc_quality, allow_hevc_encoding, hardware_acceleration, hardware_decoding_codecs, " +
 	"adaptive_quality, " +
 	"tone_mapping, tone_mapping_algorithm, tone_mapping_peak, tone_mapping_desat, gpu_tone_mapping, processor_tone_mapping_height, deinterlace_method, deinterlace_double_rate, " +
-	"downmix_algorithm, downmix_boost, max_audio_channels, audio_bitrate_per_channel, encoding_threads, ahead_seconds, keep_converted_video, " +
+	"downmix_algorithm, downmix_boost, max_audio_channels, audio_bitrate_per_channel, encoding_threads, ahead_seconds, keep_converted_video, fast_start, " +
+	"normalize_converted_audio, dynamic_range_compression, " +
 	"trickplay, trickplay_interval, trickplay_width, chapter_images, thumbnail_storage_gb, " +
 	"recording_pre_padding, recording_post_padding, recording_retention_days, " +
 	"recording_commercials, " +
-	"live_tv_refresh_hours, local_scan_hours, watch_local_folders, " +
+	"live_tv_refresh_hours, local_scan_hours, watchlist_check_hours, watch_local_folders, " +
 	"convert_recordings, convert_recordings_from, convert_recordings_until, convert_recordings_on_processor, " +
-	"custom_css, custom_js, login_disclaimer, brand_logo, add_versions_to_open_page, trakt_client_id, trakt_client_secret, simkl_client_id, lastfm_api_key, lastfm_secret, " +
+	"web_theme, custom_css, custom_js, login_disclaimer, add_versions_to_open_page, version_badges, trakt_client_id, trakt_client_secret, simkl_client_id, lastfm_api_key, lastfm_secret, " +
 	"anilist_client_id, anilist_client_secret, myanimelist_client_id, myanimelist_client_secret, " +
-	"backup_hour, backups_kept, collection_read_hour, collection_library_apps, remuxdb, remuxdb_url, " +
-	"cache_size_gb, vaapi_device, recording, recordings_folder, backups, backup_folder, public_address, " +
+	"backups_kept, collection_library_apps, remuxdb, remuxdb_url, " +
+	"cache_size_gb, vaapi_device, recording, recordings_folder, backups, backup_folder, backup_passphrase, public_address, " +
 	"smtp_host, smtp_port, smtp_security, smtp_user, smtp_password, smtp_from, smtp_from_name, " +
 	"playback_history, playback_history_days, weekly_summary_day, weekly_summary_hour, import_every_minutes, " +
 	"metrics, metrics_token, " +
-	"torrent_streams, torrent_interface, torrent_proxy, torrent_proxy_user, torrent_proxy_password, torrent_download_mbps, torrent_upload_mbps"
+	"torrent_streams, torrent_interface, torrent_proxy, torrent_proxy_user, torrent_proxy_password, torrent_wireguard, torrent_download_mbps, torrent_upload_mbps, torrents_at_once, " +
+	"torrent_trackers, " +
+	"restart_confirmed, update_tool_url, update_tool_token, " +
+	"conversion_folder, reading_folder, cache_folder, " +
+	"silo_apps, " +
+	"poster_ratings, poster_badges, poster_badge_size, poster_template, " +
+	"provider_issuer, provider_name, provider_client_id, provider_client_secret, provider_user_claim, provider_create_accounts, " +
+	"provider_admin_claim, provider_admin_value, " +
+	"source_cache_preset, source_cache_days, source_cache_credit_days, " +
+	"preload_next_episodes, preload_episodes, preload_mbps, preload_reserve_gb, preload_whole_files"
 
 // updateSettingsQuery sets every column of settingsColumns, in order.
 var updateSettingsQuery = func() string {
@@ -1796,49 +2402,66 @@ var updateSettingsQuery = func() string {
 
 // fields points to the fields of settings, in the order of
 // settingsColumns: what a row scans into, and what an update writes.
-func (settings *Settings) fields() []any {
-	return []any{&settings.ServerName, &settings.QuickConnectEnabled, &settings.LegacyAuthorization, &settings.Language,
+func (settings *Settings) upstreamFields() []any {
+	return []any{&settings.ServerName, &settings.QuickConnectEnabled, &settings.LegacyAuthorization, &settings.Language, &settings.RatingCountry,
 		&settings.PrepareAhead, &settings.Transcoding, &settings.CatalogLimit, &settings.ChannelLimit,
 		&settings.UpdateCheck, &settings.LocalDiscovery, &settings.LocalAddress,
+		&settings.IncludePrereleases,
 		&settings.DLNA, &settings.DLNAName, &settings.DLNANewDevicesUser, &settings.DLNAMarkPlayed,
 		&settings.SkipButtons, &settings.PublicMetaDBKey, &settings.TheIntroDBKey, &settings.SegmentOrder, &settings.SegmentSourcesOff, &settings.AudioIntros,
 		&settings.SimilarTitles, &settings.GenerateImages, &settings.Lyrics, &settings.EvenVolume, &settings.MeasureLoudness, &settings.PlayedPercent, &settings.ResumePercent,
 		&settings.VersionListMinutes, &settings.CatalogRefreshMinutes,
 		&settings.MDBListRatingsKey, &settings.CriticRatingShows, &settings.TMDBKey,
-		&settings.PersonalAddons, &settings.ServerImports, &settings.ShareLinks, &settings.Registration, &settings.RegistrationCodes, &settings.DefaultAudioLanguage, &settings.DefaultSubtitleLanguage, &settings.LoginAttempts, &settings.InactiveDeviceDays, &settings.KnownProxies,
+		&settings.WaitDigitalRelease,
+		&settings.PersonalAddons, &settings.ServerImports, &settings.ShareLinks, &settings.LoginAttempts, &settings.InactiveDeviceDays, &settings.KnownProxies,
 		&settings.KnownProxyNames,
 		&settings.TwoStepAdministrators,
 		&settings.HTTPSMode, &settings.HTTPSPort, &settings.HTTPSRedirect, &settings.HTTPSCertificate, &settings.HTTPSPrivateKey,
 		&settings.ACMEHosts, &settings.ACMEEmail, &settings.ACMETerms, &settings.ACMEChallenge, &settings.DetailedLog,
-		&settings.AnalysisTimeout, &settings.VersionAttempts, &settings.PreferDirectPlay,
+		&settings.AnalysisTimeout, &settings.VersionAttempts, &settings.PreferDirectPlay, &settings.SendAppsToSource,
 		&settings.VersionOrder, &settings.VersionCodecOrder, &settings.VersionSourceOrder, &settings.HideVersionsLargerGB, &settings.HiddenVersionCodecs,
-		&settings.HiddenVersionWords, &settings.HiddenRipTypes, &settings.HideSpecials, &settings.ExactTitleMatch, &settings.SubtitleExtraction,
-		&settings.NameHowVersionsPlay,
-		&settings.MaxConversions, &settings.MaxConversionHeight, &settings.ConvertedDownloads, &settings.WebSafeVideo,
+		&settings.HiddenVersionWords,
+		&settings.NameHowVersionsPlay, &settings.VersionNames,
+		&settings.HiddenReleases, &settings.VersionEditionOrder, &settings.VersionMBPerMinute, &settings.VersionLabelRules,
+		&settings.SyncAddonSubtitles, &settings.MaxConversions, &settings.MaxConversionHeight, &settings.ConvertedDownloads, &settings.SubtitleOCR, &settings.SubtitleOCRTracks,
+		&settings.SubtitleOCRDownload,
+		&settings.DefaultAudioLanguage, &settings.DefaultSubtitleLanguage,
 		&settings.EncoderPreset, &settings.H264Quality, &settings.HevcQuality, &settings.AllowHevcEncoding, &settings.HardwareAcceleration, &settings.HardwareDecodingCodecs,
 		&settings.AdaptiveQuality,
 		&settings.ToneMapping, &settings.ToneMappingAlgorithm, &settings.ToneMappingPeak, &settings.ToneMappingDesat, &settings.GPUToneMapping, &settings.ProcessorToneMappingHeight,
 		&settings.DeinterlaceMethod, &settings.DeinterlaceDoubleRate,
 		&settings.DownmixAlgorithm, &settings.DownmixBoost, &settings.MaxAudioChannels, &settings.AudioBitratePerChannel, &settings.EncodingThreads, &settings.AheadSeconds,
-		&settings.KeepConvertedVideo,
+		&settings.KeepConvertedVideo, &settings.FastStart,
+		&settings.NormalizeConvertedAudio, &settings.DynamicRangeCompression,
 		&settings.Trickplay, &settings.TrickplayInterval, &settings.TrickplayWidth, &settings.ChapterImages, &settings.ThumbnailStorageGB,
 		&settings.RecordingPrePadding, &settings.RecordingPostPadding, &settings.RecordingRetentionDays,
 		&settings.RecordingCommercials,
-		&settings.LiveTvRefreshHours, &settings.LocalScanHours,
+		&settings.LiveTvRefreshHours, &settings.LocalScanHours, &settings.WatchlistCheckHours,
 		&settings.WatchLocalFolders,
 		&settings.ConvertRecordings, &settings.ConvertRecordingsFrom, &settings.ConvertRecordingsUntil, &settings.ConvertRecordingsOnProcessor,
-		&settings.CustomCss, &settings.CustomJs, &settings.LoginDisclaimer, &settings.BrandLogo, &settings.AddVersionsToOpenPage,
+		&settings.WebTheme, &settings.CustomCss, &settings.CustomJs, &settings.LoginDisclaimer, &settings.AddVersionsToOpenPage, &settings.VersionBadges,
 		&settings.TraktClientID, &settings.TraktClientSecret, &settings.SimklClientID,
 		&settings.LastFMAPIKey, &settings.LastFMSecret,
 		&settings.AniListClientID, &settings.AniListClientSecret, &settings.MyAnimeListClientID, &settings.MyAnimeListClientSecret,
-		&settings.BackupHour, &settings.BackupsKept, &settings.CollectionReadHour, &settings.CollectionLibraryApps, &settings.RemuxDB, &settings.RemuxDBURL,
+		&settings.BackupsKept, &settings.CollectionLibraryApps, &settings.RemuxDB, &settings.RemuxDBURL,
 		&settings.CacheSizeGB, &settings.VAAPIDevice, &settings.Recording, &settings.RecordingsFolder, &settings.Backups, &settings.BackupFolder,
+		&settings.BackupPassphrase,
 		&settings.PublicAddress,
 		&settings.SMTPHost, &settings.SMTPPort, &settings.SMTPSecurity, &settings.SMTPUser, &settings.SMTPPassword, &settings.SMTPFrom, &settings.SMTPFromName,
 		&settings.PlaybackHistory, &settings.PlaybackHistoryDays, &settings.WeeklySummaryDay, &settings.WeeklySummaryHour,
 		&settings.ImportEveryMinutes, &settings.Metrics, &settings.MetricsToken,
 		&settings.TorrentStreams, &settings.TorrentInterface, &settings.TorrentProxy, &settings.TorrentProxyUser, &settings.TorrentProxyPassword,
-		&settings.TorrentDownloadMbps, &settings.TorrentUploadMbps}
+		&settings.TorrentWireGuard,
+		&settings.TorrentDownloadMbps, &settings.TorrentUploadMbps, &settings.TorrentsAtOnce,
+		&settings.TorrentTrackers,
+		&settings.RestartConfirmed, &settings.UpdateToolURL, &settings.UpdateToolToken,
+		&settings.ConversionFolder, &settings.ReadingFolder, &settings.CacheFolder,
+		&settings.SiloApps,
+		&settings.PosterRatings, &settings.PosterBadges, &settings.PosterBadgeSize, &settings.PosterTemplate,
+		&settings.ProviderIssuer, &settings.ProviderName, &settings.ProviderClientID, &settings.ProviderClientSecret, &settings.ProviderUserClaim,
+		&settings.ProviderCreateAccounts, &settings.ProviderAdminClaim, &settings.ProviderAdminValue,
+		&settings.SourceCachePreset, &settings.SourceCacheDays, &settings.SourceCacheCreditDays,
+		&settings.PreloadNextEpisodes, &settings.PreloadEpisodes, &settings.PreloadMbps, &settings.PreloadReserveGB, &settings.PreloadWholeFiles}
 }
 
 func (s *Store) loadSettings(ctx context.Context) (Settings, error) {
@@ -1875,8 +2498,12 @@ func (settings *Settings) secrets() []struct {
 		{"aniListClientSecret", &settings.AniListClientSecret},
 		{"myAnimeListClientSecret", &settings.MyAnimeListClientSecret},
 		{"smtpPassword", &settings.SMTPPassword},
+		{"backupPassphrase", &settings.BackupPassphrase},
 		{"metricsToken", &settings.MetricsToken},
 		{"torrentProxyPassword", &settings.TorrentProxyPassword},
+		{"torrentWireGuard", &settings.TorrentWireGuard},
+		{"updateToolToken", &settings.UpdateToolToken},
+		{"providerClientSecret", &settings.ProviderClientSecret},
 	}
 }
 
@@ -1894,6 +2521,17 @@ func (s *Store) openSecrets(settings *Settings) {
 		}
 		*secret.value = value
 	}
+	_, settings.traktSecretUnreadable = s.unreadable["traktClientSecret"]
+}
+
+// SecretUnreadable reports whether the secret of the settings named name,
+// as the admin API names it, is stored but cannot be opened with the key:
+// it reads as not set meanwhile.
+func (s *Store) SecretUnreadable(name string) bool {
+	s.secretsMu.Lock()
+	defer s.secretsMu.Unlock()
+	_, ok := s.unreadable[name]
+	return ok
 }
 
 // sealSecrets returns settings as they are stored: their secrets sealed,
@@ -1920,6 +2558,12 @@ func (s *Store) Settings() Settings {
 // settings: every request reads it.
 func (s *Store) KnownProxies() []netip.Prefix {
 	return s.settings.Load().KnownProxies
+}
+
+// RatingCountry returns Settings().RatingCountry without copying the
+// settings: every judged title reads it.
+func (s *Store) RatingCountry() string {
+	return s.settings.Load().RatingCountry
 }
 
 // KnownProxyNames returns Settings().KnownProxyNames without copying the
@@ -2001,6 +2645,8 @@ func (s *Store) AdoptEnvironment(ctx context.Context, env Environment) error {
 			THEN $3::text[] ELSE segment_sources_off END,
 		cache_size_gb = CASE WHEN $4::integer > 0 AND 'cache_size_gb' = ANY(environment_pending)
 			THEN $4::integer ELSE cache_size_gb END,
+		source_cache_preset = CASE WHEN $4::integer > 0 AND 'cache_size_gb' = ANY(environment_pending)
+			THEN 'custom' ELSE source_cache_preset END,
 		detailed_log = CASE WHEN $5::boolean AND 'detailed_log' = ANY(environment_pending) THEN true ELSE detailed_log END,
 		vaapi_device = CASE WHEN $6::text <> '' AND 'vaapi_device' = ANY(environment_pending)
 			THEN $6::text ELSE vaapi_device END,
@@ -2030,8 +2676,12 @@ func (s *Store) UpdateSettings(ctx context.Context, settings Settings) (Settings
 	if !validServerName(settings.ServerName) {
 		return Settings{}, ErrInvalidServerName
 	}
-	if !ValidLanguage(settings.Language) {
+	if !i18n.Valid(settings.Language) {
 		return Settings{}, ErrInvalidLanguage
+	}
+	settings.RatingCountry = strings.ToUpper(strings.TrimSpace(settings.RatingCountry))
+	if !localization.ValidRatingCountry(settings.RatingCountry) {
+		return Settings{}, ErrInvalidRatingCountry
 	}
 	if settings.CatalogLimit < MinCatalogLimit || settings.CatalogLimit > MaxCatalogLimit {
 		return Settings{}, ErrInvalidCatalogLimit
@@ -2068,6 +2718,16 @@ func (s *Store) UpdateSettings(ctx context.Context, settings Settings) (Settings
 	}
 	if !slices.Contains(CriticRatingChoices, settings.CriticRatingShows) {
 		return Settings{}, ErrInvalidCriticRatingShows
+	}
+	if !slices.Contains(VersionNameChoices, settings.VersionNames) {
+		return Settings{}, ErrInvalidVersionNames
+	}
+	if !slices.Contains(PosterBadgeSizes, settings.PosterBadgeSize) {
+		return Settings{}, ErrInvalidPosterBadgeSize
+	}
+	settings.PosterTemplate = strings.TrimSpace(settings.PosterTemplate)
+	if !ValidPosterTemplate(settings.PosterTemplate) {
+		return Settings{}, ErrInvalidPosterTemplate
 	}
 	if !slices.Contains(MeasureLoudnessChoices, settings.MeasureLoudness) {
 		return Settings{}, ErrInvalidMeasureLoudness
@@ -2135,22 +2795,6 @@ func (s *Store) UpdateSettings(ctx context.Context, settings Settings) (Settings
 	if err != nil {
 		return Settings{}, err
 	}
-	for _, language := range []*string{&settings.DefaultAudioLanguage, &settings.DefaultSubtitleLanguage} {
-		*language = strings.ToLower(strings.TrimSpace(*language))
-		if !validDefaultLanguage(*language) {
-			return Settings{}, ErrInvalidDefaultLanguage
-		}
-	}
-	if !validRipTypes(settings.HiddenRipTypes) {
-		return Settings{}, ErrInvalidHiddenRipTypes
-	}
-	rips := []string{}
-	for _, kind := range RipTypes {
-		if slices.Contains(settings.HiddenRipTypes, kind) {
-			rips = append(rips, kind)
-		}
-	}
-	settings.HiddenRipTypes = rips
 	// The lists are kept apart from the caller's, none being an empty
 	// list: the columns hold no NULL. The codecs hidden are kept in the
 	// order of VersionCodecs.
@@ -2164,11 +2808,51 @@ func (s *Store) UpdateSettings(ctx context.Context, settings Settings) (Settings
 		}
 	}
 	settings.HiddenVersionCodecs, settings.HiddenVersionWords = hidden, words
+	// The kinds of releases hidden, like the codecs, are kept in the order
+	// of ReleaseKinds.
+	for i, kind := range settings.HiddenReleases {
+		if !slices.Contains(ReleaseKinds, kind) || slices.Contains(settings.HiddenReleases[:i], kind) {
+			return Settings{}, ErrInvalidHiddenReleases
+		}
+	}
+	releases := []string{}
+	for _, kind := range ReleaseKinds {
+		if slices.Contains(settings.HiddenReleases, kind) {
+			releases = append(releases, kind)
+		}
+	}
+	settings.HiddenReleases = releases
+	if len(settings.VersionEditionOrder) != len(VersionEditions) {
+		return Settings{}, ErrInvalidVersionEditionOrder
+	}
+	for i, edition := range settings.VersionEditionOrder {
+		if !slices.Contains(VersionEditions, edition) || slices.Contains(settings.VersionEditionOrder[:i], edition) {
+			return Settings{}, ErrInvalidVersionEditionOrder
+		}
+	}
+	settings.VersionEditionOrder = slices.Clone(settings.VersionEditionOrder)
+	if settings.VersionMBPerMinute < 0 || settings.VersionMBPerMinute > MaxVersionMBPerMinute {
+		return Settings{}, ErrInvalidVersionMBPerMinute
+	}
+	labelRules, err := canonicalVersionLabelRules(settings.VersionLabelRules)
+	if err != nil {
+		return Settings{}, err
+	}
+	settings.VersionLabelRules = labelRules
 	if settings.MaxConversions < MinMaxConversions || settings.MaxConversions > MaxMaxConversions {
 		return Settings{}, ErrInvalidMaxConversions
 	}
 	if !slices.Contains(ConversionHeights, settings.MaxConversionHeight) {
 		return Settings{}, ErrInvalidMaxConversionHeight
+	}
+	if !slices.Contains(SubtitleOCRModes, settings.SubtitleOCR) {
+		return Settings{}, ErrInvalidSubtitleOCR
+	}
+	if settings.SubtitleOCRTracks < MinSubtitleOCRTracks || settings.SubtitleOCRTracks > MaxSubtitleOCRTracks {
+		return Settings{}, ErrInvalidSubtitleOCRTracks
+	}
+	if !validTrackLanguage(settings.DefaultAudioLanguage) || !validTrackLanguage(settings.DefaultSubtitleLanguage) {
+		return Settings{}, ErrInvalidDefaultLanguage
 	}
 	codecs, err := validConversion(settings)
 	if err != nil {
@@ -2201,19 +2885,23 @@ func (s *Store) UpdateSettings(ctx context.Context, settings Settings) (Settings
 	if settings.LocalScanHours < 0 || settings.LocalScanHours > MaxLocalScanHours {
 		return Settings{}, ErrInvalidLocalScanHours
 	}
+	if settings.WatchlistCheckHours < 0 || settings.WatchlistCheckHours > MaxWatchlistCheckHours {
+		return Settings{}, ErrInvalidWatchlistCheckHours
+	}
+	if !slices.Contains(WebThemes, settings.WebTheme) {
+		return Settings{}, ErrInvalidWebTheme
+	}
 	if !validWebText(settings.CustomCss, MaxCustomCodeBytes) {
 		return Settings{}, ErrInvalidCustomCss
 	}
 	if !validWebText(settings.CustomJs, MaxCustomCodeBytes) {
 		return Settings{}, ErrInvalidCustomJs
 	}
+	if err := validForkSettings(settings); err != nil {
+		return Settings{}, err
+	}
 	if !validWebText(settings.LoginDisclaimer, MaxLoginDisclaimerBytes) {
 		return Settings{}, ErrInvalidLoginDisclaimer
-	}
-	if settings.BrandLogo != "" {
-		if _, _, ok := BrandLogoImage(settings.BrandLogo); !ok {
-			return Settings{}, ErrInvalidBrandLogo
-		}
 	}
 	if !validTrackingApp(settings.TraktClientID) || !validTrackingApp(settings.TraktClientSecret) {
 		return Settings{}, ErrInvalidTraktApp
@@ -2230,22 +2918,24 @@ func (s *Store) UpdateSettings(ctx context.Context, settings Settings) (Settings
 	if !validTrackingApp(settings.MyAnimeListClientID) || !validTrackingApp(settings.MyAnimeListClientSecret) {
 		return Settings{}, ErrInvalidMyAnimeListApp
 	}
-	if settings.BackupHour < 0 || settings.BackupHour > 23 {
-		return Settings{}, ErrInvalidBackupHour
-	}
 	if settings.BackupsKept < MinBackupsKept || settings.BackupsKept > MaxBackupsKept {
 		return Settings{}, ErrInvalidBackupsKept
-	}
-	if settings.CollectionReadHour < -1 || settings.CollectionReadHour > 23 {
-		return Settings{}, ErrInvalidCollectionReadHour
 	}
 	apps, err := canonicalCollectionLibraryApps(settings.CollectionLibraryApps)
 	if err != nil {
 		return Settings{}, err
 	}
 	settings.CollectionLibraryApps = apps
+	if err := settings.applySourceCachePreset(); err != nil {
+		return Settings{}, err
+	}
 	if settings.CacheSizeGB < MinCacheSizeGB || settings.CacheSizeGB > MaxCacheSizeGB {
 		return Settings{}, ErrInvalidCacheSize
+	}
+	if settings.PreloadEpisodes < MinPreloadEpisodes || settings.PreloadEpisodes > MaxPreloadEpisodes ||
+		settings.PreloadMbps < MinPreloadMbps || settings.PreloadMbps > MaxPreloadMbps ||
+		settings.PreloadReserveGB < MinPreloadReserveGB || settings.PreloadReserveGB > MaxPreloadReserveGB {
+		return Settings{}, ErrInvalidPreload
 	}
 	if !ValidVAAPIDevice(settings.VAAPIDevice) {
 		return Settings{}, ErrInvalidVAAPIDevice
@@ -2256,6 +2946,18 @@ func (s *Store) UpdateSettings(ctx context.Context, settings Settings) (Settings
 	}
 	if settings.BackupFolder, ok = CleanFolder(settings.BackupFolder); !ok {
 		return Settings{}, ErrInvalidBackupFolder
+	}
+	if !validBackupPassphrase(settings.BackupPassphrase) {
+		return Settings{}, ErrInvalidBackupPassphrase
+	}
+	if settings.ConversionFolder, ok = CleanFolder(settings.ConversionFolder); !ok {
+		return Settings{}, ErrInvalidConversionFolder
+	}
+	if settings.ReadingFolder, ok = CleanFolder(settings.ReadingFolder); !ok {
+		return Settings{}, ErrInvalidReadingFolder
+	}
+	if settings.CacheFolder, ok = CleanFolder(settings.CacheFolder); !ok {
+		return Settings{}, ErrInvalidCacheFolder
 	}
 	// The address is kept without surrounding spaces or trailing slashes:
 	// the paths asked are added after it.
@@ -2304,26 +3006,54 @@ func (s *Store) UpdateSettings(ctx context.Context, settings Settings) (Settings
 	if !validLine(settings.MetricsToken, MaxMetricsTokenBytes) {
 		return Settings{}, ErrInvalidMetricsToken
 	}
+	settings.UpdateToolURL = strings.TrimSpace(settings.UpdateToolURL)
+	if !ValidUpdateToolURL(settings.UpdateToolURL) {
+		return Settings{}, ErrInvalidUpdateToolURL
+	}
+	if !validLine(settings.UpdateToolToken, MaxUpdateToolTokenBytes) || strings.ContainsFunc(settings.UpdateToolToken, unicode.IsSpace) {
+		return Settings{}, ErrInvalidUpdateToolToken
+	}
+	settings.ProviderIssuer, settings.ProviderName = strings.TrimSpace(settings.ProviderIssuer), strings.TrimSpace(settings.ProviderName)
+	settings.ProviderClientID, settings.ProviderClientSecret = strings.TrimSpace(settings.ProviderClientID), strings.TrimSpace(settings.ProviderClientSecret)
+	settings.ProviderUserClaim, settings.ProviderAdminClaim = strings.TrimSpace(settings.ProviderUserClaim), strings.TrimSpace(settings.ProviderAdminClaim)
+	settings.ProviderAdminValue = strings.TrimSpace(settings.ProviderAdminValue)
+	if !validProvider(settings) {
+		return Settings{}, ErrInvalidProvider
+	}
 	if settings.LoginAttempts == 0 {
 		// Without a limit, no account stays blocked, nor keeps counting.
-		unblocked, err := s.db.Exec(ctx, "UPDATE users SET invalid_login_attempts = 0, blocked_until = NULL "+
-			"WHERE invalid_login_attempts <> 0 OR blocked_until IS NOT NULL")
+		unblocked, err := s.forgetWrongPasswords(ctx)
 		if err != nil {
 			return Settings{}, err
 		}
-		if unblocked.RowsAffected() > 0 {
+		if unblocked {
 			s.forgetSignIns()
 		}
 	}
 	settings.TorrentInterface = strings.TrimSpace(settings.TorrentInterface)
 	settings.TorrentProxy = strings.TrimSpace(settings.TorrentProxy)
+	if strings.TrimSpace(settings.TorrentWireGuard) == "" {
+		settings.TorrentWireGuard = ""
+	} else {
+		config, err := torrent.ParseWireGuardConfig(settings.TorrentWireGuard)
+		if err != nil {
+			return Settings{}, fmt.Errorf("%w: %w", ErrInvalidWireGuardConfig, err)
+		}
+		settings.TorrentWireGuard = config.Marshal()
+	}
 	if !validTorrentRoute(settings) {
 		return Settings{}, ErrInvalidTorrentRoute
 	}
 	if settings.TorrentDownloadMbps < 0 || settings.TorrentDownloadMbps > MaxTorrentMbps ||
-		settings.TorrentUploadMbps < 0 || settings.TorrentUploadMbps > MaxTorrentMbps {
+		settings.TorrentUploadMbps < 0 || settings.TorrentUploadMbps > MaxTorrentMbps ||
+		settings.TorrentsAtOnce < 0 || settings.TorrentsAtOnce > MaxTorrentsAtOnce {
 		return Settings{}, ErrInvalidTorrentLimit
 	}
+	trackers, err := canonicalTorrentTrackers(settings.TorrentTrackers)
+	if err != nil {
+		return Settings{}, err
+	}
+	settings.TorrentTrackers = trackers
 	// Metrics turned on with no token, the first time or when the key
 	// cannot read the one stored, get one.
 	if settings.Metrics && settings.MetricsToken == "" {
@@ -2331,6 +3061,11 @@ func (s *Store) UpdateSettings(ctx context.Context, settings Settings) (Settings
 	}
 	s.secretsMu.Lock()
 	defer s.secretsMu.Unlock()
+	// Another route replaces a WireGuard configuration the key cannot
+	// open: it is not kept as it was stored.
+	if settings.TorrentInterface != "" || settings.TorrentProxy != "" {
+		delete(s.unreadable, "torrentWireGuard")
+	}
 	stored := s.sealSecrets(settings)
 	_, err = s.db.Exec(ctx, updateSettingsQuery, stored.fields()...)
 	if err != nil {
@@ -2341,6 +3076,7 @@ func (s *Store) UpdateSettings(ctx context.Context, settings Settings) (Settings
 			delete(s.unreadable, secret.name)
 		}
 	}
+	_, settings.traktSecretUnreadable = s.unreadable["traktClientSecret"]
 	s.storeSettings(&settings)
 	return settings, nil
 }
@@ -2394,6 +3130,8 @@ func validConversion(settings Settings) ([]string, error) {
 		return nil, ErrInvalidDownmixAlgorithm
 	case !(settings.DownmixBoost >= MinDownmixBoost && settings.DownmixBoost <= MaxDownmixBoost):
 		return nil, ErrInvalidDownmixBoost
+	case !slices.Contains(DynamicRangeCompressions, settings.DynamicRangeCompression):
+		return nil, ErrInvalidDynamicRange
 	case !slices.Contains(AudioChannelLimits, settings.MaxAudioChannels):
 		return nil, ErrInvalidMaxAudioChannels
 	case settings.AudioBitratePerChannel != 0 &&
@@ -2415,19 +3153,4 @@ func validConversion(settings Settings) ([]string, error) {
 		return nil, ErrInvalidHardwareDecodingCodecs
 	}
 	return codecs, nil
-}
-
-func validDefaultLanguage(language string) bool {
-	if language == "" {
-		return true
-	}
-	if len(language) != 3 {
-		return false
-	}
-	for _, c := range language {
-		if c < 'a' || c > 'z' {
-			return false
-		}
-	}
-	return true
 }

@@ -2,7 +2,10 @@ package jellyfin
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"log/slog"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"time"
@@ -10,6 +13,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/playback"
+	"github.com/moodiness/polyfin/internal/thumbnails"
 )
 
 // With playback prepared ahead in the settings, Polyfin does before a play
@@ -50,9 +54,6 @@ type preparationKey struct {
 	user, title accounts.ID
 	next        bool
 	version     accounts.ID
-	// subtitles marks a reading ahead of subtitles (see subtitlesahead.go),
-	// apart from the analysis of the same title or version.
-	subtitles bool
 }
 
 // preparation is a preparation waiting for a place: work reports whether
@@ -105,7 +106,8 @@ func (p *preparations) add(key preparationKey, work func(ctx context.Context) bo
 }
 
 // work runs the preparations waiting, the newest first, until none is.
-// Each runs detached from the request that triggered it.
+// Each runs detached from the request that triggered it, as background
+// work, whose requests to addons are paced (see library.Background).
 func (p *preparations) work() {
 	for {
 		p.mu.Lock()
@@ -120,8 +122,8 @@ func (p *preparations) work() {
 		p.queue = p.queue[1:]
 		p.running[next.key] = true
 		p.mu.Unlock()
-		ctx, cancel := context.WithTimeout(context.Background(), preparationTimeout)
-		done := next.work(ctx)
+		ctx, cancel := context.WithTimeout(library.Background(context.Background()), preparationTimeout)
+		done := p.run(ctx, next)
 		cancel()
 		p.mu.Lock()
 		delete(p.running, next.key)
@@ -131,6 +133,45 @@ func (p *preparations) work() {
 			p.forget(now)
 		}
 		p.mu.Unlock()
+	}
+}
+
+// run runs a preparation, whose panic, of what reads a version, fails it
+// (see logPanic): the worker goes on with the next.
+func (p *preparations) run(ctx context.Context, next preparation) (done bool) {
+	defer logPanic(p.logger, "A preparation ended on a panic")
+	return next.work(ctx)
+}
+
+// logPanic, deferred at the top of a goroutine no request's handler stands
+// above, logs a panic of it (see logRecovered), and lets the goroutine
+// end: the server goes on.
+func logPanic(logger *slog.Logger, msg string, args ...any) {
+	if cause := recover(); cause != nil {
+		logRecovered(logger, msg, cause, args...)
+	}
+}
+
+// logRecovered logs a panic recovered, cause, as msg with args and its
+// stack, when logger is set.
+func logRecovered(logger *slog.Logger, msg string, cause any, args ...any) {
+	if logger != nil {
+		logger.Error(msg, append(args, "panic", fmt.Sprint(cause), "stack", string(debug.Stack()))...)
+	}
+}
+
+// errWorkPanicked reports a request's work, run in a goroutine of its
+// own, that ended on a panic.
+var errWorkPanicked = errors.New("the work ended on a panic")
+
+// recoverInto, deferred at the top of a goroutine of a request's work
+// whose waiter takes its error, logs a panic of it as msg with args and
+// its stack, and has err report it (errWorkPanicked): the waiter fails as
+// on a read that failed, and the server goes on.
+func recoverInto(logger *slog.Logger, err *error, msg string, args ...any) {
+	if cause := recover(); cause != nil {
+		logRecovered(logger, msg, cause, args...)
+		*err = fmt.Errorf("%w: %v", errWorkPanicked, cause)
 	}
 }
 
@@ -194,16 +235,24 @@ func (h *Handler) prepareOpened(ctx context.Context, user accounts.User, item li
 }
 
 // prepareVersions queues a preparation of key that analyzes those of
-// versions not analyzed yet, at once, unless all are.
+// versions not analyzed yet, at once, unless all are. A torrent version
+// whose torrent no playback runs is left out: only a playback reads it
+// (see playback.ErrTorrentIdle), so a preparation would analyze nothing
+// and be made again at each trigger.
 func (h *Handler) prepareVersions(ctx context.Context, key preparationKey, versions []library.Version) {
-	versions = slices.DeleteFunc(slices.Clone(versions), func(v library.Version) bool { return !h.unanalyzed(ctx, v) })
+	versions = slices.DeleteFunc(slices.Clone(versions), func(v library.Version) bool {
+		return !h.unanalyzed(ctx, v) || h.idleTorrent(v)
+	})
 	if len(versions) == 0 {
 		return
 	}
 	h.prepare(key, func(ctx context.Context) bool {
 		var wg sync.WaitGroup
 		for _, version := range versions {
-			wg.Go(func() { h.analyzeAhead(ctx, version) })
+			wg.Go(func() {
+				defer logPanic(h.Logger, "Analyzing a version ahead ended on a panic", "addon", version.AddonLog)
+				h.analyzeAhead(ctx, version)
+			})
 		}
 		wg.Wait()
 		for _, version := range versions {
@@ -226,7 +275,8 @@ func (h *Handler) prepareListed(ctx context.Context, user accounts.User, item li
 		return
 	}
 	go func() {
-		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), preparationTimeout)
+		defer logPanic(h.Logger, "Preparing a title's versions ended on a panic")
+		ctx, cancel := context.WithTimeout(library.Background(context.WithoutCancel(ctx)), preparationTimeout)
 		defer cancel()
 		if p, err := h.playable(ctx, user, item); err == nil {
 			h.prepareOpened(ctx, user, item, p.versions, opened)
@@ -276,11 +326,15 @@ func (h *Handler) prepareNearTheEnd(user accounts.User, device accounts.ID, item
 		if len(versions) == 0 {
 			return false
 		}
+		if h.idleTorrent(versions[0]) {
+			// Read once played, its torrent joined.
+			return true
+		}
 		h.analyzeAhead(ctx, versions[0])
 		// Its images too, in the background, as its play would ask,
 		// once the playback of this episode stopped.
 		if h.Thumbnails != nil {
-			h.Thumbnails.Queue(versions[0], device)
+			h.Thumbnails.Queue(versions[0], thumbnails.Title(next), device)
 		}
 		_, analyzed := h.Playback.Analyzed(ctx, versions[0].ID)
 		return analyzed
@@ -291,12 +345,13 @@ func (h *Handler) prepareNearTheEnd(user accounts.User, device accounts.ID, item
 // in their order, the next of its season, else the first of the next one,
 // if it is out. Specials are left out, as Next Up leaves them out.
 func episodeAfter(episodes []library.Item, current accounts.ID) (library.Item, bool) {
-	regular := regularEpisodes(episodes)
-	i := slices.IndexFunc(regular, func(e library.Item) bool { return e.ID == current })
-	if i < 0 || i+1 == len(regular) || !regular[i+1].Available {
+	outlines := library.Outlines(episodes)
+	regular := regularEpisodes(outlines)
+	i := slices.IndexFunc(regular, func(place int) bool { return outlines[place].ID == current })
+	if i < 0 || i+1 == len(regular) || !outlines[regular[i+1]].Available {
 		return library.Item{}, false
 	}
-	return regular[i+1], true
+	return episodes[regular[i+1]], true
 }
 
 // unanalyzed reports whether a version is neither analyzed nor recently
@@ -307,6 +362,12 @@ func (h *Handler) unanalyzed(ctx context.Context, version library.Version) bool 
 	}
 	_, analyzed := h.Playback.Analyzed(ctx, version.ID)
 	return !analyzed
+}
+
+// idleTorrent reports whether a version is a torrent's file that no
+// playback reads now.
+func (h *Handler) idleTorrent(version library.Version) bool {
+	return version.Torrent != nil && !h.Playback.TorrentRunning(version.Torrent.InfoHash)
 }
 
 // analyzeAhead does before a play asks what the first play of a version
@@ -323,16 +384,25 @@ func (h *Handler) analyzeAhead(ctx context.Context, version library.Version) {
 	}
 	ctx = playback.Background(ctx)
 	started := time.Now()
-	_, err := h.Playback.Analyze(ctx, version)
+	// A live video's stream has no end for a file's analysis to reach:
+	// Endless analyzes it as a channel's, which is all its play reads.
+	if library.AddonVideoVersion(version) {
+		if endless, err := h.Playback.Endless(ctx, version); err != nil || endless {
+			h.Logger.Debug("Prepared a live version ahead of playback", "addon", version.AddonLog, "live", endless, "error", err)
+			return
+		}
+	}
+	analysis, err := h.Playback.Analyze(ctx, version)
 	if err != nil {
-		h.Logger.Debug("A version could not be analyzed ahead of playback", "addon", version.Addon, "error", err)
+		h.Logger.Debug("A version could not be analyzed ahead of playback", "addon", version.AddonLog, "error", err)
 		return
 	}
 	// A version without an index still plays as it is; a first play would
 	// find that out the same way. One with an index has the bytes of its
 	// first segment warmed in the background (see playback.Service.Warm).
 	if _, err := h.Playback.Plan(ctx, version); err != nil {
-		h.Logger.Debug("A version's keyframe index could not be read ahead of playback", "addon", version.Addon, "error", err)
+		h.Logger.Debug("A version's keyframe index could not be read ahead of playback", "addon", version.AddonLog, "error", err)
 	}
-	h.Logger.Debug("Prepared a version ahead of playback", "addon", version.Addon, "duration", time.Since(started))
+	h.Playback.SubtitlesLocated(ctx, version, analysis)
+	h.Logger.Debug("Prepared a version ahead of playback", "addon", version.AddonLog, "duration", time.Since(started))
 }

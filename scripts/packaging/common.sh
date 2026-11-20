@@ -9,6 +9,10 @@
 #   POLYFIN_DESKTOP_FILES   a folder made by files.sh, with jellyfin-web, the
 #                           fonts and their licenses: made with Docker when
 #                           unset.
+#   POLYFIN_DESKTOP_FILES_CACHE
+#                           a buildx cache files.sh's build takes its layers
+#                           from and keeps them in, such as CI's
+#                           type=gha,scope=desktop-files.
 #   SKIP_WEB                1 to use the admin app already in web/dist
 #                           rather than building it.
 #   DOCKER_HUB_MIRROR       a mirror of Docker Hub to pull Debian's image
@@ -150,16 +154,18 @@ shared_files() {
 }
 
 # install_shared DEST: jellyfin-web, the fonts and the licenses, into the
-# install folder DEST, with Polyfin's own license and hls.js's, which the
-# server embeds.
+# install folder DEST, with Polyfin's own license, and those of hls.js,
+# LumaaGlaass and Figtree, which the server embeds.
 install_shared() {
 	local files
 	files="$(shared_files)"
-	mkdir -p "$1/licenses/polyfin" "$1/licenses/hls.js"
+	mkdir -p "$1/licenses/polyfin" "$1/licenses/hls.js" "$1/licenses/lumaaglaass" "$1/licenses/figtree"
 	cp -R "$files/jellyfin-web" "$files/fonts" "$1/"
 	cp -R "$files/licenses/." "$1/licenses/"
 	cp "$ROOT/LICENSE" "$1/licenses/polyfin/"
 	cp "$ROOT/third_party/hls.js/LICENSE" "$ROOT/third_party/hls.js/NOTICE" "$1/licenses/hls.js/"
+	cp "$ROOT/third_party/lumaaglaass/LICENSE" "$ROOT/third_party/lumaaglaass/NOTICE" "$1/licenses/lumaaglaass/"
+	cp "$ROOT/third_party/figtree/LICENSE" "$ROOT/third_party/figtree/NOTICE" "$1/licenses/figtree/"
 }
 
 # check_install DIR EXE: DIR holds the install layout of docs/desktop.md,
@@ -169,7 +175,7 @@ check_install() {
 	for want in "polyfin$2" "postgresql/bin/postgres$2" "postgresql/bin/initdb$2" "postgresql/bin/pg_ctl$2" \
 		"postgresql/bin/pg_dump$2" "postgresql/bin/pg_restore$2" \
 		jellyfin-web/index.html fonts/truetype/dejavu/DejaVuSans.ttf licenses/jellyfin-web/LICENSE \
-		licenses/jellyfin-web/NOTICE licenses/postgresql licenses/polyfin/LICENSE; do
+		licenses/jellyfin-web/NOTICE licenses/postgresql licenses/polyfin/LICENSE licenses/figtree/LICENSE; do
 		if [ ! -e "$1/$want" ]; then
 			echo "the install folder $1 lacks $want" >&2
 			missing=1
@@ -178,6 +184,11 @@ check_install() {
 	# share is flat, or in share/postgresql, as PostgreSQL's prefix had it.
 	if [ ! -e "$1/postgresql/share/postgres.bki" ] && [ ! -e "$1/postgresql/share/postgresql/postgres.bki" ]; then
 		echo "the install folder $1 lacks PostgreSQL's share" >&2
+		missing=1
+	fi
+	# pg_trgm's trigram indexes serve Polyfin's name searches.
+	if [ ! -e "$1/postgresql/share/extension/pg_trgm.control" ] && [ ! -e "$1/postgresql/share/postgresql/extension/pg_trgm.control" ]; then
+		echo "the install folder $1 lacks PostgreSQL's pg_trgm extension" >&2
 		missing=1
 	fi
 	return "$missing"

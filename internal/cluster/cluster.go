@@ -1,0 +1,590 @@
+// Package cluster runs the PostgreSQL 18 cluster of Polyfin Desktop, and
+// of the image whose server runs its own database (POLYFIN_DATABASE set to
+// embedded): made
+// at first start in the data folder, with a random password kept in a file
+// only the user can read, listening on 127.0.0.1 alone, started before the
+// server and stopped after it. A cluster a crash of the app left running is
+// stopped, and the lock file of one that crashed is cleared, before it
+// starts again. The indexes of a database whose collation version changed
+// with an update are rebuilt as it starts. Its settings keep it light,
+// clusters made by older versions included.
+package cluster
+
+import (
+	"bufio"
+	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"errors"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/url"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+)
+
+// Major is the major version of PostgreSQL the cluster is made and run
+// with. A cluster another major version made needs moving by a backup
+// and a restore: PostgreSQL's server cannot open it.
+const Major = "18"
+
+const (
+	// User is the cluster's only role, its superuser, which the server
+	// signs in as; Database is the server's database.
+	User     = "polyfin"
+	Database = "polyfin"
+
+	// passwordFile and portFile are kept in the cluster's folder, which
+	// PostgreSQL makes readable by the user only.
+	passwordFile = "polyfin.password"
+	versionFile  = "PG_VERSION"
+	portFile     = "polyfin.port"
+	lockFile     = "postmaster.pid"
+
+	// startWait bounds pg_ctl's wait for the cluster to start, crash
+	// recovery included, and to stop.
+	startWait = 300 * time.Second
+	stopWait  = 120 * time.Second
+	// probeWait bounds the attempt to reach a cluster a crash left
+	// running.
+	probeWait = 5 * time.Second
+	// portTries bounds the ports a start tries (see startPostgres).
+	portTries = 3
+)
+
+// settings are appended to the postgresql.conf initdb writes: no Unix
+// socket, which would go in a shared folder, and TCP on the loopback
+// only. The port is given at each start.
+const settings = `
+# Polyfin Desktop: the server reaches the cluster over TCP on the
+# loopback, with the password of polyfin.password.
+listen_addresses = '127.0.0.1'
+unix_socket_directories = ''
+`
+
+// lightMark starts light, which tells a cluster that has it.
+const lightMark = "# Polyfin Desktop: a light cluster."
+
+// light keeps the cluster small: little shared memory, few connections
+// and background workers, no parallel query, which Polyfin does not
+// need, and no JIT compilation. The server's pool stays within
+// max_connections. A restore of a backup takes about 6,150 locks in one
+// transaction, which the lock table, max_locks_per_transaction for each
+// process, holds with room to spare. It is appended to postgresql.conf
+// when the cluster is made, and at the first start of a cluster made
+// before it.
+const light = "\n" + lightMark + `
+shared_buffers = 32MB
+max_connections = 20
+max_locks_per_transaction = 512
+max_worker_processes = 2
+max_parallel_workers = 0
+autovacuum_max_workers = 1
+max_wal_size = 256MB
+jit = off
+`
+
+// Cluster is a PostgreSQL cluster in Dir, run with the programs of Bin.
+type Cluster struct {
+	// Bin is the folder of initdb, pg_ctl and postgres.
+	Bin string
+	// Dir is the cluster's data folder.
+	Dir string
+	// Log is the file PostgreSQL logs to.
+	Log string
+	// Port is the port to listen on; 0 keeps the one chosen at first
+	// start while it is free, else chooses another free one.
+	Port   int
+	Logger *slog.Logger
+	// Rebuilding, when set, is called with true before the start rebuilds
+	// the indexes of databases whose collation version changed, and with
+	// false once it is done.
+	Rebuilding func(on bool)
+
+	password string
+	port     int
+}
+
+// Prepare makes the cluster when Dir has none, and reads its password. It
+// reports whether it made it. A cluster whose making was interrupted is
+// made again: it is made beside Dir and renamed into place once complete.
+func (c *Cluster) Prepare(ctx context.Context) (bool, error) {
+	created := false
+	version, err := os.ReadFile(filepath.Join(c.Dir, versionFile))
+	if errors.Is(err, os.ErrNotExist) {
+		if err := c.initialize(ctx); err != nil {
+			return false, err
+		}
+		created = true
+	} else if err != nil {
+		return false, err
+	} else if err := checkMajor(c.Dir, version); err != nil {
+		return false, err
+	}
+	password, err := os.ReadFile(filepath.Join(c.Dir, passwordFile))
+	if err != nil {
+		return created, fmt.Errorf("read the database password: %w", err)
+	}
+	c.password = strings.TrimSpace(string(password))
+	if c.password == "" {
+		return created, fmt.Errorf("the database password file %s is empty", filepath.Join(c.Dir, passwordFile))
+	}
+	return created, nil
+}
+
+// checkMajor tells when version, the PG_VERSION of the cluster in dir, is
+// not Major.
+func checkMajor(dir string, version []byte) error {
+	if got := strings.TrimSpace(string(version)); got != Major {
+		return fmt.Errorf("the database cluster in %s was made by PostgreSQL %s, and this version of Polyfin runs PostgreSQL %s: "+
+			"make a backup with the Polyfin that made it, then restore it into a new, empty cluster", dir, got, Major)
+	}
+	return nil
+}
+
+// initialize runs initdb into a folder beside Dir, then renames it.
+func (c *Cluster) initialize(ctx context.Context) error {
+	parent := filepath.Dir(c.Dir)
+	if err := os.MkdirAll(parent, 0o700); err != nil {
+		return err
+	}
+	building := c.Dir + ".new"
+	if err := os.RemoveAll(building); err != nil {
+		return err
+	}
+	password, err := newPassword()
+	if err != nil {
+		return err
+	}
+	// initdb reads the password from a file, never from its command line.
+	pwfile, err := os.CreateTemp(parent, ".password-*")
+	if err != nil {
+		return err
+	}
+	defer os.Remove(pwfile.Name())
+	if err := pwfile.Chmod(0o600); err != nil && !errors.Is(err, errors.ErrUnsupported) {
+		pwfile.Close()
+		return err
+	}
+	_, err = pwfile.WriteString(password + "\n")
+	if closeErr := pwfile.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	c.logger().Info("Creating the database cluster", "folder", c.Dir)
+	if err := c.run(ctx, "initdb", initdbArgs(building, pwfile.Name())...); err != nil {
+		return fmt.Errorf("create the database cluster: %w", err)
+	}
+	conf, err := os.OpenFile(filepath.Join(building, "postgresql.conf"), os.O_APPEND|os.O_WRONLY, 0)
+	if err != nil {
+		return err
+	}
+	_, err = conf.WriteString(settings + light)
+	if closeErr := conf.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		return err
+	}
+	if err := os.WriteFile(filepath.Join(building, passwordFile), []byte(password+"\n"), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(building, c.Dir)
+}
+
+// initdbArgs makes a cluster whose superuser is User with the password of
+// pwfile, signing in with SCRAM, in UTF-8. The C locale is the same on
+// every system, Windows' locale names included; ICU's root collation sorts
+// text as Docker's en_US.utf8 cluster does, on every system alike.
+func initdbArgs(dir, pwfile string) []string {
+	return []string{"-D", dir, "-U", User, "--pwfile=" + pwfile, "--auth=scram-sha-256",
+		"--encoding=UTF8", "--locale=C", "--locale-provider=icu", "--icu-locale=und", "--no-instructions"}
+}
+
+// newPassword is 24 random bytes in hexadecimal, which a URL carries
+// unescaped.
+func newPassword() (string, error) {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
+}
+
+// Start starts the cluster, after stopping one a crash of the app left
+// running or clearing the lock file of one that crashed, on another port
+// when the one chosen is taken as it starts, rebuilds the indexes of the
+// databases whose collation version changed, and creates the server's
+// database when it has none. Prepare must have run.
+func (c *Cluster) Start(ctx context.Context) error {
+	if err := c.recover(ctx); err != nil {
+		return err
+	}
+	if err := os.MkdirAll(filepath.Dir(c.Log), 0o700); err != nil {
+		return err
+	}
+	if err := c.lighten(); err != nil {
+		return fmt.Errorf("set the database's light settings: %w", err)
+	}
+	if err := c.startPostgres(ctx); err != nil {
+		return err
+	}
+	if err := c.refreshCollations(ctx); err != nil {
+		return err
+	}
+	if err := c.createDatabase(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
+// startPostgres starts PostgreSQL on the port choosePort gives. A port
+// found free may be taken before PostgreSQL listens on it, by another
+// program given it as a free port meanwhile: PostgreSQL then ends at once.
+// When it ended and its port is taken, another one is chosen, up to
+// portTries ports. A port set in Port is the only one tried.
+func (c *Cluster) startPostgres(ctx context.Context) error {
+	for try := 1; ; try++ {
+		port, err := c.choosePort()
+		if err != nil {
+			return err
+		}
+		c.port = port
+		c.logger().Info("Starting the database", "port", port)
+		err = c.run(ctx, "pg_ctl", "start", "-D", c.Dir, "-l", c.Log, "-w", "-t", seconds(startWait),
+			"-o", "-p "+strconv.Itoa(port))
+		if err == nil {
+			return nil
+		}
+		err = fmt.Errorf("start the database (see %s): %w", c.Log, err)
+		if c.Port != 0 || try == portTries || ctx.Err() != nil || c.PID() != 0 || free(port) {
+			return err
+		}
+		c.logger().Warn("The database's port was taken as it started: trying another one", "port", port, "error", err)
+	}
+}
+
+// lighten appends light to the postgresql.conf of a cluster made before
+// it. It runs once nothing runs the cluster, after recover: the settings
+// apply from the start that follows. The file is written beside, then
+// renamed into place, so that an interrupted write leaves it as it was.
+func (c *Cluster) lighten() error {
+	path := filepath.Join(c.Dir, "postgresql.conf")
+	conf, err := os.ReadFile(path)
+	if err != nil {
+		return err
+	}
+	if strings.Contains(string(conf), lightMark) {
+		return nil
+	}
+	c.logger().Info("Setting the database's light settings")
+	info, err := os.Stat(path)
+	if err != nil {
+		return err
+	}
+	building := path + ".new"
+	file, err := os.OpenFile(building, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, info.Mode().Perm())
+	if err != nil {
+		return err
+	}
+	_, err = file.Write(append(conf, light...))
+	if err == nil {
+		err = file.Sync()
+	}
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		os.Remove(building)
+		return err
+	}
+	return os.Rename(building, path)
+}
+
+// Stop stops the cluster, ending its connections, and waits until it has
+// stopped: at once when fast shutdown does not finish in time.
+func (c *Cluster) Stop(ctx context.Context) error {
+	if _, err := os.Stat(filepath.Join(c.Dir, lockFile)); errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	err := c.run(ctx, "pg_ctl", "stop", "-D", c.Dir, "-m", "fast", "-w", "-t", seconds(stopWait))
+	if err == nil {
+		c.logger().Info("The database stopped")
+		return nil
+	}
+	if !c.Running(ctx) {
+		return nil
+	}
+	c.logger().Warn("The database did not stop in time: stopping it at once", "error", err)
+	return c.run(ctx, "pg_ctl", "stop", "-D", c.Dir, "-m", "immediate", "-w", "-t", seconds(stopWait))
+}
+
+// Running tells whether pg_ctl finds the cluster running.
+func (c *Cluster) Running(ctx context.Context) bool {
+	return c.run(ctx, "pg_ctl", "status", "-D", c.Dir) == nil
+}
+
+// URL is the server's database URL, with the password: never logged.
+func (c *Cluster) URL() string {
+	return c.url(Database)
+}
+
+// url is the URL of database in the cluster. Signing in takes SCRAM, the
+// method the cluster is made with, and no other: the password is sent
+// neither as it is nor as an MD5 digest, whatever answers on the port
+// asks for, and what lets anyone in is not taken for the cluster.
+func (c *Cluster) url(database string) string {
+	u := url.URL{Scheme: "postgresql", User: url.UserPassword(User, c.password),
+		Host: net.JoinHostPort("127.0.0.1", strconv.Itoa(c.port)), Path: "/" + database,
+		RawQuery: "sslmode=disable&require_auth=scram-sha-256"}
+	return u.String()
+}
+
+// PID is the process of the running cluster's postmaster, 0 when none is
+// recorded.
+func (c *Cluster) PID() int {
+	pid, _, _ := readLock(filepath.Join(c.Dir, lockFile))
+	return pid
+}
+
+// choosePort is Port when set; else the port chosen at an earlier start
+// while it is free, else a free port, kept for the next starts.
+func (c *Cluster) choosePort() (int, error) {
+	if c.Port != 0 {
+		return c.Port, nil
+	}
+	path := filepath.Join(c.Dir, portFile)
+	if data, err := os.ReadFile(path); err == nil {
+		if port, err := strconv.Atoi(strings.TrimSpace(string(data))); err == nil && port > 0 && free(port) {
+			return port, nil
+		}
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return 0, err
+	}
+	port := listener.Addr().(*net.TCPAddr).Port
+	if err := listener.Close(); err != nil {
+		return 0, err
+	}
+	return port, os.WriteFile(path, []byte(strconv.Itoa(port)+"\n"), 0o600)
+}
+
+func free(port int) bool {
+	listener, err := net.Listen("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(port)))
+	if err != nil {
+		return false
+	}
+	return listener.Close() == nil
+}
+
+// state is what answers on the port a lock file names.
+type state int
+
+const (
+	// none: nothing answers as PostgreSQL.
+	none state = iota
+	// ours: the cluster, which takes its password.
+	ours
+	// other: another PostgreSQL, which refuses the password.
+	other
+)
+
+// recover deals with the lock file a cluster left: one still running,
+// left by a crash of the app, is stopped; the lock of one no longer
+// running, whose process number another process may have taken since, is
+// removed, and PostgreSQL recovers its data as it starts.
+func (c *Cluster) recover(ctx context.Context) error {
+	path := filepath.Join(c.Dir, lockFile)
+	pid, port, err := readLock(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil || port == 0 {
+		c.logger().Warn("The database's lock file cannot be read: removing it", "error", err)
+		return os.Remove(path)
+	}
+	switch c.probe(ctx, port) {
+	case ours:
+		c.logger().Warn("The database was left running: stopping it", "pid", pid)
+		if err := c.Stop(ctx); err != nil {
+			return fmt.Errorf("stop the database left running: %w", err)
+		}
+		return nil
+	default:
+		c.logger().Warn("The database stopped without removing its lock file: removing it", "pid", pid)
+		if err := os.Remove(path); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+		return nil
+	}
+}
+
+// probe tells what answers on port. A PostgreSQL that takes the password,
+// or that is starting, recovering or stopping, is the cluster; one that
+// refuses the password is another; one that asks for it otherwise than
+// with SCRAM, or does not ask, is given nothing and counts as none.
+func (c *Cluster) probe(ctx context.Context, port int) state {
+	saved := c.port
+	c.port = port
+	address := c.url("postgres")
+	c.port = saved
+	attempt, cancel := context.WithTimeout(ctx, probeWait)
+	defer cancel()
+	conn, err := pgx.Connect(attempt, address)
+	if err == nil {
+		_ = conn.Close(ctx)
+		return ours
+	}
+	var pgErr *pgconn.PgError
+	switch {
+	case !errors.As(err, &pgErr):
+		return none
+	case pgErr.Code == "57P03":
+		// The database is starting up, recovering or shutting down.
+		return ours
+	default:
+		return other
+	}
+}
+
+// readLock reads the process number and the port of a lock file: its
+// first and fourth lines.
+func readLock(path string) (pid, port int, err error) {
+	file, err := os.Open(path)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer file.Close()
+	scanner := bufio.NewScanner(file)
+	for line := 1; line <= 4 && scanner.Scan(); line++ {
+		text := strings.TrimSpace(scanner.Text())
+		switch line {
+		case 1:
+			pid, _ = strconv.Atoi(text)
+		case 4:
+			port, _ = strconv.Atoi(text)
+		}
+	}
+	return pid, port, scanner.Err()
+}
+
+// createDatabase creates the server's database when the cluster has none:
+// at first start, or after a first start interrupted before it.
+func (c *Cluster) createDatabase(ctx context.Context) error {
+	ctx, cancel := context.WithTimeout(ctx, time.Minute)
+	defer cancel()
+	conn, err := pgx.Connect(ctx, c.url("postgres"))
+	if err != nil {
+		return fmt.Errorf("connect to the database: %w", err)
+	}
+	defer conn.Close(ctx)
+	var exists bool
+	if err := conn.QueryRow(ctx, "SELECT EXISTS (SELECT FROM pg_database WHERE datname = $1)", Database).Scan(&exists); err != nil {
+		return err
+	}
+	if exists {
+		return nil
+	}
+	c.logger().Info("Creating the database", "database", Database)
+	_, err = conn.Exec(ctx, "CREATE DATABASE "+pgx.Identifier{Database}.Sanitize())
+	return err
+}
+
+// waitDelay bounds the wait for a program's output once it has ended:
+// a program that leaves a process behind holding its output must not hang
+// the app.
+const waitDelay = 10 * time.Second
+
+// run runs one of PostgreSQL's programs, its output kept for the error.
+// pg_ctl start leaves the postmaster running, which inherits pg_ctl's
+// output on Windows: it gets a file, never a pipe the app waits on.
+func (c *Cluster) run(ctx context.Context, program string, args ...string) error {
+	cmd := command(ctx, filepath.Join(c.Bin, executable(program)), args...)
+	cmd.Env = environment(os.Environ())
+	cmd.WaitDelay = waitDelay
+	var out []byte
+	var err error
+	if len(args) > 0 && args[0] == "start" {
+		out, err = c.runLogged(cmd)
+	} else {
+		out, err = cmd.CombinedOutput()
+	}
+	if err != nil {
+		var exit *exec.ExitError
+		if message := strings.TrimSpace(string(out)); message != "" && errors.As(err, &exit) {
+			return fmt.Errorf("%s: %w: %s", program, err, lastLines(message, 5))
+		}
+		return fmt.Errorf("%s: %w", program, err)
+	}
+	return nil
+}
+
+// runLogged runs cmd with its own output in a file of its own, pg_ctl.log
+// beside the cluster's log, and returns that output. The cluster's log is
+// left to pg_ctl -l alone: Windows refuses to open a file a second time
+// while the app holds it.
+func (c *Cluster) runLogged(cmd *exec.Cmd) ([]byte, error) {
+	if err := os.MkdirAll(filepath.Dir(c.Log), 0o700); err != nil {
+		return nil, err
+	}
+	file, err := os.OpenFile(c.programLog(), os.O_CREATE|os.O_TRUNC|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	cmd.Stdout, cmd.Stderr = file, file
+	runErr := cmd.Run()
+	if runErr == nil {
+		return nil, nil
+	}
+	out := make([]byte, 64<<10)
+	n, _ := file.ReadAt(out, 0)
+	return out[:n], runErr
+}
+
+// programLog is the file of pg_ctl start's own output.
+func (c *Cluster) programLog() string {
+	return filepath.Join(filepath.Dir(c.Log), "pg_ctl.log")
+}
+
+// environment is the app's, without the PG variables, which would point
+// PostgreSQL's programs at another cluster or server.
+func environment(env []string) []string {
+	kept := make([]string, 0, len(env))
+	for _, entry := range env {
+		name, _, _ := strings.Cut(entry, "=")
+		if strings.HasPrefix(strings.ToUpper(name), "PG") {
+			continue
+		}
+		kept = append(kept, entry)
+	}
+	return kept
+}
+
+func lastLines(text string, n int) string {
+	lines := strings.Split(text, "\n")
+	if len(lines) > n {
+		lines = lines[len(lines)-n:]
+	}
+	return strings.Join(lines, " ")
+}
+
+func seconds(d time.Duration) string { return strconv.Itoa(int(d / time.Second)) }
+
+func (c *Cluster) logger() *slog.Logger {
+	if c.Logger == nil {
+		return slog.New(slog.DiscardHandler)
+	}
+	return c.Logger
+}

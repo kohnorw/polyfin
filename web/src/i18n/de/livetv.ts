@@ -1,0 +1,169 @@
+import type en from '../en/livetv'
+
+const livetv: typeof en = {
+  livetv: {
+    title: 'Live-TV',
+    description:
+      'TV-Kataloge stammen aus deinen Quellen. Öffne die Fernsehprogramme eines Katalogs, um seinen Kanälen ein Programm zu geben.',
+    recordings: 'Aufnahmeeinstellungen',
+    settings: 'Live-TV-Einstellungen',
+    catalogsTitle: 'TV-Kataloge',
+    catalogsHelp:
+      'Ein als Bibliothek angezeigter TV-Katalog bringt seine Kanäle in das Live-TV der Jellyfin-Apps. Seine Fernsehprogramme liefern den Kanälen ihr Programm.',
+    catalogsLabel: 'TV-Kataloge',
+    catalogsLoading: 'TV-Kataloge werden geladen…',
+    catalogsEmptyTitle: 'Noch kein TV-Katalog',
+    catalogsEmpty:
+      'Installiere unter „Quellen“ ein Add-on mit TV-Katalog oder füge eine IPTV-Quelle hinzu: Ihre Kanäle werden hier aufgeführt.',
+    addSource: 'Quelle hinzufügen',
+    kinds: { stremio: 'Stremio-Add-on', iptv: 'IPTV-Quelle' },
+    guides: (count: number) => (count === 1 ? '1 Fernsehprogramm' : `${count} Fernsehprogramme`),
+    guideNone: 'Kein Fernsehprogramm',
+    failing: (count: number) =>
+      count === 1
+        ? 'Der letzte Download von 1 Fernsehprogramm ist fehlgeschlagen.'
+        : `Der letzte Download von ${count} Fernsehprogrammen ist fehlgeschlagen.`,
+    mapped: (mapped: string, channels: string) =>
+      `${mapped} von ${channels} Kanälen mit Fernsehprogramm`,
+    guideLine: (position: number, message: string) => `Fernsehprogramm ${position}: ${message}`,
+    manage: 'Fernsehprogramme und Zuordnung',
+    lineup: 'Senderliste und Fernsehprogramme',
+    lineupLabel: (name: string) => `Senderliste und Fernsehprogramme von ${name}`,
+    manageLabel: (name: string) => `Fernsehprogramme und Zuordnung von ${name}`,
+    notShownHelp:
+      'Zeige ihn als Bibliothek an, um seine Kanäle ins Live-TV zu bringen und ihm Fernsehprogramme zu geben.',
+    openLibraries: 'Bibliotheken öffnen',
+    states: {
+      notShown: 'Nicht im Live-TV',
+      addonOff: 'Add-on deaktiviert',
+      missing: 'Nicht mehr verfügbar',
+      failed: 'Download des Fernsehprogramms fehlgeschlagen',
+      noGuide: 'Kein Fernsehprogramm',
+      notFetched: 'Noch nicht abgerufen',
+      incomplete: 'Fernsehprogramm unvollständig',
+      complete: 'Fernsehprogramm vollständig',
+    },
+    iptvTitle: 'IPTV-Kanäle',
+    iptvHelp: 'Die Live-Kanäle jeder IPTV-Quelle, so wie ihre Senderliste sie führt.',
+    iptvLoading: 'IPTV-Quellen werden geladen…',
+    iptvEmptyTitle: 'Noch keine IPTV-Quelle',
+    iptvEmpty:
+      'Füge unter „Quellen“ eine M3U-Wiedergabeliste oder ein Xtream-Codes-Konto hinzu: Ihre Kanäle werden hier gezählt.',
+    kindM3u: 'M3U-Wiedergabeliste',
+    kindXtream: 'Xtream-Codes-Konto',
+    kindTuner: 'HDHomeRun-Tuner',
+    turnedOff: 'Deaktiviert',
+    downloadFailed: 'Download fehlgeschlagen',
+    active: 'Aktiv',
+    lastDownload: 'Letzter Download',
+    nextDownload: 'nächster',
+    never: 'nie',
+    figuresLabel: (name: string) => `Kanäle von ${name}`,
+    figures: {
+      enabled: 'Aktive Kanäle',
+      shown: 'In Apps angezeigt',
+      mapped: 'Mit Fernsehprogramm',
+      unmapped: 'Ohne Fernsehprogramm',
+    },
+    noLiveTv: 'Diese Quelle importiert keine Live-Kanäle.',
+    importOptions: 'Importoptionen',
+    openMapping: 'Programmzuordnung öffnen',
+    recordingsTitle: 'Aufnahmen',
+    recordingsLoading: 'Aufnahmen werden geladen…',
+    recordingsOffTitle: 'Aufnahme ist deaktiviert',
+    recordingsOff:
+      'Aktiviere sie und lege Vor- und Nachlaufzeit sowie die Aufbewahrungsdauer der Aufnahmen unter Einstellungen › Aufnahmen fest.',
+    noTimersTitle: 'Keine Aufnahme geplant',
+    noTimers:
+      'Aufnahmen werden über das Fernsehprogramm in den Jellyfin-Apps geplant. Sie werden hier aufgeführt, bis sie enden.',
+    recordingNow: 'Wird aufgenommen',
+    scheduled: 'Geplant',
+    failed: 'Fehlgeschlagen',
+    series: 'Serie',
+    scheduledBy: (name: string) => `Geplant von ${name}`,
+    unknownChannel: 'Kanal nicht gefunden',
+    tunersShort: 'Nicht genug Tuner',
+    tunersShortHelp:
+      'Auf den Kanälen dieses Geräts laufen gleichzeitig mehr Aufnahmen, als es Tuner hat: Eine davon kann fehlschlagen.',
+    guidesOf: (name: string) => `Fernsehprogramme von ${name}`,
+    spaceSaved: (count: number, saved: string) =>
+      count === 1
+        ? `1 Aufnahme in HEVC konvertiert: ${saved} gespart.`
+        : `${count} Aufnahmen in HEVC konvertiert: ${saved} gespart.`,
+  },
+  ownChannels: {
+    title: 'Kanäle aus deinen Titeln',
+    help: 'Kanäle, die deine Filme und Episoden rund um die Uhr senden, aus einer Sammlung, einer intelligenten Liste, einer Serie oder Titeln deiner Wahl. Jellyfin-Apps listen sie mit den anderen Kanälen auf, ihre Sendungen im Programmführer.',
+    add: 'Kanal hinzufügen',
+    loading: 'Kanäle werden geladen…',
+    label: 'Kanäle aus deinen Titeln',
+    emptyTitle: 'Noch kein eigener Kanal',
+    empty:
+      'Erstelle einen aus einer Sammlung, einer intelligenten Liste, einer Serie oder Titeln deiner Wahl: Er sendet sie nacheinander, den ganzen Tag.',
+    off: 'Ausgeschaltet',
+    entries: (count: number, formatted: string) =>
+      count === 1 ? '1 Film oder Episode' : `${formatted} Filme und Episoden`,
+    blockCount: (count: number) => (count === 1 ? '1 Zeitblock' : `${count} Zeitblöcke`),
+    now: (name: string) => `Jetzt: ${name}`,
+    back: 'Live-TV',
+    newTitle: 'Neuer Kanal',
+    lede: 'Seine Titel werden beim Speichern des Kanals gelesen, damit sein Programm gleich bleibt: Lies sie erneut, um später hinzugekommene aufzunehmen.',
+    notFound: 'Diesen Kanal gibt es nicht mehr.',
+    name: 'Name',
+    number: 'Nummer',
+    numberHelp: 'Leer: nach den anderen Kanälen.',
+    enabled: 'In Apps angezeigt',
+    programmes: 'Sendungen',
+    programmesHelp:
+      'Was der Kanal sendet. Serien senden ihre Episoden der Reihe nach, ohne Specials. Ein Titel ohne Laufzeit zählt 90 Minuten bei einem Film, 30 bei einer Episode.',
+    kind: 'Zusammengestellt aus',
+    kinds: {
+      collection: 'Sammlung',
+      smartlist: 'Intelligente Liste',
+      series: 'Serie',
+      titles: 'Titel',
+    },
+    collection: 'Sammlung',
+    smartList: 'Intelligente Liste',
+    choose: 'Auswählen…',
+    noCollections: 'Noch keine Sammlung: Erstelle eine in einer Jellyfin-App.',
+    noSmartLists: 'Noch keine intelligente Liste: Erstelle eine unter Bibliotheken.',
+    search: 'Suchen',
+    searchTitles: 'Filme und Serien suchen',
+    searchSeries: 'Eine Serie suchen',
+    noResults: 'Nichts gefunden.',
+    pick: (name: string) => `${name} hinzufügen`,
+    remove: (name: string) => `${name} entfernen`,
+    picked: 'Ausgewählt',
+    pickedNone: 'Noch nichts ausgewählt.',
+    movie: 'Film',
+    series: 'Serie',
+    shuffle: 'Zufällige Reihenfolge',
+    shuffleHelp:
+      'Sendet die Titel in jeder Runde in einer neuen Reihenfolge statt in ihrer eigenen.',
+    blocks: 'Zeitblöcke',
+    blocksHelp:
+      'Jeden Tag sendet ein Block seine eigenen Titel von seinem Beginn bis zu seinem Ende, in der Zeitzone des Servers, und die Sendungen des Kanals füllen den Rest des Tages. Eine Sendung, die das Ende eines Blocks abschneidet, läuft am nächsten Tag vollständig.',
+    addBlock: 'Zeitblock hinzufügen',
+    removeBlock: (n: number) => `Block ${n} entfernen`,
+    block: (n: number) => `Block ${n}`,
+    from: 'Von',
+    until: 'Bis',
+    airing: 'Auf Sendung',
+    airingHelp: 'Was der Kanal jetzt sendet, und danach.',
+    nothing: 'Es läuft nichts.',
+    rebuild: 'Titel erneut lesen',
+    rebuildHelp:
+      'Liest die Quellen erneut für die seitdem hinzugefügten oder entfernten Titel. Das Programm beginnt heute neu.',
+    create: 'Kanal erstellen',
+    created: 'Kanal erstellt',
+    saved: 'Kanal gespeichert',
+    delete: 'Löschen',
+    deleted: 'Kanal gelöscht',
+    deleteTitle: (name: string) => `${name} löschen?`,
+    deleteBody:
+      'Seine Sendungen verschwinden aus dem Programmführer, und die darauf geplanten Aufnahmen können nicht mehr erfolgen.',
+  },
+}
+
+export default livetv

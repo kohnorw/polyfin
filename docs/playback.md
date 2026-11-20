@@ -1,374 +1,213 @@
 # Playback
 
-This page explains how Polyfin plays a title in Jellyfin apps: versions, chapters, preparing playback in advance, the settings that choose a version, watching together, and scrubbing thumbnails.
+How a title plays in Jellyfin apps, how analysis picks a working version, chapters, and Watch together.
+
+See also [Versions](versions.md), [Audio and subtitle tracks](audio-and-subtitle-tracks.md), [Reading the sources](reading-the-sources.md) and [Scrubbing thumbnails](scrubbing-thumbnails.md).
 
 ## How a title plays
 
-Polyfin always handles sign-in, accounts, browsing, metadata, source selection and playback state. Apps never see the addons' stream URLs: they receive Polyfin's own, signed for the user.
+Polyfin handles sign-in, accounts, browsing, metadata, source choice and playback state. Apps get Polyfin's stream URLs, signed for the user, never the addons' URLs:
 
-A version reaches the app in one of three ways:
+```mermaid
+flowchart TD
+  A["App presses Play"] --> P["Polyfin picks<br>a version and<br>signs a URL"]
+  P --> Q{"Can the app<br>play the file<br>as it is and<br>reach the source?"}
+  Q -->|"yes"| D["Direct play:<br>the app reads<br>the source"]
+  Q -->|"plays it, cannot<br>reach it, or may not<br>be sent to it"| R["Relay: Polyfin<br>reads the source<br>and passes it on"]
+  Q -->|"cannot play it<br>as it is"| F["FFmpeg reads<br>through the<br>source cache"]
+  F --> RP["Repackage:<br>tracks copied<br>into HLS"]
+  F --> CV["Convert:<br>video or audio<br>re-encoded<br>into HLS"]
+```
 
-- **Direct play.** The app plays the version as it is. Polyfin sends it to the provider's URL, so the stream does not pass through the server.
-- **Relay.** Polyfin reads the stream and passes it on when the app could not reach the source itself: a source that needs request headers, one on a local network address, or a redirect the app could not follow.
-- **HLS.** FFmpeg reads the stream through Polyfin's cache and Polyfin serves it as HLS segments, remuxed or transcoded. See [Transcoding](transcoding.md).
+| Mode | When | What the server does |
+|---|---|---|
+| Direct play | The app plays the version as it is, and its user may be sent to the source (see [Who is sent to the source](#who-is-sent-to-the-source)) | Redirects to the provider's URL; the stream skips the server |
+| Relay | The app cannot reach the source: request headers, local network address, torrent, or unfollowable redirect. Or its user may not be sent to it: an IPTV source, or a server addon played by a user who is not an administrator | Reads the stream and passes it on |
+| Repackage or convert | The app cannot play the file as it is | FFmpeg reads through the source cache; Polyfin serves HLS. See [Transcoding](transcoding.md) |
 
-Whether a version plays directly or is converted decides how much bandwidth the server uses.
+The mode decides server bandwidth.
 
-**For app developers:**
+- **Opened in a browser:** a stream's address opened as a page in a browser, a link followed or an address typed, is relayed rather than redirected. Apps and the web player's video are redirected as before.
+- **Relayed types:** a relayed stream keeps the type its source gives it only when that is a media type, such as `video/mp4` or `audio/aac`. Anything else is passed on as `application/octet-stream`.
 
-- Direct play answers with a `302` redirect to the debrid or provider URL.
+API details: [Direct play and media source paths for apps](jellyfin-api.md#direct-play-and-media-source-paths-for-apps).
+
+### Streams that are HLS playlists
+
+An addon's stream may be an HLS playlist rather than one file. A finished playlist, which ends with `#EXT-X-ENDLIST`, plays as a file of its length. A video an addon lists among other titles whose playlist has no end plays live (see [Live videos](versions.md#live-videos)).
+
+- **Every file through Polyfin:** ffprobe, FFmpeg and relayed apps get the playlist with each address it names replaced by Polyfin's: variant and rendition playlists, segments, keys (`EXT-X-KEY`) and initialization sections (`EXT-X-MAP`). Polyfin fetches each with the headers the addon declares (`proxyHeaders`), within the source's address rules. Relative addresses are read from the playlist's own.
+- **Refused:** a playlist that names an address that is not HTTP is refused, and so is a line FFmpeg would read otherwise than Polyfin wrote it: an inline key (`data:`) that holds a quote or a backslash, or a tag of more than 4095 bytes cut within an address. The stream fails rather than being read past Polyfin.
+- **Byte ranges:** a segment or a section named with `EXT-X-BYTERANGE` is fetched as that range.
+- **Still finished:** the playlist keeps its tags, `#EXT-X-ENDLIST` included, so it keeps its duration and seeking.
+- **Bounds:** a playlist names up to 50,000 addresses, its segments, keys, sections and other playlists together, and holds up to 32 MB once each is replaced by Polyfin's. A longer one is not relayed: the stream fails, and an app that asked for the playlist receives a `502`. A day of 4-second segments names 21,600 addresses.
+- **Played as it is:** an app that plays HLS, such as jellyfin-web, gets the playlist. It is sent to the source when it can reach it itself, and relayed as above otherwise.
+- **Over HLS:** Polyfin reads no keyframe index from a playlist. It is cut every few seconds, and its video is converted, as for addon MPEG-TS files (see [Version names](versions.md#version-names)).
+- **Not kept:** the files a playlist names are fetched at each request, outside the source cache. A seek fetches its segment again.
+- **Media only:** a file a playlist names keeps the type its source gives it only when that is a media type: video, audio, a playlist, WebVTT subtitles or a picture. Anything else is passed on as `application/octet-stream`. A file that is a web page is not relayed: the app receives a `502`.
 
 ## Versions and analysis
 
-A title's details list every stream the addons offer as a version (see [Title pages](#title-pages) for when). The first time a version is played, Polyfin analyzes it with ffprobe, which takes a few seconds, and keeps the result. It then tells the app whether the app can play the version as it is, as a Jellyfin server would.
+A title's details list each addon stream as a version (see [Title pages](versions.md#title-pages)). On first play, Polyfin analyzes a version with ffprobe in a few seconds and keeps the result. Like a Jellyfin server, it then tells the app whether it can play the version as it is.
 
-- Versions keep the addons' order, addon after addon: the server's sources in the order of **Content › Sources**, folders included, then the user's own addons in theirs. The [version order](#version-order) settings may order them otherwise, by their source too, or hide some. Picking or playing one never moves it.
-- When the app has not picked a version, a version that cannot be read, or does not play on the app, is skipped in favor of the next one. It is also left out of the versions Polyfin lists, which keep their order starting from the one chosen, for apps that let the user pick at that point.
-- A version that would play over HLS but whose keyframe index cannot be read is skipped the same way, as nothing could stream it.
-- The first versions are analyzed together, up to 3 at once, and taken in order. Once a later one is ready, Polyfin waits 3 more seconds for those before it, then plays the later one: a source that never answers delays playback by those 3 seconds rather than by the whole analysis time. The analyses still running go on in the background and are kept for the next play.
-- The title's page plays the version the app sends. Most apps (the web player, Android TV, Swiftfin) send the title's own identifier, which names the first version: Polyfin then chooses among all the versions as when the app picks none. Only a version picked in the version menu, under its own identifier, is played alone.
-- Apps can save the user's playback preferences (audio and subtitle languages, subtitle mode). These choose the default audio and subtitle tracks. See [Subtitles](subtitles.md).
-- Apps that keep titles for offline viewing can download the movies and episodes whose versions they were shown. A download is the version's file, under its file name, sent to the source or relayed as playback would be. With **Converted downloads** on, apps that ask for a lower quality, such as Streamyfin, get a smaller copy instead, made as they download it. See [Converted downloads](transcoding.md#converted-downloads).
-- Active playback appears in Jellyfin apps' dashboards.
-- Apps can control one another (play, pause, seek, messages) when the controlled app keeps Jellyfin's live connection (WebSocket) open.
-- The skip intro, recap and credits buttons come from [TheIntroDB](https://theintrodb.org) and [IntroDB](https://introdb.app), community databases, from the chapters of the version played, and, for the episodes of local folders, from the intro and the credits their season's episodes share in their audio. Polyfin sends the databases only titles' IDs, episode numbers and runtimes. See [Skip segments](skip-segments.md).
-- With **Describe versions from RemuxDB** on, a title's page shows the tracks of its versions before they are played, from what [RemuxDB](https://remuxdb.1632022.xyz), a community database, found in the same files. Polyfin sends it only titles' IDs. See [Tracks from RemuxDB](#tracks-from-remuxdb).
+### Addon order of versions
 
-**Compared with Jellyfin:**
+Versions keep the addons' order: the server's sources as in **Content › Sources**, folders included, then the user's own addons. The [version order](versions.md#version-order) settings can reorder them, also by source, or hide some. Picking or playing a version never moves it.
 
-- Jellyfin 12.2 lists first the version an app opens as an item. jellyfin-web's version menu does this once a version is picked, so the menu reorders itself there. Polyfin keeps the menu as it was.
-- Jellyfin lists all versions in PlaybackInfo, including the ones that cannot be read or played.
+### Skipped versions
 
-**For app developers:**
+When the app picked no version, Polyfin skips and leaves out of its list any version that cannot be read, does not play on the app, or needs HLS but has an unreadable keyframe index. The rest keep their order from the chosen one, for apps that let the user pick there.
 
-- Unreadable or unplayable versions are left out of the versions `PlaybackInfo` lists only when the app has not picked a version.
-- A `MediaSourceId` equal to the item's own identifier picks no version: `PlaybackInfo` tries the versions in order, as without one, and answers with the version chosen alone, under its own identifier unless it is the first. Any other `MediaSourceId` plays that version or nothing.
-- Elsewhere, the item's own identifier as a media source (the `mediaSourceId` of `/Videos/{id}/stream`, subtitle and attachment URLs, playback reports) stands for the version the item's details and `PlaybackInfo` list under it: the first they list, after leaving out the versions that failed lately and those the [version order](#version-order) rules or the user's quality group leave out. A version that fails thus passes the identifier to the next one, wherever its addon is in the addons' order, and the next one's own identifier keeps naming it.
-- `StartTimeTicks` in the query or the body tells where an HLS play starts, so that Polyfin reads ahead from there.
+### Analysis timing
 
-### Title pages
+Up to 3 versions are analyzed at once, taken in order. When a later one is ready, Polyfin waits 3 more seconds for earlier ones, then plays it. A silent source thus costs 3 seconds, not the whole analysis. Unfinished analyses continue in the background for the next play.
 
-A title's page opens as soon as its description is ready, without waiting for the stream addons, some of which are slow. It lists the versions Polyfin already knows: those of the addons that answered for the title within **Keep version lists for (minutes)**, and those of IPTV sources. Polyfin asks the other addons in the background meanwhile.
+### What FFmpeg may open
 
-A title opened again once **Keep version lists for (minutes)** has passed shows the versions known before at once, even old ones, while Polyfin asks the addons again. For this, Polyfin keeps an addon's list for 24 hours after that time, also across restarts: the last list of each addon for each title is saved in the database. Listings may show these versions too.
+ffprobe and FFmpeg read a stream at an address of Polyfin's own, on the server's loopback interface. Polyfin fetches the bytes with the headers the source needs, within the source's address rules, and tells them what they may open there:
 
-- Play does not wait for the addon's new answer: it plays the old versions, asking the addon again in the background. Expired links are renewed when the source refuses them. Only when none of the old versions plays does Play wait for the new answer, then choose among its versions.
-- After a restart, a title shows the versions saved before at once, as old versions, while Polyfin asks the addons again.
-- The new answer replaces the old list. The versions it lacks stay listed after its own until Polyfin stops asking the addon again (see below): an addon that gathers other addons' streams often answers first with only part of them. They still play meanwhile.
-- Once Polyfin stops asking, the list is the addon's last answer alone: the versions the addon no longer lists disappear.
-- [Refresh metadata](jellyfin-compatibility.md#refresh-metadata) drops the old lists too.
-- Subtitles from the addons are kept the same way.
-- An answer made only of notices, with nothing to play, as an addon sends when it limits requests, counts as the addon failing: the versions it listed before stay listed, and it is asked again as before. The log tells it (`An addon could not list streams`). An empty answer still replaces the list: the addon has nothing for the title any more.
+- **Protocols:** HTTP to Polyfin's address, and for an HLS playlist its encrypted segments and inline keys. They open no file, no other port and no TLS connection of their own.
+- **One file:** a file is read by the container its bytes tell, among those that hold one file or one stream. A file whose bytes are a DASH manifest, a list of files to join or a session description (SDP) is not read as one: its analysis fails with `not a playable video`.
+- **Playlists and manifests:** FFmpeg's HLS and DASH readers are used only where Polyfin found a playlist or a manifest, and rewrote its addresses.
+- **Other hosts:** Polyfin's address is also FFmpeg's HTTP proxy, and answers for itself alone. An address a playlist or a manifest would still name is refused there instead of being fetched. FFmpeg skips its proxy for the hosts the server's `no_proxy` environment variable names.
+- **Discs and Polyfin's own files on disk** are read by their path, with FFmpeg's own choice of reader.
 
-Some addons gather other addons' streams. They answer the first request for a title with the streams that came in within their own time limit, and get the others moments later. So Polyfin asks an addon again 10 seconds after its first answer for a title, and once more 30 seconds later if that answer listed more playable streams:
+### Which version plays
 
-- Polyfin keeps the longer list, from then on for **Keep version lists for (minutes)**. It never replaces a list with a shorter one. Each answer is compared with the addon's previous answer, not with the old versions still listed after it.
-- It stops at the first answer that lists no more streams, at an error, or once the list is dropped, by [Refresh metadata](jellyfin-compatibility.md#refresh-metadata), or has expired, at the end of **Keep version lists for (minutes)**. A late answer never brings back a dropped list, nor makes an expired one current again.
-- It asks again only when it asked the addon itself. A list it already kept is used as it is. IPTV sources are never asked again: their streams are Polyfin's own.
-- Subtitles from the addons are asked again the same way, and the longer list kept.
-- Opening a title and playing never wait for these requests.
-- Renewing an expired link asks the addon as opening the title does, joining a request already under way, and asks again in the same way. When the answer lacks the version's file, Polyfin asks the addon again at once and waits for that answer, 10 seconds at most, before giving the link up. Meanwhile the title keeps listing every version.
-- A version keeps its identifier from one answer of its addon to the next, and with it its place on a title's page already open and what Polyfin learned of its file. Polyfin knows a file by its name and size when the addon gives both, else by its link. When an answer gives a new link, as links that carry a token do, or tells the file's name or size only then, the stream takes the identifier of the version of the list it replaces that is the same file: their names and sizes agree wherever both give them, and either the link is the same, or the file's name is, or only a token differs, the link keeping its host and the last part of its path, which is the file's name or comes with the same stream name and description. A match counts only when it is the one on each side, so two versions never share an identifier. Saved lists keep these identifiers across restarts, and renewing an expired link finds the version the same way.
+The title's page plays the version the app sends. Most apps (the web player, Android TV, Swiftfin) send the title's identifier, which names the first version, so Polyfin chooses among all versions. Only a version picked in the version menu, under its own identifier, plays alone.
 
-In apps:
+### Other app features
 
-- In the web player, the versions appear in the page's version menu as each addon answers, then as an addon asked again lists more. They are added in place: the page is not reloaded, and a version already picked stays picked with its audio and subtitle choices. The page reloads its details only when the version picked is gone or has changed, for instance when the placeholder gives way to the first version. The version selected, the first by default or one the user picked, stays selected even when a version that comes is listed first: the first version carries the title's own identifier, which passes to the new first one, and the page then selects the version it had under that version's own identifier, even when a later answer renamed it or told its size. A version that loses its identifier all the same is selected again when it is the one version listed with its name, and its size when both are known. Nothing changes while a video plays or while the version menu has focus, since it may be open: the versions come once it loses focus.
-- With **Add versions to an open title's page** off, under **Settings › Web player**, the web player adds no version to a page already open. A page opened before any version was known still has the placeholder give way to the versions known then, once, and its play buttons still wait for a version. The others show when the page is opened again.
-- Other Jellyfin apps cannot be told to refresh the page. They show the versions known when it opened, and get every version when the user presses Play, or when the page is opened again.
-- With [Prepare playback in advance](#preparing-playback-in-advance) on, Polyfin lists the versions of the titles of Continue Watching and Next Up as soon as an app asks for these rows. Once they are listed, every app opens those titles with all their versions.
-- In the web player, a movie's or an episode's Play, Resume and Play from the start buttons wait for a version. While none is known and addons are still asked, they are greyed and disabled, with a small spinner and the tooltip "Looking for sources…". They come back as soon as the first version is known, without reloading the page. The page asks Polyfin as soon as it opens; until Polyfin answers, the buttons wait already when the page lists only the placeholder, as it does while no version is known.
-- When every addon has answered without a version, the buttons stay disabled and a line under them says "No source is available for this title.", with a **Try again** button. It has Polyfin drop the title's version lists for the user's addons and ask them again, and the buttons wait again meanwhile. A user can ask again once every 20 seconds for a title. The words follow the web player's language (English or French, English otherwise). Nothing changes during a video, and leaving the page gives the buttons back as they were.
-- In other apps, until a version is known, the title still shows as playable. Play waits for the addons still answering for the first time, then picks among all the versions, as before.
-- An addon that fails, or does not answer within 15 seconds, only leaves its versions out.
-- Subtitles from the addons follow the same way: those known show at once, and the others with Play or the next opening. Play waits for them one second at most once the versions are in: later ones come with the next play or track change.
+- Saved playback preferences (audio and subtitle languages, subtitle mode) pick the default tracks; otherwise the server's [default languages](audio-and-subtitle-tracks.md#default-audio-and-subtitle-languages) apply. See [Subtitles](subtitles.md).
+- Apps that keep titles for offline viewing can download movies and episodes whose versions they were shown: the version's file under its name, sent to the source or relayed, or a smaller copy with [Converted downloads](transcoding.md#converted-downloads).
+- Jellyfin apps' dashboards show active playback.
+- Apps can control one another (play, pause, seek, messages) if the controlled app keeps Jellyfin's live connection (WebSocket) open.
+- Skip intro, recap and credits buttons come from four community databases, the version's chapters and, for local folders' episodes, their audio (see [The four databases](skip-segments.md#the-four-databases)). The databases get only titles' IDs, episode numbers and runtimes.
+- **Describe versions from RemuxDB** shows versions' tracks before play, from what the community database [RemuxDB](https://remuxdb.1632022.xyz) found in the same files. It gets only titles' IDs. See [Tracks from RemuxDB](versions.md#tracks-from-remuxdb).
+
+**Compared with Jellyfin**
+
+- Jellyfin 12.4 lists first the version an app opens, so jellyfin-web's menu reorders after a pick. Polyfin keeps the menu as it was.
+- Jellyfin's PlaybackInfo lists unreadable and unplayable versions too.
+- If the app names no audio track and none is flagged default, Polyfin checks the first track against the app's profile. An undecodable track is converted, and drops "(direct play)".
+  - Jellyfin 12.4 checks no audio then, and plays the file as it is ([`StreamBuilder.cs`, lines 675 to 707](https://github.com/jellyfin/jellyfin/blob/v12.4/MediaBrowser.Model/Dlna/StreamBuilder.cs#L675-L707) and [1362 to 1372](https://github.com/jellyfin/jellyfin/blob/v12.4/MediaBrowser.Model/Dlna/StreamBuilder.cs#L1362-L1372)).
+  - jellyfin-web never hits this on Jellyfin, which always lists tracks. An unanalyzed Polyfin version lists none, so jellyfin-web names no track, and browsers played AC-3, E-AC-3 or DTS silently. Channels too.
+- Video without audio is logged at Info once per version as "A version has no audio track", with the number of tracks found.
+
+API details: [Version picking in PlaybackInfo for apps](jellyfin-api.md#version-picking-in-playbackinfo-for-apps).
+
+## Who is sent to the source
+
+Direct play sends the app to the source's own address. That address can hold what the source was set up with: the key of an addon, or the name and password of an IPTV account. So Polyfin sends an app there only when its user owns the source, and relays the version to everyone else.
+
+| The version comes from | The app is sent to the source |
+|---|---|
+| An IPTV source, the server's or a user's own | Never. Polyfin builds these addresses from the account: channels, movies, episodes and past programmes are relayed, for administrators too |
+| An addon of the server | For an administrator only. Other users get the version relayed |
+| A user's own addon | For that user |
 
 | Setting | Where | Default | What it does |
 |---|---|---|---|
-| **Add versions to an open title's page** | **Settings › Web player** | On | Has the web player add the versions that come to a title's page while it is open. Off, it only has the placeholder give way to the versions known then. |
+| **Send apps to the source** | **Settings › Playback** | Off | Sends every app to the source it can reach, whoever the user and whatever the source, IPTV included. |
 
-**Compared with Jellyfin:**
+- **What the setting discloses:** users who play from a source see its address, with any key, account name or password in it.
+- **What relaying costs:** the stream passes through the server, which downloads it from the source and uploads it to the app. Each of those plays uses the server's bandwidth while it lasts (see [Bandwidth](administration.md#bandwidth)).
+- **What plays the same:** a relayed file seeks and resumes as before, by byte ranges, read through the source cache once the version is analyzed (see [Reading the sources](reading-the-sources.md)). A relayed HLS stream has each address it names replaced by Polyfin's (see [Streams that are HLS playlists](#streams-that-are-hls-playlists)). A relayed MPEG-TS channel is read from the channel's one connection, shared by everyone who watches it (see [How a channel plays](live-tv.md#how-a-channel-plays)).
+- **What may not play:** a source that answers the users' addresses and refuses the server's no longer plays for them. Turn the setting on, or use a source that answers the server.
+- **Playlists:** a playlist's lines are addresses too. For a user who is not sent to the source, a version that is an HLS playlist is relayed only with its lines replaced: it cannot be downloaded, and is refused until its first analysis, which a play makes. A DASH manifest is not passed on as it is: it plays converted.
+- **At each request:** the rule is read when the stream is asked for, not when its address is given. Turning the setting off, or taking an administrator's rights away, applies to the addresses apps already hold.
+- **Not concerned:** DLNA devices, Silo apps and guests of shared links always play through Polyfin. Local files, network shares and torrents are never sent anywhere.
 
-- Jellyfin knows every version of its titles beforehand, so its pages list them all at once.
-
-**For app developers:**
-
-- Item details (`/Items/{id}`, `/Users/{userId}/Items/{id}`) describe the versions known when asked, an expired list's included. With none known, they describe one placeholder source under the title's own identifier, which plays the first version. `PlaybackInfo` waits for every addon asked for the first time, or asked again because its list expired, joining the requests the details started, but never for an addon asked again after an answer.
-- `GET /Polyfin/Items/{id}/Versions` answers `{"Pending": <addons still asked for the title, for the first time or again>, "Count": <media sources the details would list now>, "Known": <versions known now>, "AddVersions": <whether the web player adds versions to a page already open>}`, with the authentication and access checks of item details. An addon to be asked again counts from its first answer until it is no longer asked. `Count` includes the placeholder; `Known` leaves it out, so it is `0` until a version is known, old versions of an expired list included. Both drop when the versions an addon's new answer lacked are no longer listed. Items other than movies and episodes answer `0` for all three. Polyfin also pushes it on the live connections (WebSockets) of the user's jellyfin-web, the app signed in as `Jellyfin Web`, as it changes, for 2 minutes after the details or this endpoint were last asked, in a `PolyfinVersions` message whose `Data` is `{"ItemId": <the identifier the page was opened with>, "Pending": …, "Count": …, "Known": …, "AddVersions": …}`. Other apps get no such message: the Jellyfin SDKs some apps are built on fail on a message type they do not know. `AddVersions` is **Add versions to an open title's page**, under **Settings › Web player**. Polyfin's web player script listens to it, and polls at once when a title's page opens, then every second while `Pending` is above `0`, every 10 seconds once a push came, for at most 90 seconds. The 90 seconds cover a first answer (at most 15 seconds) and both requests that follow it (10 and 30 seconds later, at most 15 seconds each). When `Count` is above what the version menu lists, or differs from it once `Pending` is `0`, the script asks for the item's details (`/Users/{userId}/Items/{id}`) and lists their media sources in the menu. When `AddVersions` is `false`, it does so only while the menu lists the placeholder alone, a single source under the title's own identifier named after the title. Each media source's `ETag` is its version's own identifier, the first one's included. When the version selected loses its identifier, to a source listed first or as Polyfin names it otherwise, the script finds it by the `ETag` it listed it with, else as the one source with its name, and its size when both are known, and selects it under its new identifier before reloading the page's details, which jellyfin-web then keeps selected. It holds the play buttons while `Known` is `0`, searching while `Pending` is above `0`, with no source once it is `0`. Its first answer may come before the details asked any addon, so it takes no source from it, only from the next. Before any answer, it holds them as searching when the version menu lists a single source whose identifier is the title's own, the placeholder.
-- `POST /Polyfin/Items/{id}/Versions/Search` asks the user's stream addons again for a movie or an episode, as [Refresh metadata](jellyfin-compatibility.md#refresh-metadata) does for its streams only: each addon's stream list for the title is dropped, the saved one included, its follow-ups stop, and the addons are asked in the background, as item details ask them. Addons still asked for the title are left to answer. It has the checks of `GET /Polyfin/Items/{id}/Versions` and answers the same progress, `Pending` counting the addons now asked. A user may ask once every 20 seconds for a title; sooner, it answers `429 Too Many Requests` with `Retry-After` in seconds. Items other than movies and episodes ask nothing and answer `0` for all three.
-- With **Prepare playback in advance** on, `GET /UserItems/Resume`, `GET /Users/{userId}/Items/Resume` and `GET /Shows/NextUp` queue the first 10 movies and episodes of their answer before answering, and never wait for them. Each queued title is listed waiting for every addon and joining any request already under way. The first 2 then have their first version analyzed.
-
-### Tracks from RemuxDB
-
-Until a version is played, Polyfin knows only what its addon says of it. With **Describe versions from RemuxDB** on, a title's page shows the tracks of each version RemuxDB knows before it is played:
-
-- the video: resolution, codec, HDR or Dolby Vision;
-- the audio tracks: language, codec, channels;
-- the subtitles inside the file: language, forced, for the deaf and hard of hearing;
-- the file's size, length and bitrate.
-
-[RemuxDB](https://remuxdb.1632022.xyz) is a community database of what probing release files found in them.
-
-| Setting | Where | Default | What it does |
-|---|---|---|---|
-| **Describe versions from RemuxDB** | **Settings › Playback** | Off | Asks RemuxDB about the titles whose pages open, and describes their versions from its answers until they are analyzed. |
-| **RemuxDB address** | **Settings › Playback** | `https://remuxdb.1632022.xyz` | The RemuxDB server Polyfin asks. |
-
-- When a title's page opens, Polyfin asks RemuxDB about the title by its IMDb identifier, with the season and episode numbers for an episode. It waits for the answer one second at most; a later answer shows from the next opening. Titles the addons know by other identifiers are not asked about.
-- Polyfin finds each version among the files RemuxDB lists by the name of its file, as the addon gives it, folders left out and case ignored. When the addon gives the file's size, the sizes must agree within 64 MiB or 1%, the larger, as addons round sizes. When several files share the name, the one of the closest size wins; without a size, a shared name describes nothing. A file under a tenth of the title's runtime, a sample, describes nothing either.
-- What RemuxDB said of a version, whether it knew the file or not, is kept in memory for 6 hours. A version listed since has the title asked about again. After RemuxDB fails to answer, it is not asked for a minute, or for as long as its `Retry-After` says.
-- Playback still analyzes each version with ffprobe, and the analysis then replaces the description. The tracks keep the numbers ffprobe gives them, so a track picked before the first play stays the same track.
-- Until the version is analyzed, the height RemuxDB found places it in the user's quality group (see [How the height of a version is found](users.md#how-the-height-of-a-version-is-found)).
-- RemuxDB knows the files of torrents and NZBs that its contributors probed. A version is described only when its addon gives its file's name and RemuxDB probed that file.
-- Polyfin sends RemuxDB only the titles' identifiers and a name for the server, derived from the server's identifier, which RemuxDB requires. It sends none of its own analyses.
-
-**For app developers:**
-
-- Item details and listings describe a version not analyzed yet with the tracks RemuxDB found, numbered as ffprobe numbers them, after the subtitle files as usual. These `MediaStreams` lack what only an analysis reads, such as `TimeBase` and `CodecTag`; the version has no chapters nor attachments yet. `PlaybackInfo` always answers from the analysis.
+API details: [Direct play redirects for apps](jellyfin-api.md#direct-play-redirects-for-apps).
 
 ## Chapters
 
-The analysis also reads the version's chapters, which apps show and let you skip through. Apps get the chapters of the version the title was opened or played as. A version never played has no chapters yet. Chapters named as an intro, a recap, a preview or credits also give that version's skip buttons (see [Segments of each version](skip-segments.md#segments-of-each-version)).
+Analysis also reads chapters, which apps show and let you skip through. Apps get the chapters of the version opened or played; an unplayed version has none yet.
 
-Chapters come without chapter images unless you turn those on (see [Scrubbing thumbnails and chapter images](#scrubbing-thumbnails-and-chapter-images)). Chapters are always sent: they are read along with the analysis every first play needs, so they never delay playback.
-
-## Preparing playback in advance
-
-The first play of a version waits for some reads. **Prepare playback in advance** does them before the user presses Play:
-
-- as soon as a title's details open in an app, it analyzes the first 2 versions the title would play, those a play reads at once, and again when an addon answering later puts another version first;
-- it then reads each version's keyframe index and where its subtitle tracks sit, which HLS playback needs, and the bytes of its first segment (see [Reading the sources](#reading-the-sources));
-- it readies the next episode the same way, with its versions and subtitles, once the episode playing has 9 minutes left;
-- as a song or audiobook starts, it resolves the next track of the app's queue (else of the album) the same way: where it streams from, and its analysis when its addon does not describe it;
-- when an app asks for Continue Watching or Next Up, it asks the addons, in the background, for the versions of the first 10 movies and episodes of each row. A title opened from these rows then lists its versions at once, instead of a placeholder while the addons answer (see [Title pages](#title-pages)). The first version of the first 2 titles of each row is analyzed too, so that resuming from these rows starts at once.
-
-Playback then starts at once instead of waiting a second or two for these reads.
-
-| Setting | Where | Default | What it does |
-|---|---|---|---|
-| **Prepare playback in advance** | **Settings › Playback** | On | Analyzes and reads ahead as described above. |
-
-It costs a few more requests to the sources, also for titles opened but not played. Limits:
-
-- at most 2 preparations run at once; the others wait, the newest first, so that the title opened last is prepared first. Beyond 4 waiting, the oldest is skipped;
-- a title is prepared once per user every 10 minutes, unless its preparation failed;
-- the titles of Continue Watching and Next Up are listed 2 at a time over the server, apart from the preparations above, in the order the rows asked for them. A title waiting or being listed is not queued again, and a title whose versions are still kept (**Keep version lists for (minutes)**) asks nothing.
-
-## Choosing a version
-
-Five more settings change how Polyfin picks a version and how much video the server converts. Their defaults keep Polyfin's earlier behavior. A change applies to the next request, without a restart.
-
-| Setting | Where | Default | What it does |
-|---|---|---|---|
-| **Maximum time to analyze a version** | **Settings › Playback** | 20 seconds (5 to 120) | Bounds every ffprobe analysis, of files and of live streams; a channel is analyzed for 8 seconds at most. A source that does not answer in time is given up for 15 minutes, and Polyfin moves on to the next version sooner. |
-| **Versions tried when one does not work** | **Settings › Playback** | 3 (1 to 10) | How many versions Polyfin analyzes when the app picked none, for titles and channels alike, up to 3 at once for titles. Later versions analyzed before are still tried, as they cost nothing. |
-| **Prefer versions the app plays without conversion** | **Settings › Playback** | Off | Looks among the versions analyzed at once for one that plays on the app as it is or remuxed with its tracks copied. If none does, falls back to the first that plays at all. |
-| **Video conversions at once (0 = no limit)** | **Settings › Conversion** | 0, no limit (up to 32) | Caps the playbacks whose video the server converts. |
-| **Maximum quality of converted video** | **Settings › Conversion** | Original (or 480p to 2160p) | Scales converted video down to that height. |
-
-### Prefer versions the app plays without conversion
-
-- The first play of a title may analyze more versions. Nothing changes once they are known.
-- It looks among the first versions in the order the [version order](#version-order) settings give them.
-- A version above the user's **Maximum quality** never counts as one that plays without conversion.
-
-**Compared with Jellyfin:**
-
-- Jellyfin 12.2 keeps the version opened first however it plays, as Polyfin does with this setting off.
-
-### Version order
-
-The **Version order** group of **Settings › Playback** orders a movie's or an episode's versions, and hides some of them. By default it changes nothing: versions keep the addons' order and none is hidden.
-
-| Setting | Where | Default | What it does |
-|---|---|---|---|
-| **Order versions by** | **Settings › Playback** | None | Up to four criteria, each grouping the versions and the next sorting within them: **Preferred audio language**; **Resolution, highest first** or **Resolution, lowest first**; **File size, largest first** or **File size, smallest first**; **Video codec, in the order below**; **HDR and Dolby Vision first** or **HDR and Dolby Vision last**; **Source, in the order below**. Versions that tie keep the addons' order. |
-| **Order of video codecs** | **Settings › Playback** | AV1, HEVC, VP9, H.264, VC-1, MPEG-4 Part 2, MPEG-2 | The order the video codec criterion puts versions in. |
-| **Order of sources** | **Settings › Playback** | The order of **Content › Sources** | The order the source criterion puts versions in: the server's addons and folders that give versions of movies and episodes, moved by drag or with the arrows. |
-| **Hide versions larger than (GB, 0 = no limit)** | **Settings › Playback** | 0 (up to 1,000) | Hides the versions known to be larger. |
-| **Hide these video codecs** | **Settings › Playback** | None | Hides the versions known to be in these codecs. |
-| **Hide versions whose labels contain** | **Settings › Playback** | None (up to 50 lines) | Hides the versions whose name, description or file name holds one of these words, one a line, in any letter case: for addons that say in their labels that a file is not ready to play yet. |
-
-**What the rules know of a version.** Nothing is read from the source for them. For each thing they look at, they take the version's analysis when Polyfin has one, else the description of its file from [RemuxDB](#tracks-from-remuxdb) when it is on, else its addon's labels:
-
-- the height, as [quality groups](users.md#how-the-height-of-a-version-is-found) find it;
-- the size the addon gives (`videoSize`);
-- the codec its labels name: HEVC, x265 or H.265; H.264, x264 or AVC; AV1; VP9; VC-1; MPEG-2; Xvid or DivX;
-- HDR when they name HDR, HDR10, HDR10+, HLG, DV, DoVi or Dolby Vision. Labels that name the height or the codec but no HDR count as SDR;
-- the audio languages they name: language names in English (French, German…), some others used by releases (TRUEFRENCH, VFF, Latino, Castellano…), ISO 639-2 codes in capitals (ENG, ITA, GER…) and flags. MULTI and DUAL say a version has several languages. A word of the movie's or the series' name is never taken for a language.
-
-A version a criterion knows nothing of comes after those it knows, and a hide rule never hides it.
-
-**Preferred audio language** is each user's own, the audio language they set in their app. Versions known to carry it come first, then those that say MULTI or DUAL without naming it, then those of unknown language, then the others. For a user without a preferred language, it changes nothing.
-
-**Source, in the order below** groups a title's versions by the addon or folder that gives them, the next criteria sorting each source's versions; placed after other criteria, it orders the versions they tie on. The sources **Order of sources** lists come first, in its order, then the others in the addons' order: a source added since the list was saved comes after those it lists, until it is moved there, and a user's own addons come after the server's sources. A source removed leaves the list. The list orders versions only: which addon describes a title, the order of the addons' subtitles and that of search results keep the order of **Content › Sources**, as versions do while the criterion is not chosen (see [Addons and libraries](addons-and-libraries.md)). It is how local files come first, whatever the other criteria (see [Local folders](local-folders.md#versions)).
-
-**In what order things happen:**
-
-1. The versions that failed lately are left out (see [Sources that fail](#sources-that-fail)).
-2. The hide rules apply. When they would hide every version of a title, none is hidden.
-3. The user's [quality group](users.md#quality-groups) leaves out the taller versions. When no version fits, the closest height comes first, and the criteria order the versions of the same height.
-4. The criteria order the others.
-
-- Item details and `PlaybackInfo` list the versions in that order, so version menus show it. The first, named after the title, is the one Play starts first and **Prepare playback in advance** analyzes. **Versions tried when one does not work** and **Prefer versions the app plays without conversion** take the versions in that order.
-- Hidden versions are listed nowhere: not in details, `PlaybackInfo`, downloads or trickplay. A version an app asks for by its own identifier, one it was shown before a rule hid it, is refused as if it were gone.
-- While a title's page is open, and Polyfin follows it (see [Title pages](#title-pages)), the versions it shows keep their places as long as the rules stay the same, the order of sources included, even when an analysis tells more of them; versions that come later take their places by the rules. A page opened again, or listed again once the rules changed, lists them in the rules' order.
-- Merged Live TV channels keep their own order (see [IPTV](iptv.md)).
-
-### Version names
-
-With **Say in version names how they play**, in **Settings › Playback** and on by default, the name of a movie's or an episode's version ends with how the app plays it. The rest of the name does not change.
-
-| Setting | Where | Default | What it does |
-|---|---|---|---|
-| **Say in version names how they play** | **Settings › Playback** | On | Ends version names with how the app plays each. Off, names are the addons' as before. |
-
-- "(direct play)": the app plays the file as it is.
-- "(direct stream)": its tracks are copied, without conversion, into HLS.
-- "(converted: reason)", with one reason, the first that applies: "HDR" when the app cannot show the video's HDR or Dolby Vision; "quality limit" when the app's quality setting, the user's **Maximum quality** or their quality group needs the video converted down; "subtitles" when a subtitle is burned into the video; "video" for any other reason about the video; "audio" when only the audio is converted. "(converted)" alone for any other reason.
-- "(cannot play here)": the version needs a conversion the server or the user may not have (see [Transcoding](transcoding.md)).
-
-How names are decided:
-
-- Only versions analyzed, or described by [RemuxDB](#tracks-from-remuxdb), are named. Naming reads nothing: it runs the decision of a play on what is known of each version. A version not known yet has no ending.
-- `PlaybackInfo` names every version it lists for the device profile the app sends, not only the one chosen.
-- Item details know no device profile. Polyfin keeps in memory each device's last `PlaybackInfo` profile and bitrate, and names versions for that device with them: the web player's version menu, Android TV's **Select version** and Swiftfin's version menu read names there. Before a device's first play, after it signs out, or after a restart, names have no ending.
-- The decision uses the audio and subtitle tracks the user's preferences choose. Picking other tracks in the app may change how the version plays; the name cannot tell.
-- A file whose keyframe index turns out to be missing once played, such as some MPEG-TS files, has its video converted all the same, while its name said "(direct stream)": the index is not read for names.
-- Names are in the server language, **Language of generated names** (see [Getting started](getting-started.md#language-of-generated-names)): in French, "(lecture directe)", "(flux direct)", "(converti : HDR)" and so on, "(illisible ici)". An ending is 30 characters at most; apps that cut long names to one line may hide it.
-
-**For app developers:**
-
-- Only `MediaSources[].Name` changes. `Id` and `ETag` stay, so the web player keeps a picked version selected.
-
-### Video conversions at once
-
-- The cap counts conversions of files and Live TV together, burning subtitles in included, and [converted downloads](transcoding.md#converted-downloads) whose video is converted, from their start to their end. Each converted download counts on its own, even next to the user's playback of the same title, as it runs a conversion of its own.
-- Live TV keeps its own caps on top: 4 channels per user and 16 for the server. See [Live TV](live-tv.md).
-- A playback is what a user plays of a version, from its first converted segment until the app stops it or asks for nothing for 3 minutes (1 minute for Live TV). Its next segments, its seeks, and the new play session apps open to switch tracks never count again.
-- The lower qualities of a playback with **Several qualities when converting** count with it, as one playback: an app stepping down at the cap is never refused. While an app switches, the qualities it asked for in the last 10 seconds keep converting, so that switching back does not start over: that costs more of the machine for those seconds only, never another place under the cap. See [Adaptive quality](transcoding.md#adaptive-quality).
-- With **Keep the converted video when the audio track changes**, a playback whose session stopped keeps its converted video 30 seconds for the next session to take over, and counts as one playback meanwhile, with that session once it does. See [Changing the audio track](transcoding.md#changing-the-audio-track).
-- A recording converted to HEVC in the background counts as one conversion while it runs, and starts only below the cap: it waits while playbacks fill it. See [Smaller recordings](live-tv.md#smaller-recordings).
-- At the cap, Polyfin plans no new video conversion, as when conversion is off. It picks the next version that plays without one, or else reports that no version is compatible.
-
-**Compared with Jellyfin:**
-
-- Jellyfin has no such cap. Its nearest, a tuner's stream limit, fails with a `500`, which apps take the same way, as a server error.
-
-**For app developers:**
-
-- At the cap, `PlaybackInfo` answers `NoCompatibleStream` when no version plays without conversion.
-- An HLS request that would start one more conversion answers `503`, as when Live TV is at its cap.
-
-### Maximum quality of converted video
-
-- Video keeps its shape and is converted at the bitrate of that height. It fits that height's 16:9 frame: a 2.40:1 picture converted to 1080p is 1920×800, as in a 1080p release.
-- A running conversion keeps the size it started with.
-- Files played as they are, or with their tracks copied, are untouched.
-- A GPU converts up to 4K (2160p), at the source's own size when nothing lower is set: a 3832×1600 picture stays 3832×1600. The processor converts to 1080p at most, so 1440p and 2160p change nothing there.
-
-See [Transcoding](transcoding.md) for how conversion works.
+- Chapters named intro, recap, preview or credits also give skip buttons (see [Segments of each version](skip-segments.md#segments-of-each-version)).
+- Chapter images are off unless you turn them on (see [Scrubbing thumbnails and chapter images](scrubbing-thumbnails.md)).
+- Chapters are always sent; they come with the first-play analysis, so never delay playback.
 
 ## Watching together
 
-Apps that offer SyncPlay, jellyfin-web first, play the same titles in step across devices and users.
+Watch together (SyncPlay in Jellyfin), the web player first, plays titles in step across devices and users. Each person joins from their own device: nobody can add someone else to a group, but the web player can invite them.
 
-- Anyone in a group can set or change what plays (up to 5,000 entries), play, pause and seek.
-- The group starts and resumes on Polyfin's clock, a little ahead so that every app gets there in time.
-- The group waits for apps still loading or buffering, for 30 seconds at most.
-- Every user may create and join groups. A group is listed to, and can be joined by, only the users who can see everything it plays. Nothing a member cannot see is queued.
-- A session leaves its group when its app disconnects or is signed out (by the app, a password change, or an administrator). A group ends once empty.
-- The apps need Jellyfin's live connection (WebSocket) open.
+1. One person opens the SyncPlay menu, the people icon at the top of the web player, and chooses "Create a new group".
+2. The others open the same menu on their own device and join that group, named after the person who created it.
+3. Whoever then plays a title starts it for everyone. Pause, Play and seeking also act for the whole group.
 
-**Compared with Jellyfin:**
+**From a title's page:** "Watch together" in the ⋮ menu of a movie or an episode does the first step with that title.
+
+- It creates a group, or uses the one the device is already in, and opens the title paused at its start.
+- It then lists the people you can invite. Tick some and choose "Invite", or choose "Skip": a message then says how the others join, as it does when nobody can be invited. Once they are in, press Play: it starts for everyone at once.
+- Choosing "Watch together" again while the group plays that title opens the list again.
+- It shows to users whose **Watch together** access is Create and join (see [Watch together](user-limits.md#watch-together)), in a web player that offers SyncPlay.
+- A message says why it can't start: SyncPlay turned off for the user, an access that only joins groups, a title with no source yet, or a group where someone can't play the title.
+
+**Invitations:**
+
+- The list shows the people who could join now: another user with the web player open, whose **Watch together** access is Create and join or Join only, inside their **Allowed hours**, who can play the title, and not in the group yet. Disabled and ended accounts, and accounts not shown on the sign-in screen, are left out. Nobody is told why someone is missing.
+- Who can play the title follows their parental control, blocked genres and addons, as joining does. A library hidden from someone's **Visible libraries** leaves them in the list: its titles stay reachable (see [Visible libraries](user-limits.md#visible-libraries)).
+- An invitation shows a prompt in the invitee's web player, on every device where it is open: who invites, and the title. Other Jellyfin apps get nothing.
+- "Join" joins the group, as joining from the SyncPlay menu does: the title opens paused, until the host presses Play. "Not now" declines.
+- Joining or declining on one device closes the prompt on the invitee's other devices.
+- An invitation lasts 5 minutes, or until the group ends. A person can be invited once a minute.
+- The group stays listed in everyone's SyncPlay menu, so the others can still join from there.
+
+API details: [Watch together invitations for apps](jellyfin-api.md#watch-together-invitations-for-apps).
+
+How groups behave:
+
+- Any member can set what plays (up to 5,000 entries), play, pause and seek.
+- Groups start and resume on Polyfin's clock, slightly ahead so every app is ready.
+- Groups wait up to 30 seconds for loading or buffering apps.
+- Every user may create and join groups, but only users who can see everything a group plays can join it. The SyncPlay menu lists a group to users who can see what it plays: the title playing and the titles queued after it, of which the first 50 are checked. Nothing hidden from a member is queued.
+- A user keeps up to 3 groups they created. Creating another ends the oldest one that only their own devices are in. When other people are in all three, the new group is refused until one of them ends.
+- A session leaves when its app disconnects or is signed out (by the app, a password change, or an administrator).
+- A group ends once everyone has left it, and when Polyfin restarts. A group where no app has its live connection open ends after 5 minutes. A new watch together then starts with a new group.
+- Apps need Jellyfin's live connection (WebSocket) open.
+- Some Jellyfin apps don't support SyncPlay, so they can neither create nor join a group. The web player does, and so do the Jellyfin apps that show it, on computers and phones.
+
+**Compared with Jellyfin**
 
 - Like Jellyfin, Polyfin keeps the groups in memory.
+- Jellyfin has no "Watch together" entry: its web player starts a group from the SyncPlay menu only.
+- Jellyfin has no invitations: everyone finds the group in the SyncPlay menu.
 
-## Reading the sources
+<div class="moved-sections">
 
-FFmpeg, ffprobe and relayed apps read a version's file through Polyfin's source cache, as large as **Disk space for files being read (GB)** under **Settings › Playback** (10 GB by default; a lower value applies at once). It fetches the file from the source in blocks and keeps them on disk for seeks.
+<a id="default-audio-and-subtitle-languages"></a>*Default audio and subtitle languages* moved to [Audio and subtitle tracks](audio-and-subtitle-tracks.md#default-audio-and-subtitle-languages).
 
-The files of local folders go through it too. Those of S3 buckets, SFTP folders and rclone remotes are fetched straight from the storage, in blocks, as addons' streams are, and count against the same disk space: S3 and rclone over HTTP with ranges, SFTP over the folder's SSH connection; the limits per host below apply to their storage. The files of folders in the container, SMB shares and WebDAV folders are read by Polyfin itself at each request, through its loopback interface (see [network shares](local-folders.md#performance)).
+<a id="regional-audio"></a>*Regional audio* moved to [Audio and subtitle tracks](audio-and-subtitle-tracks.md#regional-audio).
 
-- A file is read over up to 3 connections when its host serves each one at its own pace: one serves what is being read, the others the stretches read next. A host that asks to slow down (`429`, `503`), refuses one more connection, or serves several no faster than one, is read over one connection per file for an hour.
-- Polyfin opens at most 4 connections to a host at once, over all the files it reads there, and 2 for 10 minutes after the host answers `429` or `503`. A playback never waits for them: the remux or relay of the version playing, its seeks, the analysis of the version a play chose, the bytes of its first segment, and the subtitles read through a file's index. Background reads wait for a free connection, and give theirs up to a playback: the reads ahead of a title whose details opened, the keyframe indexes read during an analysis, the other versions a play analyzes alongside the first, a file's second and third connections, which are not opened while the host has none free, and the requests of scrubbing images.
-- Each request of FFmpeg or of an app is served on its own, the newest first. A seek is not slowed down by the request FFmpeg is leaving, and a request that ends stops what it waited for.
-- Polyfin reads further ahead of a playback as it goes on, up to 256 MiB (at most an eighth of the cache). While FFmpeg waits for the app, the connection stays open for 30 seconds instead of being opened again for each segment.
-- When a stream's address redirects, as addons' resolvers do, Polyfin keeps the address it led to for its own reads of the file. Each connection then skips the resolver, and the file cannot change under a playback. Apps sent to the source still get the addon's address. An address that stops working sends Polyfin back to the addon's, then to a renewed link.
-- Once a version's keyframe index is known, Polyfin reads the bytes of its first segment before the app asks for them, 64 MiB at most: from `PlaybackInfo`, and when a title's details open with [Prepare playback in advance](#preparing-playback-in-advance) on. For a resume, it reads the file's head, which FFmpeg probes, and the segment the playback resumes at. The index of a Matroska file is read during its analysis.
-- A file relayed to an app is served from the same cache: what was read before takes no request, and a seek reads only what is missing.
-- Before sending an app to a source for direct play, Polyfin checks that it answers, unless it answered Polyfin's own reads at that address within 2 minutes, as the analysis just did.
+<a id="remembered-track-choices"></a>*Remembered track choices* moved to [Audio and subtitle tracks](audio-and-subtitle-tracks.md#remembered-track-choices).
 
-### Sources that fail
+<a id="carrying-a-play-on"></a>*Carrying a play on* moved to [Reading the sources](reading-the-sources.md#carrying-a-play-on).
 
-- A source that sends no headers within 15 seconds fails.
-- A connection that sends nothing for 10 seconds is opened again. A host that then does not answer within a few seconds fails, and the segments waiting for it get an error within seconds instead of two minutes.
-- A host that asks to slow down (`429`, `503`) is asked again, when opening a file or later in it, up to 4 times: after the delay it asks (`Retry-After`, 5 seconds at most), else after 0.5 seconds, 1 second, then 2 seconds each time. The reads wait meanwhile. Past that, the reads fail, and the file is tried again 5 seconds later.
-- An answer of another size than the file, such as an error page or a link now naming another file, is asked once more, after renewing the link when the file was known, then fails. Its bytes are never served as the file's. A `416` that tells another size counts the same.
-- A host that answers a range with the whole file (`200`) is taken to ignore ranges, and the file is read from its start to reach the part asked. Once it served a range, it is asked again instead, up to 4 times, 0.5 seconds, 1 second, then 2 seconds apart: some hosts answer a range so once in a while, and reading through would hold a seek for minutes.
-- Once an addon's file sizes proved right, the size it announces for a file is checked at the first answer: a file more than 1% larger or smaller is another file, which fails at once. Within 1%, the file's own size is used, as some addons' sizes are a little off. An addon whose sizes are wrong more often than right is never used this way.
-- The analysis of a version whose source fails stops at once, and the version is skipped for 15 minutes: the next one is tried within seconds. A version whose source fails while it plays is skipped the same way. The log tells what the source answered, never its address.
-- A host asking to slow down never has a version skipped: not when the analysis, the keyframe index, the playback or the check before direct play meets it, nor when an analysis runs out of time while its reads waited for the host. The version is tried again at the next play.
-- A host that failed to serve a version's keyframe index is asked again at the next play. A failed renewal of a link never counts as the file's failure.
+<a id="keeping-the-files-read-across-restarts"></a>*Keeping the files read across restarts* moved to [Reading the sources](reading-the-sources.md#keeping-the-files-read-across-restarts).
 
-**For app developers:**
+<a id="preloading-the-next-episodes"></a>*Preloading the next episodes* moved to [Reading the sources](reading-the-sources.md#preloading-the-next-episodes).
 
-- `PlaybackInfo` for a version played over HLS starts reading the bytes of its first segment; with `StartTimeTicks`, those of the segment the app resumes at.
+<a id="sources-that-fail"></a>*Sources that fail* moved to [Reading the sources](reading-the-sources.md#sources-that-fail).
 
-## Scrubbing thumbnails and chapter images
+<a id="when-images-are-made"></a>*When images are made* moved to [Scrubbing thumbnails](scrubbing-thumbnails.md#when-images-are-made).
 
-**Settings › Thumbnails** makes Jellyfin's scrubbing thumbnails (trickplay) and chapter images. Both are off by default, because both read parts of the source.
+<a id="label-rules"></a>*Label rules* moved to [Versions](versions.md#label-rules).
 
-| Setting | Where | Default | What it does |
-|---|---|---|---|
-| **Thumbnails when moving through a title** | **Settings › Thumbnails** | Off | Makes trickplay thumbnails. |
-| **Chapter images** | **Settings › Thumbnails** | Off | Makes chapter images. |
-| **One thumbnail every (seconds, at least)** | **Settings › Thumbnails** | 10 seconds (5 to 60) | Shortest time between thumbnails. A version longer than the requests allow at that pace gets longer steps (see [How the images look](#how-the-images-look)). |
-| **Thumbnail width** | **Settings › Thumbnails** | 320 (or 240, 480) | Thumbnail width in pixels. |
-| **Space for images (GB)** | **Settings › Thumbnails** | 2 GB (1 to 50) | Past this, the versions whose images were used longest ago lose them, and get them again on their next play. |
+<a id="live-videos"></a>*Live videos* moved to [Versions](versions.md#live-videos).
 
-Turning either setting off hides what was made. It shows again when you turn the setting back on.
+<a id="local-files-first-for-some-users"></a>*Local files first for some users* moved to [Versions](versions.md#local-files-first-for-some-users).
 
-### When images are made
+<a id="title-pages"></a>*Title pages* moved to [Versions](versions.md#title-pages).
 
-Images are made after watching, at a gentle pace:
+<a id="version-names"></a>*Version names* moved to [Versions](versions.md#version-names).
 
-- once a version has been played, and for the next episode when [playback is prepared in advance](#preparing-playback-in-advance);
-- Polyfin waits until that playback has stopped and nobody plays anything from the same host;
-- it then reads in the background only keyframes, located through the file's index (Matroska Cues or MP4 sample tables), each with a request for its own bytes, never the whole file;
-- one version is made at a time, with a short queue.
+<a id="version-order"></a>*Version order* moved to [Versions](versions.md#version-order).
 
-### Request limits
+<a id="versions-of-a-title"></a>*Versions of a title* moved to [Versions](versions.md#versions-of-a-title).
 
-- A version takes at most 60 requests, its index included.
-- Requests are sent one every 3 seconds, and at most 120 an hour per host, across versions. Past that hour's share, they wait.
+<a id="versions-of-another-title"></a>*Versions of another title* moved to [Versions](versions.md#versions-of-another-title).
 
-### How the images look
+<a id="which-streams-become-versions"></a>*Which streams become versions* moved to [Versions](versions.md#which-streams-become-versions).
 
-- Each thumbnail gets a keyframe of its own: a version whose thumbnails would outnumber the requests left once its index is read gets its thumbnails spread evenly over its runtime, one per request, a whole number of seconds apart. With about 58 requests left, that is every 47 seconds for a 45-minute episode, and every 2 minutes 5 seconds for a 2-hour movie.
-- Each thumbnail shows the keyframe nearest its time, a few seconds from it at most, unless the file has keyframes further apart.
-- Chapter images show the keyframe nearest each chapter's start: one read for it when the requests left allow one per thumbnail and per chapter, otherwise the nearest of the thumbnails' reads.
-- FFmpeg decodes each keyframe on its own as it arrives, tied to its time whatever the order it was read in, on the GPU when there is one, and tone maps HDR.
-- Thumbnails are packed into Jellyfin's 10x10 tile JPEGs. Chapter images are at most 640 pixels wide.
-- Images made by Polyfin 0.7.0, which could show their keyframes out of order, are dropped on upgrade and made again on the next play.
-- Images are kept in the database.
-
-### When a source misbehaves
-
-- A request answered oddly, as some hosts do now and then (the whole file for a range, another range, an answer cut short, or none), is asked once more after a short pause. The retry counts in the budget.
-- A link the source says expired is renewed, once per version, then asked again.
-- Two odd answers in a row fail the version for 30 minutes. The log tells what the source answered, never its address.
-- A host that asks to slow down (`429`) or fails as overloaded (`502`, `503`, `504`) is not asked again: the version stops at once, nothing of it is kept, and the version waits a day. That host gets no image request for 2 hours, while other hosts go on.
-- A version that fails otherwise is left alone for 30 minutes, or a day when its file cannot give images (no index, an unsupported codec).
-
-**Compared with Jellyfin:**
-
-- Thumbnails are of the keyframes read, so their timing is approximate (see above).
-- Chapters carry no `ImagePath`.
-- Turning either setting off hides what was made, which shows again when turned back on.
-
-**For app developers:**
-
-- Apps get images as Jellyfin gives them: the item's `Trickplay` field, by media source and width.
-- `Trickplay` is keyed as the item's `MediaSources` name the versions (the first under the title's own identifier), and limited to the versions the user is offered under their quality group.
-- Tiles are served at `/Videos/{itemId}/Trickplay/{width}/tiles.m3u8` and `{index}.jpg`, which follow parental control, blocked genres and allowed hours.
-- Chapters carry an `ImageTag`, served by `/Items/{itemId}/Images/Chapter/{index}` without credentials, like all images.
+</div>

@@ -10,6 +10,7 @@ import (
 
 // Each system's usual place for the data folder.
 func TestDataDir(t *testing.T) {
+	t.Parallel()
 	env := func(values map[string]string) func(string) string {
 		return func(name string) string { return values[name] }
 	}
@@ -94,26 +95,13 @@ func TestInstall(t *testing.T) {
 	}
 }
 
-func TestOpenerAndClipboard(t *testing.T) {
-	for _, c := range []struct {
-		goos string
-		dir  bool
-		want string
-	}{
-		{"darwin", false, "open http://localhost:8096/admin/"},
-		{"windows", false, "rundll32 url.dll,FileProtocolHandler http://localhost:8096/admin/"},
-		{"windows", true, "explorer http://localhost:8096/admin/"},
-		{"linux", false, "xdg-open http://localhost:8096/admin/"},
-	} {
-		name, args := opener(c.goos, "http://localhost:8096/admin/", c.dir)
-		if got := name + " " + strings.Join(args, " "); got != c.want {
-			t.Errorf("opener(%s) = %q", c.goos, got)
-		}
-	}
+func TestClipboardAndLanguage(t *testing.T) {
+	t.Parallel()
 	if clipboard("darwin")[0][0] != "pbcopy" || clipboard("windows")[0][0] != "clip" || len(clipboard("linux")) != 3 {
 		t.Error("clipboard programs")
 	}
-	for locale, want := range map[string]string{"fr_FR.UTF-8": "fr", "fr-CA": "fr", "en_US.UTF-8": "en", "de_DE": "en", "": "en"} {
+	for locale, want := range map[string]string{"fr_FR.UTF-8": "fr", "fr-CA": "fr", "en_US.UTF-8": "en", "de_DE": "de", "es-419": "es",
+		"it_IT.UTF-8": "it", "pt-BR": "pt-BR", "pt_PT.UTF-8": "pt-BR", "nl_NL": "en", "": "en"} {
 		if got := languageOf(locale); got != want {
 			t.Errorf("languageOf(%q) = %q", locale, got)
 		}

@@ -19,6 +19,7 @@ import (
 // language. It runs in Node.js, in a context that stands for the browser
 // and jellyfin-web.
 func TestProgrammePagesGetReminders(t *testing.T) {
+	t.Parallel()
 	node, err := exec.LookPath("node")
 	if err != nil {
 		t.Skip("Node.js is not installed")
@@ -42,10 +43,13 @@ func TestProgrammePagesGetReminders(t *testing.T) {
 	}
 	set := with(map[string]any{"ReminderId": "r1"})
 	series := with(map[string]any{"ReminderId": "r1", "SeriesReminderId": "s1", "SeriesStartDate": "2026-10-14T18:30:00.0000000Z"})
+	// start, when set, is the address the page opens on, before the script
+	// runs in its head, without a body until the step "loaded".
 	type scenario struct {
 		answer  map[string]any
 		changes []map[string]any
 		lang    string
+		start   string
 		steps   []string
 		want    []string
 	}
@@ -73,7 +77,7 @@ func TestProgrammePagesGetReminders(t *testing.T) {
 		"no target": {
 			answer: with(map[string]any{"Reaches": false}), steps: []string{title, "show"},
 			want: []string{ask, "[Remind me] [more] note(No target of yours receives reminders yet: choose Programme starting for one in " +
-				"My account › Notifications <http://polyfin.test/admin/me/account#notifications>.)"},
+				"My account › Notifications <http://polyfin.test/admin/me/account?from=web#notifications>.)"},
 		},
 		"started":          {answer: with(map[string]any{"Started": true}), steps: []string{title, "show"}, want: []string{ask, "none"}},
 		"not a programme":  {steps: []string{title, "show"}, want: []string{ask, "none"}},
@@ -81,13 +85,13 @@ func TestProgrammePagesGetReminders(t *testing.T) {
 		"rendered anew":    {answer: coming, steps: []string{title, "show", "draw", "show"}, want: []string{ask, "[Remind me] [more]", "[Remind me] [more]"}},
 		"leaving the page": {answer: coming, steps: []string{title, "show", "#/home", "show"}, want: []string{ask, "[Remind me] [more]", "none"}},
 		"during a video":   {answer: coming, steps: []string{"video", title, "show", "end video", "show"}, want: []string{"none", ask, "[Remind me] [more]"}},
+		"opened directly":  {answer: coming, start: title, steps: []string{"show", "loaded", "draw", "show"}, want: []string{"none", ask, "[Remind me] [more]"}},
 		"in French": {
 			answer: series, lang: "fr-FR", steps: []string{title, "show"},
 			want: []string{ask, "[Rappel prévu] note(Vous rappelle chaque diffusion vers 18:30.)"},
 		},
 	}
-	const harness = `
-const vm = require('node:vm')
+	const harness = scriptRunner + `
 const { script, scenarios } = JSON.parse(require('node:fs').readFileSync(0, 'utf8'))
 const flush = () => new Promise((resolve) => setImmediate(resolve))
 async function run(scenario) {
@@ -156,7 +160,7 @@ async function run(scenario) {
   }
   const sheets = []
   const document = {
-    body,
+    body: scenario.start ? null : body,
     documentElement: { lang: scenario.lang || 'en-US' },
     head: { appendChild: (sheet) => sheets.push(sheet) },
     createElement: (tag) => new Element(tag),
@@ -201,7 +205,8 @@ async function run(scenario) {
       // The versions, scores and views are other parts'.
       if (!url.includes('/Polyfin/Reminders/')) return Promise.reject(new Error('not asked here'))
       log.push('ask ' + url)
-      return scenario.answer ? Promise.resolve({ ...scenario.answer }) : Promise.reject(new Error('not found'))
+      // An empty 204, as for an item that is no programme, fails to read.
+      return scenario.answer ? Promise.resolve({ ...scenario.answer }) : Promise.reject(new SyntaxError('Unexpected end of JSON input'))
     },
     ajax: (request) => {
       log.push(request.type + ' ' + request.url + (request.data ? ' ' + request.data : ''))
@@ -209,8 +214,9 @@ async function run(scenario) {
       return Promise.resolve(answer ? { ...answer } : undefined)
     },
   }
-  vm.runInNewContext(script, {
-    location, history, URL, document, MutationObserver, window: { ApiClient }, Object, JSON, String, Date,
+  if (scenario.start) go(scenario.start)
+  runScript(script, {
+    location, history, document, MutationObserver, window: { ApiClient }, Object, JSON, String, Date,
     CustomEvent: class { constructor(type, init) { this.type = type; this.detail = init && init.detail } },
     setTimeout: (run, delay) => timers.push({ run, at: now + delay }),
     clearTimeout: (id) => { if (id) timers[id - 1] = null },
@@ -225,6 +231,7 @@ async function run(scenario) {
   for (const step of scenario.steps) {
     if (step === 'show') show()
     else if (step === 'blank') { for (const child of [...page.children]) page.removeChild(child) }
+    else if (step === 'loaded') { document.body = body; for (const listener of listeners.DOMContentLoaded || []) listener() }
     else if (step === 'draw') draw()
     else if (step === 'video') video = body.appendChild(new Element('div')), video.className = 'videoPlayerContainer'
     else if (step === 'end video') body.removeChild(video)
@@ -260,11 +267,12 @@ async function run(scenario) {
 		Answer  map[string]any   `json:"answer,omitempty"`
 		Changes []map[string]any `json:"changes"`
 		Lang    string           `json:"lang,omitempty"`
+		Start   string           `json:"start,omitempty"`
 		Steps   []string         `json:"steps"`
 	}
 	inputs := map[string]input{}
 	for name, s := range scenarios {
-		inputs[name] = input{s.answer, s.changes, s.lang, s.steps}
+		inputs[name] = input{s.answer, s.changes, s.lang, s.start, s.steps}
 	}
 	data, _ := json.Marshal(map[string]any{"script": string(webScriptBody), "scenarios": inputs})
 	command := exec.CommandContext(t.Context(), node, "-e", harness)

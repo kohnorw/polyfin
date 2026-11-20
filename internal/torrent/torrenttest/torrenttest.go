@@ -1,7 +1,8 @@
 // Package torrenttest runs, on the loopback interface, what tests of
-// torrents need: a torrent built from bytes, peers seeding or leeching it,
-// HTTP and UDP trackers, a SOCKS5 proxy with or without UDP ASSOCIATE, and
-// a DHT node. None of them reaches anything else.
+// torrents need: a torrent built from bytes, peers seeding or leeching it
+// over TCP, or seeding it over uTP alone, peers that never answer, HTTP
+// and UDP trackers, a SOCKS5 proxy with or without UDP ASSOCIATE, and a
+// DHT node. None of them reaches anything else.
 package torrenttest
 
 import (
@@ -24,6 +25,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/moodiness/polyfin/internal/stremio"
 )
 
 // File is a file of a torrent built for a test.
@@ -48,6 +51,15 @@ func (t *Torrent) HashHex() string { return hex.EncodeToString(t.Hash[:]) }
 // Build makes a torrent of files, one file alone being a single-file
 // torrent.
 func Build(name string, pieceLength int, files ...File) *Torrent {
+	return build(name, pieceLength, false, files)
+}
+
+// BuildPrivate makes a private torrent (BEP 27) of files.
+func BuildPrivate(name string, pieceLength int, files ...File) *Torrent {
+	return build(name, pieceLength, true, files)
+}
+
+func build(name string, pieceLength int, private bool, files []File) *Torrent {
 	var data []byte
 	for _, f := range files {
 		data = append(data, f.Data...)
@@ -58,6 +70,9 @@ func Build(name string, pieceLength int, files ...File) *Torrent {
 		pieces = append(pieces, sum[:]...)
 	}
 	info := map[string]any{"name": name, "piece length": pieceLength, "pieces": string(pieces)}
+	if private {
+		info["private"] = 1
+	}
 	if len(files) == 1 {
 		info["length"] = len(files[0].Data)
 	} else {
@@ -132,11 +147,167 @@ type Peer struct {
 	conns    []net.Conn
 	// ports are the DHT ports the peer tells in PORT messages.
 	dhtPort uint16
+	// pexPeers are the peers the peer tells in ut_pex messages, with
+	// pexFlags each, and pexSent counts the messages sent.
+	pexPeers []netip.AddrPort
+	pexFlags byte
+	pexSent  int
+	// released, once Hold is called, holds the blocks asked until it is
+	// closed, and passes lets one of them through for each value it
+	// holds; delay is how long each block asked waits, one after the
+	// other. requests and cancels count the REQUEST and CANCEL messages
+	// received.
+	released chan struct{}
+	passes   chan struct{}
+	delay    time.Duration
+	requests int
+	cancels  int
+
+	// eager has the peer unchoke at once, before any INTERESTED; strict
+	// has it drop a REQUEST received before INTERESTED, as a strict
+	// client does, dropped counting them. messages are the IDs of the
+	// messages received, in order.
+	eager, strict bool
+	dropped       int
+	messages      []byte
+	// handshakes counts the handshakes received for the torrent.
+	handshakes int
+	// dropFirst has the seeder drop, without a word, the first REQUEST of
+	// the blocks it tells, and dropAll every REQUEST,
+	// dropped counting them too; asks counts the REQUESTs of each block,
+	// by its index among the torrent's.
+	dropFirst func(block int) bool
+	dropAll   bool
+	// keepAlive, when set, has the peer send a keep-alive that often.
+	keepAlive time.Duration
+	asks      map[int]int
+	// noMetadata has a seeder offer no info dictionary (BEP 9), as a
+	// client that takes no part in it: it sends pieces alone.
+	noMetadata bool
+}
+
+// HideMetadata has a seeder offer no info dictionary from its next
+// connection on: a torrent that does not know it yet cannot start from
+// this peer alone.
+func (p *Peer) HideMetadata() {
+	p.mu.Lock()
+	p.noMetadata = true
+	p.mu.Unlock()
+}
+
+// Silent returns the address of a peer on host that accepts connections
+// and never answers them, as one whose address the DHT keeps but that is
+// gone or cannot be reached: its dials time out. Nothing answers on its
+// UDP port either.
+func Silent(tb testing.TB, host string) netip.AddrPort {
+	tb.Helper()
+	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
+	if err != nil {
+		tb.Fatal(err)
+	}
+	var mu sync.Mutex
+	var conns []net.Conn
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			mu.Lock()
+			conns = append(conns, conn)
+			mu.Unlock()
+		}
+	}()
+	tb.Cleanup(func() {
+		listener.Close()
+		mu.Lock()
+		defer mu.Unlock()
+		for _, conn := range conns {
+			conn.Close()
+		}
+	})
+	return netip.MustParseAddrPort(listener.Addr().String())
 }
 
 // Seed starts a seeder of t listening on host ("127.0.0.1" for most tests).
 func Seed(tb testing.TB, t *Torrent, host string) *Peer {
 	return start(tb, t, host, true)
+}
+
+// SeedUnchoked starts a seeder of t that unchokes whoever connects at once,
+// before any INTERESTED, as many clients do; strict, it drops the REQUESTs
+// received before INTERESTED, as a strict client does.
+func SeedUnchoked(tb testing.TB, t *Torrent, host string, strict bool) *Peer {
+	p := start(tb, t, host, true)
+	p.mu.Lock()
+	p.eager, p.strict = true, strict
+	p.mu.Unlock()
+	return p
+}
+
+// Messages lists the IDs of the messages the peer received, in order,
+// keep-alives aside.
+func (p *Peer) Messages() []byte {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return slices.Clone(p.messages)
+}
+
+// Dropped counts the REQUESTs the peer dropped: a strict peer's received
+// before INTERESTED, and those DropFirst and DropAll drop.
+func (p *Peer) Dropped() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.dropped
+}
+
+// DropFirst has the seeder drop, without a word (no REJECT, no CHOKE), the
+// first REQUEST of the blocks drop tells, by their index among the
+// torrent's, as a client that loses requests does; it sends those asked
+// again.
+func (p *Peer) DropFirst(drop func(block int) bool) {
+	p.mu.Lock()
+	p.dropFirst = drop
+	p.mu.Unlock()
+}
+
+// DropAll has the seeder drop every REQUEST without a word, as a client
+// that keeps the connection but sends nothing does.
+func (p *Peer) DropAll() {
+	p.mu.Lock()
+	p.dropAll = true
+	p.mu.Unlock()
+}
+
+// KeepAlive has the peer send a keep-alive every d, as clients do.
+func (p *Peer) KeepAlive(d time.Duration) {
+	p.mu.Lock()
+	p.keepAlive = d
+	p.mu.Unlock()
+}
+
+// MostAsked is how many REQUESTs the block asked most received.
+func (p *Peer) MostAsked() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	most := 0
+	for _, n := range p.asks {
+		most = max(most, n)
+	}
+	return most
+}
+
+// Asked reports whether the peer was asked for a block holding any of the
+// length bytes at offset among the torrent's.
+func (p *Peer) Asked(offset, length int) bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for block := offset / blockSize; block*blockSize < offset+length; block++ {
+		if p.asks[block] > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 // Leech starts a leecher of t: it asks for every piece of whoever connects.
@@ -150,6 +321,11 @@ func start(tb testing.TB, t *Torrent, host string, seed bool) *Peer {
 	if err != nil {
 		tb.Fatal(err)
 	}
+	return listen(tb, t, listener, seed)
+}
+
+// listen serves the peers that connect to listener.
+func listen(tb testing.TB, t *Torrent, listener net.Listener, seed bool) *Peer {
 	p := &Peer{torrent: t, seed: seed, listener: listener, got: make([]bool, t.Pieces)}
 	go func() {
 		for {
@@ -173,6 +349,81 @@ func (p *Peer) TellDHT(port uint16) {
 	p.mu.Lock()
 	p.dhtPort = port
 	p.mu.Unlock()
+}
+
+// TellPeers has the peer tell peers in a ut_pex message (BEP 11), each
+// with flags, to those that connect and offer peer exchange.
+func (p *Peer) TellPeers(flags byte, peers ...netip.AddrPort) {
+	p.mu.Lock()
+	p.pexPeers, p.pexFlags = slices.Clone(peers), flags
+	p.mu.Unlock()
+}
+
+// PEXSent counts the ut_pex messages the peer sent.
+func (p *Peer) PEXSent() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.pexSent
+}
+
+// Hold has the seeder hold the blocks it is asked for until Release,
+// as a peer that answers nothing; those cancelled meanwhile are never
+// sent. Pass lets some of them through meanwhile.
+func (p *Peer) Hold() {
+	p.mu.Lock()
+	p.released = make(chan struct{})
+	p.passes = make(chan struct{}, 1024)
+	p.mu.Unlock()
+}
+
+// Pass has a seeder that holds its blocks send the next n of them, in
+// the order they were asked, as a peer that answers part of what it was
+// asked does; a block cancelled meanwhile counts among them, unsent.
+func (p *Peer) Pass(n int) {
+	p.mu.Lock()
+	passes := p.passes
+	p.mu.Unlock()
+	if passes == nil {
+		panic("torrenttest: Pass on a peer that does not hold its blocks")
+	}
+	for range n {
+		passes <- struct{}{}
+	}
+}
+
+// Release sends the blocks held, and those asked next at once, until the
+// peer holds them again.
+func (p *Peer) Release() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.released != nil {
+		select {
+		case <-p.released:
+		default:
+			close(p.released)
+		}
+	}
+}
+
+// Delay has the seeder send each block d after the one before, as a slow
+// peer does; those cancelled meanwhile are never sent.
+func (p *Peer) Delay(d time.Duration) {
+	p.mu.Lock()
+	p.delay = d
+	p.mu.Unlock()
+}
+
+// Requests and Cancels count the REQUEST and CANCEL messages received.
+func (p *Peer) Requests() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.requests
+}
+
+func (p *Peer) Cancels() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.cancels
 }
 
 // Address is where the peer listens.
@@ -217,6 +468,16 @@ func (p *Peer) Close() {
 	}
 }
 
+// Disconnect closes the peer's connections, as a peer that drops them
+// does; it still listens.
+func (p *Peer) Disconnect() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, c := range p.conns {
+		c.Close()
+	}
+}
+
 const blockSize = 16 << 10
 
 func (p *Peer) serve(conn net.Conn) {
@@ -230,6 +491,9 @@ func (p *Peer) serve(conn net.Conn) {
 	if _, err := io.ReadFull(conn, hello[:]); err != nil || !bytes.Equal(hello[28:48], p.torrent.Hash[:]) {
 		return
 	}
+	p.mu.Lock()
+	p.handshakes++
+	p.mu.Unlock()
 	reply := append([]byte{19}, "BitTorrent protocol"...)
 	reply = append(reply, 0, 0, 0, 0, 0, 0x10, 0, 1)
 	reply = append(reply, p.torrent.Hash[:]...)
@@ -257,7 +521,10 @@ func (p *Peer) serve(conn net.Conn) {
 		return
 	}
 	metadataSize := 0
-	if p.seed {
+	p.mu.Lock()
+	hidden := p.noMetadata
+	p.mu.Unlock()
+	if p.seed && !hidden {
 		metadataSize = len(p.torrent.Info)
 	}
 	extended := map[string]any{"m": map[string]any{"ut_metadata": 3}}
@@ -273,8 +540,12 @@ func (p *Peer) serve(conn net.Conn) {
 	}
 	_ = send(5, bits)
 	p.mu.Lock()
-	dhtPort := p.dhtPort
+	dhtPort, eager, strict := p.dhtPort, p.eager, p.strict
 	p.mu.Unlock()
+	if eager {
+		_ = send(1)
+	}
+	interested := false
 	if dhtPort != 0 {
 		_ = send(9, binary.BigEndian.AppendUint16(nil, dhtPort))
 	}
@@ -305,6 +576,86 @@ func (p *Peer) serve(conn net.Conn) {
 			}
 		}
 	}
+	// answer sends a block asked for, a REQUEST's payload.
+	answer := func(payload []byte) error {
+		index := int(binary.BigEndian.Uint32(payload))
+		offset := int(binary.BigEndian.Uint32(payload[4:]))
+		n := int(binary.BigEndian.Uint32(payload[8:]))
+		start := index*p.torrent.PieceLength + offset
+		if start+n > len(p.torrent.Data) {
+			return nil
+		}
+		p.mu.Lock()
+		p.sent += int64(n)
+		p.mu.Unlock()
+		return send(7, payload[:8], p.torrent.Data[start:start+n])
+	}
+	// Blocks held or delayed are answered in order by one goroutine,
+	// unless cancelled meanwhile.
+	var cancelMu sync.Mutex
+	cancelled := map[string]bool{}
+	waiting := make(chan []byte, 1024)
+	done := make(chan struct{})
+	defer close(done)
+	p.mu.Lock()
+	every := p.keepAlive
+	p.mu.Unlock()
+	if every > 0 {
+		go func() {
+			ticker := time.NewTicker(every)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-done:
+					return
+				case <-ticker.C:
+					writeMu.Lock()
+					_, err := conn.Write([]byte{0, 0, 0, 0})
+					writeMu.Unlock()
+					if err != nil {
+						return
+					}
+				}
+			}
+		}()
+	}
+	go func() {
+		for {
+			var payload []byte
+			select {
+			case <-done:
+				return
+			case payload = <-waiting:
+			}
+			p.mu.Lock()
+			released, passes, delay := p.released, p.passes, p.delay
+			p.mu.Unlock()
+			if released != nil {
+				select {
+				case <-done:
+					return
+				case <-released:
+				case <-passes:
+				}
+			}
+			if delay > 0 {
+				timer := time.NewTimer(delay)
+				select {
+				case <-done:
+					timer.Stop()
+					return
+				case <-timer.C:
+				}
+			}
+			cancelMu.Lock()
+			skip := cancelled[string(payload)]
+			delete(cancelled, string(payload))
+			cancelMu.Unlock()
+			if !skip && answer(payload) != nil {
+				return
+			}
+		}
+	}()
 	r := bufio.NewReader(conn)
 	for {
 		var header [4]byte
@@ -320,6 +671,9 @@ func (p *Peer) serve(conn net.Conn) {
 			return
 		}
 		payload := message[1:]
+		p.mu.Lock()
+		p.messages = append(p.messages, message[0])
+		p.mu.Unlock()
 		switch message[0] {
 		case 1:
 			unchoked = true
@@ -327,7 +681,10 @@ func (p *Peer) serve(conn net.Conn) {
 		case 0:
 			unchoked = false
 			clear(asked)
+		case 3:
+			interested = false
 		case 2:
+			interested = true
 			if p.seed {
 				_ = send(1)
 			}
@@ -345,19 +702,52 @@ func (p *Peer) serve(conn net.Conn) {
 			if !p.seed || len(payload) != 12 {
 				continue
 			}
-			index := int(binary.BigEndian.Uint32(payload))
-			offset := int(binary.BigEndian.Uint32(payload[4:]))
-			n := int(binary.BigEndian.Uint32(payload[8:]))
-			start := index*p.torrent.PieceLength + offset
-			if start+n > len(p.torrent.Data) {
+			if strict && !interested {
+				p.mu.Lock()
+				p.dropped++
+				p.mu.Unlock()
+				continue
+			}
+			index := int(binary.BigEndian.Uint32(payload))*p.torrent.PieceLength + int(binary.BigEndian.Uint32(payload[4:]))
+			p.mu.Lock()
+			p.requests++
+			if p.asks == nil {
+				p.asks = map[int]int{}
+			}
+			p.asks[index/blockSize]++
+			drop := p.dropAll || p.dropFirst != nil && p.asks[index/blockSize] == 1 && p.dropFirst(index/blockSize)
+			if drop {
+				p.dropped++
+			}
+			slow := p.released != nil || p.delay > 0
+			p.mu.Unlock()
+			if drop {
+				continue
+			}
+			if slow {
+				cancelMu.Lock()
+				delete(cancelled, string(payload))
+				cancelMu.Unlock()
+				select {
+				case waiting <- payload:
+				default:
+					// Past what any client asks at once: dropped.
+				}
+				continue
+			}
+			if answer(payload) != nil {
+				return
+			}
+		case 8:
+			if len(payload) != 12 {
 				continue
 			}
 			p.mu.Lock()
-			p.sent += int64(n)
+			p.cancels++
 			p.mu.Unlock()
-			if send(7, payload[:8], p.torrent.Data[start:start+n]) != nil {
-				return
-			}
+			cancelMu.Lock()
+			cancelled[string(payload)] = true
+			cancelMu.Unlock()
 		case 7:
 			if len(payload) < 8 {
 				continue
@@ -370,7 +760,17 @@ func (p *Peer) serve(conn net.Conn) {
 			}
 			p.mu.Unlock()
 		case 20:
-			if len(payload) > 0 && payload[0] == 3 && p.seed {
+			if len(payload) > 0 && payload[0] == 0 {
+				// The engine's extension handshake: peer exchange is
+				// answered with the ID it gives ut_pex.
+				if i := bytes.Index(payload, []byte("6:ut_pexi")); i >= 0 {
+					end := bytes.IndexByte(payload[i+9:], 'e')
+					if id, _ := strconv.Atoi(string(payload[i+9 : i+9+end])); id > 0 && id < 256 {
+						p.sendPEX(byte(id), send)
+					}
+				}
+			}
+			if len(payload) > 0 && payload[0] == 3 && p.seed && !hidden {
 				// A metadata request: msg_type 0 and its piece.
 				piece := 0
 				if i := bytes.Index(payload, []byte("5:piecei")); i >= 0 {
@@ -390,6 +790,34 @@ func (p *Peer) serve(conn net.Conn) {
 	}
 }
 
+// sendPEX sends the peers to tell, if any, in a ut_pex message of id.
+func (p *Peer) sendPEX(id byte, send func(byte, ...[]byte) error) {
+	p.mu.Lock()
+	peers, flags := p.pexPeers, p.pexFlags
+	p.mu.Unlock()
+	if len(peers) == 0 {
+		return
+	}
+	var added, addedFlags, added6, added6Flags []byte
+	for _, peer := range peers {
+		if peer.Addr().Is4() {
+			added = append(added, peer.Addr().AsSlice()...)
+			added = binary.BigEndian.AppendUint16(added, peer.Port())
+			addedFlags = append(addedFlags, flags)
+		} else {
+			added6 = append(added6, peer.Addr().AsSlice()...)
+			added6 = binary.BigEndian.AppendUint16(added6, peer.Port())
+			added6Flags = append(added6Flags, flags)
+		}
+	}
+	message := map[string]any{"added": added, "added.f": addedFlags, "added6": added6, "added6.f": added6Flags}
+	if send(20, []byte{id}, encode(message)) == nil {
+		p.mu.Lock()
+		p.pexSent++
+		p.mu.Unlock()
+	}
+}
+
 // Tracker is an HTTP tracker on the loopback interface listing peers.
 type Tracker struct {
 	server *httptest.Server
@@ -398,6 +826,8 @@ type Tracker struct {
 	peers     []netip.AddrPort
 	announces []url.Values
 	remotes   []string
+	// held, once Hold is called, holds the answers until it is closed.
+	held chan struct{}
 }
 
 // HTTPTracker starts an HTTP tracker listing peers, listening on host.
@@ -416,18 +846,34 @@ func HTTPTracker(tb testing.TB, host string, peers ...netip.AddrPort) *Tracker {
 			compact = append(compact, peer.Addr().AsSlice()...)
 			compact = binary.BigEndian.AppendUint16(compact, peer.Port())
 		}
+		held := t.held
 		t.mu.Unlock()
+		if held != nil {
+			select {
+			case <-held:
+			case <-r.Context().Done():
+				return
+			}
+		}
 		_, _ = w.Write(encode(map[string]any{"interval": 60, "peers": string(compact)}))
 	}))
 	t.server.Listener.Close()
 	t.server.Listener = listener
 	t.server.Start()
 	tb.Cleanup(t.server.Close)
+	// The answers held go before the server closes, which waits for them.
+	tb.Cleanup(t.Release)
 	return t
 }
 
 // URL is the tracker's announce URL.
 func (t *Tracker) URL() string { return t.server.URL + "/announce" }
+
+// PublicURL is the tracker's announce URL at Public, where a Proxy and a
+// WireGuardServer reach it.
+func (t *Tracker) PublicURL() string {
+	return "http://" + Through(netip.MustParseAddrPort(t.server.Listener.Addr().String())).String() + "/announce"
+}
 
 // Announces lists the events of the announces received, "" for regular
 // ones.
@@ -446,6 +892,27 @@ func (t *Tracker) Remotes() []string {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	return slices.Clone(t.remotes)
+}
+
+// Hold has the tracker take the announces and hold its answers until
+// Release, or until the announce is given up, as a slow tracker does.
+func (t *Tracker) Hold() {
+	t.mu.Lock()
+	t.held = make(chan struct{})
+	t.mu.Unlock()
+}
+
+// Release sends the answers held, and those asked next at once.
+func (t *Tracker) Release() {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.held != nil {
+		select {
+		case <-t.held:
+		default:
+			close(t.held)
+		}
+	}
 }
 
 // UDPTracker is a UDP tracker (BEP 15) on the loopback interface.
@@ -524,6 +991,12 @@ type DHTNode struct {
 	peers   []netip.AddrPort
 	mu      sync.Mutex
 	queries int
+	drop    int
+	// released, once Hold is called, holds the answers until it is
+	// closed; nodes are the nodes the answers tell.
+	released    chan struct{}
+	releaseOnce sync.Once
+	nodes       []netip.AddrPort
 }
 
 // StartDHTNode starts a DHT node listing peers for any info hash.
@@ -553,17 +1026,62 @@ func StartDHTNode(tb testing.TB, peers ...netip.AddrPort) *DHTNode {
 			txid := string(rest[colon+1 : colon+1+length])
 			d.mu.Lock()
 			d.queries++
+			dropped := d.drop > 0
+			if dropped {
+				d.drop--
+			}
+			released, nodes := d.released, d.nodes
 			d.mu.Unlock()
+			if dropped {
+				continue
+			}
 			var values []any
 			for _, peer := range d.peers {
 				values = append(values, string(binary.BigEndian.AppendUint16(peer.Addr().AsSlice(), peer.Port())))
 			}
+			var compactNodes []byte
+			for k, node := range nodes {
+				id := bytes.Repeat([]byte{byte(k + 1)}, 20)
+				compactNodes = binary.BigEndian.AppendUint16(append(append(compactNodes, id...), node.Addr().AsSlice()...), node.Port())
+			}
 			reply := encode(map[string]any{"t": txid, "y": "r", "r": map[string]any{"id": string(make([]byte, 20)), "token": "tk",
-				"values": values}})
-			_, _ = conn.WriteToUDPAddrPort(reply, from)
+				"values": values, "nodes": compactNodes}})
+			if released == nil {
+				_, _ = conn.WriteToUDPAddrPort(reply, from)
+				continue
+			}
+			go func() {
+				<-released
+				_, _ = conn.WriteToUDPAddrPort(reply, from)
+			}()
 		}
 	}()
+	tb.Cleanup(d.Release)
 	return d
+}
+
+// Hold has the node hold its answers until Release.
+func (d *DHTNode) Hold() {
+	d.mu.Lock()
+	d.released = make(chan struct{})
+	d.mu.Unlock()
+}
+
+// Release sends the answers held, and those asked next at once.
+func (d *DHTNode) Release() {
+	d.mu.Lock()
+	released := d.released
+	d.mu.Unlock()
+	if released != nil {
+		d.releaseOnce.Do(func() { close(released) })
+	}
+}
+
+// TellNodes has the node's answers tell nodes, which a lookup asks next.
+func (d *DHTNode) TellNodes(nodes ...netip.AddrPort) {
+	d.mu.Lock()
+	d.nodes = slices.Clone(nodes)
+	d.mu.Unlock()
 }
 
 // Address is the node's address.
@@ -576,8 +1094,19 @@ func (d *DHTNode) Queries() int {
 	return d.queries
 }
 
+// Drop has the node leave the next n queries unanswered, as when a
+// datagram is lost or an answer comes too late.
+func (d *DHTNode) Drop(n int) {
+	d.mu.Lock()
+	d.drop = n
+	d.mu.Unlock()
+}
+
 // Proxy is a SOCKS5 proxy on the loopback interface, with or without UDP
-// ASSOCIATE. It records the addresses it is asked to reach.
+// ASSOCIATE. It records the addresses it is asked to reach. As through a
+// WireGuardServer, a target at Public is the same port on 127.0.0.1, and
+// its answers come from Public. Any other address off the loopback is
+// recorded, and not reached.
 type Proxy struct {
 	listener net.Listener
 	address  string
@@ -585,9 +1114,20 @@ type Proxy struct {
 	user     string
 	password string
 
-	mu      sync.Mutex
-	targets []string
-	conns   []net.Conn
+	mu       sync.Mutex
+	targets  []string
+	conns    []net.Conn
+	udpDelay time.Duration
+	// udpTargets are the UDP targets recorded, each once.
+	udpTargets map[string]bool
+	// refuse are the targets whose next request is refused.
+	refuse map[string]bool
+	// stalled holds the new connections unanswered, and frozen the
+	// relays open too, until opened is closed; held counts the
+	// connections a stall held.
+	stalled, frozen bool
+	opened          chan struct{}
+	held            int
 }
 
 // StartProxy starts a SOCKS5 proxy; udp offers UDP ASSOCIATE, and user,
@@ -605,6 +1145,92 @@ func StartProxy(tb testing.TB, udp bool, user, password string) *Proxy {
 
 // Address is where the proxy listens.
 func (p *Proxy) Address() string { return p.address }
+
+// DelayUDP has the proxy answer each UDP ASSOCIATE only after d, as a
+// remote proxy is slow to.
+func (p *Proxy) DelayUDP(d time.Duration) {
+	p.mu.Lock()
+	p.udpDelay = d
+	p.mu.Unlock()
+}
+
+// RefuseFirst has the proxy answer the next request to reach target that
+// the connection was refused (reply 5), as when the peer refused it.
+func (p *Proxy) RefuseFirst(target netip.AddrPort) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.refuse == nil {
+		p.refuse = map[string]bool{}
+	}
+	p.refuse[target.String()] = true
+}
+
+// Stall has the proxy answer no new connection, as a proxy that no longer
+// answers a dial, until Answer: each is accepted, and held before its
+// greeting is read. The relays already open go on.
+func (p *Proxy) Stall() { p.block(true, false) }
+
+// Freeze is Stall with the relays open carrying nothing either, TCP or
+// UDP, as when the proxy's host sleeps.
+func (p *Proxy) Freeze() { p.block(true, true) }
+
+// Answer ends a stall or a freeze: what was held goes on.
+func (p *Proxy) Answer() { p.block(false, false) }
+
+// Held counts the connections a stall or a freeze held.
+func (p *Proxy) Held() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.held
+}
+
+func (p *Proxy) block(stalled, frozen bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.blockLocked(stalled, frozen)
+}
+
+func (p *Proxy) blockLocked(stalled, frozen bool) {
+	switch {
+	case stalled && !p.stalled:
+		p.opened = make(chan struct{})
+	case !stalled && p.stalled:
+		close(p.opened)
+	}
+	p.stalled, p.frozen = stalled, frozen
+}
+
+// hold waits while the proxy stalls, for a new connection, or while it is
+// frozen, for a relay's bytes.
+func (p *Proxy) hold(relay bool) {
+	p.mu.Lock()
+	held := p.frozen || !relay && p.stalled
+	if held && !relay {
+		p.held++
+	}
+	opened := p.opened
+	p.mu.Unlock()
+	if held {
+		<-opened
+	}
+}
+
+// copy relays src to dst, each read held while the proxy is frozen.
+func (p *Proxy) copy(dst io.Writer, src io.Reader) {
+	buffer := make([]byte, 32<<10)
+	for {
+		n, err := src.Read(buffer)
+		if n > 0 {
+			p.hold(true)
+			if _, err := dst.Write(buffer[:n]); err != nil {
+				return
+			}
+		}
+		if err != nil {
+			return
+		}
+	}
+}
 
 // Resume starts the proxy again on its address, once stopped.
 func (p *Proxy) Resume(tb testing.TB) {
@@ -640,7 +1266,8 @@ func (p *Proxy) Targets() []string {
 	return slices.Clone(p.targets)
 }
 
-// Stop stops the proxy and every connection through it.
+// Stop stops the proxy and every connection through it, a stall or a
+// freeze ended.
 func (p *Proxy) Stop() {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -648,12 +1275,27 @@ func (p *Proxy) Stop() {
 	for _, c := range p.conns {
 		c.Close()
 	}
+	p.blockLocked(false, false)
 }
 
 func (p *Proxy) record(target string) {
 	p.mu.Lock()
 	p.targets = append(p.targets, target)
 	p.mu.Unlock()
+}
+
+// recordOnce records a target the first time it is asked to reach it.
+func (p *Proxy) recordOnce(target string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.udpTargets[target] {
+		return
+	}
+	if p.udpTargets == nil {
+		p.udpTargets = map[string]bool{}
+	}
+	p.udpTargets[target] = true
+	p.targets = append(p.targets, target)
 }
 
 func readAddress(r io.Reader) (string, error) {
@@ -695,6 +1337,7 @@ func readAddress(r io.Reader) (string, error) {
 
 func (p *Proxy) serve(conn net.Conn) {
 	defer conn.Close()
+	p.hold(false)
 	var greeting [2]byte
 	if _, err := io.ReadFull(conn, greeting[:]); err != nil {
 		return
@@ -739,8 +1382,17 @@ func (p *Proxy) serve(conn net.Conn) {
 	switch {
 	case request[1] == 1:
 		p.record("tcp " + target)
-		upstream, err := net.DialTimeout("tcp", target, 10*time.Second)
-		if err != nil {
+		p.mu.Lock()
+		// An address elsewhere is refused: nothing leaves the loopback.
+		refused := p.refuse[target] || elsewhere(onLoopback(target))
+		delete(p.refuse, target)
+		p.mu.Unlock()
+		var upstream net.Conn
+		var err error
+		if !refused {
+			upstream, err = net.DialTimeout("tcp", onLoopback(target), 10*time.Second)
+		}
+		if refused || err != nil {
 			_, _ = conn.Write(append([]byte{5, 5, 0}, bound...))
 			return
 		}
@@ -750,11 +1402,15 @@ func (p *Proxy) serve(conn net.Conn) {
 		p.mu.Unlock()
 		_, _ = conn.Write(append([]byte{5, 0, 0}, bound...))
 		go func() {
-			_, _ = io.Copy(upstream, conn)
+			p.copy(upstream, conn)
 			upstream.Close()
 		}()
-		_, _ = io.Copy(conn, upstream)
+		p.copy(conn, upstream)
 	case request[1] == 3 && p.udp:
+		p.mu.Lock()
+		delay := p.udpDelay
+		p.mu.Unlock()
+		time.Sleep(delay)
 		relay, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1)})
 		if err != nil {
 			return
@@ -772,12 +1428,15 @@ func (p *Proxy) serve(conn net.Conn) {
 // relay forwards a client's datagrams and the answers to them.
 func (p *Proxy) relay(relay *net.UDPConn) {
 	var client netip.AddrPort
+	// public are the targets on the loopback reached at Public.
+	public := map[netip.AddrPort]bool{}
 	buffer := make([]byte, 65536)
 	for {
 		n, from, err := relay.ReadFromUDPAddrPort(buffer)
 		if err != nil {
 			return
 		}
+		p.hold(true)
 		if from.Addr().IsLoopback() && (client == from || !client.IsValid()) && n > 3 && buffer[0] == 0 && buffer[1] == 0 &&
 			buffer[2] == 0 && !p.isTarget(from) {
 			r := bytes.NewReader(buffer[3:n])
@@ -786,19 +1445,59 @@ func (p *Proxy) relay(relay *net.UDPConn) {
 				continue
 			}
 			client = from
-			p.record("udp " + target)
-			resolved, err := net.ResolveUDPAddr("udp4", target)
+			// A target is recorded once: uTP sends it many datagrams.
+			p.recordOnce("udp " + target)
+			// An address is not looked up: the resolver is the system's,
+			// which a test may replace.
+			resolved, err := netip.ParseAddrPort(target)
 			if err != nil {
+				addr, err := net.ResolveUDPAddr("udp4", target)
+				if err != nil {
+					continue
+				}
+				resolved = addr.AddrPort()
+			}
+			if resolved.Addr() == Public {
+				resolved = netip.AddrPortFrom(netip.AddrFrom4([4]byte{127, 0, 0, 1}), resolved.Port())
+				public[resolved] = true
+			}
+			if !resolved.Addr().IsLoopback() {
 				continue
 			}
-			_, _ = relay.WriteToUDP(buffer[3+(n-3-r.Len()):n], resolved)
+			_, _ = relay.WriteToUDPAddrPort(buffer[3+(n-3-r.Len()):n], resolved)
 			continue
 		}
 		header := []byte{0, 0, 0, 1}
+		if public[from] {
+			from = Through(from)
+		}
 		header = append(header, from.Addr().AsSlice()...)
 		header = binary.BigEndian.AppendUint16(header, from.Port())
 		_, _ = relay.WriteToUDPAddrPort(append(header, buffer[:n]...), client)
 	}
+}
+
+// onLoopback is target, a host and a port, with Public replaced by
+// 127.0.0.1.
+func onLoopback(target string) string {
+	if ap, err := netip.ParseAddrPort(target); err == nil && ap.Addr() == Public {
+		return net.JoinHostPort("127.0.0.1", strconv.Itoa(int(ap.Port())))
+	}
+	return target
+}
+
+// elsewhere reports whether target, a host and a port, is an IP address
+// off the loopback interface.
+func elsewhere(target string) bool {
+	ap, err := netip.ParseAddrPort(target)
+	return err == nil && !ap.Addr().Unmap().IsLoopback()
+}
+
+// OnLoopback is a torrent.Config's Public for the tests whose trackers,
+// DHT nodes and peers are on the loopback interface: the loopback stands
+// for the internet there, besides the public addresses.
+func OnLoopback(ip netip.Addr) bool {
+	return ip.Unmap().IsLoopback() || stremio.Public(ip)
 }
 
 // isTarget tells whether a datagram comes from an address the client sent
@@ -806,5 +1505,5 @@ func (p *Proxy) relay(relay *net.UDPConn) {
 func (p *Proxy) isTarget(from netip.AddrPort) bool {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	return slices.Contains(p.targets, "udp "+from.String())
+	return p.udpTargets["udp "+from.String()]
 }

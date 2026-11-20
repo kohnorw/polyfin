@@ -12,7 +12,7 @@ const notifications: typeof en = {
     },
     serverTargets: 'Cibles du serveur',
     serverTargetsHelp:
-      'Elles reçoivent les événements de tous les utilisateurs : un message par nouvel épisode, quel que soit qui suit la série, chaque enregistrement et chaque lecture. Chaque utilisateur peut ajouter ses propres cibles dans Mon compte › Notifications.',
+      'Elles reçoivent les événements de tous les utilisateurs\u202f: un message par nouvel épisode, quel que soit qui suit la série, chaque enregistrement et chaque lecture. Chaque utilisateur peut ajouter ses propres cibles dans Mon compte › Notifications.',
     add: 'Ajouter une cible',
     addTitle: 'Ajouter une cible',
     editTitle: (name: string) => `Modifier ${name}`,
@@ -41,27 +41,32 @@ const notifications: typeof en = {
     },
     emailUnavailable: {
       server:
-        'L’e-mail demande un serveur SMTP : enregistrez-en un, avec une adresse d’expéditeur, dans E-mail plus haut, puis ajoutez la cible.',
+        'L’e-mail demande un serveur SMTP\u202f: enregistrez-en un, avec une adresse d’expéditeur, dans E-mail plus haut, puis ajoutez la cible.',
       own: 'L’e-mail demande un serveur SMTP, qu’un administrateur règle dans Paramètres › Notifications.',
     },
     name: 'Nom',
     nameHelp: 'Affiché ici seulement, de 1 à 64 caractères.',
     webhookAddress: 'Adresse du webhook',
     discordAddress: 'Adresse du webhook Discord',
+    discordSwitched:
+      'C’est un webhook Discord\u202f: la cible devient une cible Discord, qui envoie le message propre à Discord.',
+    discordAsWebhook:
+      'C’est un webhook Discord\u202f: Polyfin lui envoie le message propre à Discord, comme à une cible Discord.',
     addressHelp: {
-      webhook: 'Elle est gardée chiffrée et n’est plus jamais affichée : seul son hôte l’est.',
+      webhook:
+        'Elle n’est plus jamais affichée, seul son hôte l’est. Elle est chiffrée si le serveur a une POLYFIN_SECRET_KEY, et enregistrée telle quelle sinon.',
       discord:
-        'Dans Discord : les paramètres du salon, Intégrations, Webhooks, Copier l’URL du webhook. Elle est gardée chiffrée et n’est plus jamais affichée.',
+        'Dans Discord\u202f: les paramètres du salon, Intégrations, Webhooks, Copier l’URL du webhook. Elle n’est plus jamais affichée. Elle est chiffrée si le serveur a une POLYFIN_SECRET_KEY, et enregistrée telle quelle sinon.',
     },
     savedAddress: (host: string) => `Enregistrée, sur ${host}.`,
     ntfyServer: 'Serveur ntfy',
     ntfyServerHelp: 'Laissez vide pour https://ntfy.sh.',
     topic: 'Sujet',
     topicHelp:
-      'Le sujet auquel vous vous abonnez dans l’appli ntfy. Sur un serveur public, quiconque connaît un sujet peut le lire : choisissez-en un difficile à deviner.',
+      'Le sujet auquel vous vous abonnez dans l’appli ntfy. Sur un serveur public, quiconque connaît un sujet peut le lire\u202f: choisissez-en un difficile à deviner.',
     token: 'Jeton d’accès',
     tokenHelp:
-      'Pour un sujet qui demande une connexion. Il est gardé chiffré et n’est plus jamais affiché.',
+      'Pour un sujet qui demande une connexion. Il n’est plus jamais affiché. Il est chiffré si le serveur a une POLYFIN_SECRET_KEY, et enregistré tel quel sinon.',
     emailAddress: 'Adresse e-mail',
     emailAddressHelp: 'Où vont les messages.',
     chat: 'Discussion',
@@ -69,25 +74,27 @@ const notifications: typeof en = {
       'Le numéro de la discussion, comme -1001234567890, ou le nom d’une chaîne publique, comme @news_example. Ajoutez d’abord le bot à la discussion.',
     botToken: 'Jeton du bot',
     botTokenHelp:
-      'BotFather le donne à la création du bot. Il est gardé chiffré et n’est plus jamais affiché.',
+      'BotFather le donne à la création du bot. Il n’est plus jamais affiché. Il est chiffré si le serveur a une POLYFIN_SECRET_KEY, et enregistré tel quel sinon.',
     gotifyServer: 'Serveur Gotify',
     gotifyServerHelp: 'Son adresse, comme https://gotify.example.org.',
     appToken: 'Jeton de l’application',
     appTokenHelp: {
       gotify:
-        'Dans Gotify : Apps, Create Application, puis copiez son jeton. Il est gardé chiffré et n’est plus jamais affiché.',
+        'Dans Gotify\u202f: Apps, Create Application, puis copiez son jeton. Il n’est plus jamais affiché. Il est chiffré si le serveur a une POLYFIN_SECRET_KEY, et enregistré tel quel sinon.',
       pushover:
-        'Le jeton d’API d’une application créée sur Pushover. Il est gardé chiffré et n’est plus jamais affiché.',
+        'Le jeton d’API d’une application créée sur Pushover. Il n’est plus jamais affiché. Il est chiffré si le serveur a une POLYFIN_SECRET_KEY, et enregistré tel quel sinon.',
     },
     userKey: 'Clé d’utilisateur',
     userKeyHelp:
-      'Affichée sur le tableau de bord de Pushover une fois connecté, ou une clé de groupe. Elle est gardée chiffrée et n’est plus jamais affichée.',
+      'Affichée sur le tableau de bord de Pushover une fois connecté, ou une clé de groupe. Elle n’est plus jamais affichée. Elle est chiffrée si le serveur a une POLYFIN_SECRET_KEY, et enregistrée telle quelle sinon.',
     events: 'Événements',
     eventsHelp: {
       server: 'Ce qui lui est signalé, pour tous les utilisateurs.',
       own: 'Ce qui lui est signalé, vous concernant.',
     },
     eventNames: {
+      server_crashed: 'Plantage du serveur',
+      playback_failed: 'Échec d’une lecture',
       new_episode: 'Nouveaux épisodes',
       recording_finished: 'Enregistrement terminé',
       recording_failed: 'Échec d’un enregistrement',
@@ -107,10 +114,15 @@ const notifications: typeof en = {
       new_device: 'Connexion depuis un nouvel appareil',
       share_played: 'Lien partagé lu',
       programme_reminder: 'Début d’une émission',
+      title_available: 'Titre à regarder disponible',
     },
     eventHelp: {
+      server_crashed:
+        'Polyfin s’est arrêté sur une erreur puis a redémarré\u202f: signalé au redémarrage, avec le début de la trace de l’erreur, que Système › Santé affiche aussi.',
+      playback_failed:
+        'Une lecture n’a pas pu commencer ou s’est interrompue\u202f: aucune version ne se lit sur l’appli, une limite l’a refusée, ou son flux a échoué. Une fois par heure par utilisateur et par titre, avec l’appli et la raison.',
       new_episode:
-        'Un épisode d’une série regardée ou mise en favori est sorti : une fois par épisode, jamais pour ceux déjà sortis.',
+        'Un épisode d’une série regardée ou mise en favori est sorti\u202f: une fois par épisode, jamais pour ceux déjà sortis.',
       recording_finished:
         'Un enregistrement de TV en direct est terminé, entier ou avec une partie manquante.',
       recording_failed: 'Un enregistrement de TV en direct n’a rien enregistré.',
@@ -118,7 +130,7 @@ const notifications: typeof en = {
       health_solved: 'Un problème détecté par Système › Santé a disparu.',
       user_joined: 'Quelqu’un a créé son compte grâce à un lien d’invitation.',
       new_version:
-        'Une nouvelle version de Polyfin est sortie, trouvée par la vérification quotidienne : une fois par version, avec ses notes de version.',
+        'Une nouvelle version de Polyfin est sortie, trouvée par la vérification quotidienne\u202f: une fois par version, avec ses notes de version.',
       playback_started:
         'Une vidéo ou un morceau commence dans une appli Jellyfin, avec qui le lit, sur quel appareil, et s’il est converti.',
       playback_paused:
@@ -127,21 +139,23 @@ const notifications: typeof en = {
       playback_stopped:
         'Une lecture s’arrête, ou son appli a cessé de la signaler depuis cinq minutes.',
       weekly_summary:
-        'Une fois par semaine, au jour et à l’heure choisis pour le serveur : les heures regardées, les titres et les nouveaux épisodes de la semaine. Les cibles du serveur et des administrateurs reçoivent la semaine du serveur, avec les utilisateurs arrivés, les fichiers ajoutés aux dossiers locaux et les problèmes détectés ; les autres reçoivent la leur. Rien n’est envoyé pour une semaine sans rien à dire.',
+        'Une fois par semaine, au jour et à l’heure choisis pour le serveur\u202f: les heures regardées, les titres et les nouveaux épisodes de la semaine. Les cibles du serveur et des administrateurs reçoivent la semaine du serveur, avec les utilisateurs arrivés, les fichiers ajoutés aux dossiers locaux et les problèmes détectés\u202f; les autres reçoivent la leur. Rien n’est envoyé pour une semaine sans rien à dire.',
       monthly_summary:
-        'Le 1er de chaque mois, à l’heure du résumé de la semaine : le contenu du résumé de la semaine sur le mois écoulé. Rien n’est envoyé pour un mois sans rien à dire.',
+        'Le 1er de chaque mois, à l’heure du résumé de la semaine\u202f: le contenu du résumé de la semaine sur le mois écoulé. Rien n’est envoyé pour un mois sans rien à dire.',
       yearly_summary:
-        'Le 1er janvier, à l’heure du résumé de la semaine : les heures regardées, les dix films et les dix séries les plus regardés et le mois le plus regardé de l’année écoulée. Les cibles du serveur et des administrateurs reçoivent l’année du serveur, avec les utilisateurs arrivés et les fichiers ajoutés aux dossiers locaux ; les autres reçoivent la leur. Rien n’est envoyé pour une année sans rien à dire.',
+        'Le 1er janvier, à l’heure du résumé de la semaine\u202f: les heures regardées, les dix films et les dix séries les plus regardés et le mois le plus regardé de l’année écoulée. Les cibles du serveur et des administrateurs reçoivent l’année du serveur, avec les utilisateurs arrivés et les fichiers ajoutés aux dossiers locaux\u202f; les autres reçoivent la leur. Rien n’est envoyé pour une année sans rien à dire.',
       connection_stopped:
-        'Une connexion à une appli ou un service de suivi a refusé ce que Polyfin gardait, et s’est arrêté : une fois par arrêt, avec ce qu’il faut faire pour le reconnecter.',
+        'Une connexion à une appli ou un service de suivi a refusé ce que Polyfin gardait, et s’est arrêté\u202f: une fois par arrêt, avec ce qu’il faut faire pour le reconnecter.',
       account_blocked:
-        'Des mots de passe erronés ont bloqué un compte pour un moment : une fois par blocage, avec jusqu’à quand, l’adresse et l’appli de la dernière tentative. Les cibles du serveur et des administrateurs apprennent ceux de tous les comptes, les autres ceux de leur compte.',
+        'Des mots de passe erronés ont bloqué un compte pour un moment\u202f: une fois par blocage, avec jusqu’à quand, l’adresse et l’appli de la dernière tentative. Les cibles du serveur et des administrateurs apprennent ceux de tous les comptes, les autres ceux de leur compte.',
       new_device:
         'Votre compte s’est connecté depuis une appli Jellyfin ou le client web sur un appareil qu’il n’avait jamais utilisé, avec l’appli, l’appareil et l’adresse. Le premier appareil d’un compte n’est pas signalé.',
       share_played:
-        'Quelqu’un sans compte a lancé un film ou un épisode grâce à un lien de partage : au plus une fois par heure et par lien, avec le titre et qui l’a partagé. Les cibles du serveur apprennent ceux de tous les liens, les autres ceux de leurs liens.',
+        'Quelqu’un sans compte a lancé un film ou un épisode grâce à un lien de partage\u202f: au plus une fois par heure et par lien, avec le titre et qui l’a partagé. Les cibles du serveur apprennent ceux de tous les liens, les autres ceux de leurs liens.',
       programme_reminder:
-        'Une émission de TV en direct dont vous avez demandé le rappel dans le lecteur web commence bientôt, avec l’avance choisie dans « Me prévenir avant », et un lien vers sa chaîne.',
+        'Une émission de TV en direct dont vous avez demandé le rappel dans le lecteur web commence bientôt, avec l’avance choisie dans «\u202fMe prévenir avant\u202f», et un lien vers sa chaîne.',
+      title_available:
+        'Des versions ont été trouvées pour un titre de votre liste de lecture «\u202fÀ regarder\u202f» pour lequel les vérifications précédentes n’en avaient trouvé aucune\u202f: une fois par titre. Une version trouvée n’a pas encore été essayée.',
     },
     enabled: 'Envoyer les messages à cette cible',
     create: 'Ajouter',
@@ -154,9 +168,10 @@ const notifications: typeof en = {
     testing: 'Envoi…',
     testDelivered: (name: string) => `${name} a reçu le message de test.`,
     testFailed: (name: string) => `${name} n’a pas accepté le message de test.`,
+    testAnswer: (answer: string) => `Sa réponse\u202f: ${answer}`,
     edit: 'Modifier',
     delete: 'Supprimer',
-    deleteTitle: (name: string) => `Supprimer ${name} ?`,
+    deleteTitle: (name: string) => `Supprimer ${name}\u202f?`,
     deleteBody: 'Les messages ne lui sont plus envoyés, et ceux en attente sont abandonnés.',
     deleted: (name: string) => `${name} supprimée.`,
     status: {
@@ -171,14 +186,59 @@ const notifications: typeof en = {
     answer: (code: string, email: boolean) => (email ? `SMTP ${code}` : `HTTP ${code}`),
     problem: {
       refused: (answer: string) =>
-        `La cible a refusé Polyfin (${answer}) : vérifiez son adresse, son jeton ou sa clé.`,
+        `La cible a refusé Polyfin (${answer})\u202f: vérifiez son adresse, son jeton ou sa clé.`,
       refusedEmail: (answer: string) =>
-        `Le serveur SMTP a refusé Polyfin (${answer}) : vérifiez son utilisateur et son mot de passe, l’adresse de l’expéditeur et cette adresse.`,
+        `Le serveur SMTP a refusé Polyfin (${answer})\u202f: vérifiez son utilisateur et son mot de passe, l’adresse de l’expéditeur et cette adresse.`,
       rejected: (answer: string) => `La cible a refusé le dernier message (${answer}).`,
       unreachable:
-        'Les derniers messages n’ont pas pu être remis : la cible n’a pas répondu, ou a répondu par des erreurs. Chaque message est retenté pendant une heure.',
+        'Les derniers messages n’ont pas pu être remis\u202f: la cible n’a pas répondu, ou a répondu par des erreurs. Chaque message est retenté pendant une heure.',
       unreadable:
-        'Son adresse, son jeton ou sa clé ne peut pas être déchiffré avec POLYFIN_SECRET_KEY : rien ne lui est envoyé tant qu’il n’est pas saisi de nouveau.',
+        'Son adresse, son jeton ou sa clé ne peut pas être déchiffré avec POLYFIN_SECRET_KEY\u202f: rien ne lui est envoyé tant qu’il n’est pas saisi de nouveau.',
+    },
+    perMinute: 'Messages par minute, au plus',
+    perMinuteHelp:
+      'Les messages suivants attendent leur tour, dans l’ordre. Vide pour aucune limite\u202f; de 1 à 60.',
+    groupMinutes: 'Grouper les lectures et nouveaux épisodes, en minutes',
+    groupMinutesHelp:
+      'Les lectures, les liens partagés lus et les nouveaux épisodes attendent ce temps, puis partent en un seul message. Tout le reste part toujours aussitôt. Vide pour tout envoyer aussitôt\u202f; de 1 à 1 440.',
+    capped: (n: number) => `Au plus ${n} par minute`,
+    grouped: (n: number) => `Groupés toutes les ${n} min`,
+    deliveries: {
+      open: 'Derniers envois',
+      title: (name: string) => `Derniers envois à ${name}`,
+      help: 'Les 100 derniers messages, du plus récent au plus ancien, gardés 30 jours.',
+      loading: 'Chargement des envois…',
+      empty: 'Aucun message envoyé.',
+      when: 'Quand',
+      event: 'Message',
+      outcome: 'Résultat',
+      test: 'Message de test',
+      grouped: (n: number) => `${n} événements en un message`,
+      attempts: (n: number) => `${n} tentatives`,
+      outcomes: {
+        delivered: 'Remis',
+        refused: 'Refusé',
+        rejected: 'Message refusé',
+        failed: 'Non remis',
+        dropped: 'Abandonné',
+        unreadable: 'Indéchiffrable',
+      },
+    },
+    preview: {
+      title: 'Aperçu',
+      help: 'Voir un résumé tel qu’une cible e-mail le recevrait maintenant, celui du serveur ou d’un utilisateur. Rien n’est envoyé.',
+      summary: 'Résumé',
+      summaries: {
+        weekly_summary: 'Résumé de la semaine',
+        monthly_summary: 'Bilan du mois',
+        yearly_summary: 'Bilan de l’année',
+      },
+      of: 'De',
+      server: 'Le serveur',
+      show: 'Aperçu',
+      loading: 'Préparation de l’aperçu…',
+      empty: 'Rien à dire pour cette période\u202f: ce résumé ne serait pas envoyé.',
+      frame: 'L’e-mail du résumé',
     },
     lastSent: 'Dernier message ',
     nothingSent: 'Aucun message envoyé',

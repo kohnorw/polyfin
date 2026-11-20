@@ -18,7 +18,7 @@ export default function LogoField({
   onValue: (value: string) => void
 }) {
   const { t } = useI18n()
-  const s = t.settings
+  const s = t.fork.settings
   const input = useRef<HTMLInputElement>(null)
   const [problem, setProblem] = useState('')
   const choose = (file: File | undefined) => {

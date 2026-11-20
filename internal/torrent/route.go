@@ -11,12 +11,12 @@ import (
 	"time"
 )
 
-// ErrNoRoute reports torrents played without a route: neither a network
-// interface nor a SOCKS5 proxy is set.
+// ErrNoRoute reports torrents played without a route: no network
+// interface, SOCKS5 proxy or WireGuard tunnel is set.
 var ErrNoRoute = errors.New("no route is set for torrents")
 
 // ErrNoUDP reports a route that carries no UDP: a SOCKS5 proxy without
-// UDP ASSOCIATE. UDP trackers and the DHT stay off over it.
+// UDP ASSOCIATE. UDP trackers, the DHT and uTP stay off over it.
 var ErrNoUDP = errors.New("the route carries no UDP")
 
 // ErrInterfaceUnsupported reports a network interface route on a system
@@ -31,11 +31,18 @@ const (
 	InterfaceUnsupported = "interface_unsupported"
 	ProxyUnreachable     = "proxy_unreachable"
 	ProxyRefused         = "proxy_refused"
+	// WireGuardEndpoint: the name of the WireGuard server cannot be
+	// looked up; WireGuardDown: the tunnel cannot start, as when its
+	// ListenPort is taken; WireGuardHandshake: the server does not answer
+	// the handshake, as with a wrong key or a server down.
+	WireGuardEndpoint  = "wireguard_endpoint"
+	WireGuardDown      = "wireguard_down"
+	WireGuardHandshake = "wireguard_handshake"
 )
 
 // RouteError is why a route cannot carry the torrents: Kind tells what,
-// Route names the interface or the proxy's address, and Err, when set,
-// is the system's error.
+// Route names the interface, the proxy's address or the WireGuard server,
+// and Err, when set, is the system's error.
 type RouteError struct {
 	Kind, Route string
 	Err         error
@@ -56,6 +63,12 @@ func (e *RouteError) Error() string {
 		text = "the SOCKS5 proxy " + e.Route + " does not answer"
 	case ProxyRefused:
 		text = "the SOCKS5 proxy " + e.Route + " refused the user and password"
+	case WireGuardEndpoint:
+		text = "the WireGuard server " + e.Route + " cannot be looked up"
+	case WireGuardDown:
+		text = "the WireGuard tunnel to " + e.Route + " cannot start"
+	case WireGuardHandshake:
+		text = "the WireGuard server " + e.Route + " does not answer the handshake"
 	}
 	if e.Err != nil {
 		text += ": " + e.Err.Error()
@@ -69,6 +82,10 @@ func (e *RouteError) Unwrap() error {
 	}
 	return e.Err
 }
+
+// RouteFailure marks a route's failure for the source cache: the source
+// of a torrent's file was not asked (see source.RouteFailure).
+func (*RouteError) RouteFailure() {}
 
 // Route carries every socket of the torrents, and nothing is sent another
 // way: a socket the route cannot open is not opened.
@@ -87,16 +104,25 @@ type Route interface {
 	Close() error
 }
 
-// PacketConn is a UDP socket of a route.
+// PacketConn is a UDP socket of a route. Its reads are made by one
+// goroutine at a time.
 type PacketConn interface {
 	// WriteTo sends p to address, a host name or an IP address with a
 	// port.
 	WriteTo(p []byte, address string) error
+	// WriteToAddrPort sends p to an IPv4 address and port, as uTP does
+	// for each packet: no name to look up.
+	WriteToAddrPort(p []byte, to netip.AddrPort) error
 	// ReadFrom reads a datagram and the IP address and port it came from.
 	ReadFrom(p []byte) (int, netip.AddrPort, error)
 	SetReadDeadline(t time.Time) error
 	Close() error
 }
+
+// udpReadBuffer is the receive buffer asked for a route's UDP socket: uTP
+// sends bursts of a window, which a busy server reads late, and the
+// system's default holds about 200 KB. The system may give less.
+const udpReadBuffer = 2 << 20
 
 // InterfaceRoute binds every socket to the network interface name, such as
 // a WireGuard interface: it is up with an address, or nothing is sent.
@@ -193,6 +219,15 @@ func (r *interfaceRoute) resolve(ctx context.Context, network, address string) (
 	return netip.AddrPortFrom(ips[0].Unmap(), uint16(n)), nil
 }
 
+// lookup is the address Dial, or a UDP socket's WriteTo, reaches for
+// address (see resolver).
+func (r *interfaceRoute) lookup(ctx context.Context, address string, tcp bool) (netip.AddrPort, error) {
+	if tcp {
+		return r.resolve(ctx, "tcp", address)
+	}
+	return r.resolve(ctx, "udp", address)
+}
+
 func (r *interfaceRoute) ListenPacket(ctx context.Context) (PacketConn, error) {
 	if err := r.Check(ctx); err != nil {
 		return nil, err
@@ -202,7 +237,9 @@ func (r *interfaceRoute) ListenPacket(ctx context.Context) (PacketConn, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &interfacePacketConn{route: r, conn: conn.(*net.UDPConn)}, nil
+	udp := conn.(*net.UDPConn)
+	_ = udp.SetReadBuffer(udpReadBuffer)
+	return &interfacePacketConn{route: r, conn: udp}, nil
 }
 
 type interfacePacketConn struct {
@@ -218,6 +255,11 @@ func (c *interfacePacketConn) WriteTo(p []byte, address string) error {
 		return err
 	}
 	_, err = c.conn.WriteToUDPAddrPort(p, target)
+	return err
+}
+
+func (c *interfacePacketConn) WriteToAddrPort(p []byte, to netip.AddrPort) error {
+	_, err := c.conn.WriteToUDPAddrPort(p, to)
 	return err
 }
 

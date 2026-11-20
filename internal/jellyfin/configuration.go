@@ -75,7 +75,7 @@ func (h *Handler) userConfiguration(ctx context.Context, user accounts.ID) (User
 
 // userDto describes user with the configuration they saved, and their
 // count of wrong passwords with the server's limit, -1 when there is none.
-// The public list of users, which anyone may read, leaves those out.
+// Only the user and administrators read it (see userDtoFor).
 func (h *Handler) userDto(ctx context.Context, user accounts.User) (UserDto, error) {
 	configuration, err := h.userConfiguration(ctx, user.ID)
 	if err != nil {
@@ -95,6 +95,30 @@ func (h *Handler) userDto(ctx context.Context, user accounts.User) (UserDto, err
 		libraryAccess(&dto.Policy, user, libraries)
 	}
 	return dto, nil
+}
+
+// userDtoFor describes user to caller. The user themselves and an
+// administrator, which an API key is, read the whole of it. Anyone else
+// reads what otherUserDto tells, and is not shown (false) the users
+// shownTo keeps from them.
+func (h *Handler) userDtoFor(ctx context.Context, caller, user accounts.User) (UserDto, bool, error) {
+	if caller.IsAdministrator || user.ID == caller.ID {
+		dto, err := h.userDto(ctx, user)
+		return dto, err == nil, err
+	}
+	if !h.shownTo(caller, user) {
+		return UserDto{}, false, nil
+	}
+	return otherUserDto(user, h.ServerID), true, nil
+}
+
+// shownTo reports whether caller may be told of user at all, their
+// identifier and picture included. The user themselves and an
+// administrator always are. Anyone else, and anyone without credentials
+// (a zero caller), is not told of a user kept off the sign-in screen, nor
+// of one who is refused, as apps see a disabled one.
+func (h *Handler) shownTo(caller, user accounts.User) bool {
+	return caller.IsAdministrator || user.ID == caller.ID || !user.IsHidden && !user.Refused(h.now())
 }
 
 // updateUserConfiguration replaces the configuration of the caller, or of
@@ -129,6 +153,10 @@ func (h *Handler) updateUserConfiguration(w http.ResponseWriter, r *http.Request
 	if !ok {
 		return
 	}
+	if configuration.OrderedViews, err = h.ownOrder(r, user, configuration.OrderedViews); err != nil {
+		h.internalError(w, r, err)
+		return
+	}
 	value, _ := json.Marshal(configuration)
 	if err := h.Preferences.PutConfiguration(r.Context(), user.ID, value); err != nil {
 		h.internalError(w, r, err)
@@ -136,6 +164,28 @@ func (h *Handler) updateUserConfiguration(w http.ResponseWriter, r *http.Request
 	}
 	h.configurations.Put(user.ID, configuration)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// ownOrder is the order of views a configuration saved for user keeps:
+// none when ordered is the server's own order, every view the user sees
+// in the order the server lists them, so that the user goes on following
+// the order of Content › Libraries, libraries added later included.
+// jellyfin-web's Settings › Home saves the order of every view each time
+// it is saved, whether the user changed it or not. Any other order is the
+// user's own, kept as saved, and comes first (see arrangeViews), as in
+// Jellyfin.
+func (h *Handler) ownOrder(r *http.Request, user accounts.User, ordered []string) ([]string, error) {
+	if len(ordered) == 0 {
+		return ordered, nil
+	}
+	views, err := h.serverOrderedViews(r, user)
+	if err != nil {
+		return nil, err
+	}
+	if slices.EqualFunc(ordered, views, func(id string, view BaseItemDto) bool { return id == view.Id }) {
+		return []string{}, nil
+	}
+	return ordered, nil
 }
 
 // parseUserConfiguration reads a UserConfiguration as Jellyfin's JSON

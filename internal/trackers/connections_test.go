@@ -1,20 +1,26 @@
 package trackers
 
 import (
+	"bytes"
 	"errors"
+	"log/slog"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 )
 
 func TestTraktCodeConnectsOnceEnteredAndKeepsTheConnectionWhenDenied(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	alice := h.user(t, "alice")
-	h.f.reply("POST", "/trakt/oauth/device/code", http.StatusOK,
+	h.f.reply("POST", "/trakt-auth/oauth/device/code", http.StatusOK,
 		`{"device_code":"device-1","user_code":"ABCD1234","verification_url":"https://trakt.example/activate","expires_in":600,"interval":1}`)
 	var polls atomic.Int32
-	h.f.on("POST", "/trakt/oauth/device/token", func(r request) answer {
+	h.f.on("POST", "/trakt-auth/oauth/device/token", func(r request) answer {
 		// Pending twice, then entered.
 		if polls.Add(1) <= 2 {
 			return answer{status: http.StatusBadRequest, body: `{}`}
@@ -37,7 +43,7 @@ func TestTraktCodeConnectsOnceEnteredAndKeepsTheConnectionWhenDenied(t *testing.
 	if status.Code != nil || status.Account != "alice-on-trakt" || status.Problem != "" || !status.ConnectedAt.Equal(clockStart) {
 		t.Errorf("connected: %+v", status)
 	}
-	poll := h.f.sent("trakt", "/oauth/device/token")[0]
+	poll := h.f.sent("trakt-auth", "/oauth/device/token")[0]
 	sameJSON(t, "poll", poll.body, `{"code":"device-1","client_id":"trakt-client","client_secret":"trakt-secret"}`)
 	if settings := h.f.sent("trakt", "/users/settings")[0]; settings.header.Get("Authorization") != "Bearer trakt-access-1" ||
 		settings.header.Get("trakt-api-key") != "trakt-client" || settings.header.Get("trakt-api-version") != "2" {
@@ -49,7 +55,7 @@ func TestTraktCodeConnectsOnceEnteredAndKeepsTheConnectionWhenDenied(t *testing.
 	}
 
 	// A new code the user denies leaves the connection as it was.
-	h.f.reply("POST", "/trakt/oauth/device/token", 418, `{}`)
+	h.f.reply("POST", "/trakt-auth/oauth/device/token", 418, `{}`)
 	if status, err := h.StartCode(t.Context(), alice, Trakt); err != nil || status.Code == nil || !status.Connected {
 		t.Fatalf("second code: %+v %v", status, err)
 	}
@@ -64,6 +70,7 @@ func TestTraktCodeConnectsOnceEnteredAndKeepsTheConnectionWhenDenied(t *testing.
 }
 
 func TestSimklCodeExpiresOrConnectsWithWriteAccess(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	bob := h.user(t, "bob")
 	h.f.reply("POST", "/simkl/oauth2/device", http.StatusOK, `{"device_code":"simkl-device","user_code":"WXYZ-2345",
@@ -118,10 +125,11 @@ func TestSimklCodeExpiresOrConnectsWithWriteAccess(t *testing.T) {
 }
 
 func TestCodeServicesNeedTheirApp(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	user := h.user(t, "carol")
 	settings := h.store.Settings()
-	settings.TraktClientSecret, settings.SimklClientID = "", ""
+	settings.TraktClientID, settings.SimklClientID = "", ""
 	if _, err := h.store.UpdateSettings(t.Context(), settings); err != nil {
 		t.Fatal(err)
 	}
@@ -137,17 +145,80 @@ func TestCodeServicesNeedTheirApp(t *testing.T) {
 		t.Errorf("MDBList: %+v", status)
 	}
 	// A service that does not answer.
-	settings.TraktClientSecret = "trakt-secret"
+	settings.TraktClientID = "trakt-client"
 	if _, err := h.store.UpdateSettings(t.Context(), settings); err != nil {
 		t.Fatal(err)
 	}
-	h.f.reply("POST", "/trakt/oauth/device/code", http.StatusServiceUnavailable, `{}`)
+	h.f.reply("POST", "/trakt-auth/oauth/device/code", http.StatusServiceUnavailable, `{}`)
 	if _, err := h.StartCode(t.Context(), user, Trakt); !errors.Is(err, ErrUnreachable) {
 		t.Errorf("unreachable: %v", err)
 	}
 }
 
+// An app created on Trakt since October 2026 has a client ID and no
+// secret: Trakt is offered, its OAuth calls go to the authentication host
+// without a secret, a refresh names the localhost redirect URI such apps
+// are registered with, and the API calls stay on the API host.
+func TestTraktAppWithoutSecret(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	settings := h.store.Settings()
+	settings.TraktClientSecret = ""
+	if _, err := h.store.UpdateSettings(t.Context(), settings); err != nil {
+		t.Fatal(err)
+	}
+	user := h.user(t, "nina")
+	h.f.reply("POST", "/trakt-auth/oauth/device/code", http.StatusOK,
+		`{"device_code":"device-n","user_code":"NINA1234","verification_url":"https://trakt.example/activate","expires_in":600,"interval":1}`)
+	// The token expires within the day, to be refreshed at the first send.
+	h.f.reply("POST", "/trakt-auth/oauth/device/token", http.StatusOK, `{"access_token":"nina-access-1","token_type":"bearer","expires_in":3600,
+		"refresh_token":"nina-refresh-1","scope":"public","created_at":`+strconv.FormatInt(clockStart.Unix(), 10)+`}`)
+	h.f.reply("POST", "/trakt-auth/oauth/token", http.StatusOK, `{"access_token":"nina-access-2","token_type":"bearer","expires_in":604800,
+		"refresh_token":"nina-refresh-2","scope":"public","created_at":`+strconv.FormatInt(clockStart.Unix(), 10)+`}`)
+	h.f.reply("GET", "/trakt/users/settings", http.StatusOK, `{"user":{"username":"nina-on-trakt"}}`)
+	h.f.reply("POST", "/trakt/scrobble/stop", http.StatusCreated, `{"action":"scrobble"}`)
+
+	if status := h.status(t, user, Trakt); !status.Available {
+		t.Fatalf("not offered with a client ID alone: %+v", status)
+	}
+	if _, err := h.StartCode(t.Context(), user, Trakt); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the connection", func() bool { return h.status(t, user, Trakt).Connected })
+	h.Playback(user, play(Stopped, movie, 90, false, false))
+	stop := h.f.wait(t, 1, "trakt", "/scrobble/stop")[0]
+	if stop.header.Get("Authorization") != "Bearer nina-access-2" {
+		t.Errorf("scrobbled with %q", stop.header.Get("Authorization"))
+	}
+	h.idle(t)
+	if err := h.Disconnect(t.Context(), user, Trakt); err != nil {
+		t.Fatal(err)
+	}
+	revoke := h.f.wait(t, 1, "trakt-auth", "/oauth/revoke")[0]
+
+	code := h.f.sent("trakt-auth", "/oauth/device/code")[0]
+	sameJSON(t, "code", code.body, `{"client_id":"trakt-client"}`)
+	if code.header.Get("trakt-api-key") != "trakt-client" || code.header.Get("trakt-api-version") != "2" {
+		t.Errorf("code asked with %v", code.header)
+	}
+	sameJSON(t, "poll", h.f.sent("trakt-auth", "/oauth/device/token")[0].body, `{"code":"device-n","client_id":"trakt-client"}`)
+	sameJSON(t, "refresh", h.f.sent("trakt-auth", "/oauth/token")[0].body, `{"refresh_token":"nina-refresh-1","client_id":"trakt-client",
+		"redirect_uri":"http://localhost","grant_type":"refresh_token"}`)
+	sameJSON(t, "revocation", revoke.body, `{"token":"nina-access-2","client_id":"trakt-client"}`)
+	if account := h.f.sent("trakt", "/users/settings"); len(account) != 1 {
+		t.Errorf("%d account requests on the API host", len(account))
+	}
+	h.f.mu.Lock()
+	defer h.f.mu.Unlock()
+	for _, r := range h.f.requests {
+		if r.service == "trakt" && strings.HasPrefix(r.path, "/oauth/") {
+			t.Errorf("%s sent to the API host", r.path)
+		}
+	}
+}
+
 func TestKeysAreCheckedWithTheService(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	user := h.user(t, "dave")
 	h.f.on("GET", "/mdblist/user", func(r request) answer {
@@ -212,6 +283,7 @@ func TestKeysAreCheckedWithTheService(t *testing.T) {
 }
 
 func TestDisconnectingRevokesAndForgets(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	user := h.user(t, "erin")
 	h.connected(t, user, Trakt, "trakt-erin")
@@ -234,7 +306,7 @@ func TestDisconnectingRevokesAndForgets(t *testing.T) {
 	if err := h.Disconnect(t.Context(), user, PublicMetaDB); err != nil {
 		t.Error(err)
 	}
-	revoke := h.f.wait(t, 1, "trakt", "/oauth/revoke")[0]
+	revoke := h.f.wait(t, 1, "trakt-auth", "/oauth/revoke")[0]
 	sameJSON(t, "Trakt revocation", revoke.body, `{"token":"trakt-erin","client_id":"trakt-client","client_secret":"trakt-secret"}`)
 	if revoke := h.f.wait(t, 1, "simkl", "/oauth2/revoke")[0]; revoke.form.Get("token") != "simkl-erin-refresh" || revoke.form.Get("client_id") != "simkl-client" {
 		t.Errorf("Simkl revocation: %v", revoke.form)
@@ -247,6 +319,7 @@ func TestDisconnectingRevokesAndForgets(t *testing.T) {
 }
 
 func TestDeletingAUserDeletesTheirConnections(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	user := h.user(t, "frank")
 	h.connected(t, user, MDBList, "mdblist-frank")
@@ -265,10 +338,11 @@ func TestDeletingAUserDeletesTheirConnections(t *testing.T) {
 }
 
 func TestARefusedAppIsNotAnOutage(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	user := h.user(t, "zoe")
 	// Asking for a code with an app Trakt does not know.
-	h.f.reply("POST", "/trakt/oauth/device/code", http.StatusUnauthorized, `{"error":"invalid_client","error_description":"client not found"}`)
+	h.f.reply("POST", "/trakt-auth/oauth/device/code", http.StatusUnauthorized, `{"error":"invalid_client","error_description":"client not found"}`)
 	if _, err := h.StartCode(t.Context(), user, Trakt); !errors.Is(err, ErrAppRefused) {
 		t.Errorf("Trakt: %v", err)
 	}
@@ -276,9 +350,9 @@ func TestARefusedAppIsNotAnOutage(t *testing.T) {
 	// A wrong secret shows only once the user entered the code: the code
 	// ends, and the service shows the app refused, connected or not.
 	h.connected(t, user, Trakt, "trakt-zoe")
-	h.f.reply("POST", "/trakt/oauth/device/code", http.StatusOK,
+	h.f.reply("POST", "/trakt-auth/oauth/device/code", http.StatusOK,
 		`{"device_code":"device-2","user_code":"EFGH5678","verification_url":"https://trakt.example/activate","expires_in":600,"interval":1}`)
-	h.f.reply("POST", "/trakt/oauth/device/token", http.StatusUnauthorized, `{"error":"invalid_client","error_description":"client not found"}`)
+	h.f.reply("POST", "/trakt-auth/oauth/device/token", http.StatusUnauthorized, `{"error":"invalid_client","error_description":"client not found"}`)
 	if _, err := h.StartCode(t.Context(), user, Trakt); err != nil {
 		t.Fatal(err)
 	}
@@ -318,5 +392,94 @@ func TestARefusedAppIsNotAnOutage(t *testing.T) {
 	}
 	if strings.Contains(h.log.String(), "trakt-secret") || strings.Contains(h.log.String(), "simkl-client") {
 		t.Errorf("log: %s", h.log.String())
+	}
+}
+
+// holdingLog holds the line that tells a connection was saved, which
+// comes once it is, until the test lets it go: the time a status in
+// between takes to read is as long as the test wants.
+type holdingLog struct {
+	saved, release chan struct{}
+	once           sync.Once
+}
+
+func (l *holdingLog) Write(p []byte) (int, error) {
+	if bytes.Contains(p, []byte("A user connected a tracking service")) {
+		l.once.Do(func() { close(l.saved) })
+		<-l.release
+	}
+	return len(p), nil
+}
+
+func TestASavedConnectionNeverShowsItsCode(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		service string
+		answer  func(f *fakes)
+	}{
+		{Trakt, func(f *fakes) {
+			f.reply("POST", "/trakt-auth/oauth/device/code", http.StatusOK,
+				`{"device_code":"device-1","user_code":"ABCD1234","verification_url":"https://trakt.example/activate","expires_in":600,"interval":1}`)
+			f.reply("POST", "/trakt-auth/oauth/device/token", http.StatusOK, `{"access_token":"trakt-access","refresh_token":"trakt-refresh"}`)
+		}},
+		{Simkl, func(f *fakes) {
+			f.reply("POST", "/simkl/oauth2/device", http.StatusOK,
+				`{"device_code":"simkl-device","user_code":"WXYZ-2345","verification_uri":"https://simkl.example/pin","expires_in":900,"interval":1}`)
+			f.reply("POST", "/simkl/oauth2/token", http.StatusOK, `{"access_token":"simkl-access","scope":"media:read media:write"}`)
+		}},
+		{LastFM, func(f *fakes) {
+			f.on(http.MethodGet, "/lastfm/2.0/", func(r request) answer {
+				if r.query.Get("method") == "auth.getToken" {
+					return answer{status: http.StatusOK, body: `{"token":"request-token"}`}
+				}
+				return answer{status: http.StatusOK, body: `{"session":{"name":"alice-fm","key":"session-key"}}`}
+			})
+		}},
+		{AniList, func(f *fakes) {
+			f.reply("POST", "/anilist-auth/token", http.StatusOK, `{"access_token":"anilist-token","expires_in":31536000}`)
+		}},
+		{MyAnimeList, func(f *fakes) {
+			f.reply("POST", "/myanimelist-auth/token", http.StatusOK, `{"access_token":"mal-token","refresh_token":"mal-refresh"}`)
+		}},
+	} {
+		t.Run(test.service, func(t *testing.T) {
+			t.Parallel()
+			h := newHarness(t)
+			log := &holdingLog{saved: make(chan struct{}), release: make(chan struct{})}
+			h.logger = slog.New(slog.NewTextHandler(log, nil))
+			// Registered after the harness, it runs before the service closes.
+			release := sync.OnceFunc(func() { close(log.release) })
+			t.Cleanup(release)
+			alice := h.user(t, "alice")
+			test.answer(h.f)
+			if status, err := h.StartCode(t.Context(), alice, test.service); err != nil || status.Code == nil {
+				t.Fatalf("waiting: %+v %v", status, err)
+			}
+			// A paste service connects with the code the user pastes back.
+			exchanged := make(chan error, 1)
+			if ByPaste(test.service) {
+				go func() {
+					_, err := h.Exchange(t.Context(), alice, test.service, "the-code")
+					exchanged <- err
+				}()
+			} else {
+				exchanged <- nil
+			}
+			select {
+			case <-log.saved:
+			case <-time.After(10 * time.Second):
+				t.Fatal("the connection was never saved")
+			}
+			if status := h.status(t, alice, test.service); !status.Connected || status.Code != nil {
+				t.Errorf("saved: %+v %+v", status, status.Code)
+			}
+			release()
+			if err := <-exchanged; err != nil {
+				t.Errorf("exchange: %v", err)
+			}
+			if status := h.status(t, alice, test.service); !status.Connected || status.Code != nil {
+				t.Errorf("connected: %+v %+v", status, status.Code)
+			}
+		})
 	}
 }

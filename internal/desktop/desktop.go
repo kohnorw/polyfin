@@ -155,6 +155,27 @@ func (f Folders) Instance() string { return filepath.Join(f.Data, "desktop.pid")
 // running app to quit.
 func (f Folders) QuitRequest() string { return filepath.Join(f.Data, "desktop.quit") }
 
+// Offer is the file the app writes the update it offers to, for the
+// server to offer it in the admin app (see Offered).
+func (f Folders) Offer() string { return filepath.Join(f.Data, "desktop-update.json") }
+
+// InstallRequest is the file the server writes to ask the running app to
+// install the update it offers (see RequestInstall).
+func (f Folders) InstallRequest() string { return filepath.Join(f.Data, "desktop.install") }
+
+// PendingUpdate is the file of an update installed whose new version has
+// not answered yet: where the previous app and the copy of the database
+// are kept until it does (see update.Pending).
+func (f Folders) PendingUpdate() string { return filepath.Join(f.Data, "desktop-update-pending.json") }
+
+// RolledBack is the file that tells the app went back to its previous
+// version (see RolledBack).
+func (f Folders) RolledBack() string { return filepath.Join(f.Data, "desktop-update-rollback.json") }
+
+// PreviousDatabase is the copy of the cluster's folder an update keeps
+// until the new version answers.
+func (f Folders) PreviousDatabase() string { return filepath.Join(f.Updates(), "postgresql.previous") }
+
 // Make creates the data folder and the log folder, readable by the user
 // only.
 func (f Folders) Make() error {

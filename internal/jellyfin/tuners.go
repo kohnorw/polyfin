@@ -57,7 +57,7 @@ func newTunerHostInfo(tuner iptv.Tuner) TunerHostInfo {
 
 // tunerHostInfo describes a tuner of the server.
 func tunerHostInfo(source iptv.Source) TunerHostInfo {
-	tuner := iptv.Tuner{BaseURL: source.Addon.ManifestURL, FriendlyName: source.Addon.Manifest.Name}
+	tuner := iptv.Tuner{BaseURL: source.Addon.ManifestURL, FriendlyName: source.Addon.Name()}
 	if source.Tuner != nil {
 		tuner.DeviceID = source.Tuner.Device
 	}
@@ -184,7 +184,7 @@ func (h *Handler) saveTunerHost(w http.ResponseWriter, r *http.Request) {
 			Account: iptv.Account{Kind: addons.KindHDHomeRun, URL: info.Url}, Options: options}, false)
 		if err == nil {
 			id = addon.ID
-			h.Activity.AddonInstalled(ctx, user, addon.Manifest.Name, addon.Manifest.Version, true)
+			h.Activity.AddonInstalled(ctx, user, addon.Name(), addon.Manifest.Version, true)
 		}
 	} else {
 		var current iptv.Source
@@ -247,14 +247,7 @@ func (h *Handler) deleteTunerHost(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	default:
-		h.Activity.AddonRemoved(r.Context(), callerFrom(r.Context()).User, addon.Manifest.Name, true)
-		// The images uploaded for its library go with the tuner, even when
-		// the request is abandoned; the tuner is gone either way.
-		if h.Library != nil {
-			if err := h.Library.DeleteLibraryImages(context.WithoutCancel(r.Context()), addon); err != nil {
-				h.Logger.Warn("The images of a removed tuner's library could not be deleted", "tuner", addon.Manifest.Name, "error", err)
-			}
-		}
+		h.Activity.AddonRemoved(r.Context(), callerFrom(r.Context()).User, addon.Name(), true)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

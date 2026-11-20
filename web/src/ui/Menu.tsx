@@ -10,11 +10,11 @@ import {
   type ReactNode,
 } from 'react'
 import { Link } from 'react-router'
-import { cx } from './cx'
+import { cx, rem } from './cx'
 
-type MenuContextValue = { close: (returnFocus?: boolean) => void }
+type MenuContextValue = { close: (returnFocus?: boolean) => void; fit: boolean }
 
-const MenuContext = createContext<MenuContextValue>({ close: () => {} })
+const MenuContext = createContext<MenuContextValue>({ close: () => {}, fit: false })
 
 /** The props a Menu gives its trigger button: spread them on a `<button>`. */
 export type MenuTriggerProps = {
@@ -48,7 +48,8 @@ export function Menu({
   label,
   trigger,
   align = 'start',
-  width = 240,
+  width = 256,
+  fit = false,
   children,
   className,
 }: {
@@ -58,14 +59,23 @@ export function Menu({
   trigger: (props: MenuTriggerProps) => ReactNode
   /** Which edge of the button the menu lines up with. */
   align?: 'start' | 'end'
-  /** Width in px. */
+  /** Width in px; with `fit`, the least width. */
   width?: number
+  /**
+   * Grows past `width` to fit its longest item, up to the room between its button and the edge
+   * of the screen, where an item wraps onto more lines rather than being cut: a row's actions,
+   * whose labels run long in some languages.
+   */
+  fit?: boolean
   /** MenuItem, MenuSeparator, MenuHeader and MenuGroup. */
   children: ReactNode
   className?: string
 }) {
   const id = useId()
   const [open, setOpen] = useState(false)
+  // With `fit`, the room between the button's aligned edge and the far edge of the screen, in px,
+  // measured as the menu opens: the menu wraps its items within it rather than going off screen.
+  const [room, setRoom] = useState<number | null>(null)
   const button = useRef<HTMLButtonElement | null>(null)
   const list = useRef<HTMLDivElement>(null)
   const root = useRef<HTMLDivElement>(null)
@@ -79,6 +89,14 @@ export function Menu({
       const all = items()
       all[which === 'first' ? 0 : all.length - 1]?.focus()
     })
+  }
+
+  function show() {
+    const box = button.current?.getBoundingClientRect()
+    if (fit && box !== undefined) {
+      setRoom(align === 'end' ? box.right : document.documentElement.clientWidth - box.left)
+    }
+    setOpen(true)
   }
 
   function close(returnFocus = true) {
@@ -120,7 +138,7 @@ export function Menu({
   }
 
   return (
-    <MenuContext value={{ close }}>
+    <MenuContext value={{ close, fit }}>
       <div ref={root} className={cx('relative', className)}>
         {trigger({
           ref: (element) => {
@@ -132,13 +150,17 @@ export function Menu({
           'aria-expanded': open,
           'aria-controls': `${id}-menu`,
           onClick: () => {
-            setOpen(!open)
-            if (!open) focusItem('first')
+            if (open) {
+              setOpen(false)
+            } else {
+              show()
+              focusItem('first')
+            }
           },
           onKeyDown: (event) => {
             if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
               event.preventDefault()
-              setOpen(true)
+              show()
               focusItem(event.key === 'ArrowDown' ? 'first' : 'last')
             }
           },
@@ -150,11 +172,23 @@ export function Menu({
           aria-label={label}
           hidden={!open}
           onKeyDown={onListKeyDown}
-          style={{ width }}
+          style={
+            fit
+              ? {
+                  minWidth: rem(width),
+                  // 0.75rem from the screen's edge, as the menu's own bound keeps.
+                  maxWidth:
+                    room === null
+                      ? undefined
+                      : `min(calc(100vw - 1.5rem), calc(${room}px - 0.75rem))`,
+                }
+              : { width: rem(width) }
+          }
           className={cx(
             // Above the SaveBar (z-20), under the TopBar (z-30).
-            'absolute top-[calc(100%+6px)] z-25 rounded-row bg-s2 p-1.5 shadow-pop animate-fade',
+            'absolute top-[calc(100%+0.375rem)] z-25 max-w-[calc(100vw-1.5rem)] rounded-panel p-1.5 raised animate-pop',
             align === 'end' ? 'right-0' : 'left-0',
+            fit && 'w-max',
           )}
         >
           {children}
@@ -164,8 +198,9 @@ export function Menu({
   )
 }
 
+// A row of the raised panel, 38 px (32 in Compact); the arrows light it like any other control.
 const itemClass =
-  'flex h-9 w-full cursor-pointer items-center gap-2.5 rounded-field px-2.5 text-left text-control text-ink-2 outline-none transition-[background-color,color] duration-160 ease-nuit hover:bg-s3 hover:text-ink focus-visible:bg-s3 focus-visible:text-ink focus-visible:outline-none aria-disabled:cursor-not-allowed aria-disabled:opacity-45'
+  'flex min-h-9.5 w-full cursor-pointer items-center gap-2.5 rounded-choice px-3 text-left text-control leading-snug outline-none transition-[background-color,color] duration-300 ease-nuit hover:bg-s2 focus-visible:lit focus-visible:outline-none aria-disabled:cursor-not-allowed aria-disabled:opacity-45 max-sm:min-h-11'
 
 /**
  * One entry of a Menu: a link with `to` (or `href` for outside the app), or an action with
@@ -179,6 +214,7 @@ export function MenuItem({
   onSelect,
   danger = false,
   disabled = false,
+  end,
   children,
 }: {
   icon?: Icon
@@ -192,19 +228,27 @@ export function MenuItem({
   /** Red, for removing. */
   danger?: boolean
   disabled?: boolean
+  /** A quiet value at the right end of the row, such as the current language. */
+  end?: ReactNode
   children: ReactNode
 }) {
-  const { close } = use(MenuContext)
+  const { close, fit } = use(MenuContext)
   const content = (
     <>
-      {Glyph && <Glyph size={16} aria-hidden="true" className="shrink-0" />}
-      <span className="min-w-0 flex-1 truncate">{children}</span>
+      {Glyph && (
+        <Glyph
+          size="1.125rem"
+          aria-hidden="true"
+          className={cx('shrink-0', danger ? 'text-danger' : 'text-ink-2')}
+        />
+      )}
+      <span className={cx('min-w-0 flex-1', fit ? 'py-1.5 hyphenate' : 'truncate')}>
+        {children}
+      </span>
+      {end !== undefined && <span className="shrink-0 text-small text-ink-3">{end}</span>}
     </>
   )
-  const className = cx(
-    itemClass,
-    danger && 'text-danger hover:text-danger focus-visible:text-danger',
-  )
+  const className = cx(itemClass, danger ? 'text-danger' : 'text-ink')
   if (to !== undefined) {
     return (
       <Link
@@ -252,8 +296,9 @@ export function MenuItem({
 }
 
 /**
- * Exclusive choices inside a Menu, drawn as a segmented control (the language): each option is a
- * `menuitemradio` reached with the arrows like the other items.
+ * Exclusive choices inside a Menu (the language): the label and the chosen option's title on one
+ * line, then the options side by side across the menu's width, as a segmented control. Each option
+ * is a `menuitemradio` reached with the arrows like the other items.
  */
 export function MenuChoice<T extends string>({
   label,
@@ -261,23 +306,27 @@ export function MenuChoice<T extends string>({
   value,
   onChange,
 }: {
-  /** Shown on the left, and the group's accessible name. */
+  /** Shown above the options, and the group's accessible name. */
   label: string
   options: readonly { value: T; label: string; lang?: string; title?: string }[]
   value: T
   onChange: (value: T) => void
 }) {
   const id = useId()
+  const chosen = options.find((option) => option.value === value)
   return (
-    <div
-      role="group"
-      aria-labelledby={id}
-      className="flex h-10 items-center justify-between gap-3 px-2.5"
-    >
-      <span id={id} className="text-control text-ink-2">
-        {label}
+    <div role="group" aria-labelledby={id} className="flex flex-col gap-1.5 px-3 pt-1.5 pb-2">
+      <span className="flex items-baseline justify-between gap-3">
+        <span id={id} className="text-control text-ink">
+          {label}
+        </span>
+        {chosen?.title && (
+          <span lang={chosen.lang} className="truncate text-small text-ink-3" aria-hidden="true">
+            {chosen.title}
+          </span>
+        )}
       </span>
-      <span className="inline-flex rounded-field border border-line-2 bg-bg p-0.5">
+      <span className="flex gap-1">
         {options.map((option) => (
           <button
             key={option.value}
@@ -286,9 +335,10 @@ export function MenuChoice<T extends string>({
             tabIndex={-1}
             lang={option.lang}
             title={option.title}
+            aria-label={option.title}
             aria-checked={option.value === value}
             onClick={() => onChange(option.value)}
-            className="h-[26px] cursor-pointer rounded-md px-2.5 text-[12.5px] font-medium text-ink-3 transition-[background-color,color] duration-160 hover:text-ink focus-visible:outline-offset-0 aria-checked:bg-s4 aria-checked:text-ink"
+            className="h-8.5 min-w-0 flex-1 cursor-pointer rounded-[0.5625rem] bg-s1 px-1 text-small font-semibold text-ink-2 transition-[background-color,color] duration-300 ease-nuit hover:bg-s2 hover:text-ink focus-visible:lit focus-visible:outline-none aria-checked:bg-s4 aria-checked:text-ink max-sm:h-11"
           >
             {option.label}
           </button>
@@ -298,12 +348,12 @@ export function MenuChoice<T extends string>({
   )
 }
 
-/** A hairline between groups of a Menu. */
+/** A soft line between groups of a Menu. */
 export function MenuSeparator() {
-  return <hr role="separator" className="mx-1 my-1.5 border-0 border-t border-line" />
+  return <hr role="separator" className="mx-3 my-1.5 h-px border-0 bg-line-2" />
 }
 
 /** The top of a Menu: who is signed in. Not focusable. */
 export function MenuHeader({ children }: { children: ReactNode }) {
-  return <div className="flex items-center gap-2.5 px-2.5 pt-2.5 pb-3">{children}</div>
+  return <div className="flex items-center gap-2.5 px-3 pt-2 pb-2.5 text-group">{children}</div>
 }

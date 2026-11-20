@@ -1,6 +1,7 @@
 // Package mosaic draws the images Polyfin makes for the collections and
 // libraries that have none: the posters of their first titles side by
-// side, under a gradient, with their name written across them.
+// side, under a gradient, with their name written across them; and the
+// emblems of its views that list no titles of their own (see DrawEmblem).
 package mosaic
 
 import (
@@ -10,6 +11,7 @@ import (
 	"math"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	xdraw "golang.org/x/image/draw"
 	"golang.org/x/image/font"
@@ -46,25 +48,56 @@ var background = color.RGBA{R: 0x14, G: 0x16, B: 0x1a, A: 0xff}
 // image. Posters missing (nil) are left out; with none, the image is the
 // gradient and the name alone.
 func Draw(name string, posters []image.Image, wide bool, fonts *Fonts) *image.RGBA {
-	width, height := PosterWidth, PosterHeight
-	if wide {
-		width, height = WideWidth, WideHeight
-	}
-	canvas := image.NewRGBA(image.Rect(0, 0, width, height))
-	draw.Draw(canvas, canvas.Bounds(), image.NewUniform(background), image.Point{}, draw.Src)
 	var shown []image.Image
 	for _, poster := range posters {
 		if poster != nil && !poster.Bounds().Empty() {
 			shown = append(shown, poster)
 		}
 	}
-	shown = shown[:min(len(shown), Tiles(wide))]
-	for i, cell := range cells(len(shown), wide, canvas.Bounds()) {
-		cover(canvas, cell, shown[i])
+	drawing := NewDrawing(len(shown), wide)
+	for i := range drawing.Shown() {
+		drawing.Cover(i, shown[i])
 	}
-	shade(canvas)
-	write(canvas, name, wide, fonts)
-	return canvas
+	return drawing.Finish(name, fonts)
+}
+
+// Drawing is an image being drawn as Draw draws it, one poster at a time,
+// so that a caller holds one decoded poster at a time beside it.
+type Drawing struct {
+	canvas *image.RGBA
+	wide   bool
+	cells  []image.Rectangle
+}
+
+// NewDrawing starts the image, a poster or a wide image, of posters
+// posters: its background, and the cells of those it shows (see Shown).
+func NewDrawing(posters int, wide bool) *Drawing {
+	width, height := PosterWidth, PosterHeight
+	if wide {
+		width, height = WideWidth, WideHeight
+	}
+	canvas := image.NewRGBA(image.Rect(0, 0, width, height))
+	draw.Draw(canvas, canvas.Bounds(), image.NewUniform(background), image.Point{}, draw.Src)
+	return &Drawing{canvas: canvas, wide: wide, cells: cells(min(posters, Tiles(wide)), wide, canvas.Bounds())}
+}
+
+// Shown is how many of its posters the image shows, the first ones: as
+// many as its cells, which may be fewer than its posters, as three of
+// five on a wide image.
+func (d *Drawing) Shown() int { return len(d.cells) }
+
+// Cover draws the poster shown at index i, from 0 to Shown, into its
+// cell; the image keeps nothing of the poster.
+func (d *Drawing) Cover(i int, poster image.Image) {
+	cover(d.canvas, d.cells[i], poster)
+}
+
+// Finish ends the image, once its posters are drawn: it shades it and
+// writes name across it.
+func (d *Drawing) Finish(name string, fonts *Fonts) *image.RGBA {
+	shade(d.canvas)
+	write(d.canvas, name, d.wide, fonts)
+	return d.canvas
 }
 
 // cells divides bounds into the cells of n posters: for a poster, a 2 by 2
@@ -192,48 +225,77 @@ func (w *writer) face(r rune) font.Face {
 	return face
 }
 
-// width measures text, in pixels; characters no font has take no room.
-func (w *writer) width(text string) float64 {
+// advance is the room r takes; a character no font has takes none.
+func (w *writer) advance(r rune) fixed.Int26_6 {
+	if w.fonts.measured != nil {
+		w.fonts.measured()
+	}
+	face := w.face(r)
+	if face == nil {
+		return 0
+	}
+	advance, _ := face.GlyphAdvance(r)
+	return advance
+}
+
+// span is the room text takes: the sum of its characters'.
+func (w *writer) span(text string) fixed.Int26_6 {
 	var total fixed.Int26_6
 	for _, r := range text {
-		if face := w.face(r); face != nil {
-			advance, _ := face.GlyphAdvance(r)
-			total += advance
-		}
+		total += w.advance(r)
 	}
-	return float64(total) / 64
+	return total
+}
+
+// width measures text, in pixels; characters no font has take no room.
+func (w *writer) width(text string) float64 {
+	return float64(w.span(text)) / 64
 }
 
 // wrap breaks text into lines no wider than width, at spaces; a word wider
-// than width on its own is broken where it reaches it.
+// than width on its own is broken where it reaches it, and a character
+// wider than width takes a line of its own. A line is filled by adding
+// the room its words take, which adds up exactly, so that a character is
+// measured once, or twice in a word that is broken.
 func (w *writer) wrap(text string, width float64) []string {
+	fits := func(room fixed.Int26_6) bool { return float64(room)/64 <= width }
+	space := w.advance(' ')
 	var lines []string
-	line := ""
+	// line is the line being filled, and taken the room it takes.
+	var line []byte
+	var taken fixed.Int26_6
 	for _, word := range words(text) {
-		candidate := word
-		if line != "" {
-			candidate = line + " " + word
+		room := w.span(word)
+		joined := room
+		if len(line) > 0 {
+			joined += taken + space
 		}
-		if w.width(candidate) <= width {
-			line = candidate
+		if fits(joined) {
+			if len(line) > 0 {
+				line = append(line, ' ')
+			}
+			line, taken = append(line, word...), joined
 			continue
 		}
-		if line != "" {
-			lines = append(lines, line)
+		if len(line) > 0 {
+			lines = append(lines, string(line))
 		}
-		line = word
-		for w.width(line) > width {
-			runes := []rune(line)
-			cut := len(runes) - 1
-			for cut > 1 && w.width(string(runes[:cut])) > width {
-				cut--
+		line, taken = line[:0], 0
+		if fits(room) {
+			line, taken = append(line, word...), room
+			continue
+		}
+		for _, r := range word {
+			advance := w.advance(r)
+			if len(line) > 0 && !fits(taken+advance) {
+				lines = append(lines, string(line))
+				line, taken = line[:0], 0
 			}
-			lines = append(lines, string(runes[:cut]))
-			line = string(runes[cut:])
+			line, taken = utf8.AppendRune(line, r), taken+advance
 		}
 	}
-	if line != "" {
-		lines = append(lines, line)
+	if len(line) > 0 {
+		lines = append(lines, string(line))
 	}
 	return lines
 }
@@ -274,22 +336,56 @@ func fit(name string, width float64, maxLines int, steps []float64, fonts *Fonts
 			return layout{lines: lines, size: size}
 		}
 	}
-	lines = lines[:maxLines]
-	last := strings.TrimRightFunc(lines[maxLines-1], unicode.IsSpace)
-	for last != "" && w.width(last+"…") > width {
-		runes := []rune(last)
-		last = strings.TrimRightFunc(string(runes[:len(runes)-1]), unicode.IsSpace)
+	// The last line ends at its last character that leaves room for the
+	// ellipsis, found by adding its characters' room once.
+	last := lines[maxLines-1]
+	room, end := w.advance('…'), 0
+	for i := 0; i < len(last); {
+		r, n := utf8.DecodeRuneInString(last[i:])
+		i += n
+		if room += w.advance(r); float64(room)/64 > width {
+			break
+		}
+		if !unicode.IsSpace(r) {
+			end = i
+		}
 	}
-	lines[maxLines-1] = last + "…"
+	lines = lines[:maxLines]
+	lines[maxLines-1] = last[:end] + "…"
 	return layout{lines: lines, size: w.size}
 }
 
+// longestName is how many characters of a name are written at most: more
+// than a collection's name may have, and more than twice what the lines of
+// an image show at the smallest size of the narrowest letters. It bounds
+// what a name costs to measure and to draw, whatever room its characters
+// take.
+const longestName = 512
+
+// cut returns the first longestName characters of name, and whether it
+// has more.
+func cut(name string) (string, bool) {
+	count := 0
+	for i := range name {
+		if count == longestName {
+			return name[:i], true
+		}
+		count++
+	}
+	return name, false
+}
+
 // write writes name across the middle of the image, centered, in white
-// over a soft shadow.
+// over a soft shadow; a name longer than longestName is cut there, with an
+// ellipsis.
 func write(canvas *image.RGBA, name string, wide bool, fonts *Fonts) {
+	name, more := cut(name)
 	name = strings.Join(strings.Fields(norm.NFC.String(name)), " ")
 	if name == "" {
 		return
+	}
+	if more {
+		name += "…"
 	}
 	bounds := canvas.Bounds()
 	maxLines, steps := 3, posterSizes

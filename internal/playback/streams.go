@@ -3,9 +3,11 @@ package playback
 import (
 	"cmp"
 	"path"
+	"slices"
 	"strconv"
 	"strings"
 
+	"github.com/moodiness/polyfin/internal/i18n"
 	"github.com/moodiness/polyfin/internal/media"
 )
 
@@ -14,28 +16,26 @@ import (
 // marked [INFERENCE] could not be observed: ffmpeg cannot produce Dolby
 // Vision, HDR10+, Atmos or DTS:X tracks, nor DVD or DVB subtitles.
 
-// ExternalSubtitle is a subtitle file of the video, Jellyfin's external
-// subtitle stream: beside a local file, or in its title's metadata folder,
-// listed before the container's tracks.
+// ExternalSubtitle is a subtitle file offered beside the video (by an
+// addon, added by a user, or beside a local file), listed before the
+// container's tracks.
 type ExternalSubtitle struct {
-	// Language is as the file's name or its probe gives it: ISO 639-2/B or
-	// /T, ISO 639-1, or a language's name.
+	// Language is as the addon gives it: ISO 639-2/B or /T, ISO 639-1, or
+	// an English or French name.
 	Language string
 	// Title is optional.
 	Title string
-	// Codec is the file's codec as Jellyfin names it: "subrip", "ass",
-	// "ssa", "webvtt", "microdvd", "sami", "PGSSUB", "DVDSUB"…
+	// Codec is "subrip", "webvtt", "ass" or "ssa", or for a picture file
+	// beside a local file "PGSSUB" or "DVDSUB".
 	Codec string
-	// Forced, HearingImpaired and Default are the flags its name or its
-	// probe gives.
+	// Forced and HearingImpaired are the flags a user gave a file they
+	// added, or a local file's name gives, with Default.
 	Forced, HearingImpaired, Default bool
-	// Width and Height are a picture file's canvas, when its probe tells.
-	Width, Height int
 }
 
 // MediaStreams describes an analyzed version's tracks as Jellyfin does: the
 // external subtitles first (indexes 0…k-1), then the container's tracks
-// shifted by k. language is the server language ("en" or "fr") for
+// shifted by k. language is the server language (one of i18n.Languages) for
 // DisplayTitle and Localized* strings.
 func MediaStreams(analysis media.Analysis, externals []ExternalSubtitle, language string) []MediaStream {
 	w := wordsFor(language)
@@ -71,6 +71,63 @@ func MediaStreams(analysis media.Analysis, externals []ExternalSubtitle, languag
 // analyzed yet.
 func ExternalStreams(externals []ExternalSubtitle, language string) []MediaStream {
 	return appendExternals(make([]MediaStream, 0, len(externals)), externals, wordsFor(language))
+}
+
+// TextCopy is a picture subtitle's text copy, read with Tesseract: the
+// Index of its original among a version's streams, and its own, after
+// every track of the version (see Service.TextCopies).
+type TextCopy struct {
+	Original, Index int
+}
+
+// AppendTextCopies lists the text copies of a version's picture subtitles
+// after its streams, so that no index moves: SubRip files with their
+// original's language and its forced and hearing-impaired flags, titled
+// with its title or language followed by "(OCR)". language is the server
+// language, as for MediaStreams.
+func AppendTextCopies(streams []MediaStream, copies []TextCopy, language string) []MediaStream {
+	w := wordsFor(language)
+	for _, c := range copies {
+		i := slices.IndexFunc(streams, func(s MediaStream) bool { return s.Type == "Subtitle" && s.Index == c.Original })
+		if i < 0 {
+			continue
+		}
+		original := streams[i]
+		title := original.Title
+		if title == "" {
+			title = w.undefined
+			if original.Language != "" {
+				title = languageLabel(original.Language, original.LocalizedLanguage)
+			}
+		}
+		stream := MediaStream{
+			Codec:                  "subrip",
+			Language:               original.Language,
+			TimeBase:               "1/1000",
+			Title:                  title + " (OCR)",
+			Type:                   "Subtitle",
+			Index:                  c.Index,
+			IsExternal:             true,
+			IsForced:               original.IsForced,
+			IsHearingImpaired:      original.IsHearingImpaired,
+			IsTextSubtitleStream:   true,
+			SupportsExternalStream: true,
+			CopyOf:                 new(original.Index),
+		}
+		finishSubtitle(&stream, w)
+		streams = append(streams, stream)
+	}
+	return streams
+}
+
+// PictureSubtitle reports whether a subtitle codec, as an analysis or a
+// stream names it, is pictures Polyfin reads into text: PGS or VobSub.
+func PictureSubtitle(codec string) bool {
+	switch strings.ToLower(codec) {
+	case "hdmv_pgs_subtitle", "dvd_subtitle", "pgssub", "dvdsub":
+		return true
+	}
+	return false
 }
 
 // Container is Jellyfin's container value for a source: the probe's format
@@ -150,18 +207,26 @@ type words struct {
 	undefined, byDefault, forced, external, hearingImpaired, original string
 }
 
-var (
-	englishWords = words{"Undefined", "Default", "Forced", "External", "Hearing Impaired", "Original"}
-	// frenchWords were observed with UICulture=fr. Language and channel
-	// layout names stay in English there.
-	frenchWords = words{"Non défini", "Par défaut", "Forcé", "Externe", "Malentendants", "Original"}
-)
+// streamWords are the words of each server language. The French were
+// observed with UICulture=fr; language and channel layout names stay in
+// English there.
+var streamWords = map[string]words{
+	"en":    {"Undefined", "Default", "Forced", "External", "Hearing Impaired", "Original"},
+	"fr":    {"Non défini", "Par défaut", "Forcé", "Externe", "Malentendants", "Original"},
+	"de":    {"Undefiniert", "Standard", "Erzwungen", "Extern", "Hörgeschädigt", "Original"},
+	"es":    {"Indefinido", "Predeterminado", "Forzado", "Externo", "Discapacidad auditiva", "Original"},
+	"it":    {"Non definito", "Predefinito", "Forzato", "Esterno", "Non udenti", "Originale"},
+	"pt-BR": {"Indefinido", "Padrão", "Forçado", "Externo", "Deficiência auditiva", "Original"},
+}
 
+// wordsFor returns the words of a language such as "fr" or "fr-FR" (see
+// i18n.Match), the English for one Polyfin does not speak.
 func wordsFor(language string) *words {
-	if language == "fr" || strings.HasPrefix(language, "fr-") {
-		return &frenchWords
+	w, ok := streamWords[i18n.Match(language)]
+	if !ok {
+		w = streamWords["en"]
 	}
-	return &englishWords
+	return &w
 }
 
 func appendExternals(streams []MediaStream, externals []ExternalSubtitle, w *words) []MediaStream {
@@ -177,11 +242,8 @@ func appendExternals(streams []MediaStream, externals []ExternalSubtitle, w *wor
 			IsForced:               external.Forced,
 			IsDefault:              external.Default,
 			IsHearingImpaired:      external.HearingImpaired,
-			IsTextSubtitleStream:   textSubtitle(external.Codec),
+			IsTextSubtitleStream:   !imageSubtitle(external.Codec),
 			SupportsExternalStream: true,
-		}
-		if external.Width > 0 && external.Height > 0 {
-			stream.Width, stream.Height = new(external.Width), new(external.Height)
 		}
 		finishSubtitle(&stream, w)
 		streams = append(streams, stream)
@@ -344,7 +406,7 @@ func subtitleStream(s media.Stream, index int, w *words) MediaStream {
 		IsOriginal:           s.Original,
 		Type:                 "Subtitle",
 		Index:                index,
-		IsTextSubtitleStream: codec != "" && textSubtitle(codec),
+		IsTextSubtitleStream: !imageSubtitle(codec),
 		// Observed for text subtitles and PGS alike.
 		SupportsExternalStream: true,
 	}
@@ -768,6 +830,15 @@ func subtitleCodec(codec string) string {
 		return "DVBTXT"
 	}
 	return codec
+}
+
+// imageSubtitle reports whether a subtitle codec draws bitmaps.
+func imageSubtitle(codec string) bool {
+	switch strings.ToLower(codec) {
+	case "pgssub", "dvdsub", "dvbsub", "dvbtxt", "xsub", "vobsub":
+		return true
+	}
+	return false
 }
 
 // bit is 1 for true, as Jellyfin writes Dolby Vision flags.

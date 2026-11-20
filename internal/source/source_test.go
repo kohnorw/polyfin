@@ -43,7 +43,7 @@ type origin struct {
 	// rangeless ignores ranges and hides the size; rate paces the bytes
 	// served, so many a second, none when zero; the range gated is served
 	// a block at a time, each once gate gives a turn. ranges holds the
-	// ranges asked, and times when.
+	// ranges asked.
 	mu         sync.Mutex
 	expired    map[string]bool
 	busy       int
@@ -56,7 +56,6 @@ type origin struct {
 	gated      string
 	gate       chan struct{}
 	ranges     []string
-	times      []time.Time
 }
 
 func newOrigin(t *testing.T, size int) (*origin, *httptest.Server) {
@@ -74,7 +73,6 @@ func newOrigin(t *testing.T, size int) (*origin, *httptest.Server) {
 		refusing := !busy && !failing && o.refusing > 0
 		whole := !busy && !failing && !refusing && o.whole > 0
 		o.ranges = append(o.ranges, r.Header.Get("Range"))
-		o.times = append(o.times, time.Now())
 		switch {
 		case busy:
 			o.busy--
@@ -118,7 +116,13 @@ func newOrigin(t *testing.T, size int) (*origin, *httptest.Server) {
 	return o, server
 }
 
+// client opens the tests' requests on a transport of its own:
+// httptest.Server.Close closes the idle connections of
+// http.DefaultTransport, which an answer without a body of a parallel
+// test has just joined (#958).
 type client struct{}
+
+var clientHTTP = &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}
 
 func (client) Open(ctx context.Context, method, target string, header http.Header, _ bool) (*http.Response, error) {
 	request, err := http.NewRequestWithContext(ctx, method, target, nil)
@@ -126,12 +130,12 @@ func (client) Open(ctx context.Context, method, target string, header http.Heade
 		return nil, err
 	}
 	request.Header = header
-	return http.DefaultClient.Do(request)
+	return clientHTTP.Do(request)
 }
 
 func newCache(t *testing.T, limit int64) *Cache {
 	t.Helper()
-	cache, err := New(t.TempDir(), func() int64 { return limit }, client{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cache, err := New(t.TempDir(), func() Policy { return Policy{Limit: limit} }, client{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -156,6 +160,7 @@ func readAll(t *testing.T, s *Source) []byte {
 }
 
 func TestSequentialReadsUseOneConnection(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, 5*blockSize+12345)
 	s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
 	defer s.Release()
@@ -168,6 +173,7 @@ func TestSequentialReadsUseOneConnection(t *testing.T) {
 }
 
 func TestSeeksReadCachedBlocksAgain(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, 80*blockSize)
 	s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
 	defer s.Release()
@@ -191,6 +197,7 @@ func TestSeeksReadCachedBlocksAgain(t *testing.T) {
 }
 
 func TestExpiredLinksAreRenewed(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, 3*blockSize)
 	o.expired["/old"] = true
 	var renewals atomic.Int32
@@ -209,6 +216,7 @@ func TestExpiredLinksAreRenewed(t *testing.T) {
 }
 
 func TestBusySourcesAreRetried(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, blockSize)
 	o.busy = 2
 	s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
@@ -230,6 +238,7 @@ func TestBusySourcesAreRetried(t *testing.T) {
 }
 
 func TestSourcesIgnoringRangesAreReadThrough(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, 4*blockSize+777)
 	o.rangeless = true
 	s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
@@ -252,6 +261,7 @@ func TestSourcesIgnoringRangesAreReadThrough(t *testing.T) {
 // again, rather than taken to ignore ranges: a seek far into a file would
 // otherwise read every block before it, minutes for tens of gigabytes.
 func TestAWholeFileAnsweredOnceIsAskedAgain(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, 48*blockSize)
 	s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
 	defer s.Release()
@@ -285,6 +295,7 @@ func TestAWholeFileAnsweredOnceIsAskedAgain(t *testing.T) {
 // version analyzed through a source that took such a page's length kept a
 // size of a few bytes, which its index was then read with.
 func TestErrorPagesDoNotCutSourcesShort(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, 4*blockSize)
 	s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
 	defer s.Release()
@@ -345,6 +356,7 @@ func (c *Cache) chunkExists(id accounts.ID, index int64) bool {
 }
 
 func TestLongReadsStayWithinTheLimit(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, 10*blockSize)
 	cache, clock := smallCache(t, 3*blockSize)
 	s := cache.Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
@@ -373,11 +385,12 @@ func TestLongReadsStayWithinTheLimit(t *testing.T) {
 // A limit lowered while the cache runs applies at its next write, which
 // evicts down to it, and Usage tells it.
 func TestALowerLimitEvictsAtTheNextWrite(t *testing.T) {
+	t.Parallel()
 	_, server := newOrigin(t, 10*blockSize)
 	cache, clock := smallCache(t, 10*blockSize)
 	var limit atomic.Int64
 	limit.Store(10 * blockSize)
-	cache.limit = limit.Load
+	cache.policy = func() Policy { return Policy{Limit: limit.Load()} }
 	s := cache.Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
 	defer s.Release()
 	read := func(block int64) {
@@ -390,16 +403,8 @@ func TestALowerLimitEvictsAtTheNextWrite(t *testing.T) {
 	for block := range int64(6) {
 		read(block)
 	}
-	used := func() int64 {
-		cache.mu.Lock()
-		defer cache.mu.Unlock()
-		return cache.used
-	}
-	// A read is answered as soon as its block is stored: the cache counts
-	// the block, and evicts for it, just after.
-	waitFor(t, "the blocks read to be counted", func() bool { return used() >= 6*blockSize })
 	limit.Store(2 * blockSize)
-	if _, _, got := cache.Usage(); got != 2*blockSize {
+	if got := cache.Usage().Limit; got != 2*blockSize {
 		t.Errorf("usage tells a limit of %d", got)
 	}
 	// The next write evicts every chunk not read lately: only those the
@@ -429,6 +434,7 @@ func TestALowerLimitEvictsAtTheNextWrite(t *testing.T) {
 }
 
 func TestBlocksReadLatelyAreKept(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, 4*blockSize)
 	cache, _ := smallCache(t, blockSize)
 	s := cache.Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
@@ -445,20 +451,20 @@ func TestBlocksReadLatelyAreKept(t *testing.T) {
 }
 
 func TestIdleSourcesLeaveWithTheirLastChunk(t *testing.T) {
+	t.Parallel()
 	_, server := newOrigin(t, 2*blockSize)
 	cache, clock := smallCache(t, 2*blockSize)
 	first := cache.Open(accounts.ID{1}, Location{URL: server.URL + "/first"}, nil)
 	readAll(t, first)
 	first.Release()
-	// Counted before the clock moves, the first source's blocks are read
-	// long ago when the second one's are stored.
-	waitCounted(t, cache, accounts.ID{1}, 2*blockSize)
+	// Counted as they were read, before the clock moves, the first
+	// source's blocks are read long ago when the second one's are stored.
 	clock.advance(time.Hour)
 	second := cache.Open(accounts.ID{2}, Location{URL: server.URL + "/second"}, nil)
 	defer second.Release()
+	// The cache evicts for a block as it counts it, before its reader gets
+	// it.
 	readAll(t, second)
-	// The cache evicts for a block as it counts it.
-	waitCounted(t, cache, accounts.ID{2}, 2*blockSize)
 	cache.mu.Lock()
 	_, kept := cache.sources[accounts.ID{1}]
 	cache.mu.Unlock()
@@ -467,25 +473,8 @@ func TestIdleSourcesLeaveWithTheirLastChunk(t *testing.T) {
 	}
 }
 
-// waitCounted waits for the cache to count size bytes of the source id. A
-// read is answered as soon as its block is stored: the cache counts the
-// block, and evicts for it, just after.
-func waitCounted(t *testing.T, cache *Cache, id accounts.ID, size int64) {
-	t.Helper()
-	waitFor(t, fmt.Sprintf("%d bytes of source %v to be counted", size, id), func() bool {
-		cache.mu.Lock()
-		defer cache.mu.Unlock()
-		var counted int64
-		for key, use := range cache.chunks {
-			if key.source == id {
-				counted += use.size
-			}
-		}
-		return counted == size
-	})
-}
-
 func TestSourcesAreServedWithRanges(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, 3*blockSize)
 	s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
 	defer s.Release()
@@ -493,7 +482,7 @@ func TestSourcesAreServedWithRanges(t *testing.T) {
 	defer loopback.Close()
 	request, _ := http.NewRequest(http.MethodGet, loopback.URL, nil)
 	request.Header.Set("Range", "bytes=1048570-1048590")
-	response, err := http.DefaultClient.Do(request)
+	response, err := clientHTTP.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -506,6 +495,7 @@ func TestSourcesAreServedWithRanges(t *testing.T) {
 }
 
 func TestStaleBlocksAreRemovedAtStart(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	stale := filepath.Join(dir, "0123.blocks")
 	kept := filepath.Join(dir, "notes.txt")
@@ -514,7 +504,7 @@ func TestStaleBlocksAreRemovedAtStart(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	if _, err := New(dir, func() int64 { return 1 << 20 }, client{}, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
+	if _, err := New(dir, func() Policy { return Policy{Limit: 1 << 20} }, client{}, slog.New(slog.NewTextHandler(io.Discard, nil))); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := os.Stat(stale); !os.IsNotExist(err) {
@@ -526,6 +516,7 @@ func TestStaleBlocksAreRemovedAtStart(t *testing.T) {
 }
 
 func TestFetchReadsTheRangeAsked(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, 3*blockSize)
 	s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
 	defer s.Release()
@@ -553,6 +544,7 @@ func TestFetchReadsTheRangeAsked(t *testing.T) {
 }
 
 func TestFetchReportsIgnoredRanges(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, blockSize)
 	o.rangeless = true
 	s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
@@ -563,6 +555,7 @@ func TestFetchReportsIgnoredRanges(t *testing.T) {
 }
 
 func TestFetchWaitsForBusySources(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, blockSize)
 	o.busy, o.retryAfter = 1, "1"
 	s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
@@ -585,6 +578,7 @@ func TestFetchWaitsForBusySources(t *testing.T) {
 }
 
 func TestFetchRenewsExpiredLinks(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, blockSize)
 	o.expired["/old"] = true
 	var renewals atomic.Int32
@@ -605,6 +599,7 @@ func TestFetchRenewsExpiredLinks(t *testing.T) {
 }
 
 func TestFetchRetriesFailingSources(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, blockSize)
 	o.failing = 2
 	s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
@@ -620,10 +615,21 @@ func TestFetchRetriesFailingSources(t *testing.T) {
 	}
 }
 
+// The pacing is checked at the instants it lets the requests go: a
+// request reaches the origin a moment later, a moment a busy machine may
+// stretch, so that two requests let go apart may arrive closer.
 func TestFetchesArePaced(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, blockSize)
 	cache := newCache(t, 1<<30)
 	cache.fetchInterval = 40 * time.Millisecond
+	var mu sync.Mutex
+	var released []time.Time
+	cache.paced = func(at time.Time) {
+		mu.Lock()
+		defer mu.Unlock()
+		released = append(released, at)
+	}
 	s := cache.Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
 	defer s.Release()
 	var wg sync.WaitGroup
@@ -639,21 +645,21 @@ func TestFetchesArePaced(t *testing.T) {
 		})
 	}
 	wg.Wait()
-	o.mu.Lock()
-	times := slices.Clone(o.times)
-	o.mu.Unlock()
-	slices.SortFunc(times, func(a, b time.Time) int { return a.Compare(b) })
-	if len(times) != 10 || times[9].Sub(times[0]) < 9*cache.fetchInterval*8/10 {
-		t.Fatalf("%d requests in %v", len(times), times[len(times)-1].Sub(times[0]))
+	mu.Lock()
+	defer mu.Unlock()
+	// Each request was let go by the pacing, once.
+	if o.requests.Load() != 10 || len(released) != 10 {
+		t.Fatalf("%d requests, %d let go", o.requests.Load(), len(released))
 	}
-	for i := 1; i < len(times); i++ {
-		if gap := times[i].Sub(times[i-1]); gap < cache.fetchInterval/2 {
-			t.Errorf("requests %v apart", gap)
+	for i := 1; i < len(released); i++ {
+		if gap := released[i].Sub(released[i-1]); gap < cache.fetchInterval {
+			t.Errorf("requests %d and %d let go %v apart", i-1, i, gap)
 		}
 	}
 }
 
 func TestFetchRangesReadsParts(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, 3*blockSize)
 	s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
 	defer s.Release()
@@ -713,6 +719,7 @@ func partsServer(t *testing.T, data []byte, parts ...[2]int) *httptest.Server {
 }
 
 func TestFetchRangesReadsMergedParts(t *testing.T) {
+	t.Parallel()
 	data := make([]byte, 64<<10)
 	_, _ = rand.Read(data)
 	ranges := []container.Range{{Off: 0, N: 100}, {Off: 1000, N: 500}, {Off: 1500, N: 500}, {Off: 5000, N: 10}}
@@ -725,6 +732,7 @@ func TestFetchRangesReadsMergedParts(t *testing.T) {
 		"single part": {{0, 5009}},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			server := partsServer(t, data, parts...)
 			s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
 			defer s.Release()
@@ -737,6 +745,7 @@ func TestFetchRangesReadsMergedParts(t *testing.T) {
 }
 
 func TestFetchRangesUnsupported(t *testing.T) {
+	t.Parallel()
 	// A file of 1 GiB, of which the first 64 KiB are served.
 	data := make([]byte, 64<<10)
 	_, _ = rand.Read(data)
@@ -760,6 +769,13 @@ func TestFetchRangesUnsupported(t *testing.T) {
 			w.WriteHeader(http.StatusPartialContent)
 			return 1 << 30
 		},
+		// One part told as the largest range there is, whose length
+		// overflows: refused, not allocated.
+		"one part of an overflowing range": func(w http.ResponseWriter) int64 {
+			w.Header().Set("Content-Range", "bytes 0-9223372036854775807/*")
+			w.WriteHeader(http.StatusPartialContent)
+			return 1 << 30
+		},
 		"another multipart type": func(w http.ResponseWriter) int64 {
 			w.Header().Set("Content-Type", "multipart/mixed; boundary=x")
 			w.WriteHeader(http.StatusPartialContent)
@@ -767,6 +783,7 @@ func TestFetchRangesUnsupported(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			var requests atomic.Int32
 			written := make(chan int64, 4)
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -818,6 +835,7 @@ func TestFetchRangesUnsupported(t *testing.T) {
 }
 
 func TestFetchStalledAttemptsAreRetried(t *testing.T) {
+	t.Parallel()
 	data := make([]byte, blockSize)
 	_, _ = rand.Read(data)
 	for name, stall := range map[string]func(w http.ResponseWriter){
@@ -831,6 +849,7 @@ func TestFetchStalledAttemptsAreRetried(t *testing.T) {
 		},
 	} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				if requests.Add(1) == 1 {
@@ -917,6 +936,7 @@ func spreadMatroska(texts ...string) []byte {
 // TestSubtitleBlocksThroughSources reads a track's blocks from hosts that
 // serve several ranges at once, merge them, or ignore them.
 func TestSubtitleBlocksThroughSources(t *testing.T) {
+	t.Parallel()
 	texts := []string{"One.", "Two.", "Three.", "Four.", "Five."}
 	data := spreadMatroska(texts...)
 	merged := func(w http.ResponseWriter, ranges string) {
@@ -950,6 +970,7 @@ func TestSubtitleBlocksThroughSources(t *testing.T) {
 		{"ignored", whole, 3 + int32(len(texts))},
 	} {
 		t.Run(test.name, func(t *testing.T) {
+			t.Parallel()
 			var requests atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				requests.Add(1)
@@ -990,6 +1011,8 @@ func TestSubtitleBlocksThroughSources(t *testing.T) {
 // Read once, a source asking to slow down, or failing, is asked nothing
 // more: the request fails at once, with ErrSlowDown, nor is an expired
 // link renewed and asked again. Fetch keeps its retries.
+//
+//nolint:paralleltest // bounds a request's answer to 400 ms, which the CPU load of the package's parallel tests can exceed
 func TestOnceNeverRetries(t *testing.T) {
 	o, server := newOrigin(t, blockSize)
 	s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
@@ -1044,6 +1067,7 @@ func TestOnceNeverRetries(t *testing.T) {
 // What a source answered is told for logs, never its URL, which may hold
 // credentials; an expired link read once is renewed on demand.
 func TestOnceTellsTheAnswer(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, blockSize)
 	o.expired["/old"] = true
 	renewals := 0
@@ -1054,7 +1078,7 @@ func TestOnceTellsTheAnswer(t *testing.T) {
 	defer s.Release()
 	once := s.Once()
 	_, err := once.Fetch(t.Context(), 0, 10)
-	if !errors.Is(err, ErrExpired) || Answer(err) != "HTTP 403" || renewals != 0 {
+	if !errors.Is(err, ErrExpired) || !strings.HasPrefix(Answer(err), "HTTP 403") || renewals != 0 {
 		t.Fatalf("expired: %v, %q, %d renewals", err, Answer(err), renewals)
 	}
 	if err := once.Renew(t.Context()); err != nil || renewals != 1 {
@@ -1069,7 +1093,7 @@ func TestOnceTellsTheAnswer(t *testing.T) {
 	}
 	o.rangeless = false
 	o.busy, o.retryAfter = 1, "0"
-	if _, err := once.Fetch(t.Context(), 0, 10); Answer(err) != "HTTP 429" {
+	if _, err := once.Fetch(t.Context(), 0, 10); !strings.HasPrefix(Answer(err), "HTTP 429") {
 		t.Errorf("429: %q", Answer(err))
 	}
 	// A host that does not answer: no URL in the error.

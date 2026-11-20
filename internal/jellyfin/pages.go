@@ -20,10 +20,15 @@ import (
 // narrowed through their genre extra; addons offer genres there, and some
 // also years, studios or networks. The titles of a page are therefore those
 // the user's libraries list for an option of that name (see
-// library.Service.Narrowed).
+// library.Service.Narrowed); a genre's page then lists the titles Polyfin
+// keeps of that genre (see library.Service.GenreTitles), and a studio's
+// the titles whose TMDB details name it, and TMDB's most popular ones of
+// it (see library.Service.StudioTitles).
 
 // namedItemDto describes a genre, studio or year as Jellyfin does on its
-// page, in Jellyfin's key order.
+// page, in Jellyfin's key order; also a person, with the details TMDB gave
+// of them: biography (Overview), birth (PremiereDate, ProductionYear),
+// death (EndDate) and birthplace (ProductionLocations).
 type namedItemDto struct {
 	Name                     string
 	ServerId                 string
@@ -33,12 +38,16 @@ type namedItemDto struct {
 	CanDelete                bool
 	CanDownload              bool
 	SortName                 string
+	PremiereDate             *Time `json:",omitempty"`
 	ExternalUrls             []MediaUrl
+	ProductionLocations      []string `json:",omitempty"`
 	EnableMediaSourceDisplay bool
 	ChannelId                *string
+	Overview                 string `json:",omitempty"`
 	Taglines                 []string
 	Genres                   []string
 	PlayAccess               string `json:",omitempty"`
+	ProductionYear           *int   `json:",omitempty"`
 	RemoteTrailers           []MediaUrl
 	ProviderIds              map[string]string
 	ParentId                 *string
@@ -59,6 +68,7 @@ type namedItemDto struct {
 	Chapters                 []struct{}
 	LocationType             string
 	MediaType                string
+	EndDate                  *Time `json:",omitempty"`
 	LockedFields             []string
 	TrailerCount             int
 	MovieCount               int
@@ -73,35 +83,34 @@ type namedItemDto struct {
 }
 
 // namedPage is the page being answered: the item's Jellyfin type, its name
-// and identifier, how it sorts, and which genre options are its. refused
-// is set for a year before 1, which does not exist.
+// and identifier, how it sorts, and which genre options are its, nil for
+// none. genre and studio are set for a genre's and a studio's page, which
+// list more than their genre options' titles. refused is set for a year
+// before 1, which does not exist.
 type namedPage struct {
 	itemType, name, id, sortName string
 	matches                      func(option string) bool
-	refused                      bool
+	genre, studio, refused       bool
 }
 
 func (h *Handler) genrePage(w http.ResponseWriter, r *http.Request) {
-	h.namedPageByName(w, r, "Genre", "genreName", "genre")
+	h.namedPageByName(w, r, genreNamed, "genreName")
 }
 
 func (h *Handler) studioPage(w http.ResponseWriter, r *http.Request) {
-	h.namedPageByName(w, r, "Studio", "name", "studio")
+	h.namedPageByName(w, r, studioNamed, "name")
 }
 
 // namedPageByName answers the page of a genre or studio, whose name is the
 // route's parameter param and whose identifier is that of its kind, as in
 // the titles' GenreItems and in /Genres.
-func (h *Handler) namedPageByName(w http.ResponseWriter, r *http.Request, itemType, param, kind string) {
+func (h *Handler) namedPageByName(w http.ResponseWriter, r *http.Request, kind namedKind, param string) {
 	b := bindErrors{}
 	name := r.PathValue(param)
 	if strings.TrimSpace(name) == "" {
 		b.add(param, fmt.Sprintf("The %s field is required.", param))
 	}
-	h.writeNamedPage(w, r, b, namedPage{
-		itemType: itemType, name: name, id: nameID(kind, name), sortName: strings.ToLower(name),
-		matches: func(option string) bool { return strings.EqualFold(strings.TrimSpace(option), strings.TrimSpace(name)) },
-	})
+	h.writeNamedPage(w, r, b, kind.page(name))
 }
 
 func (h *Handler) yearPage(w http.ResponseWriter, r *http.Request) {
@@ -137,21 +146,32 @@ func (h *Handler) writeNamedPage(w http.ResponseWriter, r *http.Request, b bindE
 		processingError(w, http.StatusBadRequest)
 		return
 	}
-	dto := h.namedItem(page)
-	user, ok := h.targetUser(w, r, id, set, func(w http.ResponseWriter) { writeJSON(w, http.StatusOK, dto) })
+	user, ok := h.targetUser(w, r, id, set, func(w http.ResponseWriter) { writeJSON(w, http.StatusOK, h.namedItem(page)) })
 	if !ok {
 		return
 	}
+	h.writeNamedItem(w, r, user, page)
+}
+
+// writeNamedItem answers a page's item for user, with the counts of its
+// titles, and a studio's images and favorite mark.
+func (h *Handler) writeNamedItem(w http.ResponseWriter, r *http.Request, user accounts.User, page namedPage) {
+	dto := h.namedItem(page)
 	// Apps only show the sections of a page whose count is not zero. A
 	// catalog's size is unknown until it is read through, so the counts are
 	// those of a first page of titles, plus one when more follow: enough to
-	// tell whether there are any, and the listing that follows reads the
-	// same catalog pages again from cache.
+	// tell whether there are any. They answer at once with the catalog
+	// pages read already, and start reading the others, which the listing
+	// that follows waits for (see library.Service.Narrowed).
+	atOnce := r.WithContext(library.AtOnce(r.Context()))
 	for _, count := range []struct {
 		kind  library.Kind
 		total *int
 	}{{library.KindMovie, &dto.MovieCount}, {library.KindSeries, &dto.SeriesCount}} {
-		titles, err := h.Library.Narrowed(r.Context(), user, page.matches, []library.Kind{count.kind}, 0, defaultPageSize)
+		if page.matches == nil {
+			break
+		}
+		titles, err := h.pageTitles(atOnce, user, page, []library.Kind{count.kind}, 0, defaultPageSize)
 		if err != nil {
 			h.browseError(w, r, err)
 			return
@@ -160,7 +180,30 @@ func (h *Handler) writeNamedPage(w http.ResponseWriter, r *http.Request, b bindE
 	}
 	dto.PlayAccess = "Full"
 	dto.UserData = &UserItemData{Key: page.name, ItemId: page.id}
+	if page.studio {
+		dto.ImageTags = h.studioImageTags(r.Context(), page.name)
+		if id, err := accounts.ParseID(page.id); err == nil {
+			data, err := h.UserData.Get(r.Context(), user.ID, []accounts.ID{id})
+			if err != nil {
+				h.internalError(w, r, err)
+				return
+			}
+			dto.UserData.IsFavorite = data[id].Favorite
+		}
+	}
 	writeJSON(w, http.StatusOK, dto)
+}
+
+// pageTitles lists the titles of the given kinds of a page, [start,
+// start+count).
+func (h *Handler) pageTitles(r *http.Request, user accounts.User, page namedPage, kinds []library.Kind, start, count int) (library.Page, error) {
+	switch {
+	case page.studio:
+		return h.Library.StudioTitles(r.Context(), user, []string{page.name}, page.matches, kinds, start, count)
+	case page.genre:
+		return h.Library.GenreTitles(r.Context(), user, []string{page.name}, page.matches, kinds, start, count)
+	}
+	return h.Library.Narrowed(r.Context(), user, page.matches, kinds, start, count)
 }
 
 // namedItem describes a page's item, without user data. Such an item has
@@ -198,8 +241,10 @@ func (h *Handler) namedItem(page namedPage) namedItemDto {
 // nameFilter is what a listing asks its titles to be narrowed to: genres
 // (genres, pipe-separated, or genreIds), studios (studios, pipe-separated,
 // or studioIds) and years. A genre option matches when it is any of them.
+// genres and studios are the names the genres and studios parameters
+// give.
 type nameFilter struct {
-	names, years, genreIDs, studioIDs []string
+	names, genres, studios, years, genreIDs, studioIDs []string
 }
 
 // nameFilterOf reads the filter of a listing; ok is false when a year is
@@ -209,6 +254,11 @@ func nameFilterOf(r *http.Request) (f nameFilter, ok bool) {
 		for name := range strings.SplitSeq(query(r, param), "|") {
 			if name = strings.TrimSpace(name); name != "" {
 				f.names = append(f.names, name)
+				if param == "studios" {
+					f.studios = append(f.studios, name)
+				} else {
+					f.genres = append(f.genres, name)
+				}
 			}
 		}
 	}
@@ -239,23 +289,48 @@ func (f nameFilter) requested() bool {
 	return len(f.names) > 0 || len(f.years) > 0 || len(f.genreIDs) > 0 || len(f.studioIDs) > 0
 }
 
-// matches reports whether a catalog's genre option is one the listing asks
-// for. A catalog accepts a single option, so a listing that asks for
-// several, of one kind or not, gets the titles of the first one a catalog
-// offers.
+// matches reports whether a catalog's genre option, or a genre of music,
+// is one the listing asks for. A catalog accepts a single option, so a
+// listing that asks for several, of one kind or not, gets the titles of the
+// first one a catalog offers.
 func (f nameFilter) matches(option string) bool {
 	option = strings.TrimSpace(option)
 	return slices.ContainsFunc(f.names, func(name string) bool { return strings.EqualFold(name, option) }) ||
 		slices.Contains(f.years, option) ||
-		len(f.genreIDs) > 0 && slices.Contains(f.genreIDs, nameID("genre", option)) ||
-		len(f.studioIDs) > 0 && slices.Contains(f.studioIDs, nameID("studio", option))
+		len(f.genreIDs) > 0 && (slices.Contains(f.genreIDs, nameID(genreNamed.kind, option)) ||
+			slices.Contains(f.genreIDs, nameID(musicGenreNamed.kind, option))) ||
+		len(f.studioIDs) > 0 && slices.Contains(f.studioIDs, nameID(studioNamed.kind, option))
 }
 
 // narrowedListing lists, across the user's libraries, the titles of a genre,
-// studio or year.
+// studio or year; a listing asking for studios lists theirs as their page
+// does (see library.Service.StudioTitles), else one asking for genres
+// theirs (see library.Service.GenreTitles).
 func (h *Handler) narrowedListing(w http.ResponseWriter, r *http.Request, user accounts.User, f nameFilter, start, limit int) {
 	keep := itemTypeFilter(r)
-	page, err := h.Library.Narrowed(r.Context(), user, f.matches, searchKinds(keep), max(start, 0), limit)
+	kinds := searchKinds(keep)
+	var page library.Page
+	var err error
+	switch {
+	case len(f.studios) > 0 || len(f.studioIDs) > 0:
+		studios := slices.Clone(f.studios)
+		for _, id := range f.studioIDs {
+			if name, ok := h.studioByID(r.Context(), id); ok {
+				studios = append(studios, name)
+			}
+		}
+		page, err = h.Library.StudioTitles(r.Context(), user, studios, f.matches, kinds, max(start, 0), limit)
+	case len(f.genres) > 0 || len(f.genreIDs) > 0:
+		genres := slices.Clone(f.genres)
+		for _, id := range f.genreIDs {
+			if name, ok := h.genreByID(r.Context(), user, id); ok {
+				genres = append(genres, name)
+			}
+		}
+		page, err = h.Library.GenreTitles(r.Context(), user, genres, f.matches, kinds, max(start, 0), limit)
+	default:
+		page, err = h.Library.Narrowed(r.Context(), user, f.matches, kinds, max(start, 0), limit)
+	}
 	if err != nil {
 		h.browseError(w, r, err)
 		return

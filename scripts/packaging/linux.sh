@@ -53,7 +53,7 @@ Polyfin is under the MIT License, in /opt/polyfin/licenses/polyfin/LICENSE.
 The other programs it carries are under their own licenses, in
 /opt/polyfin/licenses: PostgreSQL and ICU; jellyfin-web, unmodified, under
 the GPL-2.0, whose source is attached to every release of Polyfin; the
-DejaVu fonts; and hls.js.
+DejaVu fonts; hls.js; and the LumaaGlaass theme.
 EOF
 
 deb="polyfin-desktop_${VERSION}_${arch}.deb"
@@ -64,8 +64,8 @@ log "Making $deb and $appimage"
 docker run --rm -v "$stage:/stage:ro" -v "$OUT:/out" \
 	-e VERSION="$VERSION" -e DEBIAN_VERSION="$(debian_version)" -e ARCH="$arch" -e DEB="$deb" -e APPIMAGE="$appimage" \
 	-e OWNER="$(id -u):$(id -g)" "$DEBIAN_IMAGE" bash -euo pipefail -c '
-apt-get update -qq
-DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends squashfs-tools desktop-file-utils > /dev/null
+apt-get update -qq -o Acquire::Retries=5 -o APT::Update::Error-Mode=any
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends -o Acquire::Retries=5 squashfs-tools desktop-file-utils > /dev/null
 desktop-file-validate /stage/polyfin-desktop.desktop
 
 root=/tmp/deb

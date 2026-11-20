@@ -1,6 +1,5 @@
 import {
   ArrowSquareInIcon,
-  CaretRightIcon,
   DeviceMobileIcon,
   DownloadSimpleIcon,
   FileZipIcon,
@@ -8,13 +7,11 @@ import {
   PlusIcon,
   UsersIcon,
 } from '@phosphor-icons/react'
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query'
+import { useMutation, useQuery } from '@tanstack/react-query'
 import { useState } from 'react'
 import {
   fetchGroups,
-  deleteUser,
   fetchUsers,
-  updateUser,
   queryClient,
   queryKeys,
   turnOffDownloads,
@@ -23,15 +20,13 @@ import {
 } from '@/api'
 import { PageLayout } from '@/app/PageLayout'
 import { useSessionUser } from '@/app/session'
-import { errorMessage, formatDate } from '@/format'
+import { errorMessage } from '@/format'
 import { useI18n } from '@/i18n'
 import {
   Avatar,
   Badge,
   Block,
   Button,
-  Checkbox,
-  ButtonLink,
   ConfirmDialog,
   EmptyState,
   InlineError,
@@ -39,26 +34,25 @@ import {
   RowList,
   Select,
   SkeletonRows,
-  StatusPill,
-  RelativeTime,
   useToast,
 } from '@/ui'
 import CreateUserModal from './CreateUserModal'
-import { CreateInviteModal, InviteLinks } from './InviteLinks'
+import { SelectableUsers } from './forkUsers'
 import Registration from './Registration'
-import { clockTime, useRestrictions, UsersTabs } from './shared'
+import { CreateInviteModal, InviteLinks } from './InviteLinks'
+import { accountEnd, LastActivity, UserState, useRestrictions, UsersArea } from './shared'
+import UserActions from './UserActions'
 
 /** The users the list shows: every one, those in no group, or the members of one group. */
 const allUsers = 'all'
 const noGroup = 'none'
 
 /**
- * `/users`: every account, each opening its page, the button to create one, the ones importing
- * accounts from a Jellyfin server and a user's watch data from an app, the one turning downloads
- * off for everyone, and the invite links, with the button to create one.
+ * `/users`: every account as a row opening its page, with a "…" of quick actions beside it, and
+ * the buttons creating a user and an invite link; then the invite links; then the imports of
+ * accounts and watch data from another server, an app or Letterboxd, and the one turning
+ * downloads off for everyone.
  */
-const pageSize = 25
-
 export default function UsersList() {
   const { t } = useI18n()
   const toast = useToast()
@@ -66,9 +60,6 @@ export default function UsersList() {
   const [inviting, setInviting] = useState(false)
   const [stoppingDownloads, setStoppingDownloads] = useState(false)
   const [shownGroup, setShownGroup] = useState(allUsers)
-  const [selected, setSelected] = useState<string[]>([])
-  const [page, setPage] = useState(0)
-  const session = useSessionUser()
   const users = useQuery({ queryKey: queryKeys.users, queryFn: ({ signal }) => fetchUsers(signal) })
   const groups = useQuery({
     queryKey: queryKeys.groups,
@@ -90,44 +81,24 @@ export default function UsersList() {
       toast(t.users.downloadsTurnedOff(changed.length), { tone: 'ok' })
     },
   })
-  const pages = Math.ceil(shown.length / pageSize)
-  const current = Math.min(page, Math.max(pages - 1, 0))
 
   const create = (
     <Button variant="primary" icon={PlusIcon} onClick={() => setCreating(true)}>
       {t.users.createTitle}
     </Button>
   )
+  // Two actions in the head, which wrap on a phone; the imports and downloads have their rows.
   const actions = (
-    <span className="flex flex-wrap gap-2">
-      <Button
-        icon={DownloadSimpleIcon}
-        onClick={() => {
-          downloadsOff.reset()
-          setStoppingDownloads(true)
-        }}
-      >
-        {t.users.turnOffDownloads}
-      </Button>
-      <ButtonLink to="/users/jellyfin-import" icon={ArrowSquareInIcon}>
-        {t.users.jellyfinImport.open}
-      </ButtonLink>
-      <ButtonLink to="/users/app-import" icon={DeviceMobileIcon}>
-        {t.users.appImport.open}
-      </ButtonLink>
-      <ButtonLink to="/users/letterboxd-import" icon={FileZipIcon}>
-        {t.users.letterboxdImport.open}
-      </ButtonLink>
+    <>
       <Button icon={LinkIcon} onClick={() => setInviting(true)}>
         {t.invites.create}
       </Button>
       {create}
-    </span>
+    </>
   )
 
   return (
-    <>
-      <UsersTabs />
+    <UsersArea>
       <PageLayout title={t.users.title} lede={t.users.description} actions={actions}>
         <Block
           title={t.users.listTitle}
@@ -135,10 +106,11 @@ export default function UsersList() {
           aside={
             (groups.data?.length ?? 0) > 0 && (
               <Select
+                size="sm"
                 value={shownGroup}
                 onValue={setShownGroup}
                 aria-label={t.groups.filter}
-                className="w-48"
+                className="w-56 max-w-full"
                 options={[
                   { value: allUsers, label: t.groups.allGroups },
                   { value: noGroup, label: t.groups.noGroup },
@@ -161,49 +133,43 @@ export default function UsersList() {
           ) : shown.length === 0 ? (
             <EmptyState icon={UsersIcon} title={t.groups.noneShown} />
           ) : (
-            <>
-              <LiveTvBulk users={shown} selected={selected} onSelect={setSelected} />
-              <RowList aria-label={t.users.listTitle}>
-                {shown.slice(current * pageSize, (current + 1) * pageSize).map((user) => (
-                  <div key={user.id} className="flex items-center gap-1 ps-3 sm:gap-3">
-                    {user.id === session.id ? (
-                      <span aria-hidden="true" className="size-5 shrink-0" />
-                    ) : (
-                      <Checkbox
-                        label={user.name}
-                        hideLabel
-                        checked={selected.includes(user.id)}
-                        onChange={(on) =>
-                          setSelected(
-                            on ? [...selected, user.id] : selected.filter((id) => id !== user.id),
-                          )
-                        }
-                      />
-                    )}
-                    <div className="min-w-0 flex-1">
-                      <UserRow user={user} />
-                    </div>
-                  </div>
-                ))}
-              </RowList>
-              {pages > 1 && (
-                <div className="mt-3 flex items-center justify-between gap-3">
-                  <Button disabled={current === 0} onClick={() => setPage(current - 1)}>
-                    {t.users.previousPage}
-                  </Button>
-                  <span className="text-small text-ink-3 tabular-nums">
-                    {current + 1} / {pages}
-                  </span>
-                  <Button disabled={current >= pages - 1} onClick={() => setPage(current + 1)}>
-                    {t.users.nextPage}
-                  </Button>
-                </div>
-              )}
-            </>
+            // Selectable, a page at a time, with the bulk actions (this fork).
+            <SelectableUsers users={shown} row={(user) => <UserRow user={user} />} />
           )}
         </Block>
         <InviteLinks onCreate={() => setInviting(true)} />
         <Registration />
+        <Block title={t.users.moreTitle}>
+          <RowList aria-label={t.users.moreTitle}>
+            <Row
+              to="/users/jellyfin-import"
+              leading={ArrowSquareInIcon}
+              title={t.users.jellyfinImport.open}
+              meta={t.users.jellyfinImport.summary}
+            />
+            <Row
+              to="/users/app-import"
+              leading={DeviceMobileIcon}
+              title={t.users.appImport.open}
+              meta={t.users.appImport.summary}
+            />
+            <Row
+              to="/users/letterboxd-import"
+              leading={FileZipIcon}
+              title={t.users.letterboxdImport.open}
+              meta={t.users.letterboxdImport.summary}
+            />
+            <Row
+              onClick={() => {
+                downloadsOff.reset()
+                setStoppingDownloads(true)
+              }}
+              leading={DownloadSimpleIcon}
+              title={t.users.turnOffDownloads}
+              meta={t.users.turnOffDownloadsSummary}
+            />
+          </RowList>
+        </Block>
       </PageLayout>
       {/* Outside the layout, whose block spacing would push the panel down. */}
       <CreateUserModal
@@ -230,126 +196,75 @@ export default function UsersList() {
       >
         {t.users.turnOffDownloadsConfirm}
       </ConfirmDialog>
-    </>
+    </UsersArea>
   )
 }
 
-function LiveTvBulk({
-  users,
-  selected,
-  onSelect,
-}: {
-  users: User[]
-  selected: string[]
-  onSelect: (ids: string[]) => void
-}) {
-  const { t } = useI18n()
-  const client = useQueryClient()
-  const change = useMutation({
-    mutationFn: (liveTv: boolean) =>
-      Promise.allSettled(selected.map((id) => updateUser(id, { liveTv }))),
-    onSettled: () => void client.invalidateQueries({ queryKey: queryKeys.users }),
-  })
-  const self = useSessionUser()
-  const [confirming, setConfirming] = useState(false)
-  // Your own account is never selected: it is changed on its own page.
-  const others = users.filter((u) => u.id !== self.id)
-  const doomed = selected.filter((id) => id !== self.id)
-  const removal = useMutation({
-    mutationFn: () => Promise.allSettled(doomed.map((id) => deleteUser(id))),
-    onSettled: () => {
-      setConfirming(false)
-      onSelect([])
-      void client.invalidateQueries({ queryKey: queryKeys.users })
-    },
-  })
-  return (
-    <div className="mb-3 grid grid-cols-2 items-center gap-2 sm:flex sm:flex-wrap sm:gap-3">
-      <div className="col-span-2 ps-3 sm:ps-0">
-        <Checkbox
-          label={t.users.selectAll}
-          checked={others.length > 0 && selected.length === others.length}
-          onChange={(all) => onSelect(all ? others.map((u) => u.id) : [])}
-        />
-      </div>
-      <Button disabled={!selected.length || change.isPending} onClick={() => change.mutate(true)}>
-        {t.users.liveTvOn}
-      </Button>
-      <Button disabled={!selected.length || change.isPending} onClick={() => change.mutate(false)}>
-        {t.users.liveTvOff}
-      </Button>
-      <div className="col-span-2 grid sm:block">
-        <Button disabled={!doomed.length || removal.isPending} onClick={() => setConfirming(true)}>
-          {t.users.deleteSelected(doomed.length)}
-        </Button>
-      </div>
-      <ConfirmDialog
-        open={confirming}
-        onClose={() => setConfirming(false)}
-        onConfirm={() => removal.mutate()}
-        title={t.users.deleteSelected(doomed.length)}
-        confirmLabel={t.users.deleteSelected(doomed.length)}
-      >
-        {t.users.deleteSelectedHelp}
-      </ConfirmDialog>
-    </div>
-  )
-}
-
+/**
+ * A user as a row: the avatar, the name with its tags, the last activity, and the state; then,
+ * outside its link, the "…" of quick actions. As on a source's row, whose controls sit beside its
+ * link, the row draws no chevron. On a phone the state leads the second line, and the tags keep
+ * to one line under the name when they do not fit beside it.
+ */
 function UserRow({ user }: { user: User }) {
   const { t, language } = useI18n()
   const self = useSessionUser()
   const restrictions = useRestrictions(user)
-  const lastSignIn =
-    user.lastLoginAt === null ? t.common.never : <RelativeTime iso={user.lastLoginAt} />
+  const end = accountEnd(user, t, language)
+  const tags = [
+    user.id === self.id && <Badge key="you">{t.users.you}</Badge>,
+    user.isAdministrator && (
+      <Badge key="administrator" tone="accent">
+        {t.users.administrator}
+      </Badge>
+    ),
+    user.passwordResetPin !== null && (
+      <Badge key="pin" tone="warn">
+        {t.users.pinRequested}
+      </Badge>
+    ),
+    user.groupName !== null && (
+      <Badge key="group">
+        {user.ownSections.length === 0
+          ? t.groups.groupBadge(user.groupName)
+          : t.groups.groupOwnBadge(user.groupName)}
+      </Badge>
+    ),
+  ].filter(Boolean)
 
   return (
     <Row
       to={`/users/${user.id}`}
-      leading={<Avatar name={user.name} image={userImageUrl(user)} size="lg" />}
+      chevron={false}
+      leading={<Avatar name={user.name} image={userImageUrl(user)} size="md" />}
       title={user.name}
       titleAside={
-        <>
-          {user.id === self.id && <Badge>{t.users.you}</Badge>}
-          {user.isAdministrator && <Badge tone="accent">{t.users.administrator}</Badge>}
-          {user.passwordResetPin !== null && <Badge tone="warn">{t.users.pinRequested}</Badge>}
-          {user.groupName !== null && (
-            <Badge>
-              {user.followGroup
-                ? t.groups.groupBadge(user.groupName)
-                : t.groups.groupOwnBadge(user.groupName)}
-            </Badge>
-          )}
-        </>
+        tags.length > 0 && (
+          <span className="flex min-w-0 flex-wrap items-center gap-1.5">{tags}</span>
+        )
       }
       meta={
-        <span className="truncate">
-          {t.users.lastSignInLabel} {lastSignIn}
-          {user.endsOn !== null && (
+        <span className="min-w-0">
+          {/* On a phone the state leads this line, leaving the name its width. */}
+          <span className="mr-2 inline-flex align-middle sm:hidden">
+            <UserState user={user} />
+          </span>
+          <LastActivity user={user} />
+          {end !== null && (
             <span>
               {' · '}
-              {(user.ended ? t.users.endedOn : t.users.endsOn)(formatDate(user.endsOn, language))}
+              {(user.ended ? t.users.endedOn : t.users.endsOn)(end)}
             </span>
           )}
           {restrictions.length > 0 && <span> · {restrictions.join(' · ')}</span>}
         </span>
       }
       trailing={
-        <span className="flex items-center gap-3">
-          {user.isDisabled ? (
-            <StatusPill tone="muted">{t.users.disabled}</StatusPill>
-          ) : user.ended ? (
-            <StatusPill tone="muted">{t.users.ended}</StatusPill>
-          ) : user.blockedUntil !== null ? (
-            <StatusPill tone="warn">
-              {t.users.blockedUntil(clockTime(user.blockedUntil, language))}
-            </StatusPill>
-          ) : (
-            <StatusPill tone="ok">{t.users.active}</StatusPill>
-          )}
-          <CaretRightIcon size={16} aria-hidden="true" className="text-ink-3 max-sm:hidden" />
+        <span className="max-sm:hidden">
+          <UserState user={user} />
         </span>
       }
+      actions={<UserActions user={user} />}
     />
   )
 }

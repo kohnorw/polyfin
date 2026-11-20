@@ -3,6 +3,7 @@ import {
   EyeIcon,
   EyeSlashIcon,
   FilmSlateIcon,
+  ListPlusIcon,
   RowsIcon,
   TelevisionSimpleIcon,
   XIcon,
@@ -12,10 +13,14 @@ import { useState } from 'react'
 import {
   fetchOwnHidden,
   fetchOwnHomeRows,
+  fetchOwnNextUp,
   fetchOwnResume,
+  putBackOwnNextUp,
   queryClient,
   queryKeys,
+  removeOwnNextUp,
   removeOwnResume,
+  setOwnNextUpWithResume,
   setOwnHomeRow,
   showOwnHidden,
   type AccountTitle,
@@ -31,13 +36,17 @@ import {
   RelativeTime,
   Row,
   RowList,
+  SettingRow,
   SkeletonRows,
-  Switch,
   useToast,
 } from '@/ui'
+import { serviceNames } from './serviceNames'
 
-/** The poster of a title, or the icon of its kind when it has none or fails to load. */
-export function TitlePoster({ title }: { title: AccountTitle }) {
+/**
+ * The poster of a title, or the icon of its kind when it has none or fails to load. Shared by My
+ * account, Content › Versions and Content › Libraries › Episode orders.
+ */
+export function TitlePoster({ title }: { title: Pick<AccountTitle, 'kind' | 'posterId'> }) {
   const [failed, setFailed] = useState(false)
   const KindIcon =
     title.kind === 'series' || title.kind === 'episode' ? TelevisionSimpleIcon : FilmSlateIcon
@@ -45,9 +54,9 @@ export function TitlePoster({ title }: { title: AccountTitle }) {
     return (
       <span
         aria-hidden="true"
-        className="grid aspect-[2/3] w-8 shrink-0 place-items-center rounded-check border border-line-2 bg-s2 text-ink-3"
+        className="grid aspect-[2/3] w-8 shrink-0 place-items-center rounded-check bg-s3 text-ink-2"
       >
-        <KindIcon size={14} />
+        <KindIcon size="0.875rem" />
       </span>
     )
   }
@@ -57,7 +66,7 @@ export function TitlePoster({ title }: { title: AccountTitle }) {
       alt=""
       loading="lazy"
       onError={() => setFailed(true)}
-      className="aspect-[2/3] w-8 shrink-0 rounded-check object-cover ring-1 ring-ink/8"
+      className="aspect-[2/3] w-8 shrink-0 rounded-check bg-s2 object-cover"
     />
   )
 }
@@ -84,7 +93,10 @@ export function ResumeList() {
   const removal = useMutation({
     mutationFn: (title: AccountTitle) => removeOwnResume(title.id),
     onSuccess: (_data, title) => toast(text.removed(titleName(title))),
-    onSettled: () => void queryClient.invalidateQueries({ queryKey: queryKeys.ownResume }),
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: queryKeys.ownResume })
+      void queryClient.invalidateQueries({ queryKey: queryKeys.ownNextUp })
+    },
   })
 
   if (titles.isPending) return <SkeletonRows rows={2} boxed label={t.common.loading} />
@@ -142,6 +154,157 @@ export function ResumeList() {
   )
 }
 
+/**
+ * My account › Next Up: the episodes to watch next, each with Remove, which takes its series off
+ * Next Up without changing what was watched; the series taken off, each with Show again; and
+ * whether Remove from Continue Watching also takes a series off Next Up.
+ */
+export function NextUpList() {
+  const { language, t } = useI18n()
+  const text = t.account.watching
+  const toast = useToast()
+  const nextUp = useQuery({
+    queryKey: queryKeys.ownNextUp,
+    queryFn: ({ signal }) => fetchOwnNextUp(signal),
+  })
+  const removal = useMutation({
+    mutationFn: (title: AccountTitle) => removeOwnNextUp(title.id),
+    onSuccess: (_data, title) => toast(text.nextUpRemoved(title.seriesName || title.name)),
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: queryKeys.ownNextUp }),
+  })
+  const putBack = useMutation({
+    mutationFn: (title: AccountTitle) => putBackOwnNextUp(title.id),
+    onSuccess: (_data, title) => toast(text.nextUpShown(title.name)),
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: queryKeys.ownNextUp }),
+  })
+  const withResume = useMutation({
+    mutationFn: (on: boolean) => setOwnNextUpWithResume(on),
+    onSuccess: (data) => toast(data.withResume ? text.withResumeOn : text.withResumeOff),
+    onSettled: () => void queryClient.invalidateQueries({ queryKey: queryKeys.ownNextUp }),
+  })
+
+  if (nextUp.isPending) return <SkeletonRows rows={2} boxed label={t.common.loading} />
+  if (nextUp.isError) {
+    return (
+      <InlineError onRetry={() => void nextUp.refetch()} retrying={nextUp.isFetching}>
+        {errorMessage(t, nextUp.error)}
+      </InlineError>
+    )
+  }
+  const error = removal.error ?? putBack.error ?? withResume.error
+  return (
+    <div className="space-y-3">
+      {error && <Notice tone="danger">{errorMessage(t, error)}</Notice>}
+      {nextUp.data.items.length === 0 ? (
+        <EmptyState icon={ListPlusIcon} title={text.nextUpEmpty}>
+          {text.nextUpEmptyHelp}
+        </EmptyState>
+      ) : (
+        <RowList aria-label={t.account.sections.nextUp}>
+          {nextUp.data.items.map((item) => (
+            <Row
+              key={item.id}
+              leading={<TitlePoster title={item} />}
+              title={titleName(item)}
+              meta={<span className="truncate">{text.kinds[item.kind] ?? item.kind}</span>}
+              trailing={
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  icon={XIcon}
+                  aria-label={text.nextUpRemoveLabel(item.seriesName || item.name)}
+                  loading={removal.isPending && removal.variables.id === item.id}
+                  onClick={() => removal.mutate(item)}
+                >
+                  {text.remove}
+                </Button>
+              }
+            />
+          ))}
+        </RowList>
+      )}
+      {nextUp.data.removed.length > 0 && (
+        <>
+          <p className="text-small font-medium text-ink-2">{text.nextUpRemovedList}</p>
+          <RowList aria-label={text.nextUpRemovedList}>
+            {nextUp.data.removed.map((entry) => (
+              <Row
+                key={entry.item.id}
+                leading={<TitlePoster title={entry.item} />}
+                title={entry.item.name}
+                muted
+                meta={
+                  <span className="truncate">
+                    {text.kinds[entry.item.kind] ?? entry.item.kind}
+                    {' · '}
+                    {text.nextUpRemovedOn} <RelativeTime iso={entry.removedAt} />
+                  </span>
+                }
+                trailing={
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    icon={EyeIcon}
+                    aria-label={text.nextUpShowLabel(entry.item.name)}
+                    loading={putBack.isPending && putBack.variables.id === entry.item.id}
+                    onClick={() => putBack.mutate(entry.item)}
+                  >
+                    {text.showAgain}
+                  </Button>
+                }
+              />
+            ))}
+          </RowList>
+        </>
+      )}
+      {nextUp.data.dropped.length > 0 && (
+        <>
+          <div>
+            <p className="text-small font-medium text-ink-2">{text.nextUpDroppedList}</p>
+            <p className="mt-1 max-w-[72ch] text-small text-ink-2">{text.nextUpDroppedHelp}</p>
+          </div>
+          <RowList aria-label={text.nextUpDroppedList}>
+            {nextUp.data.dropped.map((entry) => (
+              <Row
+                key={entry.item.id}
+                leading={<TitlePoster title={entry.item} />}
+                title={entry.item.name}
+                muted
+                meta={
+                  // The services never truncate. From md up the date follows them after a
+                  // separator; on a phone it takes its own line, the only part that may be cut.
+                  <span className="min-w-0">
+                    {text.kinds[entry.item.kind] ?? entry.item.kind}
+                    {' · '}
+                    {text.nextUpDroppedOn(
+                      new Intl.ListFormat(language, { type: 'conjunction' }).format(
+                        entry.services.map((service) => serviceNames[service] ?? service),
+                      ),
+                    )}
+                    <span className="max-md:hidden">{' · '}</span>
+                    <span className="max-md:block max-md:truncate">
+                      <RelativeTime iso={entry.droppedAt} />
+                    </span>
+                  </span>
+                }
+              />
+            ))}
+          </RowList>
+        </>
+      )}
+      <SettingRow
+        kind="switch"
+        label={text.withResume}
+        help={text.withResumeHelp}
+        checked={nextUp.data.withResume}
+        disabled={withResume.isPending}
+        onChange={(on) => withResume.mutate(on)}
+        className="mt-4"
+      />
+    </div>
+  )
+}
+
 /** My account › Hidden titles: the titles hidden from the user's lists, each with Show again. */
 export function HiddenList() {
   const { t } = useI18n()
@@ -157,6 +320,7 @@ export function HiddenList() {
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: queryKeys.ownHidden })
       void queryClient.invalidateQueries({ queryKey: queryKeys.ownResume })
+      void queryClient.invalidateQueries({ queryKey: queryKeys.ownNextUp })
     },
   })
 
@@ -244,28 +408,25 @@ export function HomeRowList() {
           {text.emptyHelp}
         </EmptyState>
       ) : (
-        <RowList aria-label={t.account.sections.homeRows}>
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-1.5">
           {rows.data.rows.map((row) => (
-            <Row
+            <SettingRow
               key={row.id}
-              title={row.name}
-              muted={row.off}
-              meta={
-                <span className="truncate">
-                  {kinds[row.kind]} · {places[row.place]}
-                </span>
-              }
-              trailing={
-                <Switch
-                  checked={!row.off}
-                  label={text.shown(row.name)}
-                  disabled={change.isPending && change.variables.id === row.id}
-                  onChange={() => change.mutate(row)}
-                />
-              }
+              kind="switch"
+              label={row.name}
+              detail={`${
+                row.kind === 'watchlist'
+                  ? text.watchlistKind
+                  : row.kind === 'playlists'
+                    ? text.playlistsKind
+                    : kinds[row.kind]
+              } · ${places[row.place]}`}
+              checked={!row.off}
+              disabled={change.isPending && change.variables.id === row.id}
+              onChange={() => change.mutate(row)}
             />
           ))}
-        </RowList>
+        </div>
       )}
     </div>
   )

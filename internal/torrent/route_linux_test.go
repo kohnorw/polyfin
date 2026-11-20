@@ -6,37 +6,39 @@ import (
 	"bytes"
 	"context"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
-	"unsafe"
+
+	"golang.org/x/sys/unix"
 
 	"github.com/moodiness/polyfin/internal/torrent/torrenttest"
 )
 
-// boundDevice reads the interface a socket is bound to (SO_BINDTODEVICE).
+// boundDevice reads the interface a socket is bound to (SO_BINDTODEVICE),
+// through x/sys, which knows the socketcall that 386 has instead of a
+// getsockopt system call.
 func boundDevice(t *testing.T, conn syscall.Conn) string {
 	t.Helper()
 	raw, err := conn.SyscallConn()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var name [syscall.IFNAMSIZ]byte
-	size := uint32(len(name))
-	var errno syscall.Errno
+	var name string
+	var getErr error
 	if err := raw.Control(func(fd uintptr) {
-		_, _, errno = syscall.Syscall6(syscall.SYS_GETSOCKOPT, fd, syscall.SOL_SOCKET, syscall.SO_BINDTODEVICE,
-			uintptr(unsafe.Pointer(&name[0])), uintptr(unsafe.Pointer(&size)), 0)
+		name, getErr = unix.GetsockoptString(int(fd), unix.SOL_SOCKET, unix.SO_BINDTODEVICE)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if errno != 0 {
-		t.Fatal(errno)
+	if getErr != nil {
+		t.Fatal(getErr)
 	}
-	return string(bytes.TrimRight(name[:size], "\x00"))
+	return name
 }
 
 func TestInterfaceRouteBindsEverySocket(t *testing.T) {
@@ -89,6 +91,13 @@ func TestInterfaceRoutePlays(t *testing.T) {
 	waitFor(t, "the UDP tracker's announce", func() bool { return udpTracker.Announces() > 0 })
 }
 
+func TestInterfaceRoutePlaysOverUTP(t *testing.T) {
+	t.Parallel()
+	tor := utpTorrent()
+	seeder := torrenttest.SeedUTP(t, tor, "127.0.0.1")
+	playsOverUTP(t, &testSettings{s: Settings{Enabled: true, Interface: "lo"}}, tor, seeder, seeder.Address())
+}
+
 func TestMissingInterfaceStartsNothing(t *testing.T) {
 	t.Parallel()
 	tor, _, _ := twoFiles()
@@ -115,8 +124,10 @@ func TestMissingInterfaceStartsNothing(t *testing.T) {
 
 // TestInterfaceGoingDown needs a dummy interface with an address, named
 // by POLYFIN_TEST_TORRENT_INTERFACE, and the right to set it down and up
-// (NET_ADMIN): a throwaway container provides both.
+// (NET_ADMIN): a throwaway container provides both. It plays from a
+// seeder over TCP, then from one over uTP alone.
 func TestInterfaceGoingDown(t *testing.T) {
+	t.Parallel()
 	name := os.Getenv("POLYFIN_TEST_TORRENT_INTERFACE")
 	if name == "" {
 		t.Skip("POLYFIN_TEST_TORRENT_INTERFACE names no interface to set down")
@@ -136,12 +147,31 @@ func TestInterfaceGoingDown(t *testing.T) {
 		}
 	}
 	defer ip("link", "set", "dev", name, "up")
+	for _, overUTP := range []bool{false, true} {
+		ip("link", "set", "dev", name, "up")
+		tor, _, _ := twoFiles()
+		var seeder *torrenttest.Peer
+		if overUTP {
+			seeder = torrenttest.SeedUTP(t, tor, host)
+		} else {
+			seeder = torrenttest.Seed(t, tor, host)
+		}
+		interfaceGoingDown(t, ip, name, host, tor, seeder)
+	}
+}
 
-	tor, _, _ := twoFiles()
-	seeder := torrenttest.Seed(t, tor, host)
+func interfaceGoingDown(t *testing.T, ip func(...string), name, host string, tor *torrenttest.Torrent, seeder *torrenttest.Peer) {
 	tracker := torrenttest.HTTPTracker(t, host, seeder.Address())
 	settings := &testSettings{s: Settings{Enabled: true, Interface: name, DownloadMbps: 1}}
-	e := newEngine(t, settings, 64<<20)
+	// The dummy interface's address is a private one: the tracker and the
+	// seeder there stand for hosts of the internet, the only ones a
+	// stream's tracker may be on (see publicRoute).
+	e := newEngineWith(t, settings, func(c *Config) {
+		c.Public = func(ip netip.Addr) bool { return torrenttest.OnLoopback(ip) || ip.Unmap().String() == host }
+	})
+	// The torrent stops once its route gave no answer, and its peer no
+	// byte, for the grace, shortened here.
+	e.routeGrace = time.Second
 	spec, err := NewSpec(tor.HashHex(), nil, []string{"tracker:" + tracker.URL()})
 	if err != nil {
 		t.Fatal(err)

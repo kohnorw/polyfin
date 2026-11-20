@@ -1,6 +1,8 @@
 package library
 
 import (
+	"encoding/json"
+	"fmt"
 	"slices"
 	"strings"
 	"testing"
@@ -9,6 +11,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/stremio"
+	"github.com/moodiness/polyfin/internal/tmdb"
 )
 
 func TestResolveFindsTitlesByAnyOfTheirIdentifiers(t *testing.T) {
@@ -436,4 +439,301 @@ func TestResolveLeavesUnfoundWhatNoAddonDescribes(t *testing.T) {
 	if _, err := e.service.load(t.Context(), itemID("movie|tmdb:1483614")); err == nil {
 		t.Error("an undescribed title was recorded")
 	}
+}
+
+// tmdbFallbackEnv is an env whose server has a TMDB key when key is not
+// empty, TMDB being f: it gives the IMDb identifiers of movie 700 and
+// series 800, none for movie 701, and that of movie 702, which a catalog
+// listed by its IMDb identifier only. An addon describes the movie
+// "tmdb:703", without an IMDb identifier, and a catalog listed the movie
+// "tmdb:550".
+func tmdbFallbackEnv(t *testing.T, key string) (env, *fakeCreditsTMDB) {
+	t.Helper()
+	e := newEnv(t)
+	f := newFakeCreditsTMDB(t)
+	e.service.UseTMDB(tmdb.New(f.URL+"/3", f.URL+"/img/", "test", e.users.Settings))
+	e.setting(func(s *accounts.Settings) { s.TMDBKey = key })
+	f.answers["/movie/700/external_ids"] = map[string]any{"imdb_id": "tt0700000"}
+	f.answers["/tv/800/external_ids"] = map[string]any{"imdb_id": "tt0800000"}
+	f.answers["/movie/701/external_ids"] = map[string]any{"imdb_id": nil}
+	f.answers["/movie/702/external_ids"] = map[string]any{"imdb_id": "tt0702000"}
+	e.install(addons.Shared(), &fakeAddon{
+		manifest: stremio.Manifest{ID: "tmdb", Name: "By TMDB", Version: "1", Types: []string{"movie", "series"},
+			Resources: []stremio.Resource{{Name: "meta"}}, IDPrefixes: []string{"tmdb:"}},
+		metas: map[string]stremio.Meta{"movie/tmdb:703": {ID: "tmdb:703", Type: "movie", Name: "Described by an addon"}},
+	})
+	listed := []stremio.Meta{{ID: "tt0702000", Type: "movie", Name: "Listed by IMDb"}, {ID: "tmdb:550", Type: "movie", Name: "Listed by TMDB"}}
+	for _, meta := range listed {
+		if err := e.service.save(t.Context(), []record{{ID: itemID(titleKey(KindMovie, meta.ID)), Key: titleKey(KindMovie, meta.ID), Kind: KindMovie,
+			Meta: &meta}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return e, f
+}
+
+// tmdbFallbackRefs are the refs tmdbFallbackEnv's tests resolve.
+var tmdbFallbackRefs = []TitleRef{
+	{TMDB: 700, Name: "Found by TMDB"},               // TMDB gives its IMDb identifier
+	{Episode: true, TMDB: 800, Season: 1, Number: 2}, // and its series'
+	{TMDB: 701}, // TMDB gives none
+	{TMDB: 702}, // listed by the IMDb identifier TMDB gives
+	{TMDB: 550}, // listed: TMDB is not asked
+	{TMDB: 703}, // described by an addon: TMDB is not asked
+	{TMDB: 700}, // asked once
+}
+
+func TestResolveAsksTMDBForTheIMDbIdentifierOfTitlesNothingElseFinds(t *testing.T) {
+	t.Parallel()
+	e, f := tmdbFallbackEnv(t, "k3y")
+	want := [][]TitleTarget{
+		{{ID: itemID("movie|tt0700000")}},
+		{{ID: itemID("episode|tt0800000:1:2"), Series: itemID("series|tt0800000"), Season: itemID("season|tt0800000|1"), SeasonNumber: 1, Number: 2}},
+		nil,
+		{{ID: itemID("movie|tt0702000")}},
+		{{ID: itemID("movie|tmdb:550")}},
+		{{ID: itemID("movie|tmdb:703")}},
+		{{ID: itemID("movie|tt0700000")}},
+	}
+	check := func(when string, got [][]TitleTarget, err error) {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		for i := range want {
+			if len(got[i]) != len(want[i]) || len(want[i]) > 0 && got[i][0] != want[i][0] {
+				t.Errorf("%s, %+v: %+v, want %+v", when, tmdbFallbackRefs[i], got[i], want[i])
+			}
+		}
+	}
+	asked := func(when string, want int) {
+		t.Helper()
+		for _, path := range []string{"/3/movie/700/external_ids", "/3/tv/800/external_ids", "/3/movie/701/external_ids", "/3/movie/702/external_ids"} {
+			if got := len(f.requests(path)); got != want {
+				t.Errorf("%s: %s asked %d times, want %d", when, path, got, want)
+			}
+		}
+		if got := len(f.requests("/")); got != 4*want {
+			t.Errorf("%s: TMDB was asked %v", when, f.requests("/"))
+		}
+	}
+	got, err := e.service.Resolve(t.Context(), tmdbFallbackRefs)
+	check("first", got, err)
+	asked("first", 1)
+
+	// The titles found are recorded as those of an IMDb identifier, with
+	// the ref's name and TMDB identifier.
+	if r, err := e.service.load(t.Context(), itemID("movie|tt0700000")); err != nil || r.Meta == nil || r.Meta.ID != "tt0700000" ||
+		r.Meta.Name != "Found by TMDB" || r.Meta.ImdbID != "tt0700000" || r.Meta.TmdbID != "700" {
+		t.Errorf("record of tt0700000: %+v %v", r.Meta, err)
+	}
+	if r, err := e.service.load(t.Context(), itemID("episode|tt0800000:1:2")); err != nil || r.SeriesID != "tt0800000" || r.Video == nil ||
+		r.Video.ID != "tt0800000:1:2" {
+		t.Errorf("episode recorded: %+v %v", r, err)
+	}
+	if _, err := e.service.load(t.Context(), itemID("movie|tmdb:701")); err == nil {
+		t.Error("a title TMDB gives no IMDb identifier for was recorded")
+	}
+
+	// After a restart, with TMDB's answers it kept in memory gone and the
+	// record of movie 700 too, TMDB is not asked again: its answers, found
+	// or not, are kept.
+	if _, err := e.service.db.Exec(t.Context(), "DELETE FROM items WHERE key = 'movie|tt0700000'"); err != nil {
+		t.Fatal(err)
+	}
+	restarted := e.restarted()
+	restarted.service.UseTMDB(tmdb.New(f.URL+"/3", f.URL+"/img/", "test", e.users.Settings))
+	got, err = restarted.service.Resolve(t.Context(), tmdbFallbackRefs)
+	check("after a restart", got, err)
+	asked("after a restart", 1)
+
+	// A month later, TMDB is asked again for the title it gave none for.
+	restarted.service.SetClock(func() time.Time { return time.Now().Add(titleIMDbFresh + time.Hour) })
+	f.mu.Lock()
+	f.answers["/movie/701/external_ids"] = map[string]any{"imdb_id": "tt0701000"}
+	f.mu.Unlock()
+	restarted.service.UseTMDB(tmdb.New(f.URL+"/3", f.URL+"/img/", "test", e.users.Settings))
+	got, err = restarted.service.Resolve(t.Context(), tmdbFallbackRefs[2:3])
+	if err != nil || len(got[0]) != 1 || got[0][0].ID != itemID("movie|tt0701000") {
+		t.Errorf("a month later: %+v %v", got, err)
+	}
+	if got := len(f.requests("/3/movie/701/external_ids")); got != 2 {
+		t.Errorf("a month later, movie 701 asked %d times, want 2", got)
+	}
+}
+
+func TestResolveAsksTMDBNothingWithoutAKey(t *testing.T) {
+	t.Parallel()
+	e, f := tmdbFallbackEnv(t, "")
+	got, err := e.service.Resolve(t.Context(), tmdbFallbackRefs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i, ref := range tmdbFallbackRefs {
+		// Only the listed and the described titles are found.
+		if found := len(got[i]) > 0; found != (ref.TMDB == 550 || ref.TMDB == 703) {
+			t.Errorf("%+v: %+v", ref, got[i])
+		}
+	}
+	if asked := f.requests("/"); len(asked) != 0 {
+		t.Errorf("TMDB was asked %v without a key", asked)
+	}
+}
+
+// Each kind of identifier finds the titles listed under it, and those
+// whose description gives it, in the order of the table, while a title of
+// the other kind with the same identifier is not found.
+func TestResolveFindsTitlesByEachKindOfIdentifier(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		name   string
+		kind   Kind
+		listed string              // the Stremio identifier the ref names
+		ref    TitleRef            // the ref, by that identifier
+		given  func(*stremio.Meta) // gives the identifier in a description
+	}{
+		{"IMDb", KindMovie, "tt0000301", TitleRef{IMDb: "tt0000301"}, func(m *stremio.Meta) { m.ImdbID = "tt0000301" }},
+		{"TMDB", KindMovie, "tmdb:302", TitleRef{TMDB: 302}, func(m *stremio.Meta) { m.TmdbID = "302" }},
+		{"TVDB", KindSeries, "tvdb:303", TitleRef{Series: true, TVDB: 303}, func(m *stremio.Meta) { m.TvdbID = "303" }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			e := newEnv(t)
+			other := KindSeries
+			if c.kind == KindSeries {
+				other = KindMovie
+			}
+			// Saved one at a time, so that the table holds them in this
+			// order: a title whose description gives the identifier, the
+			// title listed under it, and a title of the other kind whose
+			// description gives it.
+			given := stremio.Meta{ID: "own:1", Type: string(c.kind), Name: "Described"}
+			c.given(&given)
+			stray := stremio.Meta{ID: "own:2", Type: string(other), Name: "Other kind"}
+			c.given(&stray)
+			for _, r := range []record{
+				{ID: itemID(titleKey(c.kind, given.ID)), Key: titleKey(c.kind, given.ID), Kind: c.kind, Meta: &given},
+				{ID: itemID(titleKey(c.kind, c.listed)), Key: titleKey(c.kind, c.listed), Kind: c.kind,
+					Meta: &stremio.Meta{ID: c.listed, Type: string(c.kind), Name: "Listed"}},
+				{ID: itemID(titleKey(other, stray.ID)), Key: titleKey(other, stray.ID), Kind: other, Meta: &stray},
+			} {
+				if err := e.service.save(t.Context(), []record{r}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := e.service.Resolve(t.Context(), []TitleRef{c.ref})
+			if err != nil {
+				t.Fatal(err)
+			}
+			want := []TitleTarget{{ID: itemID(titleKey(c.kind, given.ID))}, {ID: itemID(titleKey(c.kind, c.listed))}}
+			if len(got) != 1 || !slices.Equal(got[0], want) {
+				t.Errorf("%+v, want %+v", got, want)
+			}
+		})
+	}
+}
+
+// knownTitles and knownEpisodes look their titles and episodes up through
+// indexes, generic plans included: with sequential scans disabled, no plan
+// reads items whole, nor reads a whole index of it.
+func TestKnownLookupsReadItemsThroughIndexes(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	ctx := t.Context()
+	// Titles and episodes of about the size of production's, mixed in the
+	// table as listings mix them, enough for the plans to tell a lookup
+	// from a read of every title: 5,000 titles, a third of them series,
+	// each with 5 episodes.
+	if _, err := e.service.db.Exec(ctx, `INSERT INTO items (id, key, kind, data)
+		SELECT gen_random_uuid(), key, kind, data FROM (
+			SELECT kind || '|tt' || (1000000 + i) AS key, kind, jsonb_build_object('kind', kind,
+				'meta', jsonb_build_object('id', 'tt' || (1000000 + i), 'type', kind, 'imdb_id', 'tt' || (1000000 + i),
+					'_tmdbId', (100000 + i)::text, '_tvdbId', CASE WHEN kind = 'series' THEN (300000 + i)::text END,
+					'description', (SELECT string_agg(md5(i || ':' || n), ' ') FROM generate_series(1, 30) n))) AS data
+			FROM generate_series(1, 5000) i, LATERAL (SELECT CASE WHEN i % 3 = 0 THEN 'series' ELSE 'movie' END AS kind) k
+			UNION ALL
+			SELECT 'episode|tt' || (1000000 + s) || ':1:' || n, 'episode', jsonb_build_object('kind', 'episode',
+				'seriesId', 'tt' || (1000000 + s), 'video', jsonb_build_object('id', 'tt' || (1000000 + s) || ':1:' || n,
+					'season', 1, 'episode', n, 'overview', (SELECT string_agg(md5(s || ':' || n || ':' || o), ' ') FROM generate_series(1, 12) o)))
+			FROM generate_series(3, 5000, 3) s, generate_series(1, 5) n) listed
+		ORDER BY md5(key)`); err != nil {
+		t.Fatal(err)
+	}
+	// As autovacuum does after such writes.
+	if _, err := e.service.db.Exec(ctx, "ANALYZE items"); err != nil {
+		t.Fatal(err)
+	}
+	// n identifiers of every seventh title: format applied to from + 1,
+	// from + 8, and so on.
+	ids := func(format string, from, n int) []string {
+		var ids []string
+		for i := range n {
+			ids = append(ids, fmt.Sprintf(format, from+1+i*7))
+		}
+		return ids
+	}
+	// The statements as Resolve runs them: for a few identifiers, IMDb and
+	// TMDB ones only, as most imports send; for a batch of an import; and
+	// their generic plans. The few have an empty, not nil, list of TVDB
+	// identifiers: a condition on it, unlike one on nil (NULL), would let
+	// a small partial index (items_person_tmdb) stand for it, read whole.
+	fewTitles, fewTitlesArgs := knownTitlesQuery([]string{"movie|tt1000001", "movie|tmdb:100001"}, []string{"tt1000001"}, []string{"100001"},
+		[]string{}, nil)
+	batchTitles, batchTitlesArgs := knownTitlesQuery(ids("movie|tt%d", 1000000, 150), ids("tt%d", 1000000, 150),
+		ids("%d", 100000, 150), ids("%d", 300000, 50), nil)
+	for _, c := range []struct {
+		name, query string
+		args        []any // none for the generic plan
+	}{
+		{"knownTitles, a few identifiers", fewTitles, fewTitlesArgs},
+		{"knownTitles, an import batch", batchTitles, batchTitlesArgs},
+		{"knownTitles, the generic plan", batchTitles, nil},
+		{"knownEpisodes, a few identifiers", knownEpisodesQuery, []any{[]string{"tt1000003"}}},
+		{"knownEpisodes, an import batch", knownEpisodesQuery, []any{ids("tt%d", 1000000, 150)}},
+		{"knownEpisodes, the generic plan", knownEpisodesQuery, nil},
+	} {
+		tx, err := e.service.db.Begin(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := tx.Exec(ctx, "SET LOCAL enable_seqscan = off"); err != nil {
+			t.Fatal(err)
+		}
+		var out []byte
+		if c.args == nil {
+			// EXPLAIN's generic plan takes no values, so it goes
+			// unprepared, its parameters as written.
+			results, err := tx.Conn().PgConn().Exec(ctx, "EXPLAIN (GENERIC_PLAN, FORMAT JSON) "+c.query).ReadAll()
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = results[0].Rows[0][0]
+		} else if err := tx.QueryRow(ctx, "EXPLAIN (FORMAT JSON) "+c.query, c.args...).Scan(&out); err != nil {
+			t.Fatal(err)
+		}
+		_ = tx.Rollback(ctx)
+		var plans []struct{ Plan planNode }
+		if err := json.Unmarshal(out, &plans); err != nil || len(plans) != 1 {
+			t.Fatalf("%s: %v %s", c.name, err, out)
+		}
+		if read := plans[0].Plan.wholeReads(); len(read) > 0 {
+			t.Errorf("%s: reads %s whole:\n%s", c.name, strings.Join(read, ", "), out)
+		}
+	}
+}
+
+// wholeReads lists the tables the plan scans sequentially and the indexes
+// it reads without a condition: whole.
+func (n planNode) wholeReads() []string {
+	var read []string
+	switch {
+	case n.NodeType == "Seq Scan":
+		read = append(read, "table "+n.Relation)
+	case n.Index != "" && n.IndexCond == "":
+		read = append(read, "index "+n.Index)
+	}
+	for _, child := range n.Plans {
+		read = append(read, child.wholeReads()...)
+	}
+	return read
 }

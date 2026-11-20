@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"strings"
 	"time"
+
+	"github.com/moodiness/polyfin/internal/basepath"
 )
 
 // registerPage is the page at /register where visitors create their own
@@ -34,7 +36,7 @@ func registration(api http.Handler, web fs.FS) http.Handler {
 				return
 			}
 			if strings.HasSuffix(r.URL.Path, "/") {
-				http.Redirect(w, r, basePath(r)+"/register", http.StatusMovedPermanently)
+				http.Redirect(w, r, basepath.Of(r)+"/register", http.StatusMovedPermanently)
 				return
 			}
 			header := w.Header()

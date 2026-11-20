@@ -68,6 +68,7 @@ func enabled(t *testing.T, store *Store, scope Scope) []string {
 }
 
 func TestInstallEnablesBrowsableCatalogsUpToTheDefault(t *testing.T) {
+	t.Parallel()
 	store, _ := newStore(t)
 	search := stremio.Catalog{Type: "movie", ID: "search", Extra: []stremio.Extra{{Name: "search", IsRequired: true}}}
 	other := stremio.Catalog{Type: "other", ID: "other"}
@@ -93,6 +94,7 @@ func TestInstallEnablesBrowsableCatalogsUpToTheDefault(t *testing.T) {
 }
 
 func TestInstallPrefersCollectionCatalogs(t *testing.T) {
+	t.Parallel()
 	store, _ := newStore(t)
 	streaming := stremio.Catalog{Type: "collection", ID: "streaming", Extra: []stremio.Extra{{Name: "genre", IsRequired: true, Options: []string{"None"}}}}
 	unbrowsable := stremio.Catalog{Type: "collection", ID: "search", Extra: []stremio.Extra{{Name: "search", IsRequired: true}}}
@@ -114,6 +116,7 @@ func TestInstallPrefersCollectionCatalogs(t *testing.T) {
 }
 
 func TestRefreshForgetsOnlyVanishedCatalogs(t *testing.T) {
+	t.Parallel()
 	store, _ := newStore(t)
 	addon := newFakeAddon(t, catalogs("movie", 3))
 	installed, err := store.Install(t.Context(), Shared(), addon.url("a"), false)
@@ -128,7 +131,7 @@ func TestRefreshForgetsOnlyVanishedCatalogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	addon.catalogs.Store(append(catalogs("movie", 2)[1:], stremio.Catalog{Type: "movie", ID: "movie-2", Name: "two"}, stremio.Catalog{Type: "movie", ID: "new"}))
-	if _, err := store.Refresh(t.Context(), Shared(), installed.ID, false); err != nil {
+	if _, _, err := store.Refresh(t.Context(), Shared(), installed.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	libraries, _ := store.Libraries(t.Context(), Shared())
@@ -143,6 +146,7 @@ func TestRefreshForgetsOnlyVanishedCatalogs(t *testing.T) {
 }
 
 func TestLibrariesRejectInvalidChoices(t *testing.T) {
+	t.Parallel()
 	store, users := newStore(t)
 	search := stremio.Catalog{Type: "movie", ID: "search", Extra: []stremio.Extra{{Name: "search", IsRequired: true}}}
 	addon := newFakeAddon(t, append(catalogs("movie", 1), search))
@@ -168,7 +172,7 @@ func TestLibrariesRejectInvalidChoices(t *testing.T) {
 	if _, err := store.SetLibraries(t.Context(), Personal(alice.ID), []LibraryChoice{{AddonID: installed.ID, CatalogType: "movie", CatalogID: "movie-0"}}); !errors.Is(err, ErrInvalidLibrary) {
 		t.Errorf("foreign addon: got %v", err)
 	}
-	if err := store.Remove(t.Context(), Personal(alice.ID), installed.ID); !errors.Is(err, ErrNotFound) {
+	if _, err := store.Remove(t.Context(), Personal(alice.ID), installed.ID); !errors.Is(err, ErrNotFound) {
 		t.Errorf("removing another scope's addon: got %v", err)
 	}
 }
@@ -178,6 +182,7 @@ func TestLibrariesRejectInvalidChoices(t *testing.T) {
 // it without clears them. A genre its addon stops offering lists the whole
 // catalog. A catalog that requires its only genre offers none to choose.
 func TestLibrariesKeepAGenreAndAMaximum(t *testing.T) {
+	t.Parallel()
 	store, _ := newStore(t)
 	top := stremio.Catalog{Type: "movie", ID: "top", Name: "Top", Extra: []stremio.Extra{{Name: "genre", Options: []string{"Comedy", "Drama"}}}}
 	plain := stremio.Catalog{Type: "movie", ID: "plain", Name: "Plain"}
@@ -247,7 +252,7 @@ func TestLibrariesKeepAGenreAndAMaximum(t *testing.T) {
 
 	// A genre the addon no longer offers lists the whole catalog.
 	addon.catalogs.Store([]stremio.Catalog{{Type: "movie", ID: "top", Name: "Top", Extra: []stremio.Extra{{Name: "genre", Options: []string{"Comedy"}}}}, plain, channels, sets})
-	if _, err := store.Refresh(t.Context(), Shared(), installed.ID, false); err != nil {
+	if _, _, err := store.Refresh(t.Context(), Shared(), installed.ID, false); err != nil {
 		t.Fatal(err)
 	}
 	current, _ = store.Libraries(t.Context(), Shared())
@@ -268,6 +273,7 @@ func TestLibrariesKeepAGenreAndAMaximum(t *testing.T) {
 }
 
 func TestReorderNeedsEveryAddonOnce(t *testing.T) {
+	t.Parallel()
 	store, _ := newStore(t)
 	addon := newFakeAddon(t, nil)
 	first, _ := store.Install(t.Context(), Shared(), addon.url("a"), false)
@@ -283,5 +289,21 @@ func TestReorderNeedsEveryAddonOnce(t *testing.T) {
 	installed, _ := store.Addons(t.Context(), Shared())
 	if installed[0].ID != second.ID {
 		t.Error("order not applied")
+	}
+}
+
+// An addon is shown under the name it was given, else its manifest's;
+// logs add the manifest's name to one it was given, to tell the addon.
+func TestAddonNames(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct{ chosen, name, log string }{
+		{"", "Demo", "Demo"},
+		{"Mine", "Mine", "Mine (Demo)"},
+		{"Demo", "Demo", "Demo"},
+	} {
+		addon := Addon{ChosenName: c.chosen, Manifest: stremio.Manifest{Name: "Demo"}}
+		if addon.Name() != c.name || addon.LogName() != c.log {
+			t.Errorf("given %q: %q and %q in logs, want %q and %q", c.chosen, addon.Name(), addon.LogName(), c.name, c.log)
+		}
 	}
 }

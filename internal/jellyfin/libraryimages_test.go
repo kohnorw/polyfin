@@ -37,7 +37,7 @@ func TestLibrariesShowTheImageChosen(t *testing.T) {
 			}})
 		case strings.HasSuffix(path, ".jpg"):
 			w.Header().Set("Content-Type", "image/jpeg")
-			_, _ = w.Write([]byte("jpeg " + strings.TrimSuffix(strings.TrimPrefix(path, "/"), ".jpg")))
+			_, _ = w.Write([]byte(jpegStart + "jpeg " + strings.TrimSuffix(strings.TrimPrefix(path, "/"), ".jpg")))
 		default:
 			http.NotFound(w, r)
 		}
@@ -64,10 +64,20 @@ func TestLibrariesShowTheImageChosen(t *testing.T) {
 		t.Helper()
 		var views QueryResult
 		s.get(t, "/UserViews", token, &views)
+		views.Items = libraryViews(views.Items)
 		if len(views.Items) != 1 {
 			t.Fatalf("views: %+v", views.Items)
 		}
 		return views.Items[0].Id, views.Items[0].ImageTags["Primary"]
+	}
+	ratioOf := func(token string) float64 {
+		t.Helper()
+		var views QueryResult
+		s.get(t, "/UserViews", token, &views)
+		if ratio := views.Items[0].PrimaryImageAspectRatio; ratio != nil {
+			return *ratio
+		}
+		return 0
 	}
 	folderImage := func() string {
 		t.Helper()
@@ -81,6 +91,11 @@ func TestLibrariesShowTheImageChosen(t *testing.T) {
 		return status, string(body)
 	}
 
+	// A new movie library shows a generated image: the test starts from
+	// none.
+	if err := s.addons.SetLibraryImage(t.Context(), addons.Shared(), key, addons.LibraryImageNone); err != nil {
+		t.Fatal(err)
+	}
 	id, tag := view(token)
 	if tag != "" || folderImage() != "" {
 		t.Errorf("a library without an image: tag %q, folder image %q", tag, folderImage())
@@ -100,7 +115,10 @@ func TestLibrariesShowTheImageChosen(t *testing.T) {
 	if tag != want || folderImage() != id {
 		t.Errorf("an automatic image: tag %q, folder image %q", tag, folderImage())
 	}
-	if status, body := download(id); status != http.StatusOK || body != "jpeg backdrop" {
+	if ratio := ratioOf(token); ratio != 16.0/9.0 {
+		t.Errorf("an automatic backdrop's aspect ratio: %v", ratio)
+	}
+	if status, body := download(id); status != http.StatusOK || body != jpegStart+"jpeg backdrop" {
 		t.Errorf("downloading the automatic image: %d %q", status, body)
 	}
 	if _, tag := view(kid); tag != "" {

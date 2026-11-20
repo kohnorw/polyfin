@@ -17,6 +17,7 @@ import (
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/media"
 	"github.com/moodiness/polyfin/internal/playback"
+	"github.com/moodiness/polyfin/internal/plays"
 )
 
 // Tracks play as Jellyfin plays audio: PlaybackInfo decides with the
@@ -33,9 +34,9 @@ import (
 func (h *Handler) audioRoutes(rt *router) {
 	// Players fetch audio without credentials, as Jellyfin allows: see
 	// streamAccess.
-	rt.handle(http.MethodGet, "/Audio/{itemId}/{file}", http.HandlerFunc(h.audioFile))
-	rt.handle(http.MethodGet, "/Audio/{itemId}/universal", http.HandlerFunc(h.universalAudio))
-	rt.handle(http.MethodGet, "/Audio/{itemId}/hls1/{playlistId}/{file}", http.HandlerFunc(h.audioSegment))
+	rt.handle(http.MethodGet, "/Audio/{itemId}/{file}", h.meteredFile(h.audioFile))
+	rt.handle(http.MethodGet, "/Audio/{itemId}/universal", h.meteredFile(h.universalAudio))
+	rt.handle(http.MethodGet, "/Audio/{itemId}/hls1/{playlistId}/{file}", h.meteredStream(h.audioSegment))
 }
 
 // audioCodec reads an Eclipse codec as Jellyfin names it, with its profile.
@@ -184,8 +185,8 @@ func relayTrack(r *http.Request, version library.Version) bool {
 // audioURL is the address players fetch a track from as it is, with a
 // grant signed for the caller (see streamURL).
 func (h *Handler) audioURL(r *http.Request, item accounts.ID, version library.Version, container string, relay bool) string {
-	user := callerFrom(r.Context()).User
-	grant := h.Playback.Signer().Sign(playback.Grant{Version: version.ID, User: user.ID, Relay: relay})
+	caller := callerFrom(r.Context())
+	grant := h.grant(playback.Grant{Version: version.ID, User: caller.User.ID, Device: caller.Device.ID, Relay: relay})
 	query := url.Values{"static": {"true"}, "mediaSourceId": {item.String()}, "Tag": {version.ID.String()}, grantParameter: {grant}}
 	extension := container
 	if extension == "" || strings.Contains(extension, ",") {
@@ -201,7 +202,7 @@ func (h *Handler) audioPlaybackInfo(w http.ResponseWriter, r *http.Request, user
 	if request.MediaSourceId != "" {
 		if requested, ok := parseGUID(request.MediaSourceId); !ok || requested != item.ID {
 			if owner, isVersion := h.Library.VersionOwner(requested); !isVersion || owner != item.ID {
-				writeJSON(w, http.StatusOK, noCompatibleStream{MediaSources: []MediaSourceInfo{}, ErrorCode: "NoCompatibleStream"})
+				h.refusePlay(w, r, user, item, "NoCompatibleStream", plays.FailedNoStream)
 				return
 			}
 		}
@@ -209,7 +210,7 @@ func (h *Handler) audioPlaybackInfo(w http.ResponseWriter, r *http.Request, user
 	version, err := h.version(r.Context(), user, item, item.ID)
 	if failed, ok := errors.AsType[*library.StreamError](err); ok && r.Context().Err() == nil {
 		h.Logger.Info("A track's addon gave no stream", "addon", failed.Addon, "error", failed.Err)
-		writeJSON(w, http.StatusOK, noCompatibleStream{MediaSources: []MediaSourceInfo{}, ErrorCode: "NoCompatibleStream"})
+		h.refusePlay(w, r, user, item, "NoCompatibleStream", plays.FailedNoStream)
 		return
 	}
 	if err != nil {
@@ -218,11 +219,11 @@ func (h *Handler) audioPlaybackInfo(w http.ResponseWriter, r *http.Request, user
 	}
 	d, err := h.describeAudio(r.Context(), version)
 	if err != nil {
-		h.Logger.Info("A track could not be analyzed", "addon", version.Addon, "error", err)
-		writeJSON(w, http.StatusOK, noCompatibleStream{MediaSources: []MediaSourceInfo{}, ErrorCode: "NoCompatibleStream"})
+		h.Logger.Info("A track could not be analyzed", "addon", version.AddonLog, "error", err)
+		h.refusePlay(w, r, user, item, "NoCompatibleStream", plays.FailedNoStream)
 		return
 	}
-	session := h.Playback.Signer().Sign(playback.Grant{Version: version.ID, User: user.ID, Relay: relayTrack(r, version)})
+	session := h.grant(playback.Grant{Version: version.ID, User: user.ID, Device: callerFrom(r.Context()).Device.ID, Relay: relayTrack(r, version)})
 	source := h.audioSource(r, item, version, d)
 	// Jellyfin names the default track in a song's details, not here.
 	source.DefaultAudioStreamIndex = nil
@@ -237,13 +238,13 @@ func (h *Handler) audioPlaybackInfo(w http.ResponseWriter, r *http.Request, user
 	}
 	// Above the user's bitrate limit, a track plays only converted.
 	if decision.DirectPlay && overUserLimit(request.userLimit, d.source.Bitrate) {
-		h.Logger.Info("A track above the user's bitrate limit is not played as it is", "addon", version.Addon)
+		h.Logger.Info("A track above the user's bitrate limit is not played as it is", "addon", version.AddonLog)
 		decision = playback.AudioDecision{}
 	}
 	if !decision.DirectPlay {
 		if decision.Transcoding == nil || decision.Target != nil && !h.Accounts.Conversions(user).Audio {
-			h.Logger.Info("A track would need a conversion the user may not have, or that the app does not take", "addon", version.Addon)
-			writeJSON(w, http.StatusOK, noCompatibleStream{MediaSources: []MediaSourceInfo{}, ErrorCode: "NoCompatibleStream"})
+			h.Logger.Info("A track would need a conversion the user may not have, or that the app does not take", "addon", version.AddonLog)
+			h.refusePlay(w, r, user, item, "NoCompatibleStream", plays.FailedNoStream)
 			return
 		}
 		source.SupportsDirectPlay, source.SupportsDirectStream = false, false
@@ -317,16 +318,19 @@ type audioRequest struct {
 // audioOf resolves a request for a track's bytes, answering w when it
 // cannot. The conversion the query asks for is held to what the user may
 // have: none without the conversion permission, and no more than their
-// bitrate limit.
-func (h *Handler) audioOf(w http.ResponseWriter, r *http.Request, converted bool) (audioRequest, bool) {
+// bitrate limit. route is how Jellyfin guards the request's route.
+func (h *Handler) audioOf(w http.ResponseWriter, r *http.Request, converted bool, route mediaRoute) (audioRequest, bool) {
 	opened, ok := parseGUID(r.PathValue("itemId"))
 	if !ok {
 		validationProblem(w, map[string][]string{"itemId": {notValid(r.PathValue("itemId"))}})
 		return audioRequest{}, false
 	}
-	user, grant, ok := h.streamAccess(r)
+	user, grant, ok := h.streamAccess(r, route)
 	if !ok {
 		w.WriteHeader(http.StatusUnauthorized)
+		return audioRequest{}, false
+	}
+	if !h.admitPlay(w, r, user, grant.Device) {
 		return audioRequest{}, false
 	}
 	item, err := h.played(r.Context(), user, opened)
@@ -362,7 +366,7 @@ func (h *Handler) audioOf(w http.ResponseWriter, r *http.Request, converted bool
 		return audioRequest{}, false
 	}
 	if !h.Accounts.Conversions(user).Audio {
-		h.Logger.Info("A conversion the user may not have was refused", "addon", version.Addon)
+		h.Logger.Info("A conversion the user may not have was refused", "addon", version.AddonLog)
 		w.WriteHeader(http.StatusForbidden)
 		return audioRequest{}, false
 	}
@@ -437,7 +441,7 @@ func (h *Handler) audioFile(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	static, _ := boolQuery(r, "static")
-	req, ok := h.audioOf(w, r, !static)
+	req, ok := h.audioOf(w, r, !static, servedToAnyone)
 	if !ok {
 		return
 	}
@@ -449,17 +453,22 @@ func (h *Handler) audioFile(w http.ResponseWriter, r *http.Request) {
 }
 
 // serveTrack serves a track as it is: redirected to its source, or
-// relayed (see playback.Service.Serve).
+// relayed (see playback.Service.Serve), as it always is to an app kept
+// from its source (see keptFromSource).
 func (h *Handler) serveTrack(w http.ResponseWriter, r *http.Request, req audioRequest, extension string) {
-	relay := req.grant.Relay || relayTrack(r, req.version) || strings.Contains(r.Header.Get("Authorization"), "Token=")
+	kept := h.keptFromSource(r, req.user, req.version)
+	relay := kept || req.grant.Relay || relayTrack(r, req.version) || strings.Contains(r.Header.Get("Authorization"), "Token=")
 	if analysis, known := h.Playback.Analyzed(r.Context(), req.version.ID); known && overUserLimit(int64(req.user.MaxBitrate), analysis.Bitrate) {
-		h.Logger.Info("A track above the user's bitrate limit was refused", "addon", req.version.Addon)
+		h.Logger.Info("A track above the user's bitrate limit was refused", "addon", req.version.AddonLog)
 		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if kept && h.namesSource(w, r, req.version, false) {
 		return
 	}
 	contentType := audioMimeTypes[extension]
 	if err := h.Playback.Serve(w, r, req.version, playback.Delivery{Relay: relay, ContentType: contentType}); err != nil && r.Context().Err() == nil {
-		h.Logger.Warn("A track could not be served", "addon", req.version.Addon, "error", err)
+		h.Logger.Warn("A track could not be served", "addon", req.version.AddonLog, "error", err)
 	}
 }
 
@@ -480,7 +489,7 @@ func (h *Handler) convertTrack(w http.ResponseWriter, r *http.Request, req audio
 		return
 	}
 	if err := h.Playback.ConvertAudio(r.Context(), req.version, req.target, muxer, start, w); err != nil && r.Context().Err() == nil {
-		h.Logger.Warn("A track could not be converted", "addon", req.version.Addon, "error", err)
+		h.Logger.Warn("A track could not be converted", "addon", req.version.AddonLog, "error", err)
 	}
 }
 
@@ -509,14 +518,14 @@ func segmentFormat(r *http.Request) hls.Format {
 // audioPlaylist answers the master or the media playlist of a track's
 // HLS conversion, whose files carry the same query.
 func (h *Handler) audioPlaylist(w http.ResponseWriter, r *http.Request, master bool) {
-	req, ok := h.audioOf(w, r, true)
+	req, ok := h.audioOf(w, r, true, servedSignedIn)
 	if !ok {
 		return
 	}
 	format := segmentFormat(r)
 	remux, err := h.audioRemux(r.Context(), req, format)
 	if err != nil {
-		h.Logger.Warn("A track could not be analyzed", "addon", req.version.Addon, "error", err)
+		h.Logger.Warn("A track could not be analyzed", "addon", req.version.AddonLog, "error", err)
 		processingError(w, http.StatusInternalServerError)
 		return
 	}
@@ -573,7 +582,7 @@ func (h *Handler) audioSegment(w http.ResponseWriter, r *http.Request) {
 		processingError(w, http.StatusNotFound)
 		return
 	}
-	req, ok := h.audioOf(w, r, true)
+	req, ok := h.audioOf(w, r, true, servedSignedIn)
 	if !ok {
 		return
 	}
@@ -610,7 +619,7 @@ func (h *Handler) audioSegment(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, hls.ErrNotFound), errors.Is(err, hls.ErrStopped):
 			processingError(w, http.StatusNotFound)
 		default:
-			h.Logger.Warn("An audio segment could not be made", "addon", req.version.Addon, "error", err)
+			h.Logger.Warn("An audio segment could not be made", "addon", req.version.AddonLog, "error", err)
 			processingError(w, http.StatusInternalServerError)
 		}
 		return
@@ -624,13 +633,13 @@ func (h *Handler) audioSegment(w http.ResponseWriter, r *http.Request) {
 // or container|codec), then serves the track as it is, its HLS master
 // playlist, or the converted stream.
 func (h *Handler) universalAudio(w http.ResponseWriter, r *http.Request) {
-	req, ok := h.audioOf(w, r, false)
+	req, ok := h.audioOf(w, r, false, servedSignedIn)
 	if !ok {
 		return
 	}
 	d, err := h.describeAudio(r.Context(), req.version)
 	if err != nil {
-		h.Logger.Info("A track could not be analyzed", "addon", req.version.Addon, "error", err)
+		h.Logger.Info("A track could not be analyzed", "addon", req.version.AddonLog, "error", err)
 		processingError(w, http.StatusInternalServerError)
 		return
 	}
@@ -647,7 +656,7 @@ func (h *Handler) universalAudio(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if decision.Transcoding == nil || decision.Target != nil && !h.Accounts.Conversions(req.user).Audio {
-		h.Logger.Info("A track would need a conversion the user may not have, or that the app does not take", "addon", req.version.Addon)
+		h.Logger.Info("A track would need a conversion the user may not have, or that the app does not take", "addon", req.version.AddonLog)
 		processingError(w, http.StatusBadRequest)
 		return
 	}
@@ -817,7 +826,7 @@ func (h *Handler) prepareNextTrack(user accounts.User, item library.Item, state 
 			return false
 		}
 		if _, err := h.describeAudio(ctx, versions[0]); err != nil {
-			h.Logger.Debug("The next track could not be analyzed ahead of playback", "addon", versions[0].Addon, "error", err)
+			h.Logger.Debug("The next track could not be analyzed ahead of playback", "addon", versions[0].AddonLog, "error", err)
 			return false
 		}
 		return true

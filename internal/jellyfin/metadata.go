@@ -2,10 +2,13 @@ package jellyfin
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
+	"math"
 	"mime"
 	"net/http"
 	"slices"
@@ -16,6 +19,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/collections"
 	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/localfiles"
 	"github.com/moodiness/polyfin/internal/playlists"
 )
 
@@ -23,11 +27,16 @@ import (
 //
 // jellyfin-web's Edit metadata, Edit images and Identify dialogs, for
 // administrators. Edits are kept apart from what addons say and win over
-// it for every user (see library.Overrides); people and provider
-// identifiers stay the addons'. Edit images searches TMDB and the server's
-// addons for images (see remoteimages.go). Polyfin's metadata providers
-// are the server's addons: Identify searches them, but cannot bind an item
-// to another title, since an item is the addon's title.
+// it for every user (see library.Overrides); people stay the addons', and
+// so do provider identifiers but a movie's or series' TMDB and TVDB ones,
+// which are edits as the other fields, and an IMDb identifier typed for a
+// movie or series of the local folders, which links its files to that
+// title. Edit images searches TMDB and the server's addons for images (see
+// remoteimages.go). Polyfin's metadata providers are the server's addons:
+// Identify finds titles by their identifiers and names through them, and
+// TMDB with the server's key, and binds the titles of local folders to
+// the title chosen, but no other item, since an item is the addon's
+// title.
 
 // remoteSearchTypes are the item types Jellyfin's Identify searches for,
 // with the kind of title the server's addons are searched for, if any.
@@ -52,8 +61,11 @@ func (h *Handler) metadataRoutes(rt *router) {
 	administrator(http.MethodGet, "/Items/{itemId}/MetadataEditor", h.metadataEditor)
 	administrator(http.MethodPost, "/Items/{itemId}", h.updateItem)
 	administrator(http.MethodGet, "/Items/{itemId}/ExternalIdInfos", h.externalIDInfos)
-	signedIn(http.MethodGet, "/Items/{itemId}/RemoteImages", h.remoteImages)
-	signedIn(http.MethodGet, "/Items/{itemId}/RemoteImages/Providers", h.remoteImageProviders)
+	// The candidates come from every server addon and from TMDB on the
+	// server's key: listing them is an administrator's, as the rest of
+	// Edit images is.
+	administrator(http.MethodGet, "/Items/{itemId}/RemoteImages", h.remoteImages)
+	administrator(http.MethodGet, "/Items/{itemId}/RemoteImages/Providers", h.remoteImageProviders)
 	administrator(http.MethodPost, "/Items/{itemId}/RemoteImages/Download", h.downloadRemoteImage)
 	// Apps load images without credentials: the addresses are signed.
 	rt.handle(http.MethodGet, "/Items/{itemId}/RemoteImages/Image", http.HandlerFunc(h.remoteImage))
@@ -61,12 +73,10 @@ func (h *Handler) metadataRoutes(rt *router) {
 	administrator(http.MethodPost, "/Items/{itemId}/Images/{imageType}/{imageIndex}", h.uploadItemImage)
 	administrator(http.MethodDelete, "/Items/{itemId}/Images/{imageType}", h.deleteItemImage)
 	administrator(http.MethodDelete, "/Items/{itemId}/Images/{imageType}/{imageIndex}", h.deleteItemImage)
+	// Identify searches with the server's view, which no user's parental
+	// control nor choice of addons narrows: it is an administrator's.
 	for itemType, kind := range remoteSearchTypes {
-		if itemType == "Person" {
-			administrator(http.MethodPost, "/Items/RemoteSearch/"+itemType, h.remoteSearch(kind))
-		} else {
-			signedIn(http.MethodPost, "/Items/RemoteSearch/"+itemType, h.remoteSearch(kind))
-		}
+		administrator(http.MethodPost, "/Items/RemoteSearch/"+itemType, h.remoteSearch(kind))
 	}
 	administrator(http.MethodPost, "/Items/RemoteSearch/Apply/{itemId}", h.applyRemoteSearch)
 }
@@ -84,27 +94,28 @@ func (h *Handler) originalItem(r *http.Request, user accounts.User, id accounts.
 	case rootFolderID:
 		return rootFolderItem(), nil
 	case collectionsViewID:
-		return collectionsViewItem(), nil
+		return h.collectionsViewItem(), nil
 	case playlistsViewID:
-		return playlistsViewItem(), nil
+		return h.playlistsViewItem(), nil
 	case liveTvViewID:
 		if has, err := h.Library.HasChannels(ctx, user); err != nil || !has {
 			return library.Item{}, cmpErr(err, library.ErrNotFound)
 		}
-		return library.Item{ID: liveTvViewID, Kind: library.KindLibrary, Name: "Live TV", CollectionType: "livetv"}, nil
+		return liveTvViewItem(), nil
 	}
 	if c, err := h.Collections.Get(ctx, id); err == nil {
 		titles, err := h.collectionTitles(ctx, user, c)
 		if err != nil {
 			return library.Item{}, err
 		}
-		item, _ := collectionItem(c, titles[0], nil, nil)
+		item, _ := collectionItem(c, titles[0], nil, nil, h.Accounts.RatingCountry())
 		return item, nil
 	} else if !errors.Is(err, collections.ErrNotFound) {
 		return library.Item{}, err
 	}
 	if p, err := h.Playlists.Get(ctx, id); err == nil && p.Visible(user.ID) {
-		return library.Item{ID: p.ID, Kind: library.KindMusicPlaylist, Name: p.Name}, nil
+		name, err := h.playlistName(ctx, user, p)
+		return library.Item{ID: p.ID, Kind: library.KindMusicPlaylist, Name: name}, err
 	} else if err != nil && !errors.Is(err, playlists.ErrNotFound) {
 		return library.Item{}, err
 	}
@@ -178,7 +189,7 @@ func (h *Handler) metadataEditor(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, MetadataEditorInfo{
-		ParentalRatingOptions: parentalRatings(),
+		ParentalRatingOptions: parentalRatings(h.Accounts.RatingCountry()),
 		Countries:             countries(),
 		Cultures:              editorCultures(),
 		ExternalIdInfos:       externalIDs(item),
@@ -202,7 +213,9 @@ func (h *Handler) externalIDInfos(w http.ResponseWriter, r *http.Request) {
 
 // flexibleNumber binds a number as Jellyfin does from the metadata editor,
 // which sends the text of its fields: a number, or text holding one, and
-// null or empty text for none.
+// null or empty text for none. A number that is not finite ("NaN",
+// "Infinity", or one too large for a float) is none too, as Jellyfin 12.4
+// takes it: it keeps no such rating.
 type flexibleNumber struct{ value *float64 }
 
 func (n *flexibleNumber) UnmarshalJSON(raw []byte) error {
@@ -215,8 +228,12 @@ func (n *flexibleNumber) UnmarshalJSON(raw []byte) error {
 		return nil
 	}
 	value, err := strconv.ParseFloat(text, 64)
-	if err != nil {
+	if err != nil && !errors.Is(err, strconv.ErrRange) {
 		return err
+	}
+	if math.IsNaN(value) || math.IsInf(value, 0) {
+		n.value = nil
+		return nil
 	}
 	n.value = &value
 	return nil
@@ -245,8 +262,9 @@ func (d *flexibleDate) UnmarshalJSON(raw []byte) error {
 }
 
 // itemUpdate is the BaseItemDto the metadata editor sends, of which
-// Polyfin keeps the fields below; the others, people and provider
-// identifiers among them, are the addons'.
+// Polyfin keeps the fields below; the others, people among them, are the
+// addons', and so are the provider identifiers but those updateItem
+// keeps.
 type itemUpdate struct {
 	Name            *string
 	OriginalTitle   *string
@@ -263,9 +281,22 @@ type itemUpdate struct {
 	PremiereDate    flexibleDate
 	EndDate         flexibleDate
 	ProductionYear  flexibleNumber
+	ProviderIds     map[string]string
+	DisplayOrder    *string
 }
 
-// updateItem keeps an administrator's edit of an item's metadata.
+// updateItem keeps an administrator's edit of an item's metadata. A
+// movie's or series' TMDB identifier, and a series' TVDB one, are kept as
+// the other fields (see library.Overrides.TmdbID): jellyfin-web sends
+// every field on each save, and one left as its source gives it, or
+// emptied, follows the source; a value that is no identifier is left out,
+// as jellyfin-web shows no error, and the other fields are kept. An IMDb
+// identifier changed on a movie or series of the local folders, a plain
+// video or a title their files were matched to, links its files to that
+// title, as Identify does (see library.Service.Identify): Jellyfin keeps
+// the provider identifiers typed, and its next refresh describes the item
+// by them. Other provider identifiers, those of other items, and a value
+// that is no IMDb identifier change nothing.
 func (h *Handler) updateItem(w http.ResponseWriter, r *http.Request) {
 	b := bindErrors{}
 	id := b.pathID(r, "itemId")
@@ -289,10 +320,11 @@ func (h *Handler) updateItem(w http.ResponseWriter, r *http.Request) {
 	}
 	edit := library.Overrides{
 		Name: request.Name, OriginalTitle: request.OriginalTitle, SortName: request.ForcedSortName, Overview: request.Overview,
-		Taglines: request.Taglines, Genres: request.Genres, Tags: request.Tags,
+		Taglines: h.dropTasteTagline(r.Context(), callerFrom(r.Context()).User, id, request.Taglines), Genres: request.Genres, Tags: request.Tags,
 		OfficialRating: request.OfficialRating, CustomRating: request.CustomRating,
 		CommunityRating: request.CommunityRating.value, CriticRating: request.CriticRating.value,
-		PremiereDate: request.PremiereDate.value, EndDate: request.EndDate.value,
+		PremiereDate: request.PremiereDate.value, EndDate: request.EndDate.value, DisplayOrder: request.DisplayOrder,
+		TmdbID: providerID(request.ProviderIds, "Tmdb"), TvdbID: providerID(request.ProviderIds, "Tvdb"),
 	}
 	if request.Studios != nil {
 		edit.Studios = []string{}
@@ -307,7 +339,49 @@ func (h *Handler) updateItem(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
+	if imdb, ok := changedIMDb(base, request.ProviderIds); ok {
+		// The link outlives an app giving up, as in applyRemoteSearch.
+		err := h.Library.Identify(context.WithoutCancel(r.Context()), base.ID, imdb)
+		switch {
+		case err == nil:
+			h.Logger.Info("An administrator linked a local title to an IMDb identifier", "item", base.ID.String(), "imdb", imdb)
+		case errors.Is(err, library.ErrNotLocal), errors.Is(err, library.ErrNotFound), errors.Is(err, localfiles.ErrInvalidIMDb):
+		default:
+			h.internalError(w, r, err)
+			return
+		}
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// providerID is the value ids give the provider identifier key, nil when
+// they give none: those not sent stay as they were.
+func providerID(ids map[string]string, key string) *string {
+	for name, value := range ids {
+		if strings.EqualFold(name, key) {
+			return &value
+		}
+	}
+	return nil
+}
+
+// changedIMDb is the IMDb identifier an edit of a movie or series gives in
+// ids, when it is not the one the item has.
+func changedIMDb(item library.Item, ids map[string]string) (string, bool) {
+	if item.Kind != library.KindMovie && item.Kind != library.KindSeries {
+		return "", false
+	}
+	for key, value := range ids {
+		if !strings.EqualFold(key, "Imdb") {
+			continue
+		}
+		imdb := strings.ToLower(strings.TrimSpace(value))
+		if imdb == "" || strings.EqualFold(imdb, item.ProviderIDs["Imdb"]) {
+			return "", false
+		}
+		return imdb, true
+	}
+	return "", false
 }
 
 // editedItemWith is editedItem, answering the binding errors b already
@@ -452,18 +526,25 @@ type RemoteSearchResult struct {
 // remoteSearchLimit bounds the titles Identify lists.
 const remoteSearchLimit = 20
 
-// remoteSearch is Identify's search for titles of kind: the server's addons
-// that describe titles are searched by name for movies and series; Polyfin
-// has no provider for the other types (kind empty), and finds nothing.
+// remoteSearch is Identify's search for titles of kind (see
+// searchProviders); Polyfin has no provider for the other types (kind
+// empty), and finds nothing.
 func (h *Handler) remoteSearch(kind library.Kind) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) { h.searchProviders(w, r, kind) }
 }
 
+// searchProviders looks a movie or series up by the identifiers Identify
+// was given, then by its name, as Jellyfin 12.4's TMDB providers do
+// (TmdbSeriesProvider.cs lines 55-127, TmdbMovieProvider.cs lines
+// 55-115): the title an identifier finds is the one result, and the name
+// is searched only when none finds any (see library.Service.LookUpIDs).
+// The name is searched in the server's addons that describe titles.
 func (h *Handler) searchProviders(w http.ResponseWriter, r *http.Request, kind library.Kind) {
 	var request struct {
 		SearchInfo *struct {
-			Name string
-			Year flexibleNumber
+			Name        string
+			Year        flexibleNumber
+			ProviderIds map[string]string
 		}
 	}
 	present, ok := readJSONBody(w, r, &request, "query")
@@ -479,8 +560,18 @@ func (h *Handler) searchProviders(w http.ResponseWriter, r *http.Request, kind l
 		writeJSON(w, http.StatusOK, results)
 		return
 	}
-	found, err := h.Library.RemoteSearch(r.Context(), kind, request.SearchInfo.Name, remoteSearchLimit)
+	identified, err := h.Library.LookUpIDs(r.Context(), kind, request.SearchInfo.ProviderIds)
 	if err != nil {
+		h.browseError(w, r, err)
+		return
+	}
+	if identified != nil {
+		writeJSON(w, http.StatusOK, []RemoteSearchResult{remoteSearchResult(*identified)})
+		return
+	}
+	// What the addons that answered found shows, even when others failed.
+	found, err := h.Library.RemoteSearch(r.Context(), kind, request.SearchInfo.Name, remoteSearchLimit)
+	if err != nil && len(found) == 0 {
 		h.browseError(w, r, err)
 		return
 	}
@@ -490,31 +581,77 @@ func (h *Handler) searchProviders(w http.ResponseWriter, r *http.Request, kind l
 		if year != nil && item.ProductionYear > 0 && float64(item.ProductionYear) != *year {
 			continue
 		}
-		result := RemoteSearchResult{Name: item.Name, ProviderIds: item.ProviderIDs, ImageUrl: item.Images.Primary,
-			SearchProviderName: f.Provider, Overview: item.Overview, Artists: []struct{}{}}
-		if result.ProviderIds == nil {
-			result.ProviderIds = map[string]string{}
-		}
-		if item.ProductionYear > 0 {
-			result.ProductionYear = new(item.ProductionYear)
-		}
-		if item.PremiereDate != nil {
-			result.PremiereDate = new(Time(*item.PremiereDate))
-		}
-		results = append(results, result)
+		results = append(results, remoteSearchResult(f))
 	}
 	writeJSON(w, http.StatusOK, results)
 }
 
+// remoteSearchResult describes a title found as Identify lists it.
+func remoteSearchResult(f library.RemoteResult) RemoteSearchResult {
+	item := f.Item
+	result := RemoteSearchResult{Name: item.Name, ProviderIds: maps.Clone(item.ProviderIDs), ImageUrl: item.Images.Primary,
+		SearchProviderName: f.Provider, Overview: item.Overview, Artists: []struct{}{}}
+	if result.ProviderIds == nil {
+		result.ProviderIds = map[string]string{}
+	}
+	if item.ProductionYear > 0 {
+		result.ProductionYear = new(item.ProductionYear)
+	}
+	if item.PremiereDate != nil {
+		result.PremiereDate = new(Time(*item.PremiereDate))
+	}
+	return result
+}
+
 // applyRemoteSearch is Identify's last step, which binds an item to the
-// title chosen. An item is its addon's title: Polyfin cannot bind it to
-// another, and answers as Jellyfin does when applying fails.
+// title chosen, as Jellyfin 12.4 sets the item's provider identifiers to
+// the result's and refreshes it, answering 204
+// (Jellyfin.Api/Controllers/ItemLookupController.cs, ApplySearchCriteria,
+// lines 245-282 at v12.4). A title of the local folders is linked to the
+// result's IMDb title as the folder's page links it (Find the title,
+// localfiles.Service.Link): a plain video, a movie, or a series, season
+// or episode of a show folder left unmatched, and as well a movie or
+// series files were matched to, by a scan or by hand, and its seasons
+// and episodes; the movie's files or discs, or the whole show folder (see
+// library.Service.Identify). A title the addons alone list is their
+// title: Polyfin cannot bind it to another, and answers as Jellyfin does
+// when applying fails.
 func (h *Handler) applyRemoteSearch(w http.ResponseWriter, r *http.Request) {
 	b := bindErrors{}
 	b.bool(r, "replaceAllImages")
-	if _, ok := h.editedItemWith(w, r, b); !ok {
+	item, ok := h.editedItemWith(w, r, b)
+	if !ok {
 		return
 	}
-	h.Logger.Info("An administrator asked to identify an item again, which Polyfin does not do", "item", r.PathValue("itemId"))
-	processingError(w, http.StatusInternalServerError)
+	var result struct{ ProviderIds map[string]string }
+	present, ok := readJSONBody(w, r, &result, "searchResult")
+	if !ok {
+		return
+	}
+	if !present {
+		requireBody(w, "searchResult")
+		return
+	}
+	imdb := ""
+	for key, value := range result.ProviderIds {
+		if strings.EqualFold(key, "Imdb") {
+			imdb = value
+		}
+	}
+	// The link outlives an app giving up: Jellyfin's refresh does too.
+	err := h.Library.Identify(context.WithoutCancel(r.Context()), item.ID, imdb)
+	switch {
+	case err == nil:
+		h.Logger.Info("An administrator identified a local title", "item", item.ID.String(), "imdb", imdb)
+		w.WriteHeader(http.StatusNoContent)
+	case errors.Is(err, library.ErrNotLocal):
+		h.Logger.Info("An administrator asked to identify a title no local file holds, which Polyfin does not do", "item", item.ID.String())
+		processingError(w, http.StatusInternalServerError)
+	case errors.Is(err, localfiles.ErrInvalidIMDb):
+		// Links are made to IMDb identifiers: a result without one cannot
+		// be applied.
+		validationProblem(w, map[string][]string{"searchResult.ProviderIds": {"The result has no IMDb identifier."}})
+	default:
+		h.browseError(w, r, err)
+	}
 }

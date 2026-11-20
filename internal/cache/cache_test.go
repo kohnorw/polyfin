@@ -6,9 +6,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unsafe"
 )
 
 func TestALifetimeChangeAppliesToKeptEntries(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	lifetime := 10 * time.Minute
 	c := NewLasting[string, int](10, func() time.Duration { return lifetime }, func() time.Time { return now })
@@ -42,6 +44,7 @@ func TestALifetimeChangeAppliesToKeptEntries(t *testing.T) {
 }
 
 func TestNewKeepsEntriesForItsTTL(t *testing.T) {
+	t.Parallel()
 	c := New[string, int](1, time.Hour)
 	c.Put("first", 1)
 	c.Put("second", 2)
@@ -58,6 +61,7 @@ func TestNewKeepsEntriesForItsTTL(t *testing.T) {
 }
 
 func TestUpdateReplacesWhatIsKeptAsChangeDecides(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 10, 6, 12, 0, 0, 0, time.UTC)
 	c := NewLasting[string, int](10, func() time.Duration { return 10 * time.Minute }, func() time.Time { return now })
 	// larger keeps value over a smaller kept one, and only over a kept one.
@@ -133,6 +137,7 @@ func keeps(c *Cache[string, string], keys ...string) []string {
 }
 
 func TestBeyondItsBytesACacheEvictsTheLeastRecentlyUsed(t *testing.T) {
+	t.Parallel()
 	c := newClock(time.Hour).sized(10)
 	c.Put("a", "aaaa")
 	c.Put("b", "bbbb")
@@ -150,6 +155,7 @@ func TestBeyondItsBytesACacheEvictsTheLeastRecentlyUsed(t *testing.T) {
 }
 
 func TestDeleteFuncForgetsWhatItReports(t *testing.T) {
+	t.Parallel()
 	c := newClock(time.Hour).sized(100)
 	c.Put("a", "kept")
 	c.Put("b", "dropped")
@@ -160,7 +166,34 @@ func TestDeleteFuncForgetsWhatItReports(t *testing.T) {
 	}
 }
 
+// ChangeFunc changes the values it reports in place: they expire when
+// they would have, and the others stay as they were.
+func TestChangeFuncChangesWhatItReportsInPlace(t *testing.T) {
+	t.Parallel()
+	k := newClock(time.Hour)
+	c := k.sized(100)
+	c.Put("a", "old")
+	k.now = k.now.Add(30 * time.Minute)
+	c.Put("b", "old")
+	c.ChangeFunc(func(key, value string) (string, bool) { return "new", key == "a" })
+	if a, _ := c.Get("a"); a != "new" {
+		t.Errorf("a: %q, want new", a)
+	}
+	if b, _ := c.Get("b"); b != "old" {
+		t.Errorf("b: %q, want old", b)
+	}
+	if c.Bytes() != 6 || c.Len() != 2 {
+		t.Errorf("%d bytes, %d entries", c.Bytes(), c.Len())
+	}
+	// a was stored first, and expires first.
+	k.now = k.now.Add(31 * time.Minute)
+	if got := keeps(c, "a", "b"); !slices.Equal(got, []string{"b"}) {
+		t.Errorf("kept past a's lifetime: %v", got)
+	}
+}
+
 func TestASizedCacheKeepsItsCapacity(t *testing.T) {
+	t.Parallel()
 	c := NewLasting[string, string](2, func() time.Duration { return time.Hour }, time.Now).Sized(100, func(value string) int { return len(value) })
 	c.Put("a", "a")
 	c.Put("b", "b")
@@ -171,6 +204,7 @@ func TestASizedCacheKeepsItsCapacity(t *testing.T) {
 }
 
 func TestAValueLargerThanTheBytesIsNotKept(t *testing.T) {
+	t.Parallel()
 	c := newClock(time.Hour).sized(10)
 	c.Put("a", "aaaa")
 	c.Put("b", "bbbb")
@@ -197,6 +231,7 @@ func TestAValueLargerThanTheBytesIsNotKept(t *testing.T) {
 }
 
 func TestAReplacedValueCountsForItsNewSize(t *testing.T) {
+	t.Parallel()
 	c := newClock(time.Hour).sized(10)
 	c.Put("a", "aa")
 	c.Put("b", "bbbb")
@@ -217,6 +252,7 @@ func TestAReplacedValueCountsForItsNewSize(t *testing.T) {
 }
 
 func TestExpiredEntriesAreDroppedAsOthersAreStored(t *testing.T) {
+	t.Parallel()
 	k := newClock(10 * time.Minute)
 	c := k.sized(1000)
 	c.Put("a", "aaaa")
@@ -248,6 +284,7 @@ func TestExpiredEntriesAreDroppedAsOthersAreStored(t *testing.T) {
 }
 
 func TestAShorterLifetimeDropsOlderEntriesAtTheNextPut(t *testing.T) {
+	t.Parallel()
 	k := newClock(time.Hour)
 	c := k.sized(1000)
 	for _, key := range []string{"a", "b", "c"} {
@@ -266,6 +303,7 @@ func TestAShorterLifetimeDropsOlderEntriesAtTheNextPut(t *testing.T) {
 }
 
 func TestUpdateKeepsTheBytesCounted(t *testing.T) {
+	t.Parallel()
 	k := newClock(10 * time.Minute)
 	c := k.sized(10)
 	add := func(more string) func(string, bool) (string, bool) {
@@ -300,6 +338,7 @@ func TestUpdateKeepsTheBytesCounted(t *testing.T) {
 }
 
 func TestJSONSizeIsTheLengthOfTheEncoding(t *testing.T) {
+	t.Parallel()
 	value := struct {
 		Name   string
 		Tags   []string
@@ -314,5 +353,43 @@ func TestJSONSizeIsTheLengthOfTheEncoding(t *testing.T) {
 	}
 	if got := JSONSize(make(chan int)); got != 0 {
 		t.Errorf("a value JSON cannot encode: %d", got)
+	}
+}
+
+// MemorySize counts a value for what it holds in memory: an element that
+// holds nothing for its size, where its JSON is a few bytes, a text for
+// its bytes, a slice for its capacity, and what maps and pointers lead to.
+func TestMemorySizeCountsWhatAValueHolds(t *testing.T) {
+	t.Parallel()
+	type element struct {
+		Name  string
+		Tags  []string
+		Next  *element
+		Bytes []byte
+		Named map[string]string
+		count int
+	}
+	const size, text, header = int(unsafe.Sizeof(element{})), int(unsafe.Sizeof("")), int(unsafe.Sizeof([]element{}))
+	empties := make([]element, 1000)
+	if got := MemorySize(empties); got != header+1000*size {
+		t.Errorf("1000 empty elements: %d, want %d", got, header+1000*size)
+	}
+	if written := JSONSize(empties); written >= 1000*size {
+		t.Errorf("the JSON of 1000 empty elements is %d bytes, no less than they take", written)
+	}
+	full := element{Name: "four", Tags: append(make([]string, 0, 8), "a", "bc"), Next: &element{Name: "x"}, Bytes: make([]byte, 3, 10),
+		Named: map[string]string{"k": "vv"}, count: 7}
+	want := size + len("four") + (8*text + len("a") + len("bc")) + (size + len("x")) + 10 + (2*text + len("k") + len("vv"))
+	if got := MemorySize(full); got != want {
+		t.Errorf("a full element: %d, want %d", got, want)
+	}
+	if got := MemorySize[any](full); got != int(unsafe.Sizeof(any(nil)))+want {
+		t.Errorf("behind an interface: %d", got)
+	}
+	// A value that leads to itself is followed no further than maxDepth.
+	loop := &element{Name: "loop"}
+	loop.Next = loop
+	if got := MemorySize(loop); got < size || got > 2*maxDepth*size {
+		t.Errorf("a value that leads to itself: %d", got)
 	}
 }

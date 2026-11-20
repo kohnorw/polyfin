@@ -9,6 +9,8 @@ import (
 	"strconv"
 	"sync"
 	"time"
+
+	"github.com/moodiness/polyfin/internal/workfolder"
 )
 
 // pieceKey names a piece of a torrent.
@@ -32,6 +34,10 @@ type store struct {
 	pieces map[pieceKey]*storedPiece
 	// evicted tells a torrent that it lost a piece.
 	evicted func(pieceKey)
+	// runs is the number of the latest run of each torrent whose pieces
+	// may be kept, and run the last number given (see started).
+	runs map[Hash]uint64
+	run  uint64
 }
 
 type storedPiece struct {
@@ -40,15 +46,13 @@ type storedPiece struct {
 }
 
 // newStore returns a store in dir, removing what a previous run left
-// there: it is not trusted.
+// there: it is not trusted. A folder Polyfin did not make is not emptied,
+// and no store is returned for it (see workfolder.ErrOccupied).
 func newStore(dir string, budget func() int64, logger *slog.Logger) (*store, error) {
-	if err := os.RemoveAll(dir); err != nil {
+	if err := workfolder.Torrents.Empty(dir); err != nil {
 		return nil, err
 	}
-	if err := os.MkdirAll(dir, 0o700); err != nil {
-		return nil, err
-	}
-	return &store{dir: dir, budget: budget, logger: logger, pieces: map[pieceKey]*storedPiece{}}, nil
+	return &store{dir: dir, budget: budget, logger: logger, pieces: map[pieceKey]*storedPiece{}, runs: map[Hash]uint64{}}, nil
 }
 
 func (s *store) path(key pieceKey) string {
@@ -131,16 +135,46 @@ func (s *store) read(key pieceKey, p []byte, off int64) (bool, error) {
 	return true, nil
 }
 
-// drop removes the pieces of a torrent.
-func (s *store) drop(hash Hash) {
+// started numbers a run of the torrent of hash that starts: its pieces are
+// the torrent's from now on, which an earlier run that stops no longer
+// drops (see drop).
+func (s *store) started(hash Hash) uint64 {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	s.run++
+	s.runs[hash] = s.run
+	return s.run
+}
+
+// drop removes the pieces of a torrent whose run stopped, unless a later
+// run of the torrent started meanwhile: they are that run's.
+func (s *store) drop(hash Hash, run uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.runs[hash] != run {
+		return
+	}
+	delete(s.runs, hash)
 	for key := range s.pieces {
 		if key.hash == hash {
 			s.removeLocked(key)
 		}
 	}
 	_ = os.Remove(filepath.Join(s.dir, hash.String()))
+}
+
+// mark sets have[i] for each piece of the torrent of hash the store keeps,
+// as a run stopped while played leaves them for the next (see
+// Engine.remove): they were checked against their hashes as they were
+// kept.
+func (s *store) mark(hash Hash, have []bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for key := range s.pieces {
+		if key.hash == hash && key.index >= 0 && key.index < len(have) {
+			have[key.index] = true
+		}
+	}
 }
 
 // errClosed reports a piece kept once the engine closed.

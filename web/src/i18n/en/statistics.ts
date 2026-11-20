@@ -16,7 +16,7 @@ const statistics = {
     openSettings: 'Open Settings › Playback',
     empty: 'No playback in this period',
     emptyHint: 'Videos played for at least 10 seconds in a Jellyfin app show here once they stop.',
-    figures: { played: 'Hours watched', plays: 'Playbacks', users: 'Users' },
+    figures: { played: 'Hours watched', plays: 'Playbacks', users: 'Users', sent: 'Data sent' },
     perDay: 'Hours watched per day',
     perMonth: 'Hours watched per month',
     perUser: 'Hours watched per user',
@@ -45,12 +45,8 @@ const statistics = {
     history: 'Recent playbacks',
     historyEmpty: 'No playback in this period.',
     columns: {
-      started: 'Started',
-      user: 'User',
-      title: 'Title',
-      device: 'App and device',
       played: 'Played',
-      method: 'How it played',
+      sent: 'Data sent',
     },
     appOn: (app: string, device: string) => (app && device ? `${app} on ${device}` : app || device),
     /** A playback a guest started through a share link. */

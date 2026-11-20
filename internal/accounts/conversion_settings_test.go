@@ -8,9 +8,10 @@ import (
 )
 
 // The settings tuning conversions start as Polyfin converted before they
-// were settings, the ahead limit at 120 s, and the administrator's setup
-// keeps them.
+// were settings, but the stereo mix at Jellyfin's volume, 2, the ahead
+// limit at 120 s, and the administrator's setup keeps them.
 func TestConversionSettingsDefaultToWhatPolyfinDidBefore(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	check := func(when string, got Settings) {
 		t.Helper()
@@ -20,12 +21,12 @@ func TestConversionSettingsDefaultToWhatPolyfinDidBefore(t *testing.T) {
 			got.DeinterlaceMethod != "yadif" || got.DeinterlaceDoubleRate ||
 			got.DownmixAlgorithm != "None" || got.DownmixBoost != DefaultDownmixBoost || got.MaxAudioChannels != 0 ||
 			got.AudioBitratePerChannel != 0 || got.EncodingThreads != 0 || got.AheadSeconds != DefaultAheadSeconds || got.AdaptiveQuality != "off" ||
-			got.KeepConvertedVideo {
+			got.KeepConvertedVideo || got.FastStart {
 			t.Errorf("%s: %+v", when, got)
 		}
 	}
 	check("defaults", store.Settings())
-	if DefaultDownmixBoost != 1 || DefaultAheadSeconds != 120 || MinAheadSeconds != 30 || MaxAheadSeconds != 600 {
+	if DefaultDownmixBoost != 2 || DefaultAheadSeconds != 120 || MinAheadSeconds != 30 || MaxAheadSeconds != 600 {
 		t.Errorf("default constants: boost %v, %d s ahead in [%d, %d]", DefaultDownmixBoost, DefaultAheadSeconds, MinAheadSeconds, MaxAheadSeconds)
 	}
 	if _, err := store.CreateFirstAdministrator(t.Context(), "admin", "correct horse", "fr"); err != nil {
@@ -35,6 +36,7 @@ func TestConversionSettingsDefaultToWhatPolyfinDidBefore(t *testing.T) {
 }
 
 func TestConversionSettingsRoundTripAndStayInRange(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	for _, tc := range []struct {
@@ -64,6 +66,7 @@ func TestConversionSettingsRoundTripAndStayInRange(t *testing.T) {
 		{"an unknown downmix", func(s *Settings) { s.DownmixAlgorithm = "dave750" }, ErrInvalidDownmixAlgorithm},
 		{"a boost below 0.5", func(s *Settings) { s.DownmixBoost = MinDownmixBoost - 0.1 }, ErrInvalidDownmixBoost},
 		{"a boost above 3", func(s *Settings) { s.DownmixBoost = MaxDownmixBoost + 0.1 }, ErrInvalidDownmixBoost},
+		{"an unknown dynamic range compression", func(s *Settings) { s.DynamicRangeCompression = "light" }, ErrInvalidDynamicRange},
 		{"8 audio channels", func(s *Settings) { s.MaxAudioChannels = 8 }, ErrInvalidMaxAudioChannels},
 		{"an audio bitrate below 32 kb/s", func(s *Settings) { s.AudioBitratePerChannel = MinAudioBitratePerChannel - 1 }, ErrInvalidAudioBitrate},
 		{"an audio bitrate above 320 kb/s", func(s *Settings) { s.AudioBitratePerChannel = MaxAudioBitratePerChannel + 1 }, ErrInvalidAudioBitrate},
@@ -93,7 +96,7 @@ func TestConversionSettingsRoundTripAndStayInRange(t *testing.T) {
 			s.DeinterlaceMethod, s.DeinterlaceDoubleRate = "bwdif", true
 			s.DownmixAlgorithm, s.DownmixBoost, s.MaxAudioChannels, s.AudioBitratePerChannel = "Dave750", MinDownmixBoost, 2, MinAudioBitratePerChannel
 			s.EncodingThreads, s.AheadSeconds = MaxEncodingThreads, MinAheadSeconds
-			s.AdaptiveQuality, s.KeepConvertedVideo = AdaptiveQualityRemote, true
+			s.AdaptiveQuality, s.KeepConvertedVideo, s.FastStart = AdaptiveQualityRemote, true, true
 		},
 		func(s *Settings) {
 			s.EncoderPreset, s.HardwareAcceleration, s.HardwareDecodingCodecs = "ultrafast", "none", []string{}
@@ -127,7 +130,8 @@ func TestConversionSettingsRoundTripAndStayInRange(t *testing.T) {
 		"hardware_decoding_codecs = '{vp8}'", "tone_mapping_algorithm = 'gamma'", "tone_mapping_peak = 99", "tone_mapping_desat = 11",
 		"processor_tone_mapping_height = 480", "processor_tone_mapping_height = -1",
 		"deinterlace_method = 'w3fdif'", "downmix_algorithm = 'dave750'", "downmix_boost = 0.4", "max_audio_channels = 8",
-		"audio_bitrate_per_channel = 16", "encoding_threads = 65", "ahead_seconds = 29", "ahead_seconds = 601", "adaptive_quality = 'local'"} {
+		"audio_bitrate_per_channel = 16", "encoding_threads = 65", "ahead_seconds = 29", "ahead_seconds = 601", "adaptive_quality = 'local'",
+		"dynamic_range_compression = 'light'"} {
 		if _, err := store.db.Exec(ctx, "UPDATE settings SET "+column); err == nil {
 			t.Errorf("the database took %s", column)
 		}
@@ -147,6 +151,7 @@ func otherSystemsMethod() string {
 // auto and none: NVIDIA and VAAPI on Linux, VideoToolbox on macOS, and
 // NVIDIA, Intel's QSV and AMD's AMF on Windows.
 func TestEachSystemOffersItsGPUMethods(t *testing.T) {
+	t.Parallel()
 	for system, want := range map[string][]string{
 		"linux":   {"auto", "nvenc", "vaapi", "none"},
 		"darwin":  {"auto", "videotoolbox", "none"},
@@ -163,6 +168,7 @@ func TestEachSystemOffersItsGPUMethods(t *testing.T) {
 // reads as auto, which tries this system's, and saving the settings then
 // keeps auto.
 func TestAnotherSystemsGPUMethodReadsAsAuto(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	if _, err := store.db.Exec(ctx, "UPDATE settings SET hardware_acceleration = $1", otherSystemsMethod()); err != nil {

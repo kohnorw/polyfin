@@ -1,0 +1,449 @@
+package library
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"slices"
+
+	"github.com/moodiness/polyfin/internal/accounts"
+	"github.com/moodiness/polyfin/internal/addons"
+	"github.com/moodiness/polyfin/internal/stremio"
+	"github.com/moodiness/polyfin/internal/userdata"
+)
+
+// A library of other videos (see othervideos.go) may show its titles as
+// movies and shows (addons.ShowAsMoviesAndShows), for the Jellyfin apps
+// that keep only libraries of movies and shows, and list only Movie and
+// Series items. The library then has no content type, as Jellyfin's mixed
+// libraries. A title whose description has two videos or more, or one its
+// description gives an episode number, is a series: each video is an
+// episode, of the season its description numbers, season 1 when it gives
+// none, numbered as its description numbers it, or after the season's
+// numbered episodes in the description's order when it gives no number
+// (see numberVideos). A title without videos, or with one video without
+// an episode number, the file of a movie, is a movie (see shownKind). The
+// episodes play as a folder's videos do: the streams the description
+// embeds for them, then those the stream resource lists for their
+// identifiers.
+//
+// A title keeps the identifier of a series whichever it is (see
+// catalogTitleKind), so that it stays the same item when its description
+// gains or loses videos; its videos are episodes, of their own
+// identifiers. Those are not the identifiers the same titles and videos
+// have as home videos: switching the option gives users' played marks,
+// resume points and favorites to the items the titles and videos become
+// (see FollowTitles), and the items they were are no longer found (see
+// misplaced).
+
+// catalogTitleKind is the kind whose key identifies a title of metaType
+// that a catalog of entry lists (see titleKind): a series for one shown as
+// movies and shows, whether it is a series or a movie.
+func catalogTitleKind(entry installed, catalog stremio.Catalog, metaType string) (Kind, bool) {
+	kind, ok := titleKind(metaType)
+	if ok && otherType(metaType) && entry.addon.ShowsAsTitles(catalog.Type, catalog.ID) {
+		return KindSeries, true
+	}
+	return kind, ok
+}
+
+// catalogOffers reports whether a catalog of entry lists titles of one of
+// kinds, and returns the kind of their keys (see catalogTitleKind): one
+// shown as movies and shows lists movies and series.
+func catalogOffers(entry installed, catalog stremio.Catalog, kinds []Kind) (Kind, bool) {
+	kind, ok := catalogTitleKind(entry, catalog, catalog.Type)
+	switch {
+	case !ok:
+		return "", false
+	case slices.Contains(kinds, kind):
+		return kind, true
+	}
+	return kind, kind == KindSeries && otherType(catalog.Type) && slices.Contains(kinds, KindMovie)
+}
+
+// libraryCollectionType is the content of a library (see collectionType):
+// none, as Jellyfin's mixed libraries, for one that shows its titles as
+// movies and shows: a library of other videos shown so, or of movies or
+// series that lists each title as its own type tells (see mixedKinds);
+// shows or movies for an anime catalog shown as shows or as movies.
+func libraryCollectionType(l addons.Library) string {
+	switch l.ShowAs {
+	case addons.ShowAsMoviesAndShows:
+		return ""
+	case addons.ShowAsShows:
+		return "tvshows"
+	case addons.ShowAsMovies:
+		return "movies"
+	}
+	return collectionType(l.Catalog.Type)
+}
+
+// undecidedShowAs reports whether an enabled library of other videos shows
+// its titles as none chose, as home videos until Polyfin decides from its
+// catalog's first page (see addons.DecidedShowAs).
+func undecidedShowAs(l addons.Library) bool {
+	return l.Enabled && l.ShowAs == "" && slices.Contains(l.ShowAsChoices, addons.ShowAsHomeVideos)
+}
+
+// DecideShowAs decides how the enabled libraries of other videos of scope
+// for which none chose show their titles, from their catalog's first page
+// (see addons.DecidedShowAs), as Warm does for every scope at start and
+// then hourly: the admin API calls it once it saved a scope's libraries,
+// so that a library made then shows as decided at once. A library whose
+// first page cannot be read now is left to the next.
+func (s *Service) DecideShowAs(ctx context.Context, scope addons.Scope) error {
+	libraries, err := s.addons.Libraries(ctx, scope)
+	if err != nil || !slices.ContainsFunc(libraries, undecidedShowAs) {
+		return err
+	}
+	list, err := s.addons.Addons(ctx, scope)
+	if err != nil {
+		return err
+	}
+	// A member's own addons stay on public addresses, wherever they are
+	// (see addons.Addon.Confined).
+	administrator := false
+	if scope.Owner != nil {
+		if err := s.db.QueryRow(ctx, "SELECT is_administrator FROM users WHERE id = $1", *scope.Owner).Scan(&administrator); err != nil {
+			return err
+		}
+	}
+	member := addons.Member(scope, administrator)
+	var errs []error
+	for _, l := range libraries {
+		i := slices.IndexFunc(list, func(a addons.Addon) bool { return a.ID == l.AddonID })
+		if !undecidedShowAs(l) || i < 0 || !list[i].Enabled || !list[i].Stremio() {
+			continue
+		}
+		entry := installed{addon: list[i], confined: list[i].Confined(member), shared: scope.Owner == nil}
+		first, err := s.page(ctx, source{addon: entry, catalog: l.Catalog, genre: l.Genre}, 0)
+		if err != nil {
+			s.logger.Debug("A library's first page could not be read", "addon", list[i].LogName(), "catalog", l.Catalog.ID, "error", err)
+			continue
+		}
+		errs = append(errs, s.decideShowAs(ctx, l, first))
+	}
+	return errors.Join(errs...)
+}
+
+// decideShowAs stores how library l of other videos, for which none chose,
+// shows its titles, as first, its catalog's first page, tells (see
+// addons.DecidedShowAs). One decided as movies and shows lists its movies
+// and series as the same items, but its titles of other types, past the
+// first page, become series or movies: users' data follows them as when an
+// administrator switches it (see followTitles).
+func (s *Service) decideShowAs(ctx context.Context, l addons.Library, first []stremio.Meta) error {
+	showAs := addons.DecidedShowAs(first)
+	if showAs == "" || !undecidedShowAs(l) {
+		return nil
+	}
+	key := addons.LibraryKey{AddonID: l.AddonID, CatalogType: l.Catalog.Type, CatalogID: l.Catalog.ID}
+	decided, err := s.addons.DecideShowAs(ctx, key, showAs)
+	if err != nil || !decided || showAs != addons.ShowAsMoviesAndShows {
+		return err
+	}
+	s.logger.Info("A library of other videos lists movies and shows, and shows them so", "catalog", l.Catalog.ID)
+	return s.followTitles(ctx, key, true)
+}
+
+// shownTitle reports whether r is a title of the other or channel type
+// shown as a series or a movie.
+func (r record) shownTitle() bool {
+	return (r.Kind == KindSeries || r.Kind == KindMovie) && r.Meta != nil && otherType(r.Meta.Type)
+}
+
+// misplaced reports whether r is a title of the other or channel type
+// recorded as its library showed it before the library switched between
+// home videos and movies and shows: a folder or a video of a catalog whose
+// library now shows its titles as movies and shows, or a series or a
+// movie of one that no longer does. Such an item is no longer found.
+func (v view) misplaced(r record) bool {
+	if !r.shapedTitle() {
+		return false
+	}
+	shows := false
+	if r.Addon != nil {
+		if entry, ok := v.addon(*r.Addon); ok {
+			shows = entry.addon.ShowsAsTitles(r.CatalogType, r.CatalogID)
+		}
+	}
+	return r.shownTitle() != shows
+}
+
+// shownKind is the kind a description gives a title shown as movies and
+// shows: a movie when it has no video, or one its description gives no
+// episode number, as a movie's file is; else a series, a single episode
+// numbered so (S35E01) being a show of one episode.
+func shownKind(meta stremio.Meta) Kind {
+	if len(meta.Videos) == 0 || len(meta.Videos) == 1 && meta.Videos[0].EpisodeNumber() <= 0 {
+		return KindMovie
+	}
+	return KindSeries
+}
+
+// shownMeta is the description of r with its videos numbered when r is a
+// title shown as a series (see numberVideos), else meta itself: a movie's
+// one video keeps no number, so that it stays a movie.
+func shownMeta(r record, meta stremio.Meta) stremio.Meta {
+	if !r.shownTitle() || shownKind(meta) == KindMovie {
+		return meta
+	}
+	return numberVideos(meta)
+}
+
+// videoSeason is the season of a video of a title shown as movies and
+// shows: the one its description gives; season 1 when it gives neither a
+// season nor an episode number. Stremio descriptions cannot tell season 0
+// from none: a video of season 0 with an episode number is a special, as
+// they number them.
+func videoSeason(video stremio.Video) int {
+	if video.Season > 0 || video.EpisodeNumber() > 0 {
+		return int(video.Season)
+	}
+	return 1
+}
+
+// numberVideos gives each video of the description of a title shown as
+// movies and shows its season (see videoSeason) and an episode number:
+// its own, or for a video without one, the next after the highest of its
+// season, in the description's order. The description kept is left as it
+// is.
+func numberVideos(meta stremio.Meta) stremio.Meta {
+	unnumbered := false
+	for _, video := range meta.Videos {
+		if video.EpisodeNumber() <= 0 {
+			unnumbered = true
+			break
+		}
+	}
+	if !unnumbered {
+		return meta
+	}
+	videos := make([]stremio.Video, len(meta.Videos))
+	copy(videos, meta.Videos)
+	highest := map[int]int{}
+	for _, video := range videos {
+		if n := video.EpisodeNumber(); n > 0 {
+			season := videoSeason(video)
+			highest[season] = max(highest[season], n)
+		}
+	}
+	for i := range videos {
+		if videos[i].EpisodeNumber() > 0 {
+			continue
+		}
+		season := videoSeason(videos[i])
+		highest[season]++
+		videos[i].Season, videos[i].Episode = stremio.Number(season), stremio.Number(highest[season])
+	}
+	meta.Videos = videos
+	return meta
+}
+
+// FollowTitles gives, for each library of other videos that switched
+// between showing its titles as home videos and as movies and shows from
+// before to after, the libraries of a scope before and after a change,
+// what users did with its titles and their videos to the items they
+// become: the series or movie a folder or a video becomes, the episode a
+// folder's video becomes, and back. Played marks and favorites are given,
+// resume points move, by an import's rules (see userdata.Store.Follow). A
+// library turned off or on switches as well: its titles are found again as
+// home videos while it is off. A library of movies or series shown as
+// movies and shows keeps its items, so it has nothing to follow.
+func (s *Service) FollowTitles(ctx context.Context, before, after []addons.Library) error {
+	shows := func(libraries []addons.Library) map[addons.LibraryKey]bool {
+		result := map[addons.LibraryKey]bool{}
+		for _, l := range libraries {
+			if l.Enabled && l.ShowAs == addons.ShowAsMoviesAndShows && otherType(l.Catalog.Type) {
+				result[addons.LibraryKey{AddonID: l.AddonID, CatalogType: l.Catalog.Type, CatalogID: l.Catalog.ID}] = true
+			}
+		}
+		return result
+	}
+	was, is := shows(before), shows(after)
+	var errs []error
+	for key := range was {
+		if !is[key] {
+			errs = append(errs, s.followTitles(ctx, key, false))
+		}
+	}
+	for key := range is {
+		if !was[key] {
+			errs = append(errs, s.followTitles(ctx, key, true))
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// followTitles gives what users did with the titles of a catalog, and
+// their videos, to the items they become as the catalog's library shows
+// them as movies and shows, when shown is set, or as home videos (see
+// FollowTitles). The records of the items given anything are stored, so
+// that the lists of users' data find them before any listing does. A
+// user's own library moves what that user did alone: items are shared,
+// and what the others did with them stays where it is.
+func (s *Service) followTitles(ctx context.Context, key addons.LibraryKey, shown bool) error {
+	addon, err := json.Marshal(key.AddonID)
+	if err != nil {
+		return err
+	}
+	fromTitle, fromVideo, kinds := titleKey(KindVideo, ""), folderVideoKey(""), []string{string(KindFolder), string(KindVideo)}
+	if !shown {
+		fromTitle, fromVideo, kinds = titleKey(KindSeries, ""), episodeKey(""), []string{string(KindSeries), string(KindMovie)}
+	}
+	titles, err := s.loadWhere(ctx, `kind = ANY($1) AND starts_with(key, $2) AND data->'addon' = $3::jsonb AND data->>'catalogType' = $4
+		AND data->>'catalogId' = $5`, kinds, fromTitle, string(addon), key.CatalogType, key.CatalogID)
+	if err != nil {
+		return err
+	}
+	// A title's kind on either side is its kept description's, when one
+	// is kept (see shownKind and otherKind).
+	entry, owner, _ := s.addons.FindOwner(ctx, key.AddonID)
+	var only *accounts.ID
+	if owner != (accounts.ID{}) {
+		only = &owner
+	}
+	described := func(r record) (stremio.Meta, bool) {
+		return s.keptDescription(ctx, installed{addon: entry}, metaKey{key.AddonID, r.Meta.Type, r.Meta.ID}, inDatabase)
+	}
+	var moves []userdata.Move
+	var records []record
+	movedTitles := map[string]record{}
+	// oneFile maps the identifier of a title shown as a movie of one video
+	// to that video: what users did with the video, a folder's, is the
+	// movie's, and back.
+	oneFile := map[string]stremio.Video{}
+	var ids []string
+	for _, r := range titles {
+		if r.Meta == nil || !otherType(r.Meta.Type) {
+			continue
+		}
+		meta, known := described(r)
+		moved := r
+		switch {
+		case shown && known:
+			moved.Kind = shownKind(meta)
+		case shown && r.Kind == KindFolder:
+			moved.Kind = KindSeries
+		case shown:
+			moved.Kind = KindMovie
+		case known:
+			moved.Kind = otherKind(meta)
+		case r.Kind == KindSeries:
+			moved.Kind = KindFolder
+		default:
+			moved.Kind = KindVideo
+		}
+		moved.Key = titleKey(KindVideo, r.Meta.ID)
+		if shown {
+			moved.Key = titleKey(KindSeries, r.Meta.ID)
+		}
+		moved.ID = itemID(moved.Key)
+		movedTitles[r.Meta.ID] = moved
+		ids = append(ids, r.Meta.ID)
+		to := userdata.Item{ID: moved.ID}
+		if known && len(meta.Videos) == 1 && shownKind(meta) == KindMovie {
+			oneFile[r.Meta.ID] = meta.Videos[0]
+			if !shown {
+				// The movie's data goes to its file, the folder's video.
+				video := meta.Videos[0]
+				to.ID = itemID(folderVideoKey(video.ID))
+				records = append(records, record{ID: to.ID, Key: folderVideoKey(video.ID), Kind: KindVideo, Parent: &moved.ID,
+					SeriesID: r.Meta.ID, Video: &video})
+			}
+		}
+		moves = append(moves, userdata.Move{From: []accounts.ID{r.ID}, To: []userdata.Item{to}})
+	}
+	if len(ids) == 0 {
+		return nil
+	}
+	videos, err := s.loadWhere(ctx, `starts_with(key, $1) AND data->>'seriesId' = ANY($2)
+		AND EXISTS (SELECT 1 FROM user_data u WHERE u.item_id = items.id AND ($3::uuid IS NULL OR u.user_id = $3))`, fromVideo, ids, only)
+	if err != nil {
+		return err
+	}
+	holders := map[string]bool{}
+	for _, r := range videos {
+		if r.Video == nil {
+			continue
+		}
+		video := *r.Video
+		var moved record
+		var to userdata.Item
+		if _, movie := oneFile[r.SeriesID]; shown && movie {
+			// The one video of a title shown as a movie is the movie.
+			movedTitle := movedTitles[r.SeriesID]
+			holders[r.SeriesID] = true
+			moves = append(moves, userdata.Move{From: []accounts.ID{r.ID}, To: []userdata.Item{{ID: movedTitle.ID}}})
+			continue
+		}
+		if shown {
+			season := videoSeason(video)
+			video.Season = stremio.Number(season)
+			seasonID := itemID(seasonKey(r.SeriesID, season))
+			// A folder's video does not tell which addon described it: the
+			// episode it becomes is confined to public addresses until its
+			// series is listed, which records it anew (see listEpisodes).
+			// It names the library's addon, whose owner decides whether it
+			// replaces a stored episode (see savedData).
+			moved = record{Key: episodeKey(video.ID), Kind: KindEpisode, Addon: &key.AddonID, Parent: &seasonID, SeriesID: r.SeriesID,
+				Season: season, Video: &video, Confined: true}
+			to = userdata.Item{Series: itemID(titleKey(KindSeries, r.SeriesID)), Season: seasonID}
+		} else {
+			folder := itemID(titleKey(KindVideo, r.SeriesID))
+			moved = record{Key: folderVideoKey(video.ID), Kind: KindVideo, Parent: &folder, SeriesID: r.SeriesID, Video: &video,
+				Confined: r.Confined}
+		}
+		moved.ID = itemID(moved.Key)
+		to.ID = moved.ID
+		records = append(records, moved)
+		holders[r.SeriesID] = true
+		moves = append(moves, userdata.Move{From: []accounts.ID{r.ID}, To: []userdata.Item{to}})
+	}
+	// The titles whose users' data or videos move are recorded.
+	given, err := s.withUserData(ctx, titles, only)
+	if err != nil {
+		return err
+	}
+	for id, moved := range movedTitles {
+		if holders[id] || given[id] {
+			records = append(records, moved)
+		}
+	}
+	if err := s.save(ctx, records); err != nil {
+		return err
+	}
+	settings := s.settings()
+	thresholds := userdata.Thresholds{Resume: settings.ResumePercent, Played: settings.PlayedPercent}
+	if only != nil {
+		return userdata.New(s.db).FollowOf(ctx, *only, moves, thresholds)
+	}
+	return userdata.New(s.db).Follow(ctx, moves, thresholds)
+}
+
+// withUserData tells, by Stremio identifier, which titles among records
+// some user has data of, or only when set.
+func (s *Service) withUserData(ctx context.Context, records []record, only *accounts.ID) (map[string]bool, error) {
+	ids := make([]accounts.ID, 0, len(records))
+	byID := make(map[accounts.ID]string, len(records))
+	for _, r := range records {
+		if r.Meta != nil {
+			ids = append(ids, r.ID)
+			byID[r.ID] = r.Meta.ID
+		}
+	}
+	rows, err := s.db.Query(ctx, "SELECT DISTINCT item_id FROM user_data WHERE item_id = ANY($1) AND ($2::uuid IS NULL OR user_id = $2)", ids, only)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := map[string]bool{}
+	for rows.Next() {
+		var id accounts.ID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		result[byID[id]] = true
+	}
+	return result, rows.Err()
+}

@@ -1,19 +1,10 @@
 /** IPTV: adding a source and its source page (summary, what to import, categories, channels, guides, mapping). */
 const iptv = {
   iptv: {
-    name: 'Name',
-    kind: 'Kind',
-    kindM3u: 'M3U playlist',
-    kindXtream: 'Xtream Codes account',
-    kindTuner: 'HDHomeRun tuner',
-    server: 'Server address',
     address: 'Address',
-    channels: 'Channels',
     lastFetch: 'Last download',
     nextFetch: 'Next download',
     never: 'Never',
-    edit: 'Edit',
-    saved: 'Source saved.',
     errors: {
       unreachable:
         'The last download failed: the server could not be reached. The previous channels are kept.',
@@ -24,21 +15,19 @@ const iptv = {
         'The last download failed: the server did not return a channel list, or refused the login. The previous channels are kept.',
       rate_limited:
         'The last download failed: the server asked Polyfin to slow down. It is tried again in a few minutes; the previous channels are kept.',
+      file_unreadable:
+        'The last download failed: the file is gone, or Polyfin can no longer read it. The previous channels are kept.',
+      file_refused:
+        'The last download failed: only administrators can use a file of the server. The previous channels are kept.',
     } as Record<string, string>,
   },
   lineup: {
     open: 'Open the source',
-    title: (name: string) => `${name}: IPTV source`,
-    titleLoading: 'IPTV source',
     description:
       'What this source imports and how Jellyfin apps show it: its Live TV channels, with their order, names and programme guides, and its movies and series.',
-    notFound: 'This IPTV source does not exist, or is not one you can manage.',
-    backShared: 'Back to sources',
     backMine: 'Back to my sources',
     notFoundTitle: 'Source not found',
     reset: 'Reset',
-    unsaved: 'Unsaved changes',
-    upToDate: 'No unsaved changes',
     unmappedNotice: (count: string) => `${count} channels have no guide.`,
     openMapping: 'Open the mapping',
     archivedNotice: (count: number, formatted: string) =>
@@ -62,6 +51,8 @@ const iptv = {
         'The last fetch failed: the addon did not list this catalog’s channels. Try again later.',
       rate_limited:
         'The last fetch failed: the server asked Polyfin to slow down. It is tried again in a few minutes.',
+      file_unreadable: 'The last fetch failed: the file is gone, or Polyfin can no longer read it.',
+      file_refused: 'The last fetch failed: only administrators can use a file of the server.',
     } as Record<string, string>,
     sectionsLabel: 'Sections',
     sections: {
@@ -75,19 +66,18 @@ const iptv = {
     close: 'Close',
     pager: {
       label: 'Pages',
+      /** The pager below a list paged above it too: landmark names must differ. */
+      labelEnd: 'Pages, below the list',
       range: (from: string, to: string, total: string) => `${from}–${to} of ${total}`,
       previous: 'Previous',
       next: 'Next',
     },
     summary: {
       categories: 'Categories on',
-      ofTotal: (total: string) => `of ${total}`,
       shown: 'Channels shown',
-      enabledOf: (enabled: string, total: string) => `${enabled} on, of ${total}`,
       mappedOf: (mapped: string, total: string) => `${mapped} of ${total} with a guide`,
       shownOf: (shown: string, total: string) => `${shown} shown of ${total}`,
       mapped: 'With a guide',
-      unmapped: (count: string) => `${count} without`,
       entries: 'Live entries',
       listTitle: 'Lists',
       refreshHelp:
@@ -98,12 +88,13 @@ const iptv = {
       vodTitle: 'Movies and series',
       movies: 'Movies imported',
       series: 'Series imported',
-      titlesOf: (total: string, categories: string) => `of ${total}, in ${categories} categories`,
       episodes: 'Episodes known',
-      episodesHelp: 'Xtream: read as series open',
       vodShort: (movies: string, series: string) =>
         `${movies} movies and ${series} series imported`,
       lastAttempt: 'Last attempt',
+      allChannels: (count: string) => `All ${count} channels`,
+      hidden: 'Hidden',
+      noGuide: 'No guide',
     },
     tuner: {
       title: 'Tuner',
@@ -315,7 +306,7 @@ const iptv = {
       title: (name: string) => `Edit ${name}`,
       shownInApps: 'Shown in Jellyfin apps',
       notShownInApps: 'Not shown in Jellyfin apps',
-      numberNow: (number: number) => `number ${number}`,
+      numberNow: (number: string) => `number ${number}`,
       name: 'Name',
       providerValue: (value: string) => `Provider’s: ${value}`,
       resetName: 'Use the provider’s name',
@@ -355,6 +346,8 @@ const iptv = {
         dead: 'No live stream',
         refused: 'Refused by the provider',
         timeout: 'Nothing came',
+        drm: 'Needs a DRM Polyfin does not support',
+        keys: 'The list’s keys do not decrypt it',
       },
       leftOutUntil: 'left out until',
       retry: 'Try every stream again',
@@ -370,6 +363,9 @@ const iptv = {
       none: 'No guide yet.',
       address: 'Guide address',
       addressHint: 'Plain or compressed (.gz) XMLTV file. At most 10 guides.',
+      addressOrFile: 'Guide address or file',
+      addressOrFileHint:
+        'Plain or compressed (.gz) XMLTV file, by its address or its path on the server. At most 10 guides.',
       tooMany: 'This catalog has 10 guides: remove one to add another.',
       add: 'Add',
       remove: 'Remove',
@@ -450,13 +446,6 @@ const iptv = {
       guides: (count: number) => (count === 1 ? '1 guide' : `${count} guides`),
       mapped: (mapped: string, channels: string) =>
         `${mapped} of ${channels} channels with a guide`,
-      failing: (count: number) =>
-        count === 1
-          ? 'The last download of 1 guide failed.'
-          : `The last download of ${count} guides failed.`,
-      manage: 'Guides and mapping',
-      lineup: 'Line-up and guides',
-      manageLabel: (name: string) => `Guides and mapping of ${name}`,
     },
   },
 }

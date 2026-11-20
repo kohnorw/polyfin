@@ -3,6 +3,7 @@ package admin
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
@@ -43,6 +44,11 @@ type notificationTargetJSON struct {
 	Problem       *string    `json:"problem"`
 	ProblemStatus *int       `json:"problemStatus"`
 	ProblemAt     *time.Time `json:"problemAt"`
+	// PerMinute caps the messages a minute, null for no cap;
+	// GroupMinutes groups plays and new episodes into one message every so
+	// many minutes, null to send each at once.
+	PerMinute    *int `json:"perMinute"`
+	GroupMinutes *int `json:"groupMinutes"`
 }
 
 func newNotificationTargetJSON(t notifications.Target) notificationTargetJSON {
@@ -51,6 +57,12 @@ func newNotificationTargetJSON(t notifications.Target) notificationTargetJSON {
 		ProblemStatus: t.ProblemStatus, ProblemAt: utcSeconds(t.ProblemAt)}
 	if t.Problem != "" {
 		result.Problem = &t.Problem
+	}
+	if t.PerMinute != 0 {
+		result.PerMinute = &t.PerMinute
+	}
+	if t.GroupMinutes != 0 {
+		result.GroupMinutes = &t.GroupMinutes
 	}
 	return result
 }
@@ -62,7 +74,8 @@ func newNotificationTargetJSON(t notifications.Target) notificationTargetJSON {
 // target's recipient; topic an ntfy target's topic; chat a Telegram
 // target's chat; token an ntfy target's access token, empty for none, a
 // Telegram bot's token, or a Gotify or Pushover application's token;
-// userKey a Pushover target's user key.
+// userKey a Pushover target's user key; perMinute 1 to 60, 0 for no cap;
+// groupMinutes 1 to 1440, 0 to send each message at once.
 type notificationDraftJSON struct {
 	Kind    string    `json:"kind"`
 	Name    *string   `json:"name"`
@@ -73,11 +86,14 @@ type notificationDraftJSON struct {
 	UserKey *string   `json:"userKey"`
 	Events  *[]string `json:"events"`
 	Enabled *bool     `json:"enabled"`
+	// PerMinute and GroupMinutes pace the messages.
+	PerMinute    *int `json:"perMinute"`
+	GroupMinutes *int `json:"groupMinutes"`
 }
 
 func (d notificationDraftJSON) draft() notifications.Draft {
 	result := notifications.Draft{Kind: d.Kind, Name: d.Name, Address: d.Address, Topic: d.Topic, Chat: d.Chat, Token: d.Token, UserKey: d.UserKey,
-		Enabled: d.Enabled}
+		Enabled: d.Enabled, PerMinute: d.PerMinute, GroupMinutes: d.GroupMinutes}
 	if d.Events != nil {
 		result.Events = *d.Events
 		if result.Events == nil {
@@ -88,11 +104,14 @@ func (d notificationDraftJSON) draft() notifications.Draft {
 }
 
 // testResultJSON is what came of "Send a test": whether the target
-// accepted it, the status it answered, null when it did not answer, and
-// the target as it stands after.
+// accepted it, the status it answered, null when it did not answer, why it
+// did not accept it, the start of its answer or why it could not be
+// reached, without its address or tokens, null when it did, and the
+// target as it stands after.
 type testResultJSON struct {
 	Delivered bool                   `json:"delivered"`
 	Status    *int                   `json:"status"`
+	Answer    *string                `json:"answer"`
 	Target    notificationTargetJSON `json:"target"`
 }
 
@@ -129,6 +148,11 @@ func notificationError(w http.ResponseWriter, err error) bool {
 		{notifications.ErrInvalidEvents, http.StatusBadRequest, "invalid_events"},
 		{notifications.ErrTooManyTargets, http.StatusConflict, "too_many_targets"},
 		{notifications.ErrUnreadable, http.StatusConflict, "target_unreadable"},
+		{notifications.ErrTestTooSoon, http.StatusTooManyRequests, "test_too_soon"},
+		{notifications.ErrTooManyTests, http.StatusTooManyRequests, "too_many_tests"},
+		{notifications.ErrInvalidPerMinute, http.StatusBadRequest, "invalid_per_minute"},
+		{notifications.ErrInvalidGroupMinutes, http.StatusBadRequest, "invalid_group_minutes"},
+		{notifications.ErrNoPreview, http.StatusBadRequest, "invalid_summary"},
 	} {
 		if errors.Is(err, known.err) {
 			writeError(w, known.status, known.code)
@@ -230,7 +254,11 @@ func (n notificationRoutes) remove(w http.ResponseWriter, r *http.Request) {
 }
 
 // test sends a test message to a target, at once, and answers what came
-// of it: 200 whether the target accepted it or not.
+// of it: 200 whether the target accepted it or not. A test asked too soon
+// after another of the target, or while the target's cap of messages a
+// minute is reached, is not sent: 429 test_too_soon; nor is one past the
+// tests an owner's targets may be sent in an hour: 429 too_many_tests.
+// Both come with Retry-After.
 func (n notificationRoutes) test(w http.ResponseWriter, r *http.Request) {
 	id, ok := pathID(w, r, "id")
 	if !ok {
@@ -241,6 +269,9 @@ func (n notificationRoutes) test(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result, err := n.h.Notifications.Test(r.Context(), n.owner(r), id)
+	if refused := (*notifications.TestRefused)(nil); errors.As(err, &refused) {
+		w.Header().Set("Retry-After", strconv.Itoa(int((refused.Wait+time.Second-1)/time.Second)))
+	}
 	if notificationError(w, err) {
 		return
 	} else if err != nil {
@@ -251,5 +282,100 @@ func (n notificationRoutes) test(w http.ResponseWriter, r *http.Request) {
 	if result.Status != 0 {
 		answer.Status = &result.Status
 	}
+	if result.Answer != "" {
+		answer.Answer = &result.Answer
+	}
 	writeJSON(w, http.StatusOK, answer)
+}
+
+// deliveryJSON is what came of a message sent to a target: its event, by
+// identifier, type and title; events, how many it held, more than one for
+// a grouped message; outcome, "delivered", "refused", "rejected",
+// "failed", "dropped" or "unreadable"; the status the target answered,
+// null when it did not; why it did not accept it, null when it did; how
+// many times it was tried; when it was queued and done with.
+type deliveryJSON struct {
+	ID       int64     `json:"id"`
+	EventID  string    `json:"eventId"`
+	Type     string    `json:"type"`
+	Title    string    `json:"title"`
+	Events   int       `json:"events"`
+	Outcome  string    `json:"outcome"`
+	Status   *int      `json:"status"`
+	Error    *string   `json:"error"`
+	Attempts int       `json:"attempts"`
+	QueuedAt time.Time `json:"queuedAt"`
+	At       time.Time `json:"at"`
+}
+
+// deliveries answers the last deliveries of a target, newest first.
+func (n notificationRoutes) deliveries(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	if n.h.Notifications == nil {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	found, err := n.h.Notifications.Deliveries(r.Context(), n.owner(r), id)
+	if notificationError(w, err) {
+		return
+	} else if err != nil {
+		n.h.internalError(w, r, err)
+		return
+	}
+	result := make([]deliveryJSON, 0, len(found))
+	for _, d := range found {
+		j := deliveryJSON{ID: d.ID, EventID: d.EventID, Type: d.Type, Title: d.Title, Events: d.Events, Outcome: d.Outcome,
+			Attempts: d.Attempts, QueuedAt: d.QueuedAt.UTC().Truncate(time.Second), At: d.At.UTC().Truncate(time.Second)}
+		if d.Status != 0 {
+			j.Status = &d.Status
+		}
+		if d.Error != "" {
+			j.Error = &d.Error
+		}
+		result = append(result, j)
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// summaryPreviewJSON is a summary as an email target receives it: its
+// subject, plain text and HTML, the period it tells, and whether it has
+// nothing to tell, in which case none is sent.
+type summaryPreviewJSON struct {
+	Subject string    `json:"subject"`
+	Text    string    `json:"text"`
+	HTML    string    `json:"html"`
+	Start   time.Time `json:"start"`
+	End     time.Time `json:"end"`
+	Empty   bool      `json:"empty"`
+}
+
+// summaryPreview answers GET /admin/api/notifications/preview: the summary
+// its event names, weekly_summary, monthly_summary or yearly_summary, as
+// it would be sent now, of the server, or of the user its user names.
+func (h *handler) summaryPreview(w http.ResponseWriter, r *http.Request) {
+	if h.Notifications == nil {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	var user *accounts.ID
+	if raw := r.URL.Query().Get("user"); raw != "" {
+		id, err := accounts.ParseID(raw)
+		if err != nil {
+			writeError(w, http.StatusNotFound, "not_found")
+			return
+		}
+		user = &id
+	}
+	preview, err := h.Notifications.Preview(r.Context(), r.URL.Query().Get("event"), user)
+	if notificationError(w, err) {
+		return
+	} else if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, summaryPreviewJSON{Subject: preview.Subject, Text: preview.Text, HTML: preview.HTML,
+		Start: preview.Start.UTC(), End: preview.End.UTC(), Empty: preview.Empty})
 }

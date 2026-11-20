@@ -18,6 +18,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/iptv"
 	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/process"
 )
 
 // tsChunk is 16 MPEG-TS packets.
@@ -42,6 +43,10 @@ type liveSource struct {
 	// more asks for, telling sent once they were read, and nothing else.
 	more chan int
 	sent chan struct{}
+	// late holds the first bytes of "late" addresses, which answer at
+	// once, until it is closed: a proxy that answers before it has
+	// buffered the channel.
+	late chan struct{}
 
 	mu     sync.Mutex
 	open   int
@@ -68,6 +73,8 @@ func (l *liveSource) Open(ctx context.Context, _, target string, _ http.Header, 
 		return answer(http.StatusOK, "video/mp2t", strings.NewReader("")), nil
 	case strings.HasPrefix(name, "forbidden"):
 		return answer(http.StatusForbidden, "text/plain", strings.NewReader("max connections reached")), nil
+	case strings.HasPrefix(name, "unavailable"):
+		return answer(http.StatusServiceUnavailable, "application/json", strings.NewReader(`{"error":"all connections in use"}`)), nil
 	case strings.HasPrefix(name, "garbage"):
 		return answer(http.StatusOK, "video/mp2t", bytes.NewReader(bytes.Repeat([]byte{1, 2, 3, 4}, 512))), nil
 	case strings.HasPrefix(name, "playlist"):
@@ -80,6 +87,18 @@ func (l *liveSource) Open(ctx context.Context, _, target string, _ http.Header, 
 		return answer(http.StatusOK, "video/mp2t", io.MultiReader(bytes.NewReader(bytes.Repeat(tsChunk, 4)), failing{})), nil
 	case strings.HasPrefix(name, "paced"):
 		return l.paced(ctx), nil
+	case strings.HasPrefix(name, "ending"):
+		// What readers start from, then the end of the stream, as a
+		// source ending it: the feed ends by itself.
+		return l.counted(ctx, io.NopCloser(bytes.NewReader(bytes.Repeat(tsChunk, keyframeWait/len(tsChunk)+1)))), nil
+	case strings.HasPrefix(name, "late"):
+		response := l.stream(ctx, -1)
+		body := response.Body
+		response.Body = struct {
+			io.Reader
+			io.Closer
+		}{io.MultiReader(heldUntil(ctx, l.late), body), body}
+		return response, nil
 	default:
 		return l.stream(ctx, -1), nil
 	}
@@ -93,15 +112,27 @@ func answer(status int, contentType string, body io.Reader) *http.Response {
 	return &http.Response{StatusCode: status, Header: http.Header{"Content-Type": {contentType}}, Body: io.NopCloser(body)}
 }
 
+// heldUntil reads nothing until released is closed, or ctx ends.
+func heldUntil(ctx context.Context, released <-chan struct{}) io.Reader {
+	return readerFunc(func([]byte) (int, error) {
+		select {
+		case <-released:
+		case <-ctx.Done():
+			return 0, ctx.Err()
+		}
+		return 0, io.EOF
+	})
+}
+
+type readerFunc func([]byte) (int, error)
+
+func (f readerFunc) Read(p []byte) (int, error) { return f(p) }
+
 // stream answers an MPEG-TS stream sending chunks chunks, then nothing
 // (keeping the connection open); -1 sends forever. It counts as open until
 // its request ends, which closes it.
 func (l *liveSource) stream(ctx context.Context, chunks int) *http.Response {
 	reader, writer := io.Pipe()
-	l.mu.Lock()
-	l.open++
-	l.most = max(l.most, l.open)
-	l.mu.Unlock()
 	go func() {
 		defer writer.Close()
 		for n := 0; chunks < 0 || n < chunks; n++ {
@@ -114,6 +145,17 @@ func (l *liveSource) stream(ctx context.Context, chunks int) *http.Response {
 		}
 		<-ctx.Done()
 	}()
+	return l.counted(ctx, reader)
+}
+
+// counted answers an MPEG-TS stream's body, counted as open until its
+// request ends or the body is closed, which closes it, as an HTTP
+// response's body closes its connection.
+func (l *liveSource) counted(ctx context.Context, reader io.ReadCloser) *http.Response {
+	l.mu.Lock()
+	l.open++
+	l.most = max(l.most, l.open)
+	l.mu.Unlock()
 	body := &countedBody{ReadCloser: reader, close: func() {
 		if l.closing != nil {
 			<-l.closing
@@ -123,11 +165,11 @@ func (l *liveSource) stream(ctx context.Context, chunks int) *http.Response {
 		l.mu.Unlock()
 	}}
 	context.AfterFunc(ctx, func() { _ = body.Close() })
-	return answer(http.StatusOK, "video/mp2t", body)
+	return &http.Response{StatusCode: http.StatusOK, Header: http.Header{"Content-Type": {"video/mp2t"}}, Body: body}
 }
 
 // paced answers an MPEG-TS stream the test paces (see liveSource.more),
-// open until its request ends.
+// counted as open until its request ends.
 func (l *liveSource) paced(ctx context.Context) *http.Response {
 	reader, writer := io.Pipe()
 	go func() {
@@ -156,8 +198,7 @@ func (l *liveSource) paced(ctx context.Context) *http.Response {
 			}
 		}
 	}()
-	context.AfterFunc(ctx, func() { _ = reader.Close() })
-	return answer(http.StatusOK, "video/mp2t", reader)
+	return l.counted(ctx, reader)
 }
 
 // countedBody stops counting its connection when closed, then closes it:
@@ -212,13 +253,18 @@ func eventually(t *testing.T, what string, cond func() bool) {
 // the analysis, FFmpeg, players. It stays open a moment after the last
 // reader left, so that a quick return finds it, then closes.
 func TestLiveStreamsShareOneConnection(t *testing.T) {
-	src := &liveSource{interval: 5 * time.Millisecond}
+	t.Parallel()
+	src := &liveSource{interval: time.Millisecond}
 	probe, err := os.ReadFile(filepath.Join(playbackFixtures, "probes", "h264-aac-mp4.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	path, runs := fakeProbe(t, string(probe), false)
 	s := liveService(t, src, path)
+	// Its readers wait for the stream's first keyframeWait bytes, a second
+	// at this pace: bytes late meanwhile, slowed by the race detector or
+	// other tests, must not end it as stalled.
+	s.feeds.times.stall = time.Minute
 	version := channelVersion(1, "1.ts", accounts.ID{9})
 	if _, err := s.AnalyzeLive(t.Context(), version); err != nil {
 		t.Fatal(err)
@@ -240,18 +286,53 @@ func TestLiveStreamsShareOneConnection(t *testing.T) {
 	if open, opened, _ := src.counts(); open != 1 || opened != 1 || runs() != 1 {
 		t.Errorf("connections open %d, opened %d, analyses %d: want one connection for all", open, opened, runs())
 	}
+	left := time.Now()
 	_ = first.Close()
 	_ = second.Close()
-	if open, _, _ := src.counts(); open != 1 {
-		t.Errorf("the connection closed with no grace")
-	}
 	eventually(t, "the connection to close after the grace", func() bool { open, _, _ := src.counts(); return open == 0 })
+	if waited := time.Since(left); waited < shortLiveTimes.grace {
+		t.Errorf("the connection closed %s after the last reader left, before its grace", waited)
+	}
+}
+
+// A reader that joins a stream as its grace runs out keeps it open: the
+// stream closes once no one reads it, never under a reader that joined.
+func TestAStreamJoinedAsItsGraceRunsOutStaysOpen(t *testing.T) {
+	t.Parallel()
+	src := &liveSource{interval: 5 * time.Millisecond}
+	s := liveService(t, src, "ffprobe-not-installed")
+	s.feeds.times.stall = time.Minute
+	version := channelVersion(1, "1.ts", accounts.ID{})
+	left, err := s.openFeed(t.Context(), version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A start finds the stream, as openFeed does, as its last reader
+	// leaves; the streams' lock, held until it joins, keeps closing the
+	// stream waiting once its grace ran out.
+	s.feeds.mu.Lock()
+	f := s.feeds.feeds[version.ID]
+	_ = left.Close()
+	time.Sleep(2 * shortLiveTimes.grace)
+	joined := f.join(t.Context(), accounts.ID{})
+	s.feeds.mu.Unlock()
+	if joined == nil {
+		t.Fatal("the running stream took no reader")
+	}
+	// Closing the stream had its turn.
+	time.Sleep(2 * shortLiveTimes.grace)
+	if open, opened, _ := src.counts(); open != 1 || opened != 1 || f.finished() {
+		t.Errorf("connections open %d, opened %d: the stream closed under the reader that joined it", open, opened)
+	}
+	_ = joined.Close()
+	eventually(t, "the connection to close once its reader left", func() bool { open, _, _ := src.counts(); return open == 0 })
 }
 
 // Each kind of dead answer fails within a second, before any analysis,
 // classified as the stream health records it; a silent source within the
 // time given to its first bytes.
 func TestDeadLiveStreamsFailAtOnce(t *testing.T) {
+	t.Parallel()
 	path, runs := fakeProbe(t, "{}", false)
 	s := liveService(t, &liveSource{}, path)
 	var mu sync.Mutex
@@ -270,7 +351,7 @@ func TestDeadLiveStreamsFailAtOnce(t *testing.T) {
 		{"empty", LiveDead, time.Second},
 		{"forbidden", LiveRefused, time.Second},
 		{"garbage", LiveDead, time.Second},
-		{"silent", LiveTimeout, shortLiveTimes.body + time.Second},
+		{"silent", LiveTimeout, shortLiveTimes.answer + time.Second},
 	} {
 		version := channelVersion(byte(n+1), tc.name+".ts", accounts.ID{})
 		started := time.Now()
@@ -296,9 +377,44 @@ func TestDeadLiveStreamsFailAtOnce(t *testing.T) {
 	}
 }
 
+// A source that answers at once but sends its first bytes later, as a
+// proxy does while it buffers the channel for its first viewer, plays when
+// they come within the time the source has to answer, however long after
+// its answer.
+func TestLateFirstBytesStillPlay(t *testing.T) {
+	t.Parallel()
+	probe, err := os.ReadFile(filepath.Join(playbackFixtures, "probes", "h264-aac-mp4.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, _ := fakeProbe(t, string(probe), false)
+	src := &liveSource{late: make(chan struct{})}
+	s := newService(t, src, path, nil)
+	s.feeds.times = liveTimes{grace: 200 * time.Millisecond, stall: time.Minute, answer: time.Minute, body: 100 * time.Millisecond,
+		slotWait: 2 * time.Second}
+	analyzed := make(chan error, 1)
+	go func() {
+		_, err := s.AnalyzeLive(t.Context(), channelVersion(1, "late.ts", accounts.ID{9}))
+		analyzed <- err
+	}()
+	// Well past the time bytes have once the source answered, they are
+	// still waited for.
+	time.Sleep(time.Second)
+	select {
+	case err := <-analyzed:
+		t.Fatalf("the analysis ended before the first bytes came: %v", err)
+	default:
+	}
+	close(src.late)
+	if err := <-analyzed; err != nil {
+		t.Errorf("a stream whose first bytes came late: %v", err)
+	}
+}
+
 // A stream that stops sending ends its feed after feedStall, and one cut
 // mid-stream ends it at once: readers see the end rather than wait.
 func TestStalledAndCutStreamsEndTheirFeed(t *testing.T) {
+	t.Parallel()
 	s := liveService(t, &liveSource{}, "ffprobe-not-installed")
 	for n, name := range []string{"stall.ts", "reset.ts"} {
 		reader, err := s.openFeed(t.Context(), channelVersion(byte(n+1), name, accounts.ID{}))
@@ -326,6 +442,7 @@ func TestStalledAndCutStreamsEndTheirFeed(t *testing.T) {
 // others read on. The source moves on only when the test says, so neither
 // reader's speed matters.
 func TestSlowReadersAreDropped(t *testing.T) {
+	t.Parallel()
 	src := &liveSource{more: make(chan int), sent: make(chan struct{})}
 	s := liveService(t, src, "ffprobe-not-installed")
 	// The source pauses as long as the test takes between what it sends.
@@ -359,6 +476,7 @@ func TestSlowReadersAreDropped(t *testing.T) {
 // replaces their own stream, idle ones are closed first, and another
 // user's stream is never taken: the new one is refused at once.
 func TestSourceConnectionsAreKept(t *testing.T) {
+	t.Parallel()
 	source := accounts.ID{7}
 	src := &liveSource{interval: 5 * time.Millisecond}
 	s := liveService(t, src, "ffprobe-not-installed")
@@ -399,6 +517,7 @@ func TestSourceConnectionsAreKept(t *testing.T) {
 // closed, and the source counts it meanwhile: another stream of the source
 // waits for it rather than opening a second connection.
 func TestAStreamWaitsForAConnectionStillClosing(t *testing.T) {
+	t.Parallel()
 	source := accounts.ID{7}
 	closing := make(chan struct{})
 	src := &liveSource{interval: 5 * time.Millisecond, closing: closing}
@@ -431,6 +550,7 @@ func TestAStreamWaitsForAConnectionStillClosing(t *testing.T) {
 // A provider still counting the connection Polyfin just closed refuses
 // the next one for a moment: the open is tried again.
 func TestAnOpenRefusedAfterARoomWasMadeIsTriedAgain(t *testing.T) {
+	t.Parallel()
 	source := accounts.ID{7}
 	src := &liveSource{interval: 5 * time.Millisecond}
 	s := liveService(t, src, "ffprobe-not-installed")
@@ -454,6 +574,7 @@ func TestAnOpenRefusedAfterARoomWasMadeIsTriedAgain(t *testing.T) {
 // A source of unknown limit that refuses a stream while another, read by
 // no one, waits out its grace has that one closed, and is asked again.
 func TestARefusalClosesStreamsNoOneReads(t *testing.T) {
+	t.Parallel()
 	source := accounts.ID{7}
 	src := &liveSource{interval: 5 * time.Millisecond}
 	s := liveService(t, src, "ffprobe-not-installed")
@@ -483,6 +604,7 @@ func TestARefusalClosesStreamsNoOneReads(t *testing.T) {
 // What a channel's stream holds is kept: the next start, even after a
 // restart, needs neither the source nor ffprobe.
 func TestLiveShapesAreKept(t *testing.T) {
+	t.Parallel()
 	probe, err := os.ReadFile(filepath.Join(playbackFixtures, "probes", "h264-aac-mp4.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -516,6 +638,7 @@ func TestLiveShapesAreKept(t *testing.T) {
 // An HLS playlist has no feed: it is told apart at its first bytes and
 // relayed file by file.
 func TestPlaylistsHaveNoFeed(t *testing.T) {
+	t.Parallel()
 	s := liveService(t, &liveSource{}, "ffprobe-not-installed")
 	version := channelVersion(1, "playlist.m3u8", accounts.ID{})
 	if _, err := s.openFeed(t.Context(), version); !errors.Is(err, errManifest) {
@@ -600,6 +723,7 @@ func feedOf(data []byte, junk int) *feed {
 // indicator or, without one, by their NAL units, packets split across
 // writes included.
 func TestFeedsFindTheKeyframesOfTheirStream(t *testing.T) {
+	t.Parallel()
 	marked := generatedTS(t, "libx264", true)
 	want := indicatedKeys(marked)
 	if len(want) != 4 {
@@ -637,19 +761,22 @@ func readSome(t *testing.T, r *feedReader, n int) []byte {
 }
 
 // A reader joining a running feed starts with the stream's PAT and PMT,
-// then its first keyframe within feedJoin; the first reader of a new feed
-// starts at its first keyframe, even once more came. What it reads decodes from its first bytes, with
+// then the oldest keyframe the feed keeps within feedLookback of the
+// latest, feedSlack short of being overwritten, which is further back than
+// feedJoin; the first reader of a new feed starts at its first keyframe,
+// even once more came. What it reads decodes from its first bytes, with
 // FFmpeg's short probe.
 func TestReadersStartAtAKeyframe(t *testing.T) {
+	t.Parallel()
 	data := generatedTS(t, "libx264", true)
 	keys := indicatedKeys(data)
 	f := feedOf(data, 0)
 	r := f.join(t.Context(), accounts.ID{1})
 	head := readSome(t, r, 3*tsPacket)
-	// The first keyframe within feedJoin of the end.
-	want := keys[slices.IndexFunc(keys, func(at int64) bool { return at >= int64(len(data))-feedJoin })]
-	if want == keys[0] {
-		t.Fatalf("the generated stream is too short: %d bytes", len(data))
+	// The oldest keyframe kept, feedSlack away from being overwritten.
+	want := keys[slices.IndexFunc(keys, func(at int64) bool { return at >= int64(len(data))-feedBuffer+feedSlack })]
+	if joined := keys[slices.IndexFunc(keys, func(at int64) bool { return at >= int64(len(data))-feedJoin })]; want >= joined {
+		t.Fatalf("the generated stream keeps no keyframe before feedJoin: %d bytes", len(data))
 	}
 	if tsPID(head, 0) != 0 || tsPID(head, tsPacket) != f.index.pmtPID || !bytes.Equal(head[2*tsPacket:], data[want:want+tsPacket]) {
 		t.Fatalf("a joining reader starts with PIDs %d, %d, then %x, want 0, %d, then the keyframe at %d", tsPID(head, 0),
@@ -690,9 +817,37 @@ func TestReadersStartAtAKeyframe(t *testing.T) {
 	}
 }
 
+// A live stream whose audio comes most of a second after its video, as a
+// feed joined at a keyframe of a stream FFmpeg muxed gives it, is read
+// with the short probe into HLS segments at the first try: its audio is
+// found in time, where half a second of probing failed ("sample rate not
+// set") and the stream was read again.
+func TestTheShortProbeFindsLateAudio(t *testing.T) {
+	t.Parallel()
+	ffmpeg := os.Getenv("POLYFIN_TEST_FFMPEG")
+	if ffmpeg == "" {
+		t.Skip("POLYFIN_TEST_FFMPEG is not set")
+	}
+	dir := t.TempDir()
+	input := filepath.Join(dir, "live.ts")
+	// Padded to 1.5 MB a second, as a 12 Mb/s stream.
+	if output, err := exec.Command(ffmpeg, "-v", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=25", "-itsoffset", "0.8",
+		"-f", "lavfi", "-i", "sine=sample_rate=48000", "-t", "4", "-c:v", "libx264", "-g", "25", "-pix_fmt", "yuv420p", "-c:a", "aac",
+		"-muxrate", "12M", "-f", "mpegts", input).CombinedOutput(); err != nil {
+		t.Fatalf("encoding: %v %s", err, output)
+	}
+	args := append([]string{"-v", "error"}, shortProbe...)
+	args = append(args, "-i", input, "-map", "0:0", "-map", "0:1", "-c", "copy", "-bsf:a", "aac_adtstoasc", "-f", "hls",
+		"-hls_segment_type", "fmp4", "-hls_segment_filename", filepath.Join(dir, "%d.mp4"), filepath.Join(dir, "live.m3u8"))
+	if output, err := exec.Command(ffmpeg, args...).CombinedOutput(); err != nil {
+		t.Errorf("a stream whose audio comes late, read with the short probe: %v %s", err, output)
+	}
+}
+
 // Without a keyframe in its first keyframeWait bytes, or not MPEG-TS, a
 // feed's readers start feedJoin back, on a packet.
 func TestReadersOfStreamsWithoutKeyframesStillStart(t *testing.T) {
+	t.Parallel()
 	f := feedOf(bytes.Repeat([]byte("not a stream "), 1000), 0)
 	if !f.index.off {
 		t.Error("a stream of no packets is indexed")
@@ -701,4 +856,140 @@ func TestReadersOfStreamsWithoutKeyframesStillStart(t *testing.T) {
 	if got := readSome(t, r, 4); string(got) != "not " {
 		t.Errorf("read %q", got)
 	}
+}
+
+// healthReports records what LiveSources' health is told, by version.
+type healthReports struct {
+	mu       sync.Mutex
+	reported map[accounts.ID][]string
+}
+
+func (h *healthReports) tell(_ context.Context, version library.Version, failure string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.reported == nil {
+		h.reported = map[accounts.ID][]string{}
+	}
+	h.reported[version.ID] = append(h.reported[version.ID], failure)
+}
+
+func (h *healthReports) of(version accounts.ID) []string {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return slices.Clone(h.reported[version])
+}
+
+// heldProbe writes an ffprobe stand-in that tells it started by creating
+// started, then fails once released exists.
+func heldProbe(t *testing.T) (path, started, released string) {
+	skipWithoutShell(t)
+	t.Helper()
+	dir := t.TempDir()
+	started, released = filepath.Join(dir, "started"), filepath.Join(dir, "released")
+	script := "#!/bin/sh\ntouch " + started + "\nwhile [ ! -e " + released + " ]; do sleep 0.05; done\n" +
+		"echo 'Invalid data found when processing input' >&2\nexit 1\n"
+	path = filepath.Join(dir, "ffprobe")
+	if err := process.WriteExecutable(path, strings.NewReader(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path, started, released
+}
+
+// A channel's start that its user replaces by another channel of a tuner
+// of one tuner, while the first opens or is analyzed, is no failure of
+// the stream's: its health is told nothing, so the tuner shows no problem,
+// and the next start tries it again at once.
+func TestAReplacedStartIsNoFailure(t *testing.T) {
+	t.Parallel()
+	source := accounts.ID{7}
+	for _, tc := range []struct {
+		name string
+		// stream is the first channel's: a "late" one sends nothing until
+		// it is closed.
+		stream string
+		// held runs an ffprobe that waits until the channel is replaced,
+		// then fails.
+		held bool
+	}{
+		{name: "opening", stream: "late1.ts"},
+		{name: "analyzed", stream: "1.ts", held: true},
+	} {
+		src := &liveSource{late: make(chan struct{}), interval: 5 * time.Millisecond}
+		probe, started, released := "ffprobe-not-installed", "", ""
+		if tc.held {
+			probe, started, released = heldProbe(t)
+		}
+		s := newService(t, src, probe, nil)
+		s.feeds.times = liveTimes{grace: 200 * time.Millisecond, stall: time.Minute, answer: time.Minute, body: time.Minute,
+			slotWait: 2 * time.Second}
+		health := &healthReports{}
+		s.LiveSources(func(context.Context, accounts.ID) (iptv.Limit, error) {
+			return iptv.Limit{Connections: 1, Tuners: true}, nil
+		}, health.tell)
+		alice := ForUser(t.Context(), accounts.ID{1})
+		first := channelVersion(1, tc.stream, source)
+		analyzed := make(chan error, 1)
+		go func() {
+			_, err := s.AnalyzeLive(alice, first)
+			analyzed <- err
+		}()
+		if tc.held {
+			eventually(t, tc.name+": the analysis to start", func() bool { _, err := os.Stat(started); return err == nil })
+		} else {
+			eventually(t, tc.name+": the stream to be asked for", func() bool { _, opened, _ := src.counts(); return opened == 1 })
+		}
+		second, err := s.openFeed(alice, channelVersion(2, "2.ts", source))
+		if err != nil {
+			t.Fatalf("%s: switching channels: %v", tc.name, err)
+		}
+		if tc.held {
+			if err := os.WriteFile(released, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := <-analyzed; !errors.Is(err, ErrSlotsInUse) {
+			t.Errorf("%s: the replaced start: %v, want the tuner in use", tc.name, err)
+		}
+		if reported := health.of(first.ID); len(reported) > 0 {
+			t.Errorf("%s: the replaced start was told as %q", tc.name, reported)
+		}
+		if s.Failed(first.ID) {
+			t.Errorf("%s: the replaced stream is left out", tc.name)
+		}
+		_ = second.Close()
+		close(src.late)
+	}
+}
+
+// A stream analyzed before plays without being analyzed again: its health
+// is told it played once it answers, as the analysis would have told, so
+// that a tuner's problem clears on any play.
+func TestAPlayOfAStreamAnalyzedBeforeTellsItPlayed(t *testing.T) {
+	t.Parallel()
+	probe, err := os.ReadFile(filepath.Join(playbackFixtures, "probes", "h264-aac-mp4.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, runs := fakeProbe(t, string(probe), false)
+	src := &liveSource{interval: 5 * time.Millisecond}
+	s := liveService(t, src, path)
+	health := &healthReports{}
+	s.LiveSources(nil, health.tell)
+	version := channelVersion(1, "1.ts", accounts.ID{9})
+	if _, err := s.AnalyzeLive(t.Context(), version); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "the analysis's connection to close", func() bool { open, _, _ := src.counts(); return open == 0 })
+	if reported := health.of(version.ID); !slices.Equal(reported, []string{""}) {
+		t.Fatalf("the analysis told %q", reported)
+	}
+	if _, err := s.AnalyzeLive(t.Context(), version); err != nil || runs() != 1 {
+		t.Fatalf("the stream was analyzed again: %d runs, %v", runs(), err)
+	}
+	reader, err := s.openFeed(t.Context(), version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	eventually(t, "the play to be told", func() bool { return slices.Equal(health.of(version.ID), []string{"", ""}) })
 }

@@ -2,9 +2,10 @@ import type { Settings } from '@/api'
 import type { SettingsSectionId } from '@/app/navigation'
 import type en from '@/i18n/en/settings'
 import type { RangeText } from '@/i18n/en/settings'
+import { forkSettingEntries } from './forkSettings'
 
 /** The messages a setting's words come from: the settings area file of one language. */
-export type SettingsText = typeof en
+type SettingsText = typeof en
 
 /**
  * The bounds and default of a setting, by its name in Settings, as help texts show them; `scale`
@@ -32,12 +33,13 @@ const s = (text: SettingsText) => text.settings
 const c = (text: SettingsText) => text.settings.conversion
 const tr = (text: SettingsText) => text.settings.tracking
 const h = (text: SettingsText) => text.settings.https
+const p = (text: SettingsText) => text.settings.provider
 /** Both texts of a help that names folders of the container or of a computer: search finds either. */
 const anyServer = (help: { container: string; computer: string }) =>
   `${help.container} ${help.computer}`
 
 /** Every setting, in the order of the sections and of their pages. */
-export const settingEntries: readonly SettingEntry[] = [
+const upstreamSettingEntries: readonly SettingEntry[] = [
   // General
   {
     section: 'general',
@@ -55,6 +57,13 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'general',
+    anchor: 'rating-country',
+    label: (t) => s(t).ratingCountry,
+    help: (t) => s(t).ratingCountryHelp,
+    codes: ['invalid_rating_country'],
+  },
+  {
+    section: 'general',
     anchor: 'quick-connect',
     label: (t) => s(t).quickConnect,
     help: (t) => s(t).quickConnectHelp,
@@ -68,10 +77,24 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'general',
+    anchor: 'silo-apps',
+    label: (t) => s(t).siloApps,
+    help: (t) => s(t).siloAppsHelp,
+    keywords: ['Silo', '/api/v2'],
+  },
+  {
+    section: 'general',
     anchor: 'update-check',
     label: (t) => s(t).updateCheck,
     help: (t) => s(t).updateCheckHelp,
     keywords: ['GitHub', 'update', 'release', 'mise à jour'],
+  },
+  {
+    section: 'general',
+    anchor: 'include-prereleases',
+    label: (t) => s(t).includePrereleases,
+    help: (t) => s(t).includePrereleasesHelp,
+    keywords: ['pre-release', 'prerelease', 'beta', 'rc', 'préversion', 'Polyfin Desktop'],
   },
   {
     section: 'general',
@@ -110,6 +133,37 @@ export const settingEntries: readonly SettingEntry[] = [
     help: (t) => s(t).metricsTokenHelp,
     keywords: ['Prometheus', 'bearer', 'token', 'jeton'],
   },
+  {
+    section: 'general',
+    anchor: 'restart-confirmed',
+    label: (t) => s(t).restartConfirmed,
+    help: (t) => s(t).restartConfirmedHelp,
+    keywords: ['restart', 'redémarrer', 'Docker', 'restart policy', 'unless-stopped', 'systemd'],
+  },
+  {
+    section: 'general',
+    anchor: 'update-tool-url',
+    label: (t) => s(t).updateToolUrl,
+    help: (t) => s(t).updateToolUrlHelp,
+    keywords: ['update', 'mise à jour', 'Docker', 'image', 'API'],
+    codes: ['invalid_update_tool_url'],
+  },
+  {
+    section: 'general',
+    anchor: 'update-tool-token',
+    label: (t) => s(t).updateToolToken,
+    help: (t) => s(t).updateToolTokenHelp,
+    keywords: ['bearer', 'token', 'jeton'],
+    codes: ['invalid_update_tool_token'],
+  },
+  {
+    section: 'general',
+    anchor: 'cache-folder',
+    label: (t) => s(t).workFolders.cacheFolder,
+    help: (t) => `${s(t).workFolders.cacheFolderHelp} ${anyServer(s(t).workFolders.where)}`,
+    keywords: ['cache', 'images', 'Cache path', 'folder'],
+    codes: ['invalid_cache_folder'],
+  },
   // Playback
   {
     section: 'playback',
@@ -125,10 +179,40 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'playback',
+    anchor: 'send-apps-to-source',
+    label: (t) => s(t).sendAppsToSource,
+    help: (t) => s(t).sendAppsToSourceHelp,
+    keywords: [
+      'redirect',
+      'relay',
+      'bandwidth',
+      'direct play',
+      'redirection',
+      'relais',
+      'bande passante',
+    ],
+  },
+  {
+    section: 'playback',
+    anchor: 'version-names',
+    label: (t) => s(t).versionNames,
+    help: (t) => s(t).versionNamesHelp,
+    keywords: ['short', 'versions', 'names'],
+    codes: ['invalid_version_names'],
+  },
+  {
+    section: 'playback',
     anchor: 'name-how-versions-play',
     label: (t) => s(t).nameHowVersionsPlay,
     help: (t) => s(t).nameHowVersionsPlayHelp,
     keywords: ['direct play', 'lecture directe', 'transcoding'],
+  },
+  {
+    section: 'playback',
+    anchor: 'sync-addon-subtitles',
+    label: (t) => s(t).syncAddonSubtitles,
+    help: (t) => s(t).syncAddonSubtitlesHelp,
+    keywords: ['subtitles', 'sous-titres', 'sync', 'recaler'],
   },
   {
     section: 'playback',
@@ -146,11 +230,77 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'playback',
+    anchor: 'source-cache-preset',
+    label: (t) => s(t).sourceCachePreset,
+    help: (t) => s(t).sourceCachePresetHelp(''),
+    keywords: ['cache', 'restart', 'preset', 'retention'],
+    codes: ['invalid_source_cache'],
+  },
+  {
+    section: 'playback',
     anchor: 'cache-size',
     label: (t) => s(t).cacheSize,
     help: (t, r) => s(t).cacheSizeHelp(r('cacheSizeGb')),
     keywords: ['cache', 'POLYFIN_CACHE_SIZE'],
     codes: ['invalid_cache_size'],
+  },
+  {
+    section: 'playback',
+    anchor: 'source-cache-days',
+    label: (t) => s(t).sourceCacheDays,
+    help: (t, r) => s(t).sourceCacheDaysHelp(r('sourceCacheDays')),
+    keywords: ['cache', 'restart', 'retention'],
+  },
+  {
+    section: 'playback',
+    anchor: 'source-cache-credit',
+    label: (t) => s(t).sourceCacheCreditDays,
+    help: (t, r) => s(t).sourceCacheCreditDaysHelp(r('sourceCacheCreditDays')),
+    keywords: ['cache', 'retention'],
+  },
+  {
+    section: 'playback',
+    anchor: 'reading-folder',
+    label: (t) => s(t).workFolders.readingFolder,
+    help: (t) => `${s(t).workFolders.readingFolderHelp} ${anyServer(s(t).workFolders.where)}`,
+    keywords: ['cache', 'torrent', 'disk', 'folder'],
+    codes: ['invalid_reading_folder'],
+  },
+  {
+    section: 'playback',
+    anchor: 'preload-next-episodes',
+    label: (t) => s(t).preloadNextEpisodes,
+    help: (t) => s(t).preloadNextEpisodesHelp,
+    keywords: ['cache', 'preload', 'next up', 'episodes'],
+    codes: ['invalid_preload'],
+  },
+  {
+    section: 'playback',
+    anchor: 'preload-episodes',
+    label: (t) => s(t).preloadEpisodes,
+    help: (t, r) => s(t).preloadEpisodesHelp(r('preloadEpisodes')),
+    keywords: ['preload', 'episodes'],
+  },
+  {
+    section: 'playback',
+    anchor: 'preload-mbps',
+    label: (t) => s(t).preloadMbps,
+    help: (t, r) => s(t).preloadMbpsHelp(r('preloadMbps')),
+    keywords: ['preload', 'bandwidth', 'speed'],
+  },
+  {
+    section: 'playback',
+    anchor: 'preload-reserve',
+    label: (t) => s(t).preloadReserveGb,
+    help: (t, r) => s(t).preloadReserveGbHelp(r('preloadReserveGb')),
+    keywords: ['preload', 'disk', 'free space'],
+  },
+  {
+    section: 'playback',
+    anchor: 'preload-whole-files',
+    label: (t) => s(t).preloadWholeFiles,
+    help: (t) => s(t).preloadWholeFilesHelp,
+    keywords: ['preload', 'cache'],
   },
   {
     section: 'playback',
@@ -200,6 +350,22 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'playback',
+    anchor: 'version-edition-order',
+    label: (t) => s(t).versionEditionOrder.label,
+    help: (t) => s(t).versionEditionOrder.help,
+    keywords: ['edition', 'extended', 'IMAX', 'director'],
+    codes: ['invalid_version_edition_order'],
+  },
+  {
+    section: 'playback',
+    anchor: 'version-mb-per-minute',
+    label: (t) => s(t).versionMbPerMinute,
+    help: (t, r) => s(t).versionMbPerMinuteHelp(r('versionMbPerMinute')),
+    keywords: ['bitrate', 'size', 'taille'],
+    codes: ['invalid_version_mb_per_minute'],
+  },
+  {
+    section: 'playback',
     anchor: 'hide-versions-larger',
     label: (t) => s(t).hideVersionsLarger,
     help: (t, r) => s(t).hideVersionsLargerHelp(r('hideVersionsLargerGb')),
@@ -221,41 +387,19 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'playback',
-    anchor: 'hidden-rip-types',
-    label: (t) => s(t).hiddenRipTypes,
-    help: (t) => s(t).hiddenRipTypesHelp,
-    codes: ['invalid_hidden_rip_types'],
+    anchor: 'hidden-releases',
+    label: (t) => s(t).hiddenReleases,
+    help: (t) => s(t).hiddenReleasesHelp,
+    keywords: ['CAM', 'TS', 'telesync', 'screener', 'quality'],
+    codes: ['invalid_hidden_releases'],
   },
   {
     section: 'playback',
-    anchor: 'hide-specials',
-    label: (t) => s(t).hideSpecials,
-    help: (t) => s(t).hideSpecialsHelp,
-  },
-  {
-    section: 'playback',
-    anchor: 'exact-title-match',
-    label: (t) => s(t).exactTitleMatch,
-    help: (t) => s(t).exactTitleMatchHelp,
-  },
-  {
-    section: 'playback',
-    anchor: 'subtitle-extraction',
-    label: (t) => s(t).subtitleExtraction,
-    help: (t) => s(t).subtitleExtractionHelp,
-  },
-  {
-    section: 'playback',
-    anchor: 'default-audio-language',
-    label: (t) => s(t).defaultAudioLanguage,
-    help: (t) => s(t).defaultAudioLanguageHelp,
-    codes: ['invalid_default_language'],
-  },
-  {
-    section: 'playback',
-    anchor: 'default-subtitle-language',
-    label: (t) => s(t).defaultSubtitleLanguage,
-    help: (t) => s(t).defaultSubtitleLanguageHelp,
+    anchor: 'version-label-rules',
+    label: (t) => s(t).versionLabelRules.label,
+    help: (t, r) => s(t).versionLabelRules.help(r('versionLabelRules').max),
+    keywords: ['regex', 'regular expression', 'score', 'label'],
+    codes: ['invalid_version_label_rules'],
   },
   {
     section: 'playback',
@@ -270,6 +414,21 @@ export const settingEntries: readonly SettingEntry[] = [
     label: (t) => s(t).playbackHistoryDays,
     help: (t, r) => s(t).playbackHistoryDaysHelp(r('playbackHistoryDays')),
     codes: ['invalid_playback_history_days'],
+  },
+  {
+    section: 'playback',
+    anchor: 'default-audio-language',
+    label: (t) => s(t).defaultAudioLanguage,
+    help: (t) => s(t).defaultAudioLanguageHelp,
+    keywords: ['language', 'langue', 'audio', 'track', 'piste'],
+    codes: ['invalid_default_language'],
+  },
+  {
+    section: 'playback',
+    anchor: 'default-subtitle-language',
+    label: (t) => s(t).defaultSubtitleLanguage,
+    help: (t) => s(t).defaultSubtitleLanguageHelp,
+    keywords: ['language', 'langue', 'subtitles', 'sous-titres'],
   },
   // Conversion
   {
@@ -294,16 +453,41 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'conversion',
-    anchor: 'web-safe-video',
-    label: (t) => s(t).webSafeVideo,
-    help: (t) => s(t).webSafeVideoHelp,
-  },
-  {
-    section: 'conversion',
     anchor: 'converted-downloads',
     label: (t) => s(t).convertedDownloads,
     help: (t) => s(t).convertedDownloadsHelp,
     keywords: ['download', 'offline', 'Streamyfin'],
+  },
+  {
+    section: 'conversion',
+    anchor: 'conversion-folder',
+    label: (t) => s(t).workFolders.conversionFolder,
+    help: (t) => `${s(t).workFolders.conversionFolderHelp} ${anyServer(s(t).workFolders.where)}`,
+    keywords: ['transcode', 'Transcode path', 'tmpfs', 'memory', 'RAM', 'folder'],
+    codes: ['invalid_conversion_folder'],
+  },
+  {
+    section: 'conversion',
+    anchor: 'subtitle-ocr',
+    label: (t) => c(t).subtitleOcr,
+    help: (t) => c(t).subtitleOcrHelp,
+    keywords: ['OCR', 'Tesseract', 'PGS', 'VobSub', 'DVD', 'subtitles', 'sous-titres'],
+    codes: ['invalid_subtitle_ocr'],
+  },
+  {
+    section: 'conversion',
+    anchor: 'subtitle-ocr-tracks',
+    label: (t) => c(t).subtitleOcrTracks,
+    help: (t, r) => c(t).subtitleOcrTracksHelp(r('subtitleOcrTracks')),
+    keywords: ['OCR', 'Tesseract'],
+    codes: ['invalid_subtitle_ocr_tracks'],
+  },
+  {
+    section: 'conversion',
+    anchor: 'subtitle-ocr-download',
+    label: (t) => c(t).subtitleOcrDownload,
+    help: (t) => c(t).subtitleOcrDownloadHelp,
+    keywords: ['OCR', 'Tesseract', 'traineddata', 'tessdata', 'download', 'télécharger'],
   },
   {
     section: 'conversion',
@@ -443,6 +627,21 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'conversion',
+    anchor: 'normalize-converted-audio',
+    label: (t) => c(t).normalizeConvertedAudio,
+    help: (t) => c(t).normalizeConvertedAudioHelp,
+    keywords: ['loudness', 'loudnorm', 'volume', 'quiet'],
+  },
+  {
+    section: 'conversion',
+    anchor: 'dynamic-range-compression',
+    label: (t) => c(t).dynamicRangeCompression,
+    help: (t) => c(t).dynamicRangeCompressionHelp,
+    keywords: ['drc', 'dolby', 'night', 'dynamic range'],
+    codes: ['invalid_dynamic_range_compression'],
+  },
+  {
+    section: 'conversion',
     anchor: 'max-audio-channels',
     label: (t) => c(t).maxAudioChannels,
     help: (t) => c(t).maxAudioChannelsHelp,
@@ -477,6 +676,13 @@ export const settingEntries: readonly SettingEntry[] = [
     help: (t) => c(t).keepConvertedVideoHelp,
     keywords: ['audio track', 'language'],
   },
+  {
+    section: 'conversion',
+    anchor: 'fast-start',
+    label: (t) => c(t).fastStart,
+    help: (t) => c(t).fastStartHelp,
+    keywords: ['keyframe', 'first picture', 'remote', 'torrent'],
+  },
   // Content
   {
     section: 'content',
@@ -489,7 +695,7 @@ export const settingEntries: readonly SettingEntry[] = [
     anchor: 'segment-order',
     label: (t) => s(t).segmentSources.label,
     help: (t) => s(t).segmentSources.help,
-    keywords: ['TheIntroDB', 'IntroDB', 'PublicMetaDB', 'POLYFIN_SEGMENTS'],
+    keywords: ['TheIntroDB', 'IntroDB', 'PublicMetaDB', 'SkipDB', 'POLYFIN_SEGMENTS'],
     codes: ['invalid_segment_order', 'invalid_segment_sources_off'],
   },
   {
@@ -547,6 +753,21 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'content',
+    anchor: 'wait-digital-release',
+    label: (t) => s(t).waitDigitalRelease,
+    help: (t) => s(t).waitDigitalReleaseHelp,
+    keywords: [
+      'TMDB',
+      'digital release',
+      'cinema',
+      'theatrical',
+      'upcoming',
+      'release date',
+      'movie',
+    ],
+  },
+  {
+    section: 'content',
     anchor: 'mdblist-ratings-key',
     label: (t) => s(t).mdblistRatingsKey,
     help: (t) => s(t).mdblistRatingsKeyHelp,
@@ -560,6 +781,36 @@ export const settingEntries: readonly SettingEntry[] = [
     help: (t) => s(t).criticRatingShowsHelp,
     keywords: ['CriticRating', 'critics', 'audience', 'rating'],
     codes: ['invalid_critic_rating_shows'],
+  },
+  {
+    section: 'content',
+    anchor: 'poster-badges',
+    label: (t) => s(t).posterBadges,
+    help: (t) => s(t).posterBadgesHelp,
+    keywords: ['badges', 'posters', 'ratings', 'IMDb', 'new episode', 'new season', 'Primary'],
+  },
+  {
+    section: 'content',
+    anchor: 'poster-badge-size',
+    label: (t) => s(t).posterBadgeSize,
+    help: (t) => s(t).posterBadgeSizeHelp,
+    keywords: ['badges', 'posters', 'size'],
+    codes: ['invalid_poster_badge_size'],
+  },
+  {
+    section: 'content',
+    anchor: 'poster-preview',
+    label: (t) => s(t).posterPreview.title,
+    help: (t) => s(t).posterPreview.help,
+    keywords: ['badges', 'posters', 'preview'],
+  },
+  {
+    section: 'content',
+    anchor: 'poster-template',
+    label: (t) => s(t).posterTemplate,
+    help: (t) => s(t).posterTemplateHelp,
+    keywords: ['posters', 'template', 'IMDb', 'TMDB', 'address'],
+    codes: ['invalid_poster_template'],
   },
   {
     section: 'content',
@@ -628,18 +879,19 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'catalogs',
-    anchor: 'collection-read-hour',
-    label: (t) => s(t).collectionReadHour,
-    help: (t) => s(t).collectionReadHourHelp,
-    codes: ['invalid_collection_read_hour'],
-  },
-  {
-    section: 'catalogs',
     anchor: 'collection-library-apps',
     label: (t) => s(t).collectionLibraryApps,
     help: (t) => s(t).collectionLibraryAppsHelp,
     keywords: ['boxsets', 'CollectionType', 'collections', 'app', 'appli', 'client'],
     codes: ['invalid_collection_library_apps'],
+  },
+  {
+    section: 'catalogs',
+    anchor: 'watchlist-check-hours',
+    label: (t) => s(t).watchlistCheckHours,
+    help: (t, r) => s(t).watchlistCheckHoursHelp(r('watchlistCheckHours')),
+    keywords: ['watchlist', 'available', 'versions', 'streams'],
+    codes: ['invalid_watchlist_check_hours'],
   },
   {
     section: 'catalogs',
@@ -713,12 +965,6 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'security',
-    anchor: 'registration',
-    label: (t) => s(t).registration,
-    help: (t) => s(t).registrationHelp,
-  },
-  {
-    section: 'security',
     anchor: 'share-links',
     label: (t) => s(t).shareLinks,
     help: (t) => s(t).shareLinksHelp,
@@ -764,6 +1010,77 @@ export const settingEntries: readonly SettingEntry[] = [
       'nom d’hôte',
     ],
     codes: ['invalid_known_proxies'],
+  },
+  {
+    section: 'security',
+    anchor: 'signing-secret',
+    label: (t) => s(t).signingSecret,
+    help: (t) => s(t).signingSecretHelp,
+    keywords: ['POLYFIN_SECRET_KEY', 'grant', 'HMAC'],
+  },
+  {
+    section: 'security',
+    anchor: 'provider-setup',
+    label: (t) => p(t).title,
+    help: (t) => `${p(t).intro} ${p(t).redirectUriHelp}`,
+    keywords: ['OpenID Connect', 'OIDC', 'SSO', 'single sign-on', 'redirect URI', 'OAuth'],
+  },
+  {
+    section: 'security',
+    anchor: 'provider-issuer',
+    label: (t) => p(t).issuer,
+    help: (t) => p(t).issuerHelp,
+    keywords: ['OpenID Connect', 'OIDC', 'SSO', 'issuer', 'discovery'],
+    codes: ['invalid_provider'],
+  },
+  {
+    section: 'security',
+    anchor: 'provider-name',
+    label: (t) => p(t).name,
+    help: (t) => p(t).nameHelp,
+    keywords: ['OpenID Connect', 'SSO'],
+  },
+  {
+    section: 'security',
+    anchor: 'provider-client-id',
+    label: (t) => p(t).clientId,
+    help: (t) => p(t).clientIdHelp,
+    keywords: ['OpenID Connect', 'OIDC', 'client_id'],
+  },
+  {
+    section: 'security',
+    anchor: 'provider-client-secret',
+    label: (t) => p(t).clientSecret,
+    help: (t) => p(t).clientSecretHelp,
+    keywords: ['OpenID Connect', 'OIDC', 'client_secret'],
+  },
+  {
+    section: 'security',
+    anchor: 'provider-user-claim',
+    label: (t) => p(t).userClaim,
+    help: (t) => p(t).userClaimHelp,
+    keywords: ['preferred_username', 'email', 'claim'],
+  },
+  {
+    section: 'security',
+    anchor: 'provider-create-accounts',
+    label: (t) => p(t).createAccounts,
+    help: (t) => p(t).createAccountsHelp,
+    keywords: ['OpenID Connect', 'SSO', 'accounts', 'comptes'],
+  },
+  {
+    section: 'security',
+    anchor: 'provider-admin-claim',
+    label: (t) => p(t).adminClaim,
+    help: (t) => p(t).adminClaimHelp,
+    keywords: ['groups', 'roles', 'administrator'],
+  },
+  {
+    section: 'security',
+    anchor: 'provider-admin-value',
+    label: (t) => p(t).adminValue,
+    help: (t) => p(t).adminValueHelp,
+    keywords: ['groups', 'roles', 'administrator'],
   },
   {
     section: 'security',
@@ -850,7 +1167,8 @@ export const settingEntries: readonly SettingEntry[] = [
     section: 'tracking',
     anchor: 'trakt-client-id',
     label: (t) => tr(t).traktClientId,
-    help: (t) => `${tr(t).traktClientIdHelp} ${tr(t).traktSetup} ${tr(t).redirectUri}`,
+    help: (t) =>
+      `${tr(t).traktClientIdHelp} ${tr(t).traktSetup} ${tr(t).redirectUri} ${tr(t).traktOlderApps}`,
     keywords: ['Trakt'],
     codes: ['invalid_trakt_app'],
   },
@@ -1038,6 +1356,14 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'torrents',
+    anchor: 'torrent-wireguard',
+    label: (t) => s(t).torrents.wireGuard,
+    help: (t) => s(t).torrents.wireGuardHelp,
+    keywords: ['torrent', 'VPN', 'WireGuard', '.conf', 'kill switch'],
+    codes: ['invalid_wireguard_config'],
+  },
+  {
+    section: 'torrents',
     anchor: 'torrent-download-limit',
     label: (t) => s(t).torrents.downloadLimit,
     help: (t, r) => s(t).torrents.downloadLimitHelp(r('torrentDownloadMbps')),
@@ -1051,6 +1377,22 @@ export const settingEntries: readonly SettingEntry[] = [
     help: (t, r) => s(t).torrents.uploadLimitHelp(r('torrentUploadMbps')),
     keywords: ['torrent', 'seed', 'share', 'partage'],
     codes: ['invalid_torrent_limit'],
+  },
+  {
+    section: 'torrents',
+    anchor: 'torrents-at-once',
+    label: (t) => s(t).torrents.atOnce,
+    help: (t, r) => s(t).torrents.atOnceHelp(r('torrentsAtOnce')),
+    keywords: ['torrent', 'cap', 'limit', 'swarm'],
+    codes: ['invalid_torrent_limit'],
+  },
+  {
+    section: 'torrents',
+    anchor: 'torrent-trackers',
+    label: (t) => s(t).torrents.trackers,
+    help: (t, r) => s(t).torrents.trackersHelp(r('torrentTrackers')),
+    keywords: ['torrent', 'tracker', 'announce', 'DHT', 'peers'],
+    codes: ['invalid_torrent_trackers'],
   },
   // DLNA
   {
@@ -1115,17 +1457,18 @@ export const settingEntries: readonly SettingEntry[] = [
   },
   {
     section: 'backups',
-    anchor: 'backup-hour',
-    label: (t) => s(t).backupHour,
-    help: (t, r) => s(t).backupHourHelp(r('backupHour').default),
-    codes: ['invalid_backup_hour'],
-  },
-  {
-    section: 'backups',
     anchor: 'backups-kept',
     label: (t) => s(t).backupsKept,
     help: (t, r) => s(t).backupsKeptHelp(r('backupsKept')),
     codes: ['invalid_backups_kept'],
+  },
+  {
+    section: 'backups',
+    anchor: 'backup-passphrase',
+    label: (t) => s(t).backupPassphrase,
+    help: (t, r) => s(t).backupPassphraseHelp(Number(r('backupPassphrase').min)),
+    keywords: ['encryption', 'chiffrement', 'password'],
+    codes: ['invalid_backup_passphrase'],
   },
   {
     section: 'backups',
@@ -1222,6 +1565,21 @@ export const settingEntries: readonly SettingEntry[] = [
   // Web player
   {
     section: 'web-player',
+    anchor: 'web-theme',
+    label: (t) => s(t).webTheme,
+    help: (t) => s(t).webThemeHelp,
+    keywords: ['theme', 'LumaaGlaass', 'css', 'jellyfin-web'],
+    codes: ['invalid_web_theme'],
+  },
+  {
+    section: 'web-player',
+    anchor: 'theme-copy',
+    label: (t) => s(t).themeCopy,
+    help: (t) => s(t).themeCopyHelp(4, '10 MB', '32 MB', 100),
+    keywords: ['theme', 'offline', 'cdn', 'copy'],
+  },
+  {
+    section: 'web-player',
     anchor: 'custom-css',
     label: (t) => s(t).customCss,
     help: (t) => s(t).customCssHelp,
@@ -1237,14 +1595,6 @@ export const settingEntries: readonly SettingEntry[] = [
     codes: ['invalid_custom_js'],
   },
   {
-    section: 'branding',
-    anchor: 'brand-logo',
-    label: (t) => s(t).brandLogo,
-    help: (t) => s(t).brandLogoHelp,
-    keywords: ['markdown', 'disclaimer'],
-    codes: ['invalid_brand_logo'],
-  },
-  {
     section: 'web-player',
     anchor: 'login-disclaimer',
     label: (t) => s(t).loginDisclaimer,
@@ -1258,6 +1608,20 @@ export const settingEntries: readonly SettingEntry[] = [
     label: (t) => s(t).addVersionsToOpenPage,
     help: (t) => s(t).addVersionsToOpenPageHelp,
     keywords: ['versions', 'jellyfin-web'],
+  },
+  {
+    section: 'web-player',
+    anchor: 'version-badges',
+    label: (t) => s(t).versionBadges,
+    help: (t) => s(t).versionBadgesHelp,
+    keywords: ['badges', 'HDR', 'Dolby Vision', 'Atmos', 'jellyfin-web'],
+  },
+  {
+    section: 'web-player',
+    anchor: 'poster-ratings',
+    label: (t) => s(t).posterRatings,
+    help: (t) => s(t).posterRatingsHelp,
+    keywords: ['ratings', 'posters', 'cards', 'jellyfin-web'],
   },
   {
     section: 'web-player',
@@ -1287,3 +1651,9 @@ export const settingEntries: readonly SettingEntry[] = [
 export function variableAnchor(name: string): string {
   return `variable-${name.toLowerCase()}`
 }
+
+/** Every setting: upstream's, then this fork's (see forkSettings.tsx). */
+export const settingEntries: readonly SettingEntry[] = [
+  ...upstreamSettingEntries,
+  ...forkSettingEntries,
+]

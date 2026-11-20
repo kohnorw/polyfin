@@ -1,15 +1,41 @@
-import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import {
+  memo,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from 'react'
+import {
+  BugIcon,
   DownloadSimpleIcon,
   EraserIcon,
+  InfoIcon,
   MagnifyingGlassIcon,
   PauseIcon,
   PlayIcon,
   ScrollIcon,
+  WarningCircleIcon,
+  WarningIcon,
+  type Icon,
 } from '@phosphor-icons/react'
-import { ApiError, fetchLogLines, logDownloadUrl, queryClient, queryKeys } from '@/api'
+import { focusManager } from '@tanstack/react-query'
+import { ApiError, fetchLogLines, logDownloadUrl, sessionEnded } from '@/api'
 import { PageLayout } from '@/app/PageLayout'
-import { Button, buttonClass, cx, EmptyState, Field, InlineError, Select, TextInput } from '@/ui'
+import {
+  Button,
+  ExternalButtonLink,
+  cx,
+  EmptyState,
+  Field,
+  InlineError,
+  Segmented,
+  Select,
+  StatusPill,
+  TextInput,
+  type StatusTone,
+} from '@/ui'
 import { errorMessage } from '@/format'
 import { useI18n } from '@/i18n'
 
@@ -25,13 +51,28 @@ type Level = keyof typeof levelRank
 const filters = { all: 'DEBUG', info: 'INFO', warn: 'WARN', error: 'ERROR' } as const
 type Filter = keyof typeof filters
 
+const wideQuery = '(min-width: 48rem)'
+
+/** Whether the four levels fit side by side: from 768 px up. */
+function useWide(): boolean {
+  return useSyncExternalStore(
+    (onChange) => {
+      const media = window.matchMedia(wideQuery)
+      media.addEventListener('change', onChange)
+      return () => media.removeEventListener('change', onChange)
+    },
+    () => window.matchMedia(wideQuery).matches,
+  )
+}
+
 type Line = { seq: number; time: string; level: Level; text: string }
 
-const levelStyles: Record<Level, string> = {
-  DEBUG: 'text-ink-3',
-  INFO: 'text-link',
-  WARN: 'text-warn',
-  ERROR: 'text-danger',
+/** Each level as a state: an icon and the word, in the color of a warning or an error. */
+const levelLooks: Record<Level, { tone: StatusTone; icon: Icon }> = {
+  DEBUG: { tone: 'muted', icon: BugIcon },
+  INFO: { tone: 'muted', icon: InfoIcon },
+  WARN: { tone: 'warn', icon: WarningIcon },
+  ERROR: { tone: 'danger', icon: WarningCircleIcon },
 }
 
 /** Splits a line of Polyfin's text log into its time, its level and the rest. */
@@ -60,6 +101,11 @@ export default function LogsRoute() {
   const [lines, setLines] = useState<Line[]>([])
   const [following, setFollowing] = useState(true)
   const [filter, setFilter] = useState<Filter>('all')
+  const wide = useWide()
+  const levelOptions = (Object.keys(filters) as Filter[]).map((key) => ({
+    value: key,
+    label: text.levels[key],
+  }))
   const [search, setSearch] = useState('')
   const [error, setError] = useState<unknown>(null)
   const [loaded, setLoaded] = useState(false)
@@ -68,12 +114,19 @@ export default function LogsRoute() {
   const view = useRef<HTMLDivElement>(null)
   const atBottom = useRef(true)
 
-  // Reads the lines written since the last read, now and every 2 seconds while following.
+  // Reads the lines written since the last read, now and every 2 seconds while following and the
+  // tab shows; a hidden tab reads again once shown.
   useEffect(() => {
     if (!following) return
     const controller = new AbortController()
     let timer = 0
+    let waiting = false
     async function read() {
+      timer = 0
+      if (!focusManager.isFocused()) {
+        waiting = true
+        return
+      }
       try {
         const page = await fetchLogLines(next.current, keptLines, controller.signal)
         const first = page.next - page.lines.length
@@ -89,26 +142,36 @@ export default function LogsRoute() {
       } catch (caught) {
         if (controller.signal.aborted) return
         if (caught instanceof ApiError && caught.status === 401) {
-          queryClient.setQueryData(queryKeys.session, null)
+          sessionEnded()
           return
         }
         setError(caught)
       }
       timer = window.setTimeout(read, pollInterval)
     }
+    const shown = focusManager.subscribe((focused) => {
+      if (!focused || !waiting) return
+      waiting = false
+      void read()
+    })
     void read()
     return () => {
       controller.abort()
       window.clearTimeout(timer)
+      shown()
     }
   }, [following, attempt])
 
   const minimum = levelRank[filters[filter]]
   const needle = search.trim().toLocaleLowerCase(language)
-  const matching = lines.filter(
-    (line) =>
-      levelRank[line.level] >= minimum &&
-      (needle === '' || line.text.toLocaleLowerCase(language).includes(needle)),
+  const matching = useMemo(
+    () =>
+      lines.filter(
+        (line) =>
+          levelRank[line.level] >= minimum &&
+          (needle === '' || line.text.toLocaleLowerCase(language).includes(needle)),
+      ),
+    [lines, minimum, needle, language],
   )
   const drawn = matching.slice(-drawnLines)
 
@@ -131,14 +194,13 @@ export default function LogsRoute() {
           >
             {following ? text.pause : text.follow}
           </Button>
-          <a
+          <ExternalButtonLink
             href={logDownloadUrl}
             download="polyfin.log"
-            className={buttonClass('secondary', 'md')}
+            icon={DownloadSimpleIcon}
           >
-            <DownloadSimpleIcon size={16} aria-hidden="true" />
             {text.download}
-          </a>
+          </ExternalButtonLink>
         </>
       }
     >
@@ -146,19 +208,23 @@ export default function LogsRoute() {
         <div
           role="search"
           aria-label={text.filters}
-          className="mb-4 flex flex-col gap-3 md:flex-row md:items-end"
+          className="mb-3 flex flex-col gap-2.5 md:flex-row md:flex-wrap md:items-end"
         >
-          <Field label={text.level} className="md:w-60">
-            <Select
-              value={filter}
-              onValue={setFilter}
-              options={(Object.keys(filters) as Filter[]).map((key) => ({
-                value: key,
-                label: text.levels[key],
-              }))}
-            />
+          {/* Side by side from 768 px up; on a phone, where they would wrap onto three lines, a
+              list. */}
+          <Field label={text.level}>
+            {wide ? (
+              <Segmented
+                label={text.level}
+                value={filter}
+                onChange={setFilter}
+                options={levelOptions}
+              />
+            ) : (
+              <Select value={filter} onValue={setFilter} options={levelOptions} />
+            )}
           </Field>
-          <Field label={text.search} className="md:max-w-sm md:flex-1">
+          <Field label={text.search} className="md:max-w-[24rem] md:min-w-[14rem] md:flex-1">
             <TextInput
               type="search"
               icon={MagnifyingGlassIcon}
@@ -181,66 +247,61 @@ export default function LogsRoute() {
             {errorMessage(t, error)}
           </InlineError>
         )}
-        <div
-          ref={view}
-          role="log"
-          aria-label={text.region}
-          aria-live="off"
-          aria-busy={!loaded}
-          tabIndex={0}
-          onScroll={(event) => {
-            const element = event.currentTarget
-            atBottom.current = element.scrollHeight - element.scrollTop - element.clientHeight < 24
-          }}
-          className="h-[65dvh] min-h-80 overflow-auto rounded-panel border border-line-2 bg-s1 py-2 font-mono text-[12.5px] leading-relaxed"
-        >
-          {!loaded && error === null ? (
-            <div aria-hidden="true" className="space-y-2.5 px-4 py-2">
-              {[70, 55, 82, 64, 48, 76, 60].map((width, index) => (
-                <span
-                  key={index}
-                  className="block h-3 animate-pulse rounded-md bg-s3 motion-reduce:animate-none"
-                  style={{ width: `${width}%` }}
-                />
-              ))}
-            </div>
-          ) : drawn.length === 0 ? (
-            <EmptyState
-              icon={ScrollIcon}
-              title={lines.length === 0 ? text.empty : text.noMatch}
-              className="m-4 border-none font-sans"
-            >
-              {lines.length === 0 ? text.emptyHint : text.noMatchHint}
-            </EmptyState>
-          ) : (
-            <ol>
-              {drawn.map((line) => (
-                <li
-                  key={line.seq}
-                  className="grid grid-cols-[4.5rem_3.25rem_1fr] gap-x-3 px-4 py-px hover:bg-s2 max-sm:grid-cols-[4rem_3rem_1fr] max-sm:gap-x-2 max-sm:px-3"
-                >
-                  <span className="text-ink-3 tabular-nums">{line.time}</span>
-                  <span className={cx('font-semibold', levelStyles[line.level])}>{line.level}</span>
-                  <span className="min-w-0 whitespace-pre-wrap text-ink [overflow-wrap:anywhere]">
-                    {line.text}
-                  </span>
-                </li>
-              ))}
-            </ol>
-          )}
+        {/* The tile, and inside it the lines scrolling, faded where they pass its edges. */}
+        <div className="rounded-panel bg-s1 p-1.5 max-md:rounded-[1.125rem]">
+          <div
+            ref={view}
+            role="log"
+            aria-label={text.region}
+            aria-live="off"
+            aria-busy={!loaded}
+            tabIndex={0}
+            onScroll={(event) => {
+              const element = event.currentTarget
+              atBottom.current =
+                element.scrollHeight - element.scrollTop - element.clientHeight < 24
+            }}
+            className="focus-lit-row h-[65dvh] min-h-80 overflow-auto rounded-row [mask-image:linear-gradient(to_bottom,transparent,#000_0.625rem,#000_calc(100%-0.625rem),transparent)] max-md:rounded-[0.75rem]"
+          >
+            {!loaded && error === null ? (
+              <div aria-hidden="true" className="space-y-3.5 px-3 py-3">
+                {[70, 55, 82, 64, 48, 76, 60].map((width, index) => (
+                  <span
+                    key={index}
+                    className="block h-3.5 animate-pulse rounded-[0.375rem] bg-s3 motion-reduce:animate-none"
+                    style={{ width: `${width}%` }}
+                  />
+                ))}
+              </div>
+            ) : drawn.length === 0 ? (
+              <EmptyState
+                icon={ScrollIcon}
+                title={lines.length === 0 ? text.empty : text.noMatch}
+                className="bg-transparent"
+              >
+                {lines.length === 0 ? text.emptyHint : text.noMatchHint}
+              </EmptyState>
+            ) : (
+              <ol className="grid grid-cols-[minmax(0,1fr)] py-2">
+                {drawn.map((line) => (
+                  <LogLine key={line.seq} line={line} />
+                ))}
+              </ol>
+            )}
+          </div>
         </div>
-        <div className="mt-2.5 flex flex-wrap justify-between gap-2 text-small text-ink-3">
+        <div className="mt-2.5 flex flex-wrap justify-between gap-x-6 gap-y-1.5 text-small text-ink-2">
           <p aria-live="polite" className="inline-flex items-center gap-2">
             <span
               aria-hidden="true"
               className={cx(
-                'size-[7px] rounded-full',
-                following ? 'bg-ok ring-3 ring-ok/18' : 'bg-ink-3',
+                'size-2 shrink-0 rounded-full',
+                following ? 'bg-ok ring-4 ring-ok/14' : 'bg-ink-3',
               )}
             />
             {following ? text.following : text.paused}
           </p>
-          <p className="tabular-nums">
+          <p className="figures">
             {text.shown(drawn.length, lines.length)} {filter === 'all' ? text.detailedHint : ''}
           </p>
         </div>
@@ -248,3 +309,21 @@ export default function LogsRoute() {
     </PageLayout>
   )
 }
+
+/**
+ * A line of the log. Lines never change once read, so each is drawn once, not again at each read
+ * that adds lines after it.
+ */
+const LogLine = memo(function LogLine({ line }: { line: Line }) {
+  return (
+    <li className="grid min-h-9 grid-cols-[5.25rem_6.75rem_minmax(0,1fr)] items-center gap-x-3 rounded-[0.5rem] px-3 py-1 hover:bg-s2 max-md:min-h-0 max-md:grid-cols-[auto_minmax(0,1fr)] max-md:gap-y-1 max-md:px-2.5 max-md:py-2">
+      <span className="text-micro text-ink-2 figures">{line.time}</span>
+      <StatusPill tone={levelLooks[line.level].tone} icon={levelLooks[line.level].icon}>
+        {line.level}
+      </StatusPill>
+      <span className="min-w-0 font-mono text-[0.8125rem] leading-5 whitespace-pre-wrap text-ink [overflow-wrap:anywhere] max-md:col-span-2">
+        {line.text}
+      </span>
+    </li>
+  )
+})

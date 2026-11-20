@@ -6,7 +6,9 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -95,7 +97,25 @@ func (m *Manager) Progressive(ctx context.Context, key Key, open Opener, start t
 			}
 		}()
 	}
-	cmd := exec.CommandContext(ctx, m.ffmpeg, remux.progressiveArgs(start)...)
+	if remux.Encode != nil && remux.Encode.BurnFile != "" {
+		// The stream is one run: its copy of the subtitle file burned in
+		// is its own (see writeBurnCopy), removed once it ends.
+		if dir, err := os.MkdirTemp(m.dir, "burn-"); err != nil {
+			if vobSubIndex(remux.Encode.BurnFile) {
+				// FFmpeg never opens a pair's .idx file itself (see
+				// sentinelCopy).
+				m.logger.Warn("A subtitle file is not burned in: its .idx file cannot be copied", "file", remux.Encode.BurnFile, "error", err)
+				remux = *burning(&remux, "", "")
+			} else {
+				m.logger.Info("A subtitle file is burned in as it is, without a sentinel: FFmpeg 9.0 may stop for good at its end", "file", remux.Encode.BurnFile, "error", err)
+			}
+		} else {
+			defer os.RemoveAll(dir)
+			file, sub, _ := m.sentinelCopy(ctx, &remux, filepath.Join(dir, "burn"))
+			remux = *burning(&remux, file, sub)
+		}
+	}
+	cmd := exec.CommandContext(ctx, m.ffmpegPath(), remux.progressiveArgs(start)...)
 	cmd.WaitDelay = 5 * time.Second
 	stderr := &tail{limit: 4096}
 	cmd.Stderr = stderr
@@ -188,11 +208,12 @@ func (r Remux) progressiveArgs(start time.Duration) []string {
 		args = append(args, r.Encode.inputs()...)
 	}
 	args = append(args, r.InputOptions...)
+	args = append(args, r.decoderArgs()...)
 	args = append(args, "-copyts", "-i", r.Input)
 	video := "0:" + strconv.Itoa(r.Video)
 	if r.Encode != nil && r.Encode.Burns() {
 		if r.Encode.BurnFile != "" {
-			args = append(args, "-i", r.Encode.BurnFile)
+			args = append(args, r.Encode.burnFileArgs()...)
 		}
 		args = append(args, "-filter_complex", r.Encode.burnGraph(r.Video, start, ""))
 		video = "[video]"

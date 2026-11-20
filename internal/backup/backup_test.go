@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
+	"github.com/moodiness/polyfin/internal/process"
 	"github.com/moodiness/polyfin/internal/testdb/migrated"
 )
 
@@ -20,18 +21,19 @@ import (
 // nowhere but in pg_dump's PGPASSWORD.
 const password = "s3cret pa'ss@word"
 
-// fakePgDump is a pg_dump that records its arguments, one per line, and
-// its environment in the folder FAKE_PG_DUMP_RECORD names, writes part of
-// a dump to its --file, then fails when FAKE_PG_DUMP_FAIL is set, and
-// otherwise ends the dump.
-const fakePgDump = `#!/bin/sh
-printf '%s\n' "$@" > "$FAKE_PG_DUMP_RECORD/args"
-env > "$FAKE_PG_DUMP_RECORD/env"
+// fakePgDump is the body of a pg_dump that records its arguments, one per
+// line, and its environment in the folder $record names (newHarness sets
+// it to the harness's record), writes part of a dump to its --file, or its
+// standard output without one, then fails when that folder holds a file
+// named fail (see failDumps), and otherwise ends the dump.
+const fakePgDump = `printf '%s\n' "$@" > "$record/args"
+env > "$record/env"
+file=/dev/stdout
 for arg; do
 	case $arg in --file=*) file=${arg#--file=} ;; esac
 done
 printf 'PGDMP partial' > "$file"
-if [ -n "$FAKE_PG_DUMP_FAIL" ]; then
+if [ -e "$record/fail" ]; then
 	echo "pg_dump: error: connection to server failed" >&2
 	exit 1
 fi
@@ -45,25 +47,43 @@ type harness struct {
 	record string
 	logs   *bytes.Buffer
 	kept   int
+	// passphrase is the settings' BackupPassphrase.
+	passphrase string
 }
 
 func newHarness(t *testing.T, db DB) *harness {
 	t.Helper()
 	h := &harness{dir: t.TempDir(), record: t.TempDir(), logs: &bytes.Buffer{}, kept: 3}
 	script := filepath.Join(t.TempDir(), "pg_dump")
-	if err := os.WriteFile(script, []byte(fakePgDump), 0o700); err != nil {
+	if err := process.WriteExecutable(script, strings.NewReader("#!/bin/sh\nrecord='"+h.record+"'\n"+fakePgDump), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	t.Setenv("FAKE_PG_DUMP_RECORD", h.record)
 	h.service = New(Config{
 		Folder:      func() string { return h.dir },
 		DatabaseURL: "postgresql://polyfin:" + strings.ReplaceAll(strings.ReplaceAll(password, " ", "%20"), "@", "%40") + "@db.example:5432/polyfin?sslmode=disable&pool_max_conns=4",
 		PgDump:      script,
 		DB:          db,
-		Settings:    func() accounts.Settings { return accounts.Settings{BackupHour: 4, BackupsKept: h.kept} },
-		Logger:      slog.New(slog.NewTextHandler(h.logs, nil)),
+		Settings: func() accounts.Settings {
+			return accounts.Settings{BackupsKept: h.kept, BackupPassphrase: h.passphrase}
+		},
+		Logger: slog.New(slog.NewTextHandler(h.logs, nil)),
 	})
 	return h
+}
+
+// failDumps makes pg_dump fail from now on, or succeed again.
+func (h *harness) failDumps(t *testing.T, fail bool) {
+	t.Helper()
+	flag := filepath.Join(h.record, "fail")
+	if !fail {
+		if err := os.Remove(flag); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if err := os.WriteFile(flag, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func (h *harness) files(t *testing.T) []string {
@@ -125,6 +145,7 @@ func TestThePasswordStaysOutOfTheCommandLineAndTheLogs(t *testing.T) {
 // one; its error, with pg_dump's, is what the run returns and records, and
 // the last backup made stays recorded.
 func TestAFailedDumpLeavesNoBackup(t *testing.T) {
+	t.Parallel()
 	pool := migrated.New(t)
 	h := newHarness(t, pool)
 	made := time.Date(2026, 10, 4, 4, 0, 0, 0, time.Local)
@@ -137,11 +158,11 @@ func TestAFailedDumpLeavesNoBackup(t *testing.T) {
 		status.File != "polyfin-20261004-040000.dump" || status.Size != int64(len("PGDMP partial complete")) {
 		t.Fatalf("after a success: %+v %v", status, err)
 	}
-	if status.Problem(made.Add(StaleAfter)) || !status.Problem(made.Add(StaleAfter+time.Minute)) {
-		t.Error("a backup is stale only after StaleAfter")
+	if status.Problem(made.Add(MinStaleAfter), MinStaleAfter) || !status.Problem(made.Add(MinStaleAfter+time.Minute), MinStaleAfter) {
+		t.Error("a backup is stale only after MinStaleAfter")
 	}
 
-	t.Setenv("FAKE_PG_DUMP_FAIL", "1")
+	h.failDumps(t, true)
 	failed := made.Add(24 * time.Hour)
 	h.service.now = func() time.Time { return failed }
 	err = h.service.Run(t.Context())
@@ -153,7 +174,7 @@ func TestAFailedDumpLeavesNoBackup(t *testing.T) {
 	}
 	status, err = h.service.Status(t.Context())
 	if err != nil || !status.RanAt.Equal(failed) || !strings.Contains(status.Error, "connection to server failed") ||
-		!status.MadeAt.Equal(made) || status.File != "polyfin-20261004-040000.dump" || !status.Problem(failed) {
+		!status.MadeAt.Equal(made) || status.File != "polyfin-20261004-040000.dump" || !status.Problem(failed, MinStaleAfter) {
 		t.Errorf("after a failure: %+v %v", status, err)
 	}
 	if strings.Contains(h.logs.String(), password) {
@@ -161,7 +182,7 @@ func TestAFailedDumpLeavesNoBackup(t *testing.T) {
 	}
 
 	// A partial backup a crash left is deleted by the next run.
-	t.Setenv("FAKE_PG_DUMP_FAIL", "")
+	h.failDumps(t, false)
 	crashed := filepath.Join(h.dir, ".polyfin-20261005-040000.dump.partial")
 	if err := os.WriteFile(crashed, []byte("PGDMP"), 0o600); err != nil {
 		t.Fatal(err)
@@ -178,8 +199,9 @@ func TestAFailedDumpLeavesNoBackup(t *testing.T) {
 // Without a status recorded, there is nothing to look at; nor without a
 // folder.
 func TestStatusBeforeTheFirstRun(t *testing.T) {
+	t.Parallel()
 	var none Status
-	if none.Problem(time.Now()) {
+	if none.Problem(time.Now(), MinStaleAfter) {
 		t.Error("no run is a problem")
 	}
 	off := New(Config{})
@@ -202,6 +224,7 @@ func TestStatusBeforeTheFirstRun(t *testing.T) {
 // and touches no other file: neither those named almost like one, nor a
 // folder or a link named like one.
 func TestRetentionKeepsTheNewestBackupsOnly(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, nil)
 	h.kept = 3
 	others := []string{"notes.txt", "polyfin-latest.dump", "polyfin-20200101-000000.dump.bak", "polyfin-2020010-000000.dump",
@@ -251,6 +274,7 @@ func TestRetentionKeepsTheNewestBackupsOnly(t *testing.T) {
 
 // Two runs in the same second do not overwrite the first backup.
 func TestABackupIsNeverOverwritten(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, nil)
 	at := time.Date(2026, 10, 5, 4, 0, 0, 0, time.Local)
 	h.service.now = func() time.Time { return at }
@@ -271,6 +295,7 @@ func TestABackupIsNeverOverwritten(t *testing.T) {
 // The connection string pg_dump gets has no password, in either of the
 // forms pgx reads, and none of the parameters libpq would refuse.
 func TestSplitPassword(t *testing.T) {
+	t.Parallel()
 	for _, test := range []struct{ connection, conninfo, password string }{
 		{"postgresql://polyfin:p%40ss@postgres:5432/polyfin", "postgresql://polyfin@postgres:5432/polyfin", "p@ss"},
 		{"postgres://polyfin@postgres/polyfin?sslmode=require", "postgres://polyfin@postgres/polyfin?sslmode=require", ""},
@@ -296,14 +321,14 @@ func TestSplitPassword(t *testing.T) {
 }
 
 // Backups follow the folder the settings give: off, they are not
-// available, the daily task has no hour, and a run by hand fails; another
-// folder is written to at once.
+// available and a run by hand fails; another folder is written to at once.
 func TestBackupsFollowTheSettingsFolder(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, nil)
 	on := h.dir
 	h.dir = ""
-	if h.service.Available() || h.service.Dir() != "" || h.service.Hour() != -1 {
-		t.Errorf("off: available %v, folder %q, hour %d", h.service.Available(), h.service.Dir(), h.service.Hour())
+	if h.service.Available() || h.service.Dir() != "" {
+		t.Errorf("off: available %v, folder %q", h.service.Available(), h.service.Dir())
 	}
 	if err := h.service.Run(t.Context()); !errors.Is(err, ErrOff) {
 		t.Errorf("run by hand while off: %v", err)
@@ -313,13 +338,25 @@ func TestBackupsFollowTheSettingsFolder(t *testing.T) {
 	}
 	other := t.TempDir()
 	h.dir = other
-	if !h.service.Available() || h.service.Dir() != other || h.service.Hour() != 4 {
-		t.Errorf("on: available %v, folder %q, hour %d", h.service.Available(), h.service.Dir(), h.service.Hour())
+	if !h.service.Available() || h.service.Dir() != other {
+		t.Errorf("on: available %v, folder %q", h.service.Available(), h.service.Dir())
 	}
 	if err := h.service.Run(t.Context()); err != nil {
 		t.Fatal(err)
 	}
 	if files := h.files(t); len(files) != 1 || !backupName.MatchString(files[0]) {
 		t.Errorf("files in the other folder: %v", files)
+	}
+}
+
+// A backup is stale after two runs of its schedule missed, never under 48
+// hours.
+func TestStaleAfterFollowsTheSchedule(t *testing.T) {
+	t.Parallel()
+	for gap, want := range map[time.Duration]time.Duration{0: 48 * time.Hour, 6 * time.Hour: 48 * time.Hour,
+		24 * time.Hour: 48 * time.Hour, 7 * 24 * time.Hour: 14 * 24 * time.Hour} {
+		if got := StaleAfter(gap); got != want {
+			t.Errorf("gap %v: %v, want %v", gap, got, want)
+		}
 	}
 }

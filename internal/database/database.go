@@ -3,6 +3,7 @@ package database
 
 import (
 	"context"
+	"crypto/rand"
 	"errors"
 	"fmt"
 	"log/slog"
@@ -20,6 +21,15 @@ const (
 	maxRetryDelay = 30 * time.Second
 )
 
+// maxConns bounds the pool when the URL sets no pool_max_conns. pgx would
+// allow one connection for each CPU, 32 on a large NAS, more than a light
+// PostgreSQL's max_connections of 20 holds. Polyfin's load fits in fewer:
+// about 7 at once on a busy server. With the connection that listens to
+// the changes of addons, and pg_dump's during a backup, Polyfin uses 12
+// at most, which leaves room for an administrator's session and the
+// connections PostgreSQL keeps for superusers.
+const maxConns = 10
+
 // Connect opens a connection pool and waits until PostgreSQL accepts it.
 //
 // A database container often starts after Polyfin (Unraid starts containers
@@ -27,12 +37,10 @@ const (
 // ends. Rejected credentials and missing databases are configuration errors
 // that waiting cannot fix: they are returned immediately.
 func Connect(ctx context.Context, url string, logger *slog.Logger) (*pgxpool.Pool, error) {
-	config, err := pgxpool.ParseConfig(url)
+	config, err := poolConfig(url)
 	if err != nil {
-		// pgconn redacts the password from parse errors.
-		return nil, fmt.Errorf("invalid database URL: %w", err)
+		return nil, err
 	}
-	config.ConnConfig.RuntimeParams["application_name"] = "polyfin"
 	pool, err := pgxpool.NewWithConfig(ctx, config)
 	if err != nil {
 		return nil, err
@@ -64,6 +72,28 @@ func Connect(ctx context.Context, url string, logger *slog.Logger) (*pgxpool.Poo
 	}
 }
 
+// poolConfig reads the database URL into the pool's configuration, maxConns
+// connections at most unless the URL's pool_max_conns sets another bound.
+func poolConfig(url string) (*pgxpool.Config, error) {
+	config, err := pgxpool.ParseConfig(url)
+	if err != nil {
+		// pgconn redacts the password from parse errors.
+		return nil, fmt.Errorf("invalid database URL: %w", err)
+	}
+	config.ConnConfig.RuntimeParams["application_name"] = "polyfin"
+	// pgxpool takes pool_max_conns out of the settings it parses, and
+	// gives the same bound whether the URL set it or not: the URL is
+	// read again to tell.
+	connConfig, err := pgconn.ParseConfig(url)
+	if err != nil {
+		return nil, fmt.Errorf("invalid database URL: %w", err)
+	}
+	if _, set := connConfig.RuntimeParams["pool_max_conns"]; !set {
+		config.MaxConns = maxConns
+	}
+	return config, nil
+}
+
 // permanent reports server answers that will not change by retrying.
 func permanent(err error) bool {
 	var pgErr *pgconn.PgError
@@ -87,8 +117,10 @@ func ServerID(ctx context.Context, db interface {
 	return id, nil
 }
 
-// Secret returns the server's signing secret, created by a migration. It
-// signs what Polyfin hands to players, so it never leaves the server.
+// Secret returns the server's signing secret as it is stored, created by
+// a migration and replaced by ReplaceSecret. What Polyfin hands to
+// players is signed with it, or with what POLYFIN_SECRET_KEY derives from
+// it (see secrets.Box.SigningSecret), so it never leaves the server.
 func Secret(ctx context.Context, db interface {
 	QueryRow(context.Context, string, ...any) pgx.Row
 }) ([]byte, error) {
@@ -97,6 +129,35 @@ func Secret(ctx context.Context, db interface {
 		return nil, fmt.Errorf("read server secret: %w", err)
 	}
 	return secret, nil
+}
+
+// ReplaceSecret stores a new signing secret, 32 random bytes: what the
+// former one signed is refused by the Polyfin that starts next, as it
+// reads the secret once, at its start.
+func ReplaceSecret(ctx context.Context, db interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}) error {
+	secret := make([]byte, 32)
+	if _, err := rand.Read(secret); err != nil {
+		return fmt.Errorf("make a server secret: %w", err)
+	}
+	if _, err := db.Exec(ctx, "UPDATE server_identity SET secret = $1", secret); err != nil {
+		return fmt.Errorf("replace the server secret: %w", err)
+	}
+	return nil
+}
+
+// PlexClient returns the client identifier Polyfin names itself by to
+// plex.tv and to Plex Media Servers, created by a migration, so that every
+// sign-in with Plex reuses one entry among the account's devices.
+func PlexClient(ctx context.Context, db interface {
+	QueryRow(context.Context, string, ...any) pgx.Row
+}) (string, error) {
+	var id string
+	if err := db.QueryRow(ctx, "SELECT plex_client::text FROM server_identity").Scan(&id); err != nil {
+		return "", fmt.Errorf("read Plex client identifier: %w", err)
+	}
+	return id, nil
 }
 
 // Size returns the bytes the database takes on disk.

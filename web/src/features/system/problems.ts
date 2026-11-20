@@ -11,12 +11,18 @@ import { dateTime, formatBytes } from '@/format'
 import { useI18n } from '@/i18n'
 import type { Messages } from '@/i18n'
 
-/** The server's health, refreshed every 10 seconds. */
-export function useHealth() {
+/** How often the health is read again where it is followed, in milliseconds. */
+const healthPoll = 30_000
+
+/**
+ * The server's health. With `poll`, read again every 30 seconds: a page follows it with one
+ * observer only, while what shows it is on screen, as reading it scans the library.
+ */
+export function useHealth(poll = false) {
   return useQuery({
     queryKey: queryKeys.health,
     queryFn: ({ signal }) => fetchHealth(signal),
-    refetchInterval: 10_000,
+    refetchInterval: poll ? healthPoll : false,
   })
 }
 
@@ -31,7 +37,7 @@ export function useHealthProblems() {
 }
 
 /** A row's name, followed by whose it is when it is a user's own. */
-export function ownedName(t: Messages, name: string, owner: Owner): string {
+function ownedName(t: Messages, name: string, owner: Owner): string {
   return owner === null ? name : `${name} (${t.system.health.owner.user(owner.name)})`
 }
 
@@ -70,6 +76,57 @@ const serviceNames = {
   listenbrainz: 'ListenBrainz',
 }
 
+/** The reasons a torrent's peers did not connect, in the order Health tells them. */
+const peerReasons = [
+  'connected',
+  'timedOut',
+  'refused',
+  'unreachable',
+  'proxy',
+  'closed',
+  'left',
+  'other',
+  'untried',
+] as const
+
+/** Why a torrent that did not start, with peers found, sent nothing: its peers counted by why. */
+function torrentStartWhy(
+  t: Messages,
+  problem: Extract<HealthProblem, { code: 'torrent_start' }>,
+): string {
+  const text = t.system.health.problems
+  const why = text.torrentStartWhy[problem.failure]
+  const peers = problem.peers
+  if (!peers) return why
+  const counts = peerReasons.flatMap((reason) => {
+    const n = peers[reason] ?? 0
+    return n > 0 ? [text.torrentPeerWhy[reason](n)] : []
+  })
+  return counts.length === 0
+    ? why
+    : `${why} (${text.torrentStartPeers(peers.found, counts.join(', '))})`
+}
+
+/**
+ * That a host answers an error file instead of the videos, since a time: Health's problem, and the
+ * notice on the versions from that host, each followed by what to check
+ * (`problems.hostErrorFileHint`).
+ */
+export function hostErrorFileText(
+  t: Messages,
+  language: string,
+  host: string,
+  since: string,
+): string {
+  return t.system.health.problems.hostErrorFile(
+    host,
+    new Intl.DateTimeFormat(language, { timeStyle: 'short' }).format(new Date(since)),
+  )
+}
+
+/** The failures of a share's scan that met a limit of what one scan reads. */
+const shareLimits = ['too_deep', 'too_many_folders', 'too_many_files', 'listing_too_large']
+
 /** What a problem the server found says. */
 export function problemText(t: Messages, language: string, problem: HealthProblem): string {
   const health = t.system.health
@@ -80,6 +137,12 @@ export function problemText(t: Messages, language: string, problem: HealthProble
     case 'disk':
       return text.disk(health.folders[problem.folder], formatBytes(problem.free, language))
     case 'addon':
+      if (problem.until !== undefined) {
+        return text.addonTimingOut(
+          ownedName(t, problem.name, problem.owner ?? null),
+          new Intl.DateTimeFormat(language, { timeStyle: 'short' }).format(new Date(problem.until)),
+        )
+      }
       return text.addon(
         ownedName(t, problem.name, problem.owner ?? null),
         health.failures[problem.failure] ?? problem.failure,
@@ -94,10 +157,23 @@ export function problemText(t: Messages, language: string, problem: HealthProble
       return text.discoveryPort(problem.port)
     case 'dlna_port':
       return text.dlnaPort(problem.port)
-    case 'torrent_route':
-      return text.torrentRoute(text.torrentWhy[problem.failure](problem.name ?? ''))
+    case 'torrent_route': {
+      const why = text.torrentWhy[problem.failure](problem.name ?? '')
+      return problem.grace === undefined
+        ? text.torrentRoute(why)
+        : text.torrentRouteRiding(why.charAt(0).toUpperCase() + why.slice(1), problem.grace)
+    }
     case 'torrent_udp':
       return text.torrentUdp(problem.name)
+    case 'torrent_start':
+      return text.torrentStart(torrentStartWhy(t, problem))
+    case 'torrent_stopped':
+      return text.torrentStopped(
+        new Intl.DateTimeFormat(language, { timeStyle: 'short' }).format(new Date(problem.at)),
+        text.torrentStoppedWhy[problem.failure](problem.name ?? ''),
+      )
+    case 'host_error_file':
+      return `${hostErrorFileText(t, language, problem.host, problem.at)} ${text.hostErrorFileHint}`
     case 'discovery_address':
       return text.discoveryAddress(problem.address)
     case 'proxy_name_unresolved':
@@ -128,6 +204,8 @@ export function problemText(t: Messages, language: string, problem: HealthProble
       if (problem.failure === 'unreachable') return text.shareUnreachable(problem.name)
       if (problem.failure === 'refused') return text.shareRefused(problem.name)
       if (problem.failure === 'host_key_changed') return text.shareHostKey(problem.name)
+      if (shareLimits.includes(problem.failure)) return text.shareTooLarge(problem.name)
+      if (problem.failure === 'too_slow') return text.shareTooSlow(problem.name)
       return problem.share !== undefined ? text.share(problem.name) : text.folder(problem.name)
     case 'folder_unwatched':
       if (problem.share !== undefined) {
@@ -140,6 +218,20 @@ export function problemText(t: Messages, language: string, problem: HealthProble
       if (problem.failure === 'instance_limit') return text.folderInstanceLimit(problem.name)
       if (problem.failure === 'open_files_limit') return text.folderOpenFilesLimit(problem.name)
       return text.folderUnwatched(problem.name)
+    case 'folder_search':
+      return text.folderSearch(
+        problem.name,
+        problem.addon ?? '',
+        t.localFolders.searchFailures[problem.failure] ?? '',
+      )
+    case 'search_late':
+      return text.searchLate(ownedName(t, problem.name, problem.owner ?? null))
+    case 'smart_list_empty':
+      return text.smartListEmpty(problem.name, problem.owner?.name ?? null)
+    case 'virtual_channel_source':
+      return text.virtualChannelSource(problem.name)
+    case 'folder_no_search':
+      return text.folderNoSearch(problem.name)
     case 'task':
       return text.task(problem.task)
     case 'https_port':
@@ -154,11 +246,58 @@ export function problemText(t: Messages, language: string, problem: HealthProble
       return problem.tone === 'error'
         ? text.httpsExpired(dateTime(problem.expires, language))
         : text.httpsExpires(dateTime(problem.expires, language))
+    case 'subtitle_ocr_language': {
+      const missing = text.subtitleOcrLanguage(ocrLanguageName(language, problem), problem.file)
+      return problem.error ? `${missing} ${text.subtitleOcrDownloadFailed(problem.error)}` : missing
+    }
     case 'metadata_languages':
       return text.metadataLanguages(problem.name)
+    case 'nvidia_driver':
+      return text.nvidiaDriver(problem.name)
+    case 'nvidia_older_ffmpeg':
+      return text.nvidiaOlderFFmpeg(problem.failure, problem.error)
+    case 'theme_copy_missing':
+      return text.themeCopyMissing(problem.missing, problem.files)
+    case 'desktop_rolled_back':
+      return text.desktopRolledBack(problem.name, problem.previous, problem.error)
+    case 'data_folder_temporary':
+      return text.dataFolderTemporary(problem.path, problem.moveTo)
+    case 'data_folder_shared':
+      return text.dataFolderShared(problem.failure, problem.path, problem.command)
+    case 'collation_version':
+      return text.collationVersion(problem.name, problem.previous, problem.version)
+    case 'folder_unwritable':
+      return text.folderUnwritable(health.folderTitle[problem.folder], problem.path)
+    case 'folder_occupied':
+      return text.folderOccupied(health.folderTitle[problem.folder], problem.path, problem.name)
     case 'connection_stopped':
       return problem.kind === 'app'
         ? text.appStopped(t.account.appImport.apps[problem.name], problem.owner.name)
         : text.trackingStopped(serviceNames[problem.name], problem.owner.name)
   }
+}
+
+/**
+ * A language Tesseract has no data for, named in `language` from its file, as jpn.traineddata
+ * or chi_sim.traineddata, else as the server names it in English.
+ */
+export function ocrLanguageName(language: string, problem: { name: string; file: string }): string {
+  const code = problem.file.replace(/\.traineddata$/, '').split('_')[0]
+  try {
+    return (
+      new Intl.DisplayNames([language], { type: 'language', fallback: 'none' }).of(code) ??
+      problem.name
+    )
+  } catch {
+    return problem.name
+  }
+}
+
+/**
+ * The commands that rebuild the indexes of the database `name`, then record its new collation
+ * version, in this order, the name quoted as an identifier, as the server writes them.
+ */
+export function collationCommands(name: string): string[] {
+  const quoted = `"${name.replaceAll('"', '""')}"`
+  return [`REINDEX DATABASE ${quoted};`, `ALTER DATABASE ${quoted} REFRESH COLLATION VERSION;`]
 }

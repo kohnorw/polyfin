@@ -10,11 +10,14 @@ const libraries = {
     shownHelpMine:
       'Libraries appear in this order, after the server’s libraries if you use them. Leave a name empty to use the catalog name. Libraries that share a name get their type added in apps, for example “Popular (Movies)”.',
     defaultHelp:
-      'When an addon is installed, its collection catalogs become libraries: each one shows its collections (for example genres or decades), which open on their movies and series. An addon without collections gets its movie, series and TV catalogs as libraries, up to 20. This is only a starting point: enable as many catalogs as you like. Each library adds a row to the home screen of Jellyfin apps, except TV catalogs, whose channels appear in Live TV.',
+      'When an addon is installed, its collection catalogs become libraries: each one shows its collections (for example genres or decades), which open on their movies and series. An addon without collections gets its movie, series and TV catalogs as libraries. Polyfin does this only until the server has 20 libraries in all, counting those of every addon. This is only a starting point: enable as many catalogs as you like. Each library adds a row to the home screen of Jellyfin apps, except TV catalogs, whose channels appear in Live TV.',
     manyWarning: 'More than 20 libraries can make the home screen of Jellyfin apps heavy.',
     noAddons: 'Add a source first: its catalogs will be listed here.',
     shownEmpty: 'No library: Jellyfin apps show nothing from these addons.',
     name: 'Name in apps',
+    nameHelp: 'Leave it empty to use the catalog name.',
+    options: 'Options',
+    optionsLabel: (name: string) => `Options of ${name}`,
     appName: (name: string) => `Shown in apps as “${name}”.`,
     liveTv: 'Its channels appear in Live TV in Jellyfin apps.',
     iptvVod: 'From an IPTV source.',
@@ -25,9 +28,79 @@ const libraries = {
     hideInMenusHelp:
       'It keeps its row on the home screen. The web player’s side menu leaves it out too; other Jellyfin apps still list it. Applies the next time the web player is loaded.',
     hiddenInMenus: 'Hidden from the top bar',
-    remove: 'Remove',
+    skipLocal: 'Leave out the titles local folders hold',
+    skipLocalHelp:
+      'A movie or show that a local folder’s library lists, linked to the same identifier, shows only there. Its versions and watched state stay the same, and search finds it once. A user who does not see the folder’s library still finds it here.',
+    skippedLocal: 'Without local folders’ titles',
+    showAs: {
+      label: 'Show as',
+      choices: {
+        home_videos: 'Home videos',
+        listed: 'As listed',
+        movies_and_shows: 'Movies and shows',
+        shows: 'Shows',
+        movies: 'Movies',
+      },
+      pill: {
+        home_videos: 'Shown as home videos',
+        listed: 'Shown as listed',
+        movies_and_shows: 'Shown as movies and shows',
+        shows: 'Shown as shows',
+        movies: 'Shown as movies',
+      },
+      help: {
+        home_videos:
+          'Each title is a folder of its videos, or a single video, as in a home videos library. Apps that list only movies and shows leave the library out.',
+        listed:
+          'A movies or shows library, as the catalog’s type says: a title of the other kind counts in its total, but none of its tabs shows it.',
+        titles:
+          'For the Jellyfin apps that list only movies and shows: a title with several videos, or one numbered as an episode, becomes a show, its videos its episodes; a title without videos, or with one file, a movie. Titles the catalog types as movies or shows stay as they are. Played marks, resume points and favorites follow them when you save.',
+        shows:
+          'A shows library: apps fill its tabs with shows only, so the catalog’s movies count in its total but no tab shows them, and apps that copy libraries into their own take none of them. Search still finds them.',
+        movies:
+          'A movies library: apps fill its tabs with movies only, so the catalog’s shows count in its total but no tab shows them, and apps that copy libraries into their own take none of them. Search still finds them.',
+        anime:
+          'A library without a type: every app lists each title as the movie or show it is, with exact counts.',
+        mixed:
+          'A library without a type, as Jellyfin’s mixed movies and shows libraries: each title is listed as the movie or show it is, so its tabs also show a series a movie catalog lists, with exact counts. Played marks and favorites stay.',
+      },
+      undecided:
+        'Polyfin shows it as movies and shows once it reads the catalog’s first page, if every title there is a movie or a show.',
+    },
     removeLabel: (name: string) => `Remove ${name}`,
+    moreActions: (name: string) => `More actions for ${name}`,
+    userOrders: {
+      help: 'A user who ordered the libraries in the web player’s Settings › Home keeps that order, until Apply this order to every user or their own Reset my preferences.',
+      apply: 'Apply this order to every user',
+      saveFirst: 'Save the list first: the order applied is the saved one.',
+      title: 'Apply this order to every user?',
+      counting: 'Counting the users with an order of their own…',
+      none: 'Every user already follows this order: none ordered the libraries in the web player’s Settings › Home.',
+      some: (count: number) =>
+        `${count === 1 ? '1 user ordered' : `${count} users ordered`} the libraries in the web player’s Settings › Home. Their order is forgotten, and their apps list the libraries in this order, as saved; the web player within a minute. Their other settings stay.`,
+      applied: (count: number) =>
+        count === 0
+          ? 'Every user follows this order.'
+          : count === 1
+            ? 'This order now applies to every user: 1 user’s own order was forgotten.'
+            : `This order now applies to every user: ${count} users’ own orders were forgotten.`,
+    },
+    refresh: {
+      start: 'Refresh descriptions',
+      stop: 'Stop refreshing',
+      queued: 'Waiting to refresh its descriptions',
+      running: (done: string, titles: string) => `Refreshing descriptions: ${done} of ${titles}`,
+      done: (done: string, failed: number, figure: string) =>
+        failed === 0
+          ? `Descriptions refreshed: ${done}`
+          : `Descriptions refreshed: ${done}, ${figure} not described`,
+      stopped: (done: string, titles: string) => `Refresh stopped at ${done} of ${titles}`,
+      failed: 'Its descriptions could not be refreshed',
+      started: (name: string) => `${name}: its descriptions are read again, 30 a minute.`,
+      progress: (name: string) => `Refresh of ${name}`,
+    },
     removedLive: (name: string) => `${name} removed from the libraries.`,
+    dragHandle: (name: string) => `Drag ${name}`,
     availableTitle: 'Available catalogs',
     availableHelp: 'Adding a catalog shows it as a library, at the end of the list above.',
     filter: 'Filter',
@@ -41,14 +114,12 @@ const libraries = {
     notBrowsableHelp: 'Needs a search or another value, so it cannot be a library.',
     availableEmpty: 'Every catalog is already shown.',
     noMatch: 'No catalog matches this filter.',
-    reset: 'Reset',
     saved: 'Libraries saved.',
     guideAfterSave: 'Save the libraries to add a programme guide to this catalog.',
     guideFetched: 'Last fetched',
     guideNever: 'Not fetched yet.',
     loading: 'Loading libraries…',
     listLabel: 'Libraries, in the order apps show them',
-    columnCatalog: 'Catalog',
     shownEmptyTitle: 'No library yet',
     shownEmptyHow: 'Add catalogs from the list below: each one becomes a library.',
     noAddonsTitle: 'No catalog yet',
@@ -86,7 +157,6 @@ const libraries = {
           'An image you upload, or one Polyfin downloads once from an address. Wide 16:9 images fit library tiles best. JPEG, PNG or WebP, at most 10 MB.',
       },
       parental: 'Users under parental control or blocking genres do not see it.',
-      liveTv: 'Apps show it on the Live TV library tile.',
       notFound: {
         automatic: 'Nothing found in this catalog for now, so apps show no image.',
         generated:
@@ -113,15 +183,10 @@ const libraries = {
       close: (name: string) => `Close the image of ${name}`,
     },
     narrow: {
-      title: 'Genre and maximum',
-      edit: (name: string) => `Genre and maximum of ${name}`,
-      close: (name: string) => `Close the genre and maximum of ${name}`,
-      staged: 'Saved with the Save button, like the names.',
       genre: 'Genre',
       allGenres: 'All genres',
       genreHelp: 'Shows only the titles of this genre.',
       maxItems: 'Maximum titles',
-      noMax: 'No maximum',
       maxHelp: (max: string, where: string) =>
         `Shows at most this many titles in the library, and as many in each of its collections, in place of the catalog limit in ${where}. From 1 to ${max}. Empty: that limit applies.`,
       maxHelpMine: (max: string) =>
@@ -136,6 +201,8 @@ const libraries = {
     help: 'Lists made from rules over the titles of the server’s catalogs, such as “French movies of the 1990s not watched yet”. Every user sees them, within the libraries they may see.',
     helpMine:
       'Lists made from rules over the titles of your catalogs, and of the server’s while you use them. Only you see them.',
+    helpKept:
+      'Kept but not used: your Jellyfin apps don’t show them, and they can’t be changed until your own sources are used again. You can delete them.',
     add: 'Add a smart list',
     emptyTitle: 'No smart list yet',
     emptyHow:
@@ -169,12 +236,17 @@ const libraries = {
     serverBadge: 'Server',
     noCatalogs: 'No catalog to draw from yet: add a source first.',
     noCatalogMatch: 'No catalog matches this filter.',
+    catalogsGone:
+      'The catalogs this list drew from are gone, removed with their addons or dropped by them. Choose others: it lists nothing until then.',
     rules: 'Rules',
     rulesHelp: 'Without rules, the list keeps every title of its catalogs.',
+    exclude: 'Exclusions',
+    excludeHelp:
+      'Titles that match these rules are left out, whatever the rules above say. Without exclusions, none is.',
+    excludeMatch: 'Leave out titles that match',
     match: 'Titles match',
     matchChoices: { all: 'All of the rules', any: 'Any of the rules' },
     groupMatch: 'This group matches',
-    group: 'Group',
     addRule: 'Add a rule',
     addGroup: 'Add a group',
     removeRule: 'Remove this rule',
@@ -188,6 +260,13 @@ const libraries = {
       type: 'Movie or series',
       rank: 'Place in its catalog',
       state: 'Watch state',
+      released: 'Release date',
+      homeRelease: 'Home release',
+      votes: 'IMDb votes',
+      runtime: 'Runtime',
+      contentRating: 'Content rating',
+      person: 'Actor or director',
+      studio: 'Studio or network',
     } as Record<string, string>,
     negation: 'Matches or not',
     is: 'is',
@@ -197,6 +276,17 @@ const libraries = {
     to: 'To',
     language: 'Language',
     rankMax: 'Among its first',
+    minutes: 'minutes',
+    atMost: 'At most',
+    releasedWhen: 'When',
+    releasedWithin: { last: 'In the last', next: 'In the next' } as Record<string, string>,
+    homeReleaseWithin: {
+      released: 'Out in the last',
+      upcoming: 'Coming in the next',
+      both: 'Within',
+    } as Record<string, string>,
+    days: 'days',
+    namePlaceholder: { person: 'Their name', studio: 'Its name' } as Record<string, string>,
     types: { movie: 'A movie', series: 'A series' } as Record<string, string>,
     states: {
       played: 'Played',
@@ -206,26 +296,36 @@ const libraries = {
     } as Record<string, string>,
     stateHelp:
       'Played, started and favorite rules follow what each user did: everyone sees their own list.',
-    languageHelp:
-      'The language comes with a title’s description, which Polyfin reads in the background: a title not yet described is left out until it is.',
+    describedHelp:
+      'A title’s language, and its runtime, content rating, people and release date when its catalog does not give them, come with its description, which Polyfin reads in the background: a title not yet described is left out until it is. A title that lacks what a rule looks at matches neither the rule nor its opposite.',
+    votesHelp:
+      'IMDb votes come from MDBList, with the MDBList API key for ratings under Settings › Content, looked up in the background. Without that key, no title has votes.',
+    studioHelp:
+      'Studios and networks come from TMDB, with the TMDB API key under Settings › Content, looked up in the background and kept: the list grows as they come. Without that key, only the studios an administrator set in a title’s metadata count.',
+    homeReleaseHelp:
+      'A movie’s home release is its first digital or physical release, else 90 days after it came out in cinemas, as TMDB tells with the TMDB API key under Settings › Content, looked up in the background and kept: the list grows as they come. A series’ is its premiere date. With Wait for the digital release on, a movie not out yet is listed only by lists with a rule of upcoming titles.',
     sort: 'Sort',
     sorts: {
       catalog: 'As its catalogs list them, one of each in turn',
       premiere: 'Premiere date, latest first',
+      latestEpisode: 'Latest episode aired, latest first',
+      seasonPremiere: 'Latest season premiere, latest first',
       rating: 'IMDb rating, highest first',
       name: 'Name',
       random: 'At random, drawn again each day',
     } as Record<string, string>,
+    episodeSortHelp:
+      'Series come by their latest regular episode aired, or their latest season premiere, as their description tells, specials and episodes to come left out; movies by their premiere date. A series whose description is not read yet comes last until it is.',
     maxItems: 'Maximum titles',
     maxHelp: (max: string) => `From 1 to ${max}. Empty: no maximum.`,
-    noMax: 'No maximum',
     create: 'Create the list',
-    save: 'Save',
     created: 'Smart list created.',
     saved: 'Smart list saved.',
     delete: 'Delete',
     deleteTitle: (name: string) => `Delete ${name}?`,
     deleteBody: 'Jellyfin apps no longer show it. Its titles stay in their catalogs.',
+    deleteLabel: (name: string) => `Delete ${name}`,
+    deleteKeptBody: 'It won’t come back with your own sources. Its titles stay in their catalogs.',
     deleted: 'Smart list deleted.',
     preview: 'Preview',
     previewHelp:
@@ -235,8 +335,8 @@ const libraries = {
     firstOf: (shown: string, listed: string) => `The first ${shown} of ${listed}.`,
     unknown: (count: string) =>
       count === '1'
-        ? '1 title still waits for its description, which tells its language: the list grows as descriptions come.'
-        : `${count} titles still wait for their description, which tells their language: the list grows as descriptions come.`,
+        ? '1 title still waits for what its rules look at: its description, its votes or its studios. The list grows as they come.'
+        : `${count} titles still wait for what their rules look at: their description, their votes or their studios. The list grows as they come.`,
     incomplete:
       'Some catalogs had not answered in time: the list shows what was read so far, and reads the rest.',
     previewEmpty: 'No title matches these rules for now.',
@@ -250,6 +350,49 @@ const libraries = {
       genres: 'Genres',
       languages: 'Language',
     },
+  },
+  /** Episode orders: the order a series shows its seasons and episodes in, for every user. */
+  episodeOrders: {
+    title: 'Episode orders',
+    help: 'A series shows its seasons and episodes as its addon numbers them, as aired. Show one in another order from TMDB, such as DVD, absolute or story arc, for every user, as the Display order of jellyfin-web’s metadata editor does. Its episodes keep their own season and number for playback, watch history and tracking.',
+    loading: 'Loading episode orders…',
+    emptyTitle: 'Every series shows as aired',
+    emptyHow: 'Find a series below to show it in another order.',
+    search: 'Find a series',
+    searchPlaceholder: 'Series name',
+    searchButton: 'Search',
+    searching: 'Searching…',
+    results: 'Series found',
+    noSeries: 'No series matches this name.',
+    editTitle: (name: string) => `Episode order of ${name}`,
+    order: 'Order',
+    orderHelp:
+      'The episode groups TMDB gives this series. The parts of a group become its seasons.',
+    aired: 'As aired',
+    types: {
+      originalAirDate: 'Original air date',
+      absolute: 'Absolute',
+      dvd: 'DVD',
+      digital: 'Digital',
+      storyArc: 'Story arc',
+      production: 'Production',
+      tv: 'TV',
+    },
+    counts: (seasons: number, episodes: number) =>
+      `${seasons === 1 ? '1 season' : `${seasons} seasons`}, ${episodes === 1 ? '1 episode' : `${episodes} episodes`}`,
+    lookup: {
+      no_key: 'Add a TMDB key in Settings › Content to list this series’ orders.',
+      unknown: 'TMDB does not know this series: it shows as aired.',
+      failed: 'TMDB could not be reached to list this series’ orders. Try again in a moment.',
+    },
+    specials: 'Specials',
+    specialsHelp:
+      'Where season 0 shows among the seasons. Hidden specials still play from Continue Watching or a link.',
+    specialsFirst: 'First',
+    specialsLast: 'Last',
+    specialsHidden: 'Hidden',
+    specialsSummary: { last: 'Specials last', hidden: 'Specials hidden' },
+    saved: (name: string) => `${name}: episode order saved.`,
   },
 }
 

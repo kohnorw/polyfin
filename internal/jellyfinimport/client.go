@@ -2,16 +2,21 @@ package jellyfinimport
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
+	"maps"
 	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/moodiness/polyfin/internal/redirect"
+	"github.com/moodiness/polyfin/internal/stremio"
 )
 
 // The ways reading a server fails.
@@ -75,11 +80,14 @@ func ParseAddress(text string) (string, error) {
 
 // client reads one server with a key, one request at a time, spaced by the
 // service's gap: an API key of the server's dashboard, a user's own key,
-// the token of a session the client signed in, or Plex's owner's token.
+// the token of a session the client signed in, or a Plex account's token.
 type client struct {
 	s            *Service
 	kind         Kind
 	address, key string
+	// confined tells the client of an import a member started for
+	// themselves: each of its requests reaches public addresses only.
+	confined bool
 	// session tells that key is the token of a session the client signed
 	// in, which signOut ends.
 	session bool
@@ -98,7 +106,9 @@ func (c *client) get(ctx context.Context, path string, query url.Values, into an
 
 // send sends a request, a GET or a POST of body as JSON, and reads the
 // answer into into. It waits as long as the server asks when it answers
-// too many requests, and tries again after failures.
+// too many requests, and tries again after failures, but for a confined
+// request led to a local network address: that fails at once, with
+// stremio.ErrPrivateNetwork.
 func (c *client) send(ctx context.Context, method, path string, query url.Values, body []byte, into any) error {
 	failures, waits := 0, 0
 	for {
@@ -112,8 +122,12 @@ func (c *client) send(ctx context.Context, method, path string, query url.Values
 		}
 		var wait time.Duration
 		switch {
+		case errors.Is(err, stremio.ErrPrivateNetwork):
+			return stremio.ErrPrivateNetwork
 		case err == nil && status == http.StatusOK:
-			if json.Unmarshal(answer, into) != nil {
+			if err := json.Unmarshal(answer, into); err != nil {
+				// The path tells where, never the query or the key.
+				c.s.logger.Warn("An import could not read an answer", "kind", c.kind, "path", path, "error", err)
 				return ErrNotJellyfin
 			}
 			return nil
@@ -144,12 +158,14 @@ func (c *client) send(ctx context.Context, method, path string, query url.Values
 // do sends one request, a POST of body as JSON when there is one. The key
 // goes in the header the server reads keys from, never in the URL, which
 // errors would hold: Authorization for Jellyfin, X-Emby-Token for Emby, and
-// X-Plex-Token for Plex, which is also told Polyfin's device. Without a
-// key, the header names Polyfin as the app and device signing in, as
-// Jellyfin's and Emby's apps do: a server missing the device may sign the
-// user out of every other device.
+// X-Plex-Token for Plex, which is also told Polyfin's device. A redirect
+// to another host is sent none of them: Go's client keeps Authorization
+// from it, and redirect the other two. Without a key, the header names
+// Polyfin as the app and device signing in, as Jellyfin's and Emby's apps
+// do: a server missing the device may sign the user out of every other
+// device.
 func (c *client) do(ctx context.Context, method, path string, query url.Values, body []byte) (int, http.Header, []byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, c.s.timing.request)
+	ctx, cancel := context.WithTimeout(redirect.SecretHeaders(ctx, "X-Emby-Token", "X-Plex-Token"), c.s.timing.request)
 	defer cancel()
 	target := c.address + path
 	if len(query) > 0 {
@@ -186,7 +202,11 @@ func (c *client) do(ctx context.Context, method, path string, query url.Values, 
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	response, err := c.s.client.Do(request)
+	sender := c.s.client
+	if c.confined {
+		sender = c.s.confined
+	}
+	response, err := sender.Do(request)
 	if err != nil {
 		return 0, nil, nil, err
 	}
@@ -212,7 +232,8 @@ func (c *client) signIn(ctx context.Context, name, password string) (string, err
 		}
 		AccessToken string
 	}
-	err = c.send(ctx, http.MethodPost, "/Users/AuthenticateByName", nil, body, &signed)
+	// The password goes to no other host a 307 or 308 names.
+	err = c.send(redirect.SecretBody(ctx), http.MethodPost, "/Users/AuthenticateByName", nil, body, &signed)
 	switch {
 	case errors.Is(err, ErrKeyRefused):
 		return "", ErrSignInRefused
@@ -281,6 +302,18 @@ type Server struct {
 	// that user's watch data only: some servers answer it with that user's
 	// data whatever user is asked.
 	KeyOwner string
+	// MachineID is a Plex server's machine identifier, which plex.tv names
+	// it by among an account's servers; empty for other kinds. ID is a
+	// Jellyfin or Emby server's own identifier; empty for Plex.
+	MachineID string
+	ID        string
+}
+
+// source names the server among those imports read, as the collections
+// and playlists brought from it remember it: its kind and its own
+// identifier.
+func (s Server) source() string {
+	return string(s.Kind) + ":" + cmp.Or(s.MachineID, s.ID)
 }
 
 // User is a user of a server.
@@ -377,7 +410,7 @@ func (c *client) open(ctx context.Context, credentials Credentials) (Server, err
 	if err != nil {
 		return Server{}, err
 	}
-	server := Server{Kind: c.kind, Name: info.ServerName, Version: info.Version, Address: c.address}
+	server := Server{Kind: c.kind, Name: info.ServerName, Version: info.Version, Address: c.address, ID: info.ID}
 	// A password goes only to a server that answered as the kind asked
 	// does.
 	if credentials.Name == "" {
@@ -462,10 +495,11 @@ func (c *client) embyKey(ctx context.Context) error {
 	return ErrUserKey
 }
 
-// date reads a date as Jellyfin writes them, nil when there is none.
-// Jellyfin writes a missing date as the zero year.
+// date reads a date as Jellyfin writes them, or a day as Plex writes
+// them, nil when there is none. Jellyfin writes a missing date as the
+// zero year.
 func date(text string) *time.Time {
-	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05"} {
+	for _, layout := range []string{time.RFC3339, "2006-01-02T15:04:05", time.DateOnly} {
 		if t, err := time.Parse(layout, text); err == nil {
 			if t.Year() <= 1 {
 				return nil
@@ -492,14 +526,32 @@ type itemJSON struct {
 	IndexNumber       *int
 	IndexNumberEnd    *int
 	RunTimeTicks      int64
-	UserData          struct {
+	// PremiereDate is the day an episode aired, as the server keeps it:
+	// for Jellyfin, midnight where the server is, in UTC. DisplayOrder is
+	// the order a series is shown in, empty or Aired as aired.
+	PremiereDate string
+	DisplayOrder string
+	// MediaType is a playlist's: Audio for music, Video for movies and
+	// episodes.
+	MediaType string
+	UserData  struct {
 		Played                bool
 		PlayCount             int
 		PlaybackPositionTicks int64
 		PlayedPercentage      float64
 		IsFavorite            bool
 		LastPlayedDate        string
+		// Rating is the user's, from 0 to 10; Likes, which Jellyfin
+		// derives from it, a thumb up or down, which Emby may keep
+		// without a rating.
+		Rating *float64
+		Likes  *bool
 	}
+	// unmatchable is why an item cannot be matched whatever its
+	// identifiers, when it cannot (see plexLibrary.item); rating is the
+	// user's, from 0 to 10, for an item of the ratings read.
+	unmatchable string
+	rating      *float64
 }
 
 type pageJSON struct {
@@ -508,47 +560,86 @@ type pageJSON struct {
 }
 
 // items reads, page by page, the items of user that types and filter
-// select, handing each to found. Emby leaves the play count and the date
-// last played out of a list's user data unless its fields name them.
+// select, handing each to found; an empty filter selects every item of
+// types. Emby leaves the play count and the date last played out of a
+// list's user data unless its fields name them.
 func (c *client) items(ctx context.Context, user, types, filter string, found func(itemJSON)) error {
-	path := "/Users/" + url.PathEscape(user) + "/Items"
 	fields := "ProviderIds"
 	if c.kind == Emby {
 		fields += ",UserDataPlayCount,UserDataLastPlayedDate"
 	}
+	query := url.Values{
+		"Recursive":        {"true"},
+		"IncludeItemTypes": {types},
+		"Fields":           {fields},
+		"EnableUserData":   {"true"},
+		"SortBy":           {"SortName"},
+		"SortOrder":        {"Ascending"},
+	}
+	if filter != "" {
+		query.Set("Filters", filter)
+	}
+	return c.pages(ctx, "/Users/"+url.PathEscape(user)+"/Items", query, found)
+}
+
+// pages reads, page by page, the items of the list at path with query,
+// without their images, handing each to found.
+func (c *client) pages(ctx context.Context, path string, query url.Values, found func(itemJSON)) error {
 	for start := 0; ; {
-		query := url.Values{
-			"Recursive":              {"true"},
-			"IncludeItemTypes":       {types},
-			"Filters":                {filter},
-			"Fields":                 {fields},
-			"EnableUserData":         {"true"},
-			"EnableImages":           {"false"},
-			"EnableTotalRecordCount": {"true"},
-			"SortBy":                 {"SortName"},
-			"SortOrder":              {"Ascending"},
-			"StartIndex":             {strconv.Itoa(start)},
-			"Limit":                  {strconv.Itoa(c.s.timing.pageSize)},
-		}
-		var page pageJSON
-		if err := c.get(ctx, path, query, &page); err != nil {
+		page := maps.Clone(query)
+		page.Set("EnableImages", "false")
+		page.Set("EnableTotalRecordCount", "true")
+		page.Set("StartIndex", strconv.Itoa(start))
+		page.Set("Limit", strconv.Itoa(c.s.timing.pageSize))
+		var list pageJSON
+		if err := c.get(ctx, path, page, &list); err != nil {
 			return err
 		}
-		for _, item := range page.Items {
+		for _, item := range list.Items {
 			found(item)
 		}
-		start += len(page.Items)
-		if len(page.Items) == 0 || start >= page.TotalRecordCount {
+		start += len(list.Items)
+		if len(list.Items) == 0 || start >= list.TotalRecordCount {
 			return nil
 		}
 	}
 }
 
-// providers reads the identifiers of the items ids name, as user sees
-// them: the series of episodes, whose own identifiers are the episodes'.
-func (c *client) providers(ctx context.Context, user string, ids []string) (map[string]map[string]string, error) {
+// The types of the items a collection or a playlist brings: Polyfin's
+// collections hold movies, series and episodes, and its playlists movies
+// and episodes.
+const (
+	collectionTypes = "Movie,Series,Episode"
+	playlistTypes   = "Movie,Episode"
+)
+
+// collection reads the titles of the collection id, a BoxSet, as user
+// sees them, in the collection's order.
+func (c *client) collection(ctx context.Context, user, id string, found func(itemJSON)) error {
+	return c.pages(ctx, "/Users/"+url.PathEscape(user)+"/Items", url.Values{
+		"ParentId":         {id},
+		"IncludeItemTypes": {collectionTypes},
+		"Fields":           {"ProviderIds"},
+		"EnableUserData":   {"false"},
+	}, found)
+}
+
+// playlist reads the entries of the playlist id, as user sees them, in the
+// playlist's order.
+func (c *client) playlist(ctx context.Context, user, id string, found func(itemJSON)) error {
+	return c.pages(ctx, "/Playlists/"+url.PathEscape(id)+"/Items", url.Values{
+		"UserId":         {user},
+		"Fields":         {"ProviderIds"},
+		"EnableUserData": {"false"},
+	}, found)
+}
+
+// providers reads the items ids name, as user sees them, with their
+// identifiers: the series of episodes, whose own identifiers are the
+// episodes', and whose DisplayOrder Jellyfin and Emby give with them.
+func (c *client) providers(ctx context.Context, user string, ids []string) (map[string]itemJSON, error) {
 	path := "/Users/" + url.PathEscape(user) + "/Items"
-	result := make(map[string]map[string]string, len(ids))
+	result := make(map[string]itemJSON, len(ids))
 	for start := 0; start < len(ids); start += idsPerRequest {
 		batch := ids[start:min(start+idsPerRequest, len(ids))]
 		query := url.Values{
@@ -562,10 +653,27 @@ func (c *client) providers(ctx context.Context, user string, ids []string) (map[
 			return nil, err
 		}
 		for _, item := range page.Items {
-			result[item.ID] = item.ProviderIDs
+			result[item.ID] = item
 		}
 	}
 	return result, nil
+}
+
+// episodesOf reads the episodes the server holds of the series id, as
+// user sees them, with their identifiers and the day they aired, handing
+// each to found. Emby gives that day when its fields name it.
+func (c *client) episodesOf(ctx context.Context, user, id string, found func(itemJSON)) error {
+	fields := "ProviderIds"
+	if c.kind == Emby {
+		fields += ",PremiereDate"
+	}
+	return c.pages(ctx, "/Users/"+url.PathEscape(user)+"/Items", url.Values{
+		"ParentId":         {id},
+		"Recursive":        {"true"},
+		"IncludeItemTypes": {"Episode"},
+		"Fields":           {fields},
+		"EnableUserData":   {"false"},
+	}, found)
 }
 
 // idsPerRequest bounds the items a request names, which keeps its URL

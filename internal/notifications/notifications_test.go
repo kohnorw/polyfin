@@ -7,6 +7,7 @@ import (
 	"html"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"slices"
@@ -159,10 +160,31 @@ func (l *fakeLibrary) set(series accounts.ID, episodes ...library.Item) {
 	l.episodes[series] = episodes
 }
 
-// fakeUserData tells which series users played and marked favorite.
+// fakeUserData tells which series users played, marked favorite and
+// dropped on a tracking service.
 type fakeUserData struct {
 	mu                  sync.Mutex
 	episodes, favorites map[accounts.ID][]userdata.Entry
+	dropped             map[accounts.ID]map[accounts.ID]bool
+}
+
+func (u *fakeUserData) DroppedSeries(_ context.Context, user accounts.ID) (map[accounts.ID]bool, error) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return maps.Clone(u.dropped[user]), nil
+}
+
+// drop records that user dropped series on a tracking service.
+func (u *fakeUserData) drop(user, series accounts.ID) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.dropped == nil {
+		u.dropped = map[accounts.ID]map[accounts.ID]bool{}
+	}
+	if u.dropped[user] == nil {
+		u.dropped[user] = map[accounts.ID]bool{}
+	}
+	u.dropped[user][series] = true
 }
 
 func (u *fakeUserData) Episodes(_ context.Context, user accounts.ID) ([]userdata.Entry, error) {
@@ -245,6 +267,10 @@ func newHarness(t *testing.T) harness {
 	if h.member, err = store.CreateUser(t.Context(), accounts.NewUser{Name: "member", Password: "correct horse"}); err != nil {
 		t.Fatal(err)
 	}
+	// Live TV is opt-in in this fork.
+	if h.member, err = store.UpdateUser(t.Context(), h.member.ID, accounts.UserChanges{LiveTv: new(true)}, nil); err != nil {
+		t.Fatal(err)
+	}
 	h.Service = New(Options{DB: pool, Accounts: store, Library: h.library, UserData: h.userData, Secrets: box, Version: "1.2.3",
 		ServerID: "fedcba9876543210fedcba9876543210", WebClient: true, Logger: slog.New(slog.NewTextHandler(h.log, nil)),
 		Problems: func(context.Context) ([]Problem, error) { return slices.Clone(*h.problems), nil }})
@@ -314,6 +340,7 @@ func types(requests []received) []string {
 // publication to its server with its topic, its tags, its access token and
 // the address a click opens.
 func TestTargetsReceiveTheirFormat(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	settings := h.store.Settings()
 	settings.PublicAddress, settings.ServerName = "https://media.example.org", "Home"
@@ -406,6 +433,7 @@ func (h harness) chatServices(t *testing.T, events ...string) (telegram, gotify,
 // event and the address a click opens. A new Pushover token keeps the
 // user key.
 func TestChatServicesReceiveTheirFormat(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	settings := h.store.Settings()
 	settings.PublicAddress = "https://media.example.org"
@@ -467,9 +495,12 @@ func TestChatServicesReceiveTheirFormat(t *testing.T) {
 // refused. A message they ask to wait for is sent again once the wait is
 // over, as long as Telegram asks in its answer.
 func TestChatServicesRefusingAndRateLimiting(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	// Long enough for Telegram's wait below, short enough to wait for.
 	h.timing.giveUp = 3 * time.Second
+	// A target is tested several times in a row.
+	h.timing.testEvery = 0
 	telegram, gotify, pushover := h.chatServices(t, RecordingFinished)
 	for _, refusal := range []struct {
 		target  Target
@@ -515,6 +546,7 @@ func TestChatServicesRefusingAndRateLimiting(t *testing.T) {
 // in the database, never shown, and never logged, even when Telegram's
 // address, which holds the bot's token, cannot be reached.
 func TestChatServiceTokensAreSealedNeverShownNorLogged(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.chatServices(t, RecordingFinished)
 	h.Service.telegramAPI = "http://127.0.0.1:1"
@@ -562,6 +594,7 @@ func TestChatServiceTokensAreSealedNeverShownNorLogged(t *testing.T) {
 // targets are never told, and the server's are told once per episode,
 // however many users follow its series.
 func TestNewEpisodesAreToldOncePerEpisodeOfFollowedSeries(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.add(t, &h.member, h.webhook("/member", NewEpisode))
 	h.add(t, &h.admin, h.webhook("/admin", NewEpisode))
@@ -632,9 +665,50 @@ func TestNewEpisodesAreToldOncePerEpisodeOfFollowedSeries(t *testing.T) {
 	}
 }
 
+// A series the user dropped on a tracking service is not followed, played
+// or favorite: its new episodes are not told to them, while another user
+// following it still hears of them.
+func TestNewEpisodesOfDroppedSeriesAreNotTold(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.add(t, &h.member, h.webhook("/member", NewEpisode))
+	h.add(t, &h.admin, h.webhook("/admin", NewEpisode))
+
+	kept, played, favorite := accounts.ID{1}, accounts.ID{2}, accounts.ID{3}
+	h.userData.played(h.member.ID, kept)
+	h.userData.played(h.member.ID, played)
+	h.userData.favorite(h.member.ID, favorite)
+	h.userData.drop(h.member.ID, played)
+	h.userData.drop(h.member.ID, favorite)
+	h.userData.played(h.admin.ID, played)
+	now := time.Now()
+	episode := func(series accounts.ID, number int, released time.Duration) library.Item {
+		date := now.Add(released)
+		return library.Item{ID: accounts.ID{series[0], byte(number)}, Kind: library.KindEpisode, Name: "Episode " + string(rune('A'+number)),
+			SeriesID: series, SeriesName: "Series " + string(rune('0'+series[0])), ParentIndexNumber: 1, IndexNumber: number, PremiereDate: &date, Available: true}
+	}
+	for _, series := range []accounts.ID{kept, played, favorite} {
+		h.library.set(series, episode(series, 1, -48*time.Hour))
+	}
+	h.CheckEpisodes(t.Context())
+	h.idle(t)
+	for _, series := range []accounts.ID{kept, played, favorite} {
+		h.library.set(series, episode(series, 1, -48*time.Hour), episode(series, 2, -time.Minute))
+	}
+	h.CheckEpisodes(t.Context())
+	h.idle(t)
+	if got := h.targets.at("/member"); len(got) != 1 || got[0].body["title"] != "New episode of Series 1" {
+		t.Errorf("member's target: %v, want the kept series' episode only", types(got))
+	}
+	if got := h.targets.at("/admin"); len(got) != 1 || got[0].body["title"] != "New episode of Series 2" {
+		t.Errorf("admin's target: %v, want the episode of the series they follow", types(got))
+	}
+}
+
 // A recording that ended is told to the targets of the user who made it
 // and to the server's, finished or failed, never to another user's.
 func TestRecordingsEndedReachTheirOwnerAndTheServer(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	events := []string{RecordingFinished, RecordingFailed}
 	h.add(t, &h.member, h.webhook("/member", events...))
@@ -667,6 +741,7 @@ func TestRecordingsEndedReachTheirOwnerAndTheServer(t *testing.T) {
 // restart neither tells a problem again nor forgets it, nor the page that
 // shows it, which both messages open.
 func TestHealthProblemsFoundAndSolved(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	settings := h.store.Settings()
 	settings.PublicAddress = "https://media.example.org"
@@ -746,10 +821,50 @@ func TestHealthProblemsFoundAndSolved(t *testing.T) {
 	}
 }
 
+// The problem of a source removed is not told solved: the removal deletes
+// its record (see library's leftovers.go), which the checks then forget,
+// in the middle of confirming it gone as at its end.
+func TestHealthProblemsOfARemovedSourceAreNotToldSolved(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	h.add(t, nil, h.webhook("/server", HealthProblem, HealthSolved))
+	addon := Problem{Key: "addon:0123456789abcdef0123456789abcdef", Severity: SeverityWarning, Text: "Addon: could not be reached"}
+	folder := Problem{Key: "folder:fedcba9876543210fedcba9876543210", Severity: SeverityError, Text: "Folder: missing"}
+	check := func(problems ...Problem) {
+		*h.problems = problems
+		h.CheckHealth(t.Context())
+		h.idle(t)
+	}
+	check(addon, folder)
+	check(addon, folder)
+	h.targets.wait(t, "/server", 2)
+	// The folder is removed between two checks without it, the addon
+	// before them.
+	if _, err := h.db.Exec(t.Context(), "DELETE FROM notification_health WHERE key = $1", addon.Key); err != nil {
+		t.Fatal(err)
+	}
+	check()
+	if _, err := h.db.Exec(t.Context(), "DELETE FROM notification_health WHERE key = $1", folder.Key); err != nil {
+		t.Fatal(err)
+	}
+	check()
+	check()
+	time.Sleep(50 * time.Millisecond)
+	if got := types(h.targets.at("/server")); len(got) != 2 || slices.Contains(got, "health_solved "+addon.Key) ||
+		slices.Contains(got, "health_solved "+folder.Key) {
+		t.Errorf("messages: %v", got)
+	}
+	var left int
+	if err := h.db.QueryRow(t.Context(), "SELECT count(*) FROM notification_health").Scan(&left); err != nil || left != 0 {
+		t.Errorf("%d records left: %v", left, err)
+	}
+}
+
 // A user who joined through an invite is told to the server's targets and
 // to administrators' own, naming who created the invite; a member may not
 // choose the event, and a user no longer an administrator stops hearing it.
 func TestUsersJoiningAreToldToAdministrators(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.add(t, nil, h.webhook("/server", UserJoined))
 	h.add(t, &h.admin, h.webhook("/admin", UserJoined))
@@ -792,6 +907,7 @@ func TestUsersJoiningAreToldToAdministrators(t *testing.T) {
 // A new version of Polyfin is told to the server's targets and to
 // administrators' own, with its release notes; members cannot choose it.
 func TestNewVersionsAreToldToAdministrators(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.add(t, nil, h.webhook("/server", NewVersion))
 	h.add(t, &h.admin, h.webhook("/admin", NewVersion))
@@ -829,6 +945,7 @@ func (h harness) problems2() func(context.Context) ([]Problem, error) {
 // as long as a target asks with Retry-After, and is given up after a
 // while: the target then shows as unreachable.
 func TestDeliveryRetriesWaitsAndGivesUp(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	// Long enough for the Retry-After below, short enough to wait for.
 	h.timing.giveUp = 2 * time.Second
@@ -879,7 +996,10 @@ func TestDeliveryRetriesWaitsAndGivesUp(t *testing.T) {
 // status, and the message is not tried again; "Send a test" tells the
 // same, and a delivered message clears it.
 func TestRefusingTargetsAreMarkedFailing(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
+	// The target is tested twice in a row.
+	h.timing.testEvery = 0
 	target := h.add(t, nil, h.webhook("/gone", RecordingFinished))
 	h.targets.then("/gone", status(http.StatusNotFound))
 	h.RecordingEnded(t.Context(), recordings.Ended{Recording: accounts.ID{1}, User: &h.member.ID, Name: "Show"})
@@ -916,7 +1036,14 @@ func TestRefusingTargetsAreMarkedFailing(t *testing.T) {
 // shown but for the address's host, and never logged, whatever happens
 // to the messages sent with them.
 func TestSecretsAreSealedNeverShownNorLogged(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
+	// The clock stands still: the message answered 429 is tried again
+	// however long its first try took on a loaded machine, rather than
+	// given up once a second passed (TestDeliveryRetriesWaitsAndGivesUp
+	// tells when a message is given up).
+	now := time.Now()
+	h.now = func() time.Time { return now }
 	discordPath := "/api/webhooks/123/very-secret-webhook-token"
 	h.add(t, nil, Draft{Kind: Discord, Name: new("Channel"), Address: new(h.targets.url + discordPath), Events: []string{RecordingFinished}})
 	h.add(t, &h.admin, Draft{Kind: Ntfy, Name: new("Phone"), Address: new(h.targets.url + "/ntfy"), Topic: new("topic"),
@@ -965,6 +1092,7 @@ func TestSecretsAreSealedNeverShownNorLogged(t *testing.T) {
 // network is refused when added, unlike an administrator's, and messages
 // to one whose address now points there do not reach it.
 func TestMembersTargetsStayOnPublicAddresses(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	moved := h.add(t, &h.member, h.webhook("/moved", RecordingFinished))
 	h.checkPublic, h.confined = stremio.CheckPublic, stremio.HTTPClient(true)

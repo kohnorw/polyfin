@@ -15,6 +15,7 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/database"
+	"github.com/moodiness/polyfin/internal/playback"
 	"github.com/moodiness/polyfin/internal/secrets"
 	"github.com/moodiness/polyfin/internal/testdb"
 	"github.com/moodiness/polyfin/internal/testdb/migrated"
@@ -42,7 +43,7 @@ func newRestoring(t *testing.T) *restoring {
 	// The restore empties the database it is given: the test's own copy.
 	r.service = New(Config{Folder: func() string { return r.dir }, DatabaseURL: testdb.CopyURL(t, pool), PgDump: pgDump,
 		PgRestore: pgRestore, DB: pool, Secrets: newBox(t, testKey),
-		Settings: func() accounts.Settings { return accounts.Settings{BackupHour: 4, BackupsKept: 7} },
+		Settings: func() accounts.Settings { return accounts.Settings{BackupsKept: 7} },
 		Logger:   slog.New(slog.NewTextHandler(r.logs, nil))})
 	return r
 }
@@ -89,11 +90,15 @@ func (r *restoring) count(t *testing.T, query string, args ...any) int {
 
 // A restore of a backup of the folder brings the database back as it was
 // when the backup was made: the users and devices added since are gone, so
-// apps signed in since must sign in again, and the server's secret, which
-// signs stream links, is the backup's. The database is backed up first,
-// as a before-restore backup that retention keeps; the restore is
-// recorded in the restored database, with the administrator who asked.
+// apps signed in since must sign in again. The server's secret, which
+// signs stream links, is the one thing it does not bring back: the
+// restored server gets a new one, and refuses what the backup's signs.
+// The database is backed up first, as a before-restore backup that
+// retention keeps; the restore is recorded in the restored database, with
+// the administrator who asked.
 func TestARestoreBringsTheDatabaseBackAsItWas(t *testing.T) {
+	t.Parallel()
+	testdb.LockRestores(t)
 	r := newRestoring(t)
 	ctx := t.Context()
 	store, err := accounts.Open(ctx, r.pool)
@@ -150,8 +155,13 @@ func TestARestoreBringsTheDatabaseBackAsItWas(t *testing.T) {
 	if _, user, err := reopened.DeviceByToken(ctx, before, "127.0.0.1"); err != nil || user.Name != "alice" {
 		t.Errorf("a device signed in before the backup: %+v %v", user, err)
 	}
-	if restored, _ := database.Secret(ctx, r.pool); !bytes.Equal(restored, secret) {
-		t.Error("the server's secret is not the backup's")
+	restored, err := database.Secret(ctx, r.pool)
+	if err != nil || len(restored) != 32 || bytes.Equal(restored, secret) {
+		t.Errorf("the server's secret after the restore: %d bytes (%v), the backup's: %v", len(restored), err, bytes.Equal(restored, secret))
+	}
+	signed := playback.NewSigner(secret).Sign(playback.Grant{User: alice.ID})
+	if _, err := playback.NewSigner(restored).Verify(signed); !errors.Is(err, playback.ErrInvalidGrant) {
+		t.Errorf("a grant signed with the backup's secret: %v", err)
 	}
 	last, err := r.service.LastRestore(ctx)
 	if err != nil || last == nil || last.File != name || last.Administrator != "root" || last.Error != "" {
@@ -173,7 +183,7 @@ func TestARestoreBringsTheDatabaseBackAsItWas(t *testing.T) {
 	// database's own record, which predates the backup restored.
 	status, err := r.service.Status(ctx)
 	if err != nil || status.File != beforeRestore || status.Error != "" || status.Size != info.Size() || status.MadeAt == nil ||
-		!status.MadeAt.Equal(at.Add(time.Hour)) || status.Problem(at.Add(2*time.Hour)) {
+		!status.MadeAt.Equal(at.Add(time.Hour)) || status.Problem(at.Add(2*time.Hour), MinStaleAfter) {
 		t.Errorf("status after the restore: %+v %v", status, err)
 	}
 	if deleted, err := prune(r.dir, 1); err != nil || len(deleted) != 0 {
@@ -190,11 +200,16 @@ func TestARestoreBringsTheDatabaseBackAsItWas(t *testing.T) {
 // what was stored in it since, is gone, then made again empty. An uploaded
 // backup restores the same way.
 func TestARestoreOfAnOlderBackupIsMigrated(t *testing.T) {
+	t.Parallel()
+	testdb.LockRestores(t)
 	r := newRestoring(t)
 	ctx := t.Context()
-	// The schema before the destinations: the newest migration undone.
+	// The schema before the destinations: their migrations undone, the
+	// one that added the host key offered included.
+	// 0239 is recorded as Polyfin 0.72.0 shipped it, since superseded.
 	if _, err := r.pool.Exec(ctx, `DROP TABLE backup_destinations, backup_restore;
-		DELETE FROM schema_migrations WHERE name = 'backup_destinations'`); err != nil {
+		DELETE FROM schema_migrations WHERE name IN ('backup_destinations', 'backup_offered_key');
+		UPDATE schema_migrations SET checksum = '31eea78c9bad0c4fa99bd34e4b3b4a8a2119deb606af69b1bfff92fb8912054b' WHERE version = 239`); err != nil {
 		t.Fatal(err)
 	}
 	old := r.backUp(t, time.Date(2026, 10, 1, 4, 0, 0, 0, time.Local))
@@ -231,6 +246,9 @@ func TestARestoreOfAnOlderBackupIsMigrated(t *testing.T) {
 	if n := r.count(t, "SELECT count(*) FROM schema_migrations WHERE name = 'backup_destinations'"); n != 1 {
 		t.Error("the restored database was not migrated")
 	}
+	if n := r.count(t, "SELECT count(*) FROM schema_migrations WHERE checksum = '31eea78c9bad0c4fa99bd34e4b3b4a8a2119deb606af69b1bfff92fb8912054b'"); n != 0 {
+		t.Error("0239 kept the checksum Polyfin 0.72.0 shipped it with")
+	}
 	for _, entry := range fileNames(t, r.dir) {
 		if restoreTemporary.MatchString(entry) {
 			t.Errorf("the download is left: %s", entry)
@@ -257,6 +275,7 @@ func TestARestoreOfAnOlderBackupIsMigrated(t *testing.T) {
 // A backup made by a newer Polyfin, or whose migrations differ, or a file
 // that is no backup of Polyfin, is refused before anything changes.
 func TestBackupsThisPolyfinCannotRestoreAreRefused(t *testing.T) {
+	t.Parallel()
 	r := newRestoring(t)
 	ctx := t.Context()
 	if _, err := r.pool.Exec(ctx, "INSERT INTO schema_migrations (version, name, checksum) VALUES (9999, 'from_the_future', 'x')"); err != nil {
@@ -296,6 +315,8 @@ func TestBackupsThisPolyfinCannotRestoreAreRefused(t *testing.T) {
 // decrypt is flagged with their counts by kind, before anything changes;
 // it is restored only when asked anyway.
 func TestABackupMadeWithAnotherKeyIsFlagged(t *testing.T) {
+	t.Parallel()
+	testdb.LockRestores(t)
 	r := newRestoring(t)
 	ctx := t.Context()
 	other := newBox(t, []byte("fedcba9876543210fedcba9876543210"))
@@ -343,6 +364,8 @@ func TestABackupMadeWithAnotherKeyIsFlagged(t *testing.T) {
 // A restore that fails part way leaves the database as it was, and
 // records why.
 func TestAFailedRestoreLeavesTheDatabaseAsItWas(t *testing.T) {
+	t.Parallel()
+	testdb.LockRestores(t)
 	r := newRestoring(t)
 	ctx := t.Context()
 	name := r.backUp(t, time.Date(2026, 10, 1, 4, 0, 0, 0, time.Local))
@@ -381,6 +404,7 @@ func TestAFailedRestoreLeavesTheDatabaseAsItWas(t *testing.T) {
 // The script pg_restore writes is read as COPY's text format writes
 // values.
 func TestCopyValues(t *testing.T) {
+	t.Parallel()
 	for field, want := range map[string]string{
 		`plain`: "plain", `a\tb\nc\\d`: "a\tb\nc\\d", `\101\x42\r`: "AB\r", `\x`: "x", `end\`: `end\`,
 	} {

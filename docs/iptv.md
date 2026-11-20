@@ -1,70 +1,125 @@
 # IPTV sources
 
-This page explains how to import an M3U playlist or an Xtream Codes account directly, without a Stremio addon, how to watch and record the channels of an HDHomeRun tuner on the local network, and how to shape their channels, movies and series. For the programme guide, recordings and how channels play, see [Live TV](live-tv.md).
+This page is for administrators, and for users who add their own sources. It shows how to import an M3U playlist or an Xtream Codes account directly, without a Stremio addon. It then covers how to shape the source's channels.
+
+- HDHomeRun tuners have their own page: [HDHomeRun tuners](hdhomerun.md).
+- Request headers, user agents and DASH channels have theirs: [IPTV stream headers and encryption](iptv-streams.md).
+- Past programmes and imported titles have theirs too: [Replay](iptv-replay.md) and [IPTV movies and series](iptv-movies-and-series.md).
+- For the programme guide, recordings and how channels play, see [Live TV](live-tv.md).
 
 ## Adding a source
 
-Use **Add a source** and its **IPTV source** tab, under **Content › Sources** for the server or **My sources** for a user's own. Sources follow the same rules as addons (see [Addons and libraries](addons-and-libraries.md)):
+Open **Add a source**, then choose **IPTV source** under **Kind of source**. It is in **Content › Sources** for the server's sources, and in **My sources** for your own.
 
-- A user's own sources follow **Allow users' own addons** and the user's **Can add their own addons** (see [Users](users.md)).
-- Only an administrator's source may reach a local network address.
+Adding a source takes two steps: the **Account**, then **What to import** and its categories.
 
-Adding a source takes two steps in the admin app: the **Account**, then **What to import** and its categories.
+Sources follow the same rules as addons (see [Addons and libraries](addons-and-libraries.md)):
+
+- A user may add their own sources only with **Allow users' own addons** on, the user's **Can add their own addons**, and no parental control or blocked genres (see [Users' own addons](sign-in-and-security.md#users-own-addons)).
+- Only an administrator's source may be on a local network address, or read a file of the server (see [Lists and guides that are files of the server](#lists-and-guides-that-are-files-of-the-server)).
+- A source on a public address reaches public addresses only, for its list and for the streams and logos the list names. To let a source name addresses of the local network, add it by its local address (see [What an addon may reach](addons.md#what-an-addon-may-reach)).
 
 ### M3U playlists
 
-An **M3U playlist** source takes a **Name**, the **Playlist address** and, optionally, a **Programme guide address (XMLTV, optional)**.
+An **M3U playlist** source takes these fields:
 
-- A playlist's `#EXTINF` lines give each channel its `tvg-id`, `tvg-name`, `tvg-logo`, `tvg-chno` and `group-title` (quoted with double or single quotes, or not), and its name after the comma.
-- Its `#EXTVLCOPT` `http-user-agent` and `http-referrer` lines give the headers its stream is requested with.
+| Field | Required | What it takes |
+|---|---|---|
+| **Name** | Yes | The source's name |
+| **Playlist address** | Yes | The list's address. Administrators see **Playlist address or file**, which also takes a file of the server. |
+| **User agent (optional)** | No | See [Headers and user agent](iptv-streams.md#headers-and-user-agent) |
+| **Programme guide address (XMLTV, optional)** | No | An XMLTV guide. Administrators see **Programme guide address or file (XMLTV, optional)**. |
+
+Polyfin reads these lines of the list:
+
+| Line | What it gives |
+|---|---|
+| `#EXTINF` | The channel's `tvg-id`, `tvg-name`, `tvg-logo`, `tvg-chno` and `group-title`, and its name after the comma |
+| `channel-number` or `tvg-channel-no` on `#EXTINF` | The channel's number, when the line has no `tvg-chno` |
+| Header attributes of `#EXTINF`, `#EXTVLCOPT` and `#EXTHTTP` lines, and the end of an address after a `\|` | The headers its stream is requested with (see [Headers and user agent](iptv-streams.md#headers-and-user-agent)) |
+| `#KODIPROP` | A DASH stream's manifest type, and how it is encrypted (see [DASH channels and encryption](iptv-streams.md#dash-channels-and-encryption)) |
+
+- Attribute values may be quoted with double quotes, single quotes or none.
 - A byte order mark, CRLF line ends and `#EXTGRP` lines are accepted.
+- A decimal number, such as `104.5`, shows as written in apps. The channel sorts after 104 and before 105.
+- An Xtream account's decimal `num` works the same way.
+- A `tvg-logo` must be a picture, such as a PNG or a JPEG. A logo given as SVG is not shown (see [Artwork](artwork-and-editing.md#artwork)).
+
+**Compared with Jellyfin**
+
+- Polyfin keeps a decimal channel number, as Jellyfin does ([M3uParser.cs](https://github.com/jellyfin/jellyfin/blob/v12.4/src/Jellyfin.LiveTv/TunerHosts/M3uParser.cs#L170-L181)).
+
+### Lists and guides that are files of the server
+
+An administrator may give an M3U list or an XMLTV guide as a file of the server, instead of an address. Write it in one of these forms:
+
+- an absolute path, such as `/iptv/custom.m3u`, or `C:\IPTV\custom.m3u` with Polyfin Desktop on Windows;
+- a `file://` address, such as `file:///iptv/custom.m3u`.
+
+Polyfin reads the file as it reads a list or a guide from an address. Parsing, categories, headers and guide matching are the same.
+
+| Case | What happens |
+|---|---|
+| No file at the path, a folder, or a file Polyfin may not read | Refused when the source or the guide is added, with the reason |
+| A relative path | Refused. Give the whole path. |
+| The file changed | Read again within 5 minutes. Polyfin checks its modification time every 5 minutes. |
+| The file was modified with a date older than its last read | Read again at the next refresh |
+| The file is gone, or Polyfin can no longer read it | Shown within 5 minutes on the source's row, its page and **System › Health**. The channels or programmes stay. |
+
+- The file is also read again at each refresh (see [Refreshing](#refreshing)).
+- A file that cannot be read is tried again as a failed download is (see [When guides are fetched](live-tv.md#when-guides-are-fetched)).
+- The path is shown in full, as a path holds no credential.
+- Only administrators may give a file, for the server's sources or for their own.
+- A member's source or guide is refused any file of the server, whether the file exists or not.
+- A source whose owner is no longer an administrator stops reading its file.
+
+With Docker, Polyfin sees only the files of the volumes mounted in its container. Give the path inside the container. Mount the folder that holds the file, read-only, in the `polyfin` service of `compose.yaml`:
+
+```yaml
+services:
+  polyfin:
+    volumes:
+      - ./iptv:/iptv:ro
+```
+
+Run `docker compose up -d` so that the container gets the volume, then give `/iptv/custom.m3u`. User 65532 must be able to read the file.
+
+**Compared with Jellyfin**
+
+- Jellyfin's M3U tuners and XMLTV guides also take a file or an address. Anything that does not start with `http` is opened as a file ([M3uParser.cs](https://github.com/jellyfin/jellyfin/blob/v12.4/src/Jellyfin.LiveTv/TunerHosts/M3uParser.cs#L52-L55), [XmlTvListingsProvider.cs](https://github.com/jellyfin/jellyfin/blob/v12.4/src/Jellyfin.LiveTv/Listings/XmlTvListingsProvider.cs#L118-L124)).
+- Both refuse a missing file when the tuner or the guide is saved ([M3UTunerHost.cs](https://github.com/jellyfin/jellyfin/blob/v12.4/src/Jellyfin.LiveTv/TunerHosts/M3UTunerHost.cs#L133-L138), [XmlTvListingsProvider.cs](https://github.com/jellyfin/jellyfin/blob/v12.4/src/Jellyfin.LiveTv/Listings/XmlTvListingsProvider.cs#L342-L346)).
+- Polyfin takes absolute paths only, whose meaning does not depend on how it was started. Jellyfin also takes a path relative to its working folder.
+- Polyfin reads a list or a guide file again once it changed, and at each refresh. Jellyfin reads a guide file again once its copy is an hour old ([XmlTvListingsProvider.cs](https://github.com/jellyfin/jellyfin/blob/v12.4/src/Jellyfin.LiveTv/Listings/XmlTvListingsProvider.cs#L30)).
 
 ### Xtream Codes accounts
 
-An **Xtream Codes account** source takes a **Name**, the **Server address**, a **Username** and a **Password** and, optionally, the address of an XMLTV guide. By default the guide is the one the server publishes for the account (**Use the provider's programme guide**).
+An **Xtream Codes account** source takes a **Name**, the **Server address**, a **Username** and a **Password**.
 
-- The account is read through its player API (its live categories and streams).
-- Its channels stream in MPEG-TS, or HLS when the account only allows HLS.
+- Optionally, it takes a **User agent (optional)** (see [Headers and user agent](iptv-streams.md#headers-and-user-agent)) and an XMLTV guide address.
+- By default, the guide is the one the server publishes for the account: **Use the provider's programme guide**.
+- Polyfin reads the account through its player API: its live categories and streams.
+- Its channels stream in MPEG-TS, or in HLS when the account allows only HLS.
 
 ### What is read
 
-- Lists are read as they arrive, up to 100 MB and 100,000 channels.
+- Lists are read as they arrive, up to 100 MB and 100,000 channels. An Xtream account's category list may hold up to 10,000 categories, and its login answer 1 MB: past either, the account cannot be read.
 - A list that cannot be read is not added.
-- Headings that lists put between channels are skipped: names without a letter or digit, or drawn with a run of three or more decoration characters, such as `##### NAME #####` or `=== NAME ===`.
-- Addresses and logins are stored as manifest addresses are: never shown in full (only the server's scheme and host) and never logged.
-- Requests to a provider's server (its lists, guide, and the details of a title) go one at a time, a second apart; a server that answers "too many requests" is asked again when it says. A list or guide that still fails says the server asked Polyfin to slow down, and is tried again after a few minutes (see [Refreshing](#refreshing)).
-- An Xtream account's connection limit, which its login tells, bounds the channels played at once (see [How a channel plays](live-tv.md#how-a-channel-plays)).
-- The archive of past programmes a list tells for a channel (catch-up) is read on every download, and its programmes play from Replay (see [Replay](#replay)).
+- Headings that lists put between channels are skipped. These are names without a letter or digit, or drawn with a run of three or more decoration characters, such as `##### NAME #####` or `=== NAME ===`.
+- Addresses and logins are stored as manifest addresses are. They are never shown in full, only the server's scheme and host, and never logged.
+- The archive of past programmes a list gives for a channel (catch-up) is read on every download. Its programmes play from Replay (see [Replay](iptv-replay.md)).
+- An Xtream account's connection limit, which its login gives, bounds the channels played at once (see [Connection limits](live-tv.md#connection-limits)).
+
+Polyfin paces its requests to a provider's server: its lists, its guide, and the details of a title.
+
+| The server | Polyfin |
+|---|---|
+| Any request | Starts requests to the same server at least a second apart |
+| Answers "too many requests" for a list or a title's details | Asks again when the server says, or after 2 seconds. At most twice, and only for a wait of 30 seconds or less. |
+| Still refuses a list or a guide | Says the server asked Polyfin to slow down, and tries again after a few minutes (see [Refreshing](#refreshing)) |
 
 ## HDHomeRun tuners
 
-An HDHomeRun tuner on the local network, with an antenna or a cable, is a source too: its free channels play and record as an IPTV source's. Only administrators add tuners, to the server's sources, as only their sources may reach the local network, and its tuners are the server's to share.
-
-**Add a source** under **Content › Sources** has an **HDHomeRun tuner** tab:
-
-- **Find tuners** asks the tuners of the local network to answer (HDHomeRun's discovery, a UDP broadcast on port 65001) and lists those that do, with their name, model and tuner count. A tuner already added says so.
-- **Add by address** takes the tuner's address, `192.168.1.20` or `http://192.168.1.20`, and reads its `discover.json`.
-
-In Docker, the broadcast reaches the local network only with host networking (see [Installation](installation.md#find-hdhomerun-tuners)): the tab says so when no tuner answers, and an address always works. `POLYFIN_HDHOMERUN_ADDRESSES` has **Find tuners** ask given addresses instead of broadcasting (see [Configuration](configuration.md)).
-
-A tuner is added under the name it gives itself, with its Live TV catalog only, and once: the same tuner (its device ID) cannot be added twice, as its tuners would be counted twice.
-
-### A tuner's channels
-
-- Channels are read from the tuner's `lineup.json`, with their number (`GuideNumber`, such as "5.1") and name. Channels the tuner marks protected (`DRM`) are left out, as it does not play them.
-- Apps show each channel's number as the tuner gives it, and order them by it: 5, 5.1, 5.2, then 6. A fixed number set under **Channels** replaces it.
-- **Only the tuner's favorite channels**, off by default, keeps the channels marked favorite on the tuner. It is in the **Tuner** panel of the source page's **Summary**, with the tuner's model and tuner count.
-- **Scan for channels** asks the tuner to scan for channels again (on its first source, such as its antenna), shows its progress, then reads its line-up.
-- The line-up is read again with **Refresh Live TV lists and guides every**, and kept as an IPTV line-up is, edits included (see [How the line-up is kept](#how-the-line-up-is-kept)).
-- XMLTV guides attach to its catalog as to any catalog. A guide channel named by the channel's number takes it (see [How channels are matched to the guide](live-tv.md#how-channels-are-matched-to-the-guide)).
-
-### Tuners in use
-
-Each channel watched or recorded takes one of the tuner's tuners, whoever reads it, as a channel's stream is read once for every viewer. With every tuner taken, opening a channel first frees one no one watches any more, then the user's own oldest, as for an account's connection limit; when other users' channels take them all, it is refused at once. A recording takes the tuner of a channel only watched, never another recording's (see [Recordings and tuners](live-tv.md#recordings-and-tuners)).
-
-Streams play as IPTV channels do: as they come when the app takes them, else converted. Terrestrial video is often MPEG-2 and interlaced: a conversion deinterlaces it with **Deinterlacing method** (see [Transcoding](transcoding.md)). The user's **Live TV** permission, quality group and limits apply.
-
-A tuner that does not answer, or refuses a stream for another reason than its tuners being in use, shows under **System › Health** until one of its streams plays. A stream refused because every tuner was in use, by Polyfin or another app, is **Refused by the provider** (see [Stream health](#stream-health)), and is no fault of the tuner's.
+An HDHomeRun tuner on the local network is a source too. Administrators add it with **Add a source**, choosing **HDHomeRun tuner** under **Kind of source**. See [HDHomeRun tuners](hdhomerun.md) for finding tuners, their channels and how they are shared.
 
 ## What to import
 
@@ -72,81 +127,123 @@ The add flow's second step starts with **What to import**:
 
 | Type | Default | What it imports |
 |---|---|---|
-| **Live TV channels** | on | The provider's live channels, as a Live TV catalog. |
-| **Movies** | off | The provider's movies, as a library. |
-| **Series** | off | The provider's series, as a library. |
+| **Live TV channels** | On | The provider's live channels, as a Live TV catalog |
+| **Movies** | Off | The provider's movies, as a library |
+| **Series** | Off | The provider's series, as a library |
 
-With **Movies** and **Series** off, a source stays exactly as before they existed: an M3U playlist's movies and episodes then stay channels.
+With **Movies** and **Series** off, an M3U playlist's movies and episodes stay channels.
 
 The step then previews the **Categories to import**, to include or leave out:
 
-- Channel categories **By group** or **By country**, with their channel counts. The preview downloads the list once and reuses it for the next few minutes.
-- With movies or series on, their categories per type, with title counts and search (**Include all**, **Exclude all**).
+- Channel categories **By group** or **By country**, with their channel counts.
+- With movies or series on, their categories for each type, with title counts and search, and **Include all** and **Exclude all**.
+- The preview downloads the list once, and reuses it for 5 minutes.
 
-It also shows the [import options](#import-options), and for movies and series the libraries choice and whether titles are described by the metadata addons (see [Movies and series libraries](#movies-and-series-libraries)).
+The step also shows the [import options](#import-options). For movies and series, it shows the libraries choice, and whether the metadata addons describe titles (see [Movies and series libraries](iptv-movies-and-series.md#movies-and-series-libraries)).
 
 ## Import options
 
-**Import options** are chosen when the source is added and can be changed later on the source page, where they apply to the list already downloaded. They turn the list into the source's line-up. On the source page, **Save and rebuild** applies them and **Discard changes** drops them.
+**Import options** turn the list into the source's line-up. You choose them when you add the source, and can change them later on the source page.
+
+- On the source page, they apply to the list already downloaded.
+- **Save and rebuild** applies them, and **Discard changes** drops them.
 
 | Option | Default | What it does |
 |---|---|---|
-| **Categories** | **As the provider groups them** | Categories from the provider's groups, or **One per country**. |
-| **Channels** | **One per entry** | One channel per entry, or **Merge quality variants**. |
-| **Categories to import** | all included | The groups and countries left out. |
-| **Turn on new channels** | on | Whether new channels found by a refresh arrive turned on or off. |
-| **Numbering** | **The provider's numbers** | The list's number (`tvg-chno`, or Xtream's `num`), or **In line-up order**, apps then numbering channels by their place. |
+| **Categories** | **As the provider groups them** | Categories from the provider's groups, or **One per country** |
+| **Channels** | **One per entry** | One channel per entry, or **Merge quality variants** |
+| **Categories to import** | All included | The groups and countries left out |
+| **Turn on new channels** | On | Whether channels a refresh finds arrive turned on or off |
+| **Numbering** | **The provider's numbers** | The list's number (`tvg-chno`, or Xtream's `num`). With **In line-up order**, apps number channels by their place. |
 
 ### Categories by country
 
-A channel's country is told by the group's name first and then the channel's: a flag, or a prefix such as `FR|`, `[FR]`, `(FR)`, `FR:` or `FR -`. `UK` counts as GB. The rest go under Other, last.
+A channel's country comes from the group's name first, then from the channel's name.
+
+- Polyfin reads a flag, or a prefix such as `FR|`, `[FR]`, `(FR)`, `FR:` or `FR -`.
+- `UK` counts as GB.
+- Channels without a country go under Other, last.
 
 ### Merged channels
 
-When merged, the entries of a category with the same name, once country prefixes and quality tags are set aside, become one channel with a stream per entry, best quality first: 4K, UHD, FHD, HD, SD, then the others. The channel's name keeps the brackets that belong to it, such as "Zeb (Prime)".
+With **Merge quality variants**, entries of a category with the same name become one channel, with a stream per entry.
 
+- Names are compared without country prefixes and quality tags.
+- The channel's name keeps the brackets that belong to it, such as "Zeb (Prime)".
+- Streams are ordered best quality first: 4K, UHD, FHD, HD, SD, then the others.
 - A merged channel's details offer one version per turned-on stream, best first.
-- Playing it tries them in order, as many as **Versions tried when one does not work**, past those that fail, among those that fit the user's quality group (see [Playback](playback.md)).
+- Playing it tries them in order, past those that fail, up to **Versions tried when one does not work**. Only streams that fit the user's quality group are tried (see [Playback](playback.md)).
 
-**Compared with Jellyfin:**
-- Jellyfin's tuner channels each have one source, so apps offer the streams as a version choice.
+**Compared with Jellyfin**
+
+- Polyfin merges quality variants into one channel, whose streams apps offer as versions. Jellyfin's tuner channels each have one source.
 
 ## The source page
 
-Each source has its own page, titled with the source's name and its kind (**M3U playlist** or **Xtream Codes account**), opened from **Open the source** on its row under **Content › Sources** or **My sources**. Its header holds **Download again**, on every section. It has six sections: **Summary**, **Import options**, **Categories**, **Channels**, **Guides** and **Guide mapping**. While **Live TV channels** is off, the four Live TV sections (**Categories**, **Channels**, **Guides**, **Guide mapping**) are hidden.
+Each source has its own page, titled with the source's name and kind: **M3U playlist** or **Xtream Codes account**. Select its row in **Content › Sources** or **My sources**: the page opens beside the list.
+
+![An M3U playlist source's page on Summary, beside the list of sources, with Download again and its six sections as words under its name](images/iptv-source.webp)
+
+- The page's head holds **Download again**, on every section, and the more-actions menu with **Edit the account** and **Remove**.
+- The page has six sections, as words under its name: **Summary**, **Import options**, **Categories**, **Channels**, **Guides** and **Guide mapping**.
+- **Summary** shows a failed download first, with **Download again**, then the Live TV figures, the first channels, **Enabled**, **Used by**, the order, and the lists' downloads.
+- While **Live TV channels** is off, the four Live TV sections are hidden: **Categories**, **Channels**, **Guides** and **Guide mapping**.
+- **Content › Live TV** also lists each IPTV source's channel counts; its row opens the source's **Channels**.
 
 ### Summary
 
-Counts (including movies and series), and the last and next download. When channels keep their past programmes, a notice counts those apps show, with **See them** to list them under **Channels**.
+The **Summary** shows the counts, movies and series included, and the last and next download.
 
-### Import options
+- When channels keep their past programmes, a notice counts those apps show.
+- Its **See them** lists them under **Channels**.
 
-The same choices as when adding the source, including **What to import**, the libraries choice and enrichment, applied to the list already downloaded.
+<a id="import-options-1"></a>
+
+### Import options on the source page
+
+The same choices as when adding the source, applied to the list already downloaded. They include **What to import**, the libraries choice and enrichment.
 
 ### Categories
 
-Add, rename, reorder (drag and drop or arrows), turn on or off, and delete your own added categories. Deleting an added category sends its channels back to their own.
+Add, rename, reorder, turn on or off, and delete categories.
+
+- Reorder by drag and drop, or with the arrows.
+- Only categories you added can be deleted. Their channels go back to their own categories.
 
 ### Channels
 
-A list read a page of 100 at a time from the server, filtered by category, state, visibility in apps, guide and archive. A channel whose provider keeps its past programmes shows for how many days, such as **Replay, 7 days**.
+The channel list loads from the server 100 at a time. It filters by category, state, visibility in apps, guide and archive.
 
-- On/off switches, and a selection to turn on or off.
-- **Change by keyword**, after a count of what would change.
-- Moves within a category, or to another category or place.
-- An editor for the name, logo, description, category, fixed number, streams (reorder, turn off or add) and guide.
+- A channel whose provider keeps its past programmes shows for how many days, such as **Replay, 7 days**.
+- On/off switches turn a channel on or off. A selection turns several on or off.
+- **Change by keyword** shows a count of what would change, then applies it.
+- Channels move within a category, or to another category or place.
+- An editor sets the name, logo, description, category, fixed number, streams and guide. Streams can be reordered, turned off or added.
+
+Edits work one by one, or in bulk by selection, category or keyword.
+
+- A bulk edit first counts what would change.
+- The server pages and searches the lists, so line-ups of tens of thousands of channels stay quick.
+- An added stream's address is yours, not the source's: an administrator's may be on the local network, a user's own must be public. It is never shown in full.
 
 #### Stream health
 
-Each stream shows how it last answered when its channel was opened:
+Each stream shows how it last answered when its channel was opened.
 
-- **No live stream**: an error, a web page, an empty answer or bytes of no video. It is left out of its channel for an hour, then 6 hours, then a day while it keeps failing.
-- **Nothing came**: left out for 10 minutes when it never played at its address, or after nothing came twice in a row. A stream that played and was silent once, as when its provider was slow, is tried again at the next start, after the channel's other streams.
-- **Refused by the provider**: the provider would not serve it then (connections in use, too many requests). It is tried again at the next start.
+| State | Meaning | What Polyfin does |
+|---|---|---|
+| **No live stream** | An error, a web page, an empty answer or bytes of no video | Leaves the stream out of its channel for an hour, then 6 hours, then a day while it keeps failing |
+| **Nothing came** | The stream sent nothing in time | Leaves it out for 10 minutes once nothing came twice in a row. After one silence, tries it again at the next start, after the channel's other streams, whether it played before or not. |
+| **Refused by the provider** | The provider would not serve it then: connections in use, or too many requests | Tries it again at the next start |
+| **Needs a DRM Polyfin does not support** | See [DASH channels and encryption](iptv-streams.md#dash-channels-and-encryption) | Leaves it out as a dead stream |
+| **The list's keys do not decrypt it** | See [DASH channels and encryption](iptv-streams.md#dash-channels-and-encryption) | Leaves it out as a dead stream |
 
-Streams that failed come after the others in their channel. A stream that plays, or that the list gives a new address, is healthy again. **Try every stream again** forgets it all for the channel: its next start tries every stream at once, those that failed within the last 15 minutes included.
-
-Edits work one by one or in bulk, by selection, category or keyword, with a count of what would change first. Lists are paged and searched by the server, so line-ups of tens of thousands of channels stay quick. An added stream's address follows the source's rule for local network addresses and is never shown in full.
+- A stream can be silent once when its provider was slow, or when a proxy was starting the channel for its first viewer.
+- Streams that failed come after the others in their channel.
+- A stream that plays is healthy again. So is a stream the list gives a new address.
+- A stream analyzed before plays without another analysis. It counts as played once it answers with a live stream.
+- A start stopped or replaced while the stream opens or is analyzed tells nothing of the stream. An example is a viewer who switches channels on a source of one connection. No failure is recorded, and the next start tries the stream again.
+- **Try every stream again** forgets it all for the channel. Its next start tries every stream, including those that failed within the last 15 minutes.
 
 ### Guides
 
@@ -154,190 +251,151 @@ The catalog's XMLTV guides in order, with their status and the automatic mapping
 
 ### Guide mapping
 
-The guide channel each channel takes its programmes from, set by hand from a search across the guides showing what airs now. See [Remapping and mapping by hand](live-tv.md#remapping-and-mapping-by-hand).
+The guide channel each channel takes its programmes from. Set it by hand from a search across the guides, which shows what airs now. See [Remapping and mapping by hand](live-tv.md#remapping-and-mapping-by-hand).
 
-A Stremio addon's Live TV catalog has the same **Guides** and **Guide mapping** views, from **Guides and mapping** on its row under **Content › Live TV** (see [Live TV](live-tv.md)). The **Content › Live TV** page also lists each IPTV source's channel counts, with **Line-up and guides** to open its page.
+A Stremio addon's Live TV catalog has the same **Guides** and **Guide mapping** views. Open them with **Guides and mapping** on its row in **Content › Live TV** (see [Live TV](live-tv.md)).
 
 ## How the line-up is kept
 
-Polyfin keeps the line-up and reconciles it with the list on every download and option change, by stable keys: a category by its group or country, a channel by its entry, or by its category and name when merged, and by any of its former streams when the mode changes.
+Polyfin keeps the line-up, and reconciles it with the list on every download and option change. It matches by stable keys:
+
+- a category by its group or country;
+- a channel by its entry, or by its category and name when merged;
+- a channel by any of its former streams, when the **Channels** option changes.
+
+Reconciling keeps your edits and follows the provider:
 
 - The administrator's edits stay.
 - The provider's names, logos, numbers and guide identifiers update underneath.
-- What the list dropped, or the options now leave out, goes away with its edits.
-- A source added before line-ups keeps what it showed: the groups it did not show become turned-off categories.
+- What the list dropped, or what the options now leave out, goes away with its edits.
+- A source added before line-ups existed keeps what it showed. The groups it did not show become turned-off categories.
 
 ### What apps show
 
-Apps list the turned-on channels of turned-on categories that have a turned-on stream, in category then channel order. A channel's category is its genre. **Channels read per Live TV catalog** counts those only. A channel no longer in the line-up, or turned off, is no longer listed nor played.
+Apps list the turned-on channels of turned-on categories that have a turned-on stream.
+
+- They list them in category order, then channel order.
+- A channel's category is its genre.
+- **Channels read per Live TV catalog** counts only these channels.
+- A channel no longer in the line-up, or turned off, is no longer listed nor played.
 
 ### A source behaves as an addon
 
 A source behaves as an installed addon with one TV catalog:
 
 - It is listed, ordered, turned off and removed with the addons.
-- Its catalog is enabled under **Content › Libraries**, where its guide panel is, whatever the number of libraries.
-- Its channels play, record and follow the **Live TV** permission, quality groups, parental control and allowed hours as any channel (see [Users](users.md) and [Live TV](live-tv.md)).
-- **Edit the account** renames it and changes its address or login. The new address is fetched first; a password left empty keeps the current one.
-
-## Assigning sources to users
-
-**Live TV access**, on a user's or a group's page, sets which of the server's IPTV sources and categories they get, on top of the **Live TV** permission. New users and groups start with the **Live TV** permission off, so they get no Live TV until it is turned on; accounts that existed before keep theirs. With it on, every source and category is on by default. A source turned off takes all its channels and any category it gains later; a category turned off takes its channels, and categories a source adds later arrive on. A channel taken this way is gone from lists, the guide, search and Replay, and does not play by its identifier. Administrators can set it too; users' own sources and Stremio addons' catalogs are not concerned.
-
-## Registering with an Xtream login
-
-The **Live TV** box on `/register` opens a second login, the user's Xtream one, beside their Polyfin user and password. Polyfin asks the server's Xtream sources, at their own addresses, and creates the account with Live TV on only if one accepts it.
-
-The login is kept encrypted with the server's secret key, and without a key this registration is refused, as a login is never stored in the clear. **Check IPTV logins**, a task under **System › Schedule**, asks every 24 hours about each one: a refused login turns the user's Live TV off and is forgotten. When a source does not accept its own account, as when the provider is down, the run stops and nobody changes.
-
-A user who already has an account can do the same on `/register`: their own user and correct password with the box ticked add Live TV to it, once the Xtream login is accepted. A wrong password changes nothing.
-
-## Live TV categories in apps
-
-Apps show **Live TV** as a folder per category of the user's channels, in line-up order, each listing its channels. Selecting a channel opens it as anywhere else. It reads no guide, so it stays quick on large line-ups and works in every Jellyfin app, with nothing to install. Categories of the same name from several sources are one folder.
-
-Under **Content › Libraries**, a TV catalog's row sets the name and picture of **Live TV** in apps. With several catalogs, the first one that has each is used.
-
-A **Favorites** folder comes first once the user has favorite channels. A channel's details list its next programmes in its description, in the server's time zone.
-
-**For app developers:** the view is a `CollectionFolder` of `CollectionType` `folders`, with the same identifier on every server; its categories are `CollectionFolder` items, as Streamyfin opens no plain `Folder`, holding `TvChannel` items.
-
-## Replay
-
-Many providers keep their channels' past programmes for a few days, an archive also called catch-up or timeshift. Polyfin lists them in apps in a Replay view, apart from Live TV and from recordings, and plays them from the provider's archive.
-
-### The Replay view
-
-- Apps do not list the Replay view among the libraries. It stays reachable by its identifier, and programmes already started stay in Continue Watching.
-- It holds one folder per channel with an archive, in channel order, named and pictured as the channel.
-- A folder holds the programmes of the channel's guide that have ended and started within the channel's archive, the latest first. A programme in progress or to come is not listed.
-- A programme is a video named after its guide's title, with its episode title, description and image (the channel's logo when the guide gives none), its air time and its length. It plays, resumes from Continue Watching, and is marked played as a movie is.
-- A programme no longer in the archive is no longer listed nor played; a resume point on it then goes unused.
-- Replay follows the **Live TV** permission and the user's sources, as channels do. Parental control and blocked genres judge its programmes as guide programmes, which have no rating.
-
-### What lists tell
-
-Archives are read on every download of the list, with the channels:
-
-- **Xtream Codes:** a live stream's `tv_archive` (1 for an archive) and `tv_archive_duration` (its days). The login's `server_info.timezone` gives the server's time zone.
-- **M3U:** an entry's `catchup` (or `catchup-type`), `catchup-days` (or `tvg-rec`) and `catchup-source` attributes. Given on the `#EXTM3U` line, they apply to every channel; a channel's own attributes take over from them.
-- An archive whose days are not given reaches a day back. Lists may say up to 365 days; Replay lists at most the last 30.
-- A merged channel's archive is that of its first turned-on stream with one, in the channel's stream order.
-- A kind of archive Polyfin does not know is no archive.
-
-| `catchup` | Address of a programme |
-|---|---|
-| `default` | `catchup-source`, its placeholders filled in. Without a `catchup-source`, no archive. |
-| `append` | The stream's address followed by `catchup-source`, filled in. A source starting with `?` starts with `&` after an address that already has a query. Without a `catchup-source`, no archive. |
-| `shift` | The stream's address with `utc` and `lutc` added: `?utc={start}&lutc={now}`, or `&` after an address that already has a query. |
-| `flussonic` (also `flussonic-hls`, `flussonic-ts`, `fs`) | `archive-{start}-{duration}.ts` beside the stream's playlist or `mpegts` address, or under its address: one MPEG-TS file. |
-| `xc` | The Xtream Codes timeshift: `{server}/timeshift/{username}/{password}/{minutes}/{YYYY-MM-DD:HH-MM}/{stream}.ts`, read from the stream's address, its length in minutes rounded up. An Xtream Codes account's channels use it. |
-
-Placeholders of `catchup-source`, written `{name}` or `${name}`:
-
-| Placeholder | Value |
-|---|---|
-| `utc`, `start` | The programme's start, in seconds since 1970. |
-| `utcend`, `end` | Its end. |
-| `lutc`, `now`, `timestamp` | The time of the request. |
-| `duration` | Its length in seconds; `{duration:60}` in minutes, and any unit of seconds after the colon, rounded up. |
-| `offset` | How long ago it started, in seconds; `{offset:60}` in minutes, and so on. |
-| `Y`, `m`, `d`, `H`, `M`, `S` | The start's year, month, day, hour, minute and second. |
-| `{utc:Y-m-d H:M:S}` and the like | One of the times above written with `Y`, `m`, `d`, `H`, `M` and `S`, as `{start:YmdHMS}` or `${end:H-M}`. |
-
-Other text, and placeholders of other names, stay as they are.
-
-### Time zones
-
-Seconds since 1970 have no time zone. Dates, as the `xc` start and the `Y`, `m`, `d`, `H`, `M`, `S` fields, are written in the provider's time zone: for an Xtream Codes account, the one its login names, daylight saving time included; else UTC. An M3U playlist names none, so its dates, those of its `xc` entries included, are in UTC.
-
-### Guides and the archive window
-
-A guide download keeps a day of past programmes (see [What a download keeps](live-tv.md#what-a-download-keeps)). For the guide channels that channels with an archive take, it keeps them as far back as the longest of those archives, at most 30 days, and carries over from the last download the past programmes a new one no longer gives while that archive still holds them. On a guide's first download, before its channels are mapped, a channel's own guide identifier (`tvg-id` or `epg_channel_id`) stands for its mapping.
-
-Each folder then lists its channel's programmes within that channel's archive, however far the guide reaches.
-
-### Playing a programme
-
-- A programme plays as a movie's file does: analyzed, played as it is, remuxed or converted (see [Playback](playback.md) and [Transcoding](transcoding.md)). As the archive answers an MPEG-TS stream of unknown length, the programme's length stands for it. A file under a tenth of the programme's length is refused, as a short clip standing in for a title is. Its times count from its start, though its packets tell the time of the broadcast, and a seek lands where asked (see [HLS segments](transcoding.md#hls-segments)).
-- When a seek in a converted programme has FFmpeg start again further back, as its keyframes are far apart, Polyfin keeps that distance for the programme's channel, whose programmes usually come from the same encoder: seeks in its other programmes, by any user and after a restart too, start as far back, each opening the archive once rather than two or three times.
-- Polyfin always relays it: the address holds the account's credentials, and is never shown nor logged.
-- An archive that answers an HLS playlist, as a `default` or `append` template ending in `.m3u8` may, is refused: the app is told no stream suits. Programmes play as files, and Polyfin's HLS path for sources is the live one, which keeps a sliding window of an endless stream and cannot serve a finite playlist to seek in. `xc` and `flussonic` archives are MPEG-TS files.
-- Programmes get no scrubbing thumbnails nor chapter images, which would read the whole file through a provider connection.
-
-### Connection limits
-
-A programme takes one of the account's connections while it plays, counted with the channels played (see [How a channel plays](live-tv.md#how-a-channel-plays)): from `PlaybackInfo`, through the analysis, the stream or FFmpeg's reads, until 20 seconds after its last request. The requests of the same play share it.
-
-- When every connection is taken, a stream no one uses any more is closed first, then the user's own oldest channel. A programme playing is never closed for another stream.
-- Otherwise the programme does not start: `PlaybackInfo` tells no stream suits, and a request for its file is refused (503).
-
-**Compared with Jellyfin:**
-- Jellyfin plays no catch-up archive: its past programmes are only those it recorded. Replay is apart from Polyfin's recordings, which stay under Live TV.
-
-**For app developers:**
-- The Replay view is a `CollectionFolder` of `CollectionType` `folders`, with the same identifier on every server, listed in `/UserViews` after Live TV. Apps open it as a folder list; it has no Latest row.
-- Its folders are `Folder` items. Its programmes are `Video` items with `ChannelId`, `StartDate`, `EndDate`, `RunTimeTicks`, and `DateCreated` set to the air time. They play through `PlaybackInfo` and the video stream and HLS routes, as movies do.
-- `/UserItems/Resume` lists them with movies and episodes, as Jellyfin lists its other videos there.
-
-## Movies and series libraries
-
-### Libraries
-
-Movies and series libraries are chosen as:
-
-- **One per type: Movies, Series** (default): a Movies and a Series library named after the source, each title's category being its genre, by which the library can be narrowed;
-- **One per provider category**.
-
-The libraries are ordinary library rows of the source under **Content › Libraries**, with a link to the source's import options (**Its import options**).
-
-- A catalog that appears is added as an enabled library at the end of the scope's libraries.
-- One that goes away loses its library.
-- A library turned off under **Content › Libraries** stays off.
-- A category added later by the provider is imported.
-- With **Live TV channels** turned off, the source has no Live TV catalog (its guides are removed), while its line-up keeps its edits for when they come back.
-
-### How titles are read
-
-- **Xtream Codes:** the VOD and series lists are read through its player API (`get_vod_categories`, `get_vod_streams`, `get_series_categories`, `get_series`) with its live list, only for the types turned on. Turning a type on reads its list at once.
-- **M3U:** entries are movies or episodes by their address (a `/movie/` or `/series/` path) or their video file's extension (`mp4`, `mkv`, `avi` and the like; `ts` and `m3u8` stay live).
-- An episode's name gives its series, season and episode (`S01E02`, `S01 E02`, `1x02`, `Season 1 Episode 2`). Episodes whose names give no numbers are numbered by their place. Episodes group into series by name whatever its case.
-- Titles are named without the list's dressing (a language or country prefix such as `EN -` or `|FR|`, quality tags). A year written after a name becomes the title's year.
-- Titles keep the provider's identifier, so their item identifiers, and with them users' played state, resume points, favorites and next up, survive refreshes, changes of order and new credentials.
-
-### In apps
-
-Movies and series are ordinary titles in apps: details, search, latest, genres, continue watching, next up, collections. They are newest first in their libraries, which are paged and counted whole. **Titles read per movie and series catalog** does not bound them: they are stored, not asked of an addon page by page.
-
-- Listings use only the lists' data.
-- An Xtream title's details are asked only when an app opens the title or plays it: `get_vod_info` (overview, cast, director, genres, release date, duration, backdrop, trailer, TMDB id) and `get_series_info` (seasons and episodes). They are kept until the series changes or for seven days.
-- Details are asked of a provider host at most once a second, as providers ban accounts that send bursts.
-
-### Playback
-
-Each movie or episode has one version, the provider's file (`/movie/…` or `/series/…` with its container for Xtream). It is labelled with the quality its name gives (4K, FHD, HD, SD) for quality groups. It plays, converts, downloads and takes thumbnails and subtitles as any title's (see [Playback](playback.md) and [Transcoding](transcoding.md)).
-
-An MPEG-TS file has no index to cut it by its keyframes. It plays as it is on apps that take MPEG-TS, and otherwise only converted: cut into a 2-second segment, then one every four seconds over its duration, the encoder placing a keyframe at each segment's start. After a seek, FFmpeg reads it from before the time asked, as it lands on the first keyframe after the time it is given, and what comes before the segment is left out; how far before is kept with the file, for its next playbacks (see [HLS segments](transcoding.md#hls-segments)). A user who may not have video converted is told no stream suits instead. This holds for addons' MPEG-TS files too.
-
-**Compared with Jellyfin:**
-- MPEG-TS files play as Jellyfin plays such files.
-
-### Ratings and enrichment
-
-Providers give no content rating: titles are unrated unless enrichment brings one. A user blocking unrated movies or series does not see them.
-
-Enrichment is an import option, on by default. It only asks the administrator's own addons, once per title opened, and brings the posters, cast and age ratings the providers lack.
-
-- A title the provider gives a TMDB or IMDb identifier is described by the first of the user's addons that describes that identifier.
-- The provider's description fills what the addon lacks.
-- The title's name, category and episodes stay the provider's.
+- Its catalog is enabled in **Content › Libraries**, where its guide panel is, whatever the number of libraries.
+- Its channels play, record, and follow the **Live TV** permission, quality groups, parental control and allowed hours as any channel (see [Users](users.md) and [Live TV](live-tv.md)).
+- Its streams always reach apps through Polyfin: their addresses hold the account, so no app is sent to them, unless **Send apps to the source** is on in **Settings › Playback** (see [Who is sent to the source](playback.md#who-is-sent-to-the-source)).
+- **Edit the account** renames it, and changes its address, login or user agent.
+- A new address or user agent is fetched first. A password left empty keeps the current one.
 
 ## Refreshing
 
 The list is downloaded:
 
 - when the source is added;
-- again, with the guides, once **Refresh Live TV lists and guides every** hours have passed (under **Settings › Live TV**, 12 by default, 1 to 168; see [When guides are fetched](live-tv.md#when-guides-are-fetched));
-- when you press **Refresh** on the source's row, or **Download again** in its page's header.
+- again, with the guides, once the hours set in **Refresh Live TV lists and guides every (hours)** have passed (see the table below);
+- when you press **Refresh** on the source's row, or **Download again** in its page's header;
+- for a list that is a file of the server, within 5 minutes once the file changed or became unreadable (see [Lists and guides that are files of the server](#lists-and-guides-that-are-files-of-the-server)).
 
-A download that fails keeps the previous channels and tells why, and is tried again after 5 minutes, then 15 minutes, then every hour (never later than the setting). After every list refresh and change of options, channels are mapped to the guides again.
+| Setting | Where | Default | What it does |
+|---|---|---|---|
+| **Refresh Live TV lists and guides every (hours)** | **Settings › Live TV** | 12 | How often lists and guides download again, from 1 to 168 hours. See [When guides are fetched](live-tv.md#when-guides-are-fetched). |
+
+- A download that fails keeps the previous channels, and tells why.
+- It is tried again as a guide is (see [When guides are fetched](live-tv.md#when-guides-are-fetched)).
+- After every list refresh and change of options, channels are mapped to the guides again.
+
+## Past programmes, movies and series
+
+The past programmes a provider keeps play from a Replay view: see [Replay](iptv-replay.md). A source's movies and series become libraries: see [IPTV movies and series](iptv-movies-and-series.md).
+
+## Using Dispatcharr
+
+Dispatcharr is an IPTV channel and guide manager. It gathers providers' lists into channels with numbers, logos, groups and a guide.
+
+- It shares one provider connection per channel between every app that watches it.
+- It keeps within each provider's connection limit.
+- It fails over to a channel's next stream when one breaks.
+
+Polyfin takes its channels in three ways: as an [M3U playlist](#as-an-m3u-playlist-with-its-guide-advised) (advised), an [Xtream Codes account](#as-an-xtream-codes-account) or an [HDHomeRun tuner](#as-an-hdhomerun-tuner). In the addresses below, replace `nas.lan:9191` with Dispatcharr's address and port.
+
+### As an M3U playlist with its guide (advised)
+
+Add an **M3U playlist** source with:
+
+- **Playlist address:** `http://nas.lan:9191/output/m3u`, or `http://nas.lan:9191/output/m3u/<channel profile>` for a profile's channels only.
+- **Programme guide address (XMLTV, optional):** `http://nas.lan:9191/output/epg`, with the same profile when the playlist has one. Its channel ids match the playlist's `tvg-id`, so every channel takes its guide.
+
+Dispatcharr's options go in the addresses' query:
+
+| Option | What it does |
+|---|---|
+| `tvg_id_source` | What `tvg-id` holds: `channel_number` (its default), `tvg_id` or `gracenote`. Give the playlist and the guide the same one. |
+| `cachedlogos=false` | Gives the provider's logo addresses instead of Dispatcharr's cached logos |
+| `direct=true` | Gives the provider's own stream addresses. Dispatcharr then neither shares connections nor fails over. Leave it off. |
+| `days`, `prev_days` | Bound the guide |
+
+- Dispatcharr serves these addresses only to local networks by default.
+- Polyfin reaches a local network address only for a source an administrator adds to the server by its local network address.
+- Channels keep Dispatcharr's numbers, decimals included, its logos, its groups as categories, and its guide.
+
+This is the advised way. It carries everything Dispatcharr curates, needs no login, and lets Dispatcharr enforce the connection limits itself.
+
+### As an Xtream Codes account
+
+Add an **Xtream Codes account** with these settings:
+
+- the server `http://nas.lan:9191`;
+- a Dispatcharr user, and that user's XC password, set on the user in Dispatcharr;
+- **Use the provider's programme guide**.
+
+Polyfin then knows the connection limit Dispatcharr gives the user (`max_connections`). It may also import Dispatcharr's movies and series. Dispatcharr rounds decimal numbers here: 104.5 shows as 105.
+
+### As an HDHomeRun tuner
+
+Add an **HDHomeRun tuner** by address: `http://nas.lan:9191/hdhr`, or `http://nas.lan:9191/hdhr/<channel profile>` (see [HDHomeRun tuners](hdhomerun.md)).
+
+- **Find tuners** does not see Dispatcharr, which does not answer HDHomeRun's discovery.
+- Its line-up gives numbers and names only, and the channels have no groups.
+- Add the XMLTV guide `http://nas.lan:9191/output/epg` to the tuner's catalog in **Content › Live TV**. Its icons give the channels their logos.
+- Its tuner count is the sum of Dispatcharr's account limits, or 10 when one has none.
+
+### Connection limits and failover
+
+Dispatcharr shares one provider connection per channel between Polyfin and its other apps. It keeps within each provider account's limit.
+
+| Case | What happens |
+|---|---|
+| Every connection is in use | Dispatcharr refuses a new channel (HTTP 503). Polyfin tells the app no stream suits. The stream shows **Refused by the provider**, but is not left out. |
+| An M3U source | Polyfin knows no limit, and lets Dispatcharr decide |
+| An Xtream account | Polyfin also keeps within the user's `max_connections` (see [Connection limits](live-tv.md#connection-limits)) |
+
+Dispatcharr fails over inside the one channel address. A stream that breaks while playing switches to the next one without Polyfin noticing. Keep **Merge quality variants** off for its sources, as Dispatcharr's channels are already merged.
+
+Dispatcharr sends nothing until it holds about 1 MB of a channel. A low-bitrate channel can take 10 seconds or more to fill it. Dispatcharr also waits on a silent stream before it fails over.
+
+- Polyfin waits 20 seconds for a channel's first bytes (see [How a channel plays](live-tv.md#how-a-channel-plays)).
+- A channel that took longer is tried again at the next start, rather than left out.
+- Dispatcharr keeps starting the channel meanwhile, so the next try is quick.
+
+### Recording
+
+Record with Polyfin's DVR from any Jellyfin app's guide, as for any channel (see [Recordings](live-tv.md#recordings)).
+
+- Each recording takes one Dispatcharr connection while it runs.
+- It shares that connection with anyone watching the same channel.
+- Dispatcharr's own recordings are not shown in Polyfin.
+
+<div class="moved-sections">
+
+<a id="tuners-in-use"></a>*Tuners in use* moved to [HDHomeRun tuners](hdhomerun.md#tuners-in-use).
+
+<a id="replay"></a>*Replay* moved to [Replay](iptv-replay.md#replay).
+
+<a id="dash-channels-and-encryption"></a>*DASH channels and encryption* moved to [IPTV stream headers and encryption](iptv-streams.md#dash-channels-and-encryption).
+
+<a id="headers-and-user-agent"></a>*Headers and user agent* moved to [IPTV stream headers and encryption](iptv-streams.md#headers-and-user-agent).
+
+</div>

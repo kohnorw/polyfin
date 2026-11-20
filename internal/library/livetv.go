@@ -14,7 +14,6 @@ import (
 	"golang.org/x/sync/errgroup"
 
 	"github.com/moodiness/polyfin/internal/accounts"
-	"github.com/moodiness/polyfin/internal/cache"
 	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/xmltv"
 )
@@ -27,17 +26,18 @@ const guideDays = 7
 // channels rather than titles: the tv type, whose streams are live.
 func LiveCatalog(catalogType string) bool { return catalogType == "tv" }
 
-// HasChannels reports whether the user has live TV catalogs, without asking
-// their addons.
+// HasChannels reports whether the user has live TV catalogs, or channels
+// Polyfin airs, without asking their addons.
 func (s *Service) HasChannels(ctx context.Context, user accounts.User) (bool, error) {
 	v, err := s.view(ctx, user)
-	return len(v.channels) > 0, err
+	return len(v.channels) > 0 || len(v.virtual) > 0, err
 }
 
 // Channels lists the user's live TV channels: those of their live TV
-// catalogs, in catalog order, each once. Stremio gives channels no number:
-// a channel is numbered by its place in the list, unless its IPTV source
-// gives it one.
+// catalogs, in catalog order, each once, then the channels Polyfin airs.
+// Stremio gives channels no number: a channel is numbered by its place in
+// the list, unless its IPTV source, or the channel Polyfin airs, gives it
+// one.
 func (s *Service) Channels(ctx context.Context, user accounts.User) ([]Item, error) {
 	v, err := s.view(ctx, user)
 	if err != nil {
@@ -47,10 +47,34 @@ func (s *Service) Channels(ctx context.Context, user accounts.User) ([]Item, err
 	return s.overridden(channels), s.save(ctx, records)
 }
 
+// ChannelPage lists the user's channels as Channels does, but records
+// none of them: the function it returns records those of a page an
+// answer shows, which apps find again by their identifiers. A guide
+// lists hundreds of channels a page at a time, out of thousands.
+func (s *Service) ChannelPage(ctx context.Context, user accounts.User) ([]Item, func(context.Context, []Item) error, error) {
+	v, err := s.view(ctx, user)
+	if err != nil {
+		return nil, nil, err
+	}
+	channels, records := s.channels(ctx, v)
+	return s.overridden(channels), func(ctx context.Context, shown []Item) error {
+		ids := make(map[accounts.ID]bool, len(shown))
+		for _, channel := range shown {
+			ids[channel.ID] = true
+		}
+		return s.save(ctx, slices.DeleteFunc(slices.Clone(records), func(r record) bool { return !ids[r.ID] }))
+	}, nil
+}
+
 // channels lists the channels of a view, with the records that find them
 // again. A catalog that cannot be read is left out, as from a collection.
+// The channels the user's channel rule hides are left out too, but keep
+// their place in the numbering, so that a channel shows the same number
+// to every user. The channels Polyfin airs follow those of the catalogs,
+// numbered after all of them.
 func (s *Service) channels(ctx context.Context, v view) ([]Item, []record) {
 	lists := make([][]stremio.Meta, len(v.channels))
+	icons := make([]map[accounts.ID]string, len(v.channels))
 	var group errgroup.Group
 	group.SetLimit(catalogFetches)
 	for i, src := range v.channels {
@@ -60,6 +84,9 @@ func (s *Service) channels(ctx context.Context, v view) ([]Item, []record) {
 				s.logger.Warn("A live TV catalog could not be listed", "catalog", src.catalog.ID, "error", err)
 			}
 			lists[i] = metas
+			if icons[i], err = s.guideIcons(ctx, src, metas); err != nil && ctx.Err() == nil {
+				s.logger.Warn("A live TV catalog's guide icons could not be read", "catalog", src.catalog.ID, "error", err)
+			}
 			return nil
 		})
 	}
@@ -67,6 +94,7 @@ func (s *Service) channels(ctx context.Context, v view) ([]Item, []record) {
 	var items []Item
 	var records []record
 	seen := map[string]bool{}
+	place := 0
 	for i, metas := range lists {
 		src := v.channels[i]
 		addon := src.addon.addon.ID
@@ -74,31 +102,46 @@ func (s *Service) channels(ctx context.Context, v view) ([]Item, []record) {
 			if meta.ID == "" || seen[meta.ID] || v.hiddenChannels[meta.ID] {
 				continue
 			}
-			seen[meta.ID] = true
 			if meta.Type == "" {
 				meta.Type = src.catalog.Type
 			}
-			number := len(items) + 1
+			group, _ := channelGroup(src, meta)
+			if meta.Poster == "" && meta.Logo == "" {
+				meta.Logo = icons[i][itemID(channelKey(meta.ID))]
+			}
+			if !v.allowsChannel(src, group, meta.ID) {
+				place++
+				continue
+			}
+			seen[meta.ID] = true
+			place++
+			number := place
 			if meta.ChannelNumber > 0 {
 				number = meta.ChannelNumber
 			}
-			item := channelItem(meta, number)
+			item := s.channelItem(meta, number, v.country)
 			preview := meta
 			items = append(items, item)
 			records = append(records, record{ID: item.ID, Key: channelKey(meta.ID), Kind: KindChannel, Addon: &addon,
 				CatalogType: src.catalog.Type, CatalogID: src.catalog.ID, Meta: &preview, Number: number, GuideNumber: meta.GuideNumber,
-				Confined: src.addon.confined})
+				ChannelGroup: group, Confined: src.addon.confined})
 		}
+	}
+	for _, c := range v.virtual {
+		place++
+		item := virtualChannelItem(c, place)
+		items = append(items, item)
+		records = append(records, virtualChannelRecord(c, item, place))
 	}
 	return items, records
 }
 
 // channelItem describes a channel from its catalog entry. TV addons give a
 // channel's logo as its poster, or only as its logo. A tuner's channel
-// shows the tuner's number ("5.1").
-func channelItem(meta stremio.Meta, number int) Item {
+// shows the tuner's number ("5.1"). Its rating is the one country gives.
+func (s *Service) channelItem(meta stremio.Meta, number int, country string) Item {
 	item := Item{ID: itemID(channelKey(meta.ID)), Kind: KindChannel, Number: cmp.Or(meta.GuideNumber, strconv.Itoa(number)), Available: true}
-	fromMeta(&item, meta)
+	s.fromMeta(&item, meta, country)
 	item.Images = channelImages(meta)
 	// A channel has no release, runtime or credits of its own.
 	item.ProductionYear, item.PremiereDate, item.EndDate, item.Runtime, item.People = 0, nil, nil, 0, nil
@@ -109,28 +152,109 @@ func channelImages(meta stremio.Meta) Images {
 	return Images{Primary: cmp.Or(meta.Poster, meta.Logo), Backdrop: meta.Background}
 }
 
+// guideIcons finds the icons of the guide channels a catalog's channels
+// without a logo are mapped to, by channel: such a channel shows its guide
+// channel's icon, as in Jellyfin (ListingsManager.cs, AddMetadata, lines
+// 303-305), which tuners' channels need, their line-up giving no logo.
+func (s *Service) guideIcons(ctx context.Context, src source, metas []stremio.Meta) (map[accounts.ID]string, error) {
+	var bare []accounts.ID
+	for _, meta := range metas {
+		if meta.ID != "" && meta.Poster == "" && meta.Logo == "" {
+			bare = append(bare, itemID(channelKey(meta.ID)))
+		}
+	}
+	if !src.guide || len(bare) == 0 {
+		return nil, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT m.channel_id, gc.icon FROM live_guide_maps m JOIN live_guides g ON g.id = m.guide_id
+		JOIN live_guide_channels gc ON gc.guide_id = g.id AND gc.generation = g.generation AND gc.xmltv_id = m.xmltv_id
+		WHERE m.addon_id = $1 AND m.catalog_type = $2 AND m.catalog_id = $3 AND m.channel_id = ANY($4) AND gc.icon <> ''`,
+		src.addon.addon.ID, src.catalog.Type, src.catalog.ID, bare)
+	if err != nil {
+		return nil, err
+	}
+	icons := map[accounts.ID]string{}
+	var channel accounts.ID
+	var icon string
+	_, err = pgx.ForEachRow(rows, []any{&channel, &icon}, func() error { icons[channel] = icon; return nil })
+	return icons, err
+}
+
+// guideIcon finds the icon of the guide channel a channel is mapped to, ""
+// for none (see guideIcons): that of its first catalog's mapping.
+func (s *Service) guideIcon(ctx context.Context, channel accounts.ID) (string, error) {
+	var icon string
+	err := s.db.QueryRow(ctx, `SELECT gc.icon FROM live_guide_maps m JOIN live_guides g ON g.id = m.guide_id
+		JOIN live_guide_channels gc ON gc.guide_id = g.id AND gc.generation = g.generation AND gc.xmltv_id = m.xmltv_id
+		WHERE m.channel_id = $1 AND gc.icon <> '' ORDER BY m.addon_id, m.catalog_type, m.catalog_id LIMIT 1`, channel).Scan(&icon)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return "", nil
+	}
+	return icon, err
+}
+
 // channel describes a channel listed before, from what Polyfin remembers
-// of it, when the user still has the live TV catalog that listed it:
-// players ask for it with every segment, which must not list the catalogs
-// again. An IPTV source answers at once whether it still shows the
-// channel: its groups may have been chosen since.
+// of it, when the user still has the live TV catalog that listed it and
+// their channel rule shows it: players ask for it with every segment,
+// which must not list the catalogs again. An IPTV source answers at once
+// whether it still shows the channel, and in which category: its groups
+// may have been chosen since.
 func (s *Service) channel(ctx context.Context, v view, r record) (Item, error) {
+	if item, ok := v.virtualChannel(r); ok {
+		return item, nil
+	}
 	index := slices.IndexFunc(v.channels, func(src source) bool {
 		return r.Addon != nil && src.addon.addon.ID == *r.Addon && src.catalog.Type == r.CatalogType && src.catalog.ID == r.CatalogID
 	})
 	if r.Kind != KindChannel || r.Meta == nil || index < 0 || v.hiddenChannels[r.Meta.ID] {
 		return Item{}, ErrNotFound
 	}
-	if src := v.channels[index]; src.addon.addon.IPTV() {
-		if _, err := s.fetchMeta(ctx, src.addon, r.CatalogType, r.Meta.ID); errors.Is(err, stremio.ErrNotFound) {
+	src := v.channels[index]
+	var group string
+	if src.addon.addon.IPTV() {
+		current, err := s.fetchMeta(ctx, src.addon, r.CatalogType, r.Meta.ID)
+		if errors.Is(err, stremio.ErrNotFound) {
 			return Item{}, ErrNotFound
 		} else if err != nil {
 			return Item{}, err
 		}
+		group, _ = channelGroup(src, current)
+	} else {
+		group, _ = channelGroup(src, *r.Meta)
+	}
+	if !v.allowsChannel(src, group, r.Meta.ID) {
+		return Item{}, ErrNotFound
 	}
 	meta := *r.Meta
 	meta.GuideNumber = r.GuideNumber
-	return channelItem(meta, r.Number), nil
+	return s.channelItem(meta, r.Number, v.country), nil
+}
+
+// loadListed is load, which also finds a channel of one of the user's IPTV
+// sources that no listing recorded yet: apps may open it by the identifier
+// its line-up gives, as the admin app shows it, before any app listed the
+// channels. The user's channels are then listed and recorded, as Channels
+// does, which numbers the channel; one the user does not see stays
+// ErrNotFound.
+func (s *Service) loadListed(ctx context.Context, v view, id accounts.ID) (record, error) {
+	r, err := s.load(ctx, id)
+	if !errors.Is(err, ErrNotFound) || s.iptv == nil || len(v.channels) == 0 {
+		return r, err
+	}
+	addon, err := s.iptv.ChannelSource(ctx, id)
+	if errors.Is(err, stremio.ErrNotFound) {
+		return record{}, ErrNotFound
+	} else if err != nil {
+		return record{}, err
+	}
+	if !slices.ContainsFunc(v.channels, func(src source) bool { return src.addon.addon.ID == addon }) {
+		return record{}, ErrNotFound
+	}
+	_, records := s.channels(ctx, v)
+	if err := s.save(ctx, records); err != nil {
+		return record{}, err
+	}
+	return s.load(ctx, id)
 }
 
 // Programs lists the programmes of the user's channels that overlap
@@ -149,8 +273,23 @@ type GuideQuery struct {
 	// Keep keeps the programmes it accepts; nil keeps all.
 	Keep func(Item) bool
 	// Limit, when positive, lists the first Limit programmes kept, by
-	// start time then channel number, and reads the guide no further.
+	// start time then channel number (by channel number with ByChannel),
+	// and reads the guide no further.
 	Limit int
+	// ByChannel lists the programmes by channel number, then by start
+	// time, as On Now lists what airs: with a Limit, only the first
+	// channels' programmes are read, as many as it takes.
+	ByChannel bool
+	// Shown, when set, is the part of the listing an answer shows, which
+	// apps find again: only its programmes and channels are recorded. A
+	// listing counted further than its page records its page.
+	Shown func(programs []Item) []Item
+	// Kept lists the channels and Native EPG programmes of the catalog
+	// pages kept only, asking no addon, and has those missing fetched in
+	// the background for the next listing (see keptOrLater): what airs
+	// now on the home screen, which jellyfin-web waits for before it
+	// fills any of its rows, answers at once however slow an addon is.
+	Kept bool
 }
 
 // Guide lists the programmes of the user's channels that q asks for, by
@@ -165,12 +304,19 @@ type GuideQuery struct {
 // no item: one opened by its identifier is found again from the guide (see
 // unsavedProgram). Native EPG programmes, which only their addon gives
 // again, are kept as items once listed.
+//
+// A listing waits for the addons to give the pages of the catalogs and
+// days Polyfin does not keep yet, unless q.Kept.
 func (s *Service) Guide(ctx context.Context, user accounts.User, q GuideQuery) ([]Item, error) {
 	v, err := s.view(ctx, user)
 	if err != nil {
 		return nil, err
 	}
-	all, channelRecords := s.channels(ctx, v)
+	read := ctx
+	if q.Kept {
+		read = withKeptOrLater(ctx)
+	}
+	all, channelRecords := s.channels(read, v)
 	var wanted map[accounts.ID]bool
 	if q.Channels != nil {
 		wanted = make(map[accounts.ID]bool, len(q.Channels))
@@ -207,7 +353,7 @@ func (s *Service) Guide(ctx context.Context, user accounts.User, q GuideQuery) (
 		}
 	}
 	var mu sync.Mutex
-	var programs []Item
+	var natives []Item
 	var records []record
 	seen := map[accounts.ID]bool{}
 	// native are the channels with Native EPG programmes, aired or not.
@@ -216,7 +362,7 @@ func (s *Service) Guide(ctx context.Context, user accounts.User, q GuideQuery) (
 	group.SetLimit(catalogFetches)
 	for _, src := range guides {
 		group.Go(func() error {
-			metas, _, err := s.window(ctx, v, src, 0, v.limit(src))
+			metas, _, err := s.window(read, v, src, 0, v.limit(src))
 			if err != nil && ctx.Err() == nil {
 				s.logger.Warn("A live TV guide could not be read", "catalog", src.catalog.ID, "date", src.date, "error", err)
 			}
@@ -237,7 +383,7 @@ func (s *Service) Guide(ctx context.Context, user accounts.User, q GuideQuery) (
 						continue
 					}
 					seen[program.ID] = true
-					programs = append(programs, program)
+					natives = append(natives, program)
 					records = append(records, record{ID: program.ID, Key: programKey(channel.StremioID, programmeID(video)), Kind: KindProgram,
 						Parent: &channel.ID, Channel: channel.StremioID, Video: &video, Confined: src.addon.confined})
 				}
@@ -246,32 +392,67 @@ func (s *Service) Guide(ctx context.Context, user accounts.User, q GuideQuery) (
 		})
 	}
 	_ = group.Wait()
-	guided, err := s.guidePrograms(ctx, v, byStremioID, native, q, keep)
+	// The channels Polyfin airs have programmes over the days the guides
+	// span.
+	airsFrom, airsTo := from, to
+	if airsFrom.Before(first) {
+		airsFrom = first
+	}
+	if airsTo.After(last) {
+		airsTo = last
+	}
+	// listed lists the programmes of channels, a part of byStremioID: their
+	// Native EPG programmes, then those of their XMLTV guides, then those of
+	// the channels Polyfin airs.
+	listed := func(channels map[string]Item, guideQuery GuideQuery) ([]Item, error) {
+		var programs []Item
+		for _, program := range natives {
+			if _, ok := channels[program.Channel.StremioID]; ok {
+				programs = append(programs, program)
+			}
+		}
+		var guided []Item
+		var err error
+		if guideQuery.Limit <= 0 && to.Sub(from) <= airingSpan {
+			guided, err = s.airingGuidePrograms(ctx, v, channels, native, from, to, keep)
+		} else {
+			guided, err = s.guidePrograms(ctx, v, channels, native, guideQuery, keep)
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, program := range guided {
+			if !seen[program.ID] {
+				seen[program.ID] = true
+				programs = append(programs, program)
+			}
+		}
+		return append(programs, s.virtualPrograms(v, channels, airsFrom, airsTo, keep)...), nil
+	}
+	var programs []Item
+	if q.ByChannel && q.Limit > 0 {
+		programs, err = firstChannelsPrograms(byStremioID, q, firstChannels, listed)
+	} else {
+		programs, err = listed(byStremioID, q)
+	}
 	if err != nil {
 		return nil, err
 	}
-	for _, program := range guided {
-		if !seen[program.ID] {
-			seen[program.ID] = true
-			programs = append(programs, program)
-		}
-	}
-	slices.SortStableFunc(programs, func(a, b Item) int {
-		if c := a.StartDate.Compare(*b.StartDate); c != 0 {
-			return c
-		}
-		return comparedNumbers(a.Channel.Number, b.Channel.Number)
-	})
+	sortPrograms(programs, q.ByChannel)
 	if q.Limit > 0 && len(programs) > q.Limit {
 		programs = programs[:q.Limit]
 	}
-	// Only the Native EPG programmes listed are kept, and the channels of
-	// the programmes listed, which their programmes are found again by.
-	listed, channels := map[accounts.ID]bool{}, map[string]bool{}
-	for _, program := range programs {
-		listed[program.ID], channels[program.Channel.StremioID] = true, true
+	// Only the Native EPG programmes shown are kept, and the channels of
+	// the programmes shown, which their programmes are found again by.
+	shown := programs
+	if q.Shown != nil {
+		shown = q.Shown(programs)
 	}
-	records = slices.DeleteFunc(records, func(r record) bool { return !listed[r.ID] })
+	listedIDs, channels := map[accounts.ID]bool{}, map[string]bool{}
+	for _, program := range shown {
+		listedIDs[program.ID], channels[program.Channel.StremioID] = true, true
+	}
+	records = slices.DeleteFunc(records, func(r record) bool { return !listedIDs[r.ID] })
 	for _, r := range channelRecords {
 		if r.Meta != nil && channels[r.Meta.ID] {
 			records = append(records, r)
@@ -280,9 +461,9 @@ func (s *Service) Guide(ctx context.Context, user accounts.User, q GuideQuery) (
 	return s.overridden(programs), s.save(ctx, records)
 }
 
-// comparedNumbers orders channel numbers, a tuner's "5.1" after "5" and
-// before "5.2" and "6".
-func comparedNumbers(a, b string) int {
+// CompareChannelNumbers orders channel numbers, a tuner's "5.1" or a
+// list's "104.5" after "5" or "104" and before "5.2" or "105".
+func CompareChannelNumbers(a, b string) int {
 	majorA, minorA, _ := strings.Cut(a, ".")
 	majorB, minorB, _ := strings.Cut(b, ".")
 	x, _ := strconv.Atoi(majorA)
@@ -361,27 +542,39 @@ type programRef struct {
 	start   time.Time
 }
 
-// programRefs remembers the XMLTV programmes listed lately by their
-// identifier, for apps that open one; past it, or after a restart, the
-// guide is searched (see unsavedProgram).
-var programRefs = cache.New[accounts.ID, programRef](200_000, 24*time.Hour)
+// rememberProgram keeps where the programme id listed is in its guide,
+// for apps that open it (see programRefs).
+func (s *Service) rememberProgram(id accounts.ID, ref programRef) { s.programRefs.Put(id, ref) }
 
-func rememberProgram(id accounts.ID, ref programRef) { programRefs.Put(id, ref) }
+// guideState sums up what an identifier is searched in among the guides'
+// programmes: each guide's current download, and the channels mapped to
+// them, which a mapping made or changed moves.
+func (s *Service) guideState(ctx context.Context) (string, error) {
+	var state string
+	err := s.db.QueryRow(ctx, `SELECT (SELECT count(*) || ':' || coalesce(string_agg(id::text || '@' || generation, ',' ORDER BY id), '')
+		FROM live_guides) || '|' || (SELECT count(*) || ':' || coalesce(max(xmin::text::bigint), 0) FROM live_guide_maps)`).Scan(&state)
+	return state, err
+}
 
 // unsavedProgram describes an XMLTV programme of one of the user's
 // channels by its identifier, which no item keeps: from the programmes
-// listed lately, else by searching the guides' programmes of the channels
-// mapped to one. An identifier of no programme is ErrNotFound.
+// listed lately, else from the index of the guides' programmes of the
+// channels mapped to one, built again once a download or a mapping
+// changed them (see programIndex). An identifier of no programme is
+// ErrNotFound.
 func (s *Service) unsavedProgram(ctx context.Context, v view, id accounts.ID) (Item, error) {
-	ref, ok := programRefs.Get(id)
+	ref, ok := s.programRefs.Get(id)
 	if !ok {
-		var found bool
-		var err error
-		if ref, found, err = s.searchProgram(ctx, id); err != nil || !found {
-			if err == nil {
-				err = ErrNotFound
-			}
+		state, err := s.guideState(ctx)
+		if err != nil {
 			return Item{}, err
+		}
+		table, err := s.programTable(ctx, state)
+		if err != nil {
+			return Item{}, err
+		}
+		if ref, ok = table.find(id); !ok {
+			return Item{}, ErrNotFound
 		}
 	}
 	stored, err := s.load(ctx, itemID(channelKey(ref.channel)))
@@ -400,16 +593,20 @@ func (s *Service) unsavedProgram(ctx context.Context, v view, id accounts.ID) (I
 	if !ok || program.ID != id {
 		return Item{}, ErrNotFound
 	}
-	rememberProgram(id, ref)
+	s.rememberProgram(id, ref)
 	return s.overriddenItem(program), nil
 }
 
 // ProgramArtwork returns the image of an XMLTV programme listed lately,
 // which no item keeps, and whether downloading it is confined, as its
-// channel's addon is. Other programmes are not searched for: images are
-// served without credentials, and apps list the programmes they show.
+// channel's addon is; that of a programme of a channel Polyfin airs is its
+// title's. Other programmes are not searched for: images are served
+// without credentials, and apps list the programmes they show.
 func (s *Service) ProgramArtwork(ctx context.Context, id accounts.ID, imageType string) (string, bool, error) {
-	ref, ok := programRefs.Get(id)
+	if artwork, ok, err := s.virtualArtwork(ctx, id, imageType); ok {
+		return artwork.URL, artwork.Confined, err
+	}
+	ref, ok := s.programRefs.Get(id)
 	if !ok || !strings.EqualFold(imageType, "Primary") {
 		return "", false, ErrNotFound
 	}
@@ -439,29 +636,18 @@ func (s *Service) guideProgramme(ctx context.Context, ref programRef) (xmltv.Pro
 	return p, err
 }
 
-// searchProgram finds the guide programme an identifier names among those
-// of the channels mapped to a guide: an identifier is a hash of its
-// channel's Stremio identifier and its start (see programKey).
-func (s *Service) searchProgram(ctx context.Context, id accounts.ID) (programRef, bool, error) {
-	var ref programRef
-	err := s.db.QueryRow(ctx, `SELECT c.data->'meta'->>'id', p.guide_id, p.xmltv_id, p.starts_at
-		FROM live_guide_maps m JOIN items c ON c.id = m.channel_id AND c.kind = 'channel'
-		JOIN live_guides g ON g.id = m.guide_id
-		JOIN live_guide_programmes p ON p.guide_id = g.id AND p.generation = g.generation AND p.xmltv_id = m.xmltv_id
-		WHERE substring(sha256(convert_to('polyfin:item:program|' || (c.data->'meta'->>'id') || '|' ||
-			to_char(p.starts_at AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS"Z"'), 'UTF8')) FOR 16) = $1 LIMIT 1`, id[:]).
-		Scan(&ref.channel, &ref.guide, &ref.xmltvID, &ref.start)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return programRef{}, false, nil
-	}
-	return ref, err == nil, err
-}
-
 // SweepPrograms deletes the programmes kept as items that ended more than
 // two days ago and that no timer or recording names: Native EPG programmes
 // listed, and those of guides kept before they no longer were; and the
-// Replay programmes no archive keeps any more, past maxReplayDays.
+// Replay programmes no archive keeps any more, past maxReplayDays. Without
+// any programme kept, as on a server without Live TV, it reads only the
+// index of programmes. The kinds are written in the statements, so that
+// the planner uses that index (see migration items_programmes).
 func (s *Service) SweepPrograms(ctx context.Context) (int64, error) {
+	var kept bool
+	if err := s.db.QueryRow(ctx, "SELECT EXISTS (SELECT 1 FROM items WHERE kind IN ('program', 'replay'))").Scan(&kept); err != nil || !kept {
+		return 0, err
+	}
 	tag, err := s.db.Exec(ctx, `DELETE FROM items WHERE kind = 'program'
 		AND CASE WHEN data->'video'->>'endTime' ~ '^\d{4}-\d\d-\d\dT\d\d:\d\d' THEN (data->'video'->>'endTime')::timestamptz < $1 ELSE false END
 		AND id NOT IN (SELECT program_id FROM live_timers WHERE program_id IS NOT NULL
@@ -470,8 +656,8 @@ func (s *Service) SweepPrograms(ctx context.Context) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
-	replays, err := s.db.Exec(ctx, `DELETE FROM items WHERE kind = $1
-		AND CASE WHEN data->'video'->>'endTime' ~ '^\d{4}-\d\d-\d\dT\d\d:\d\d' THEN (data->'video'->>'endTime')::timestamptz < $2 ELSE true END`,
-		string(KindReplay), s.now().AddDate(0, 0, -maxReplayDays))
+	replays, err := s.db.Exec(ctx, `DELETE FROM items WHERE kind = 'replay'
+		AND CASE WHEN data->'video'->>'endTime' ~ '^\d{4}-\d\d-\d\dT\d\d:\d\d' THEN (data->'video'->>'endTime')::timestamptz < $1 ELSE true END`,
+		s.now().AddDate(0, 0, -maxReplayDays))
 	return tag.RowsAffected() + replays.RowsAffected(), err
 }

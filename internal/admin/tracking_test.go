@@ -72,6 +72,7 @@ func newTrackingAPI(t *testing.T) testAPI {
 		tracker := trackers.New(trackers.Options{DB: deps.pool, Settings: options.Accounts.Settings, Version: "test", Logger: options.Logger,
 			URLs: map[string]string{trackers.Trakt: services + "/trakt", trackers.MDBList: services + "/mdblist", trackers.PublicMetaDB: services + "/publicmetadb",
 				trackers.LastFM: services + "/lastfm/2.0/"},
+			AuthURLs: map[string]string{trackers.Trakt: services + "/trakt"},
 			Titles:   library.New(deps.pool, deps.addons, deps.client, options.Logger, options.Accounts.Settings),
 			UserData: userdata.New(deps.pool)})
 		t.Cleanup(tracker.Close)
@@ -91,14 +92,14 @@ func TestOwnTrackingFollowsTheContract(t *testing.T) {
 
 	status, body, _ := member.call(http.MethodGet, "/account/tracking", nil)
 	want := `{"importEveryMinutes":360,"services":[
-		{"service":"trakt","connection":"code","music":false,"available":false,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":true,"importWatchlist":false,"ratings":false,"syncRatings":false},
-		{"service":"simkl","connection":"code","music":false,"available":false,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":true,"importWatchlist":false,"ratings":false,"syncRatings":false},
-		{"service":"mdblist","connection":"key","music":false,"available":true,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":false,"importWatchlist":false,"ratings":false,"syncRatings":false},
-		{"service":"publicmetadb","connection":"key","music":false,"available":true,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":false,"importWatchlist":false,"ratings":false,"syncRatings":false},
-		{"service":"anilist","connection":"pin","music":false,"available":false,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":true,"importWatchlist":false,"ratings":true,"syncRatings":false},
-		{"service":"myanimelist","connection":"redirect","music":false,"available":false,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":true,"importWatchlist":false,"ratings":true,"syncRatings":false},
-		{"service":"lastfm","connection":"signin","music":true,"available":false,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":false,"importWatchlist":false,"ratings":false,"syncRatings":false},
-		{"service":"listenbrainz","connection":"key","music":true,"available":true,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":false,"importWatchlist":false,"ratings":false,"syncRatings":false}]}`
+		{"service":"trakt","connection":"code","music":false,"available":false,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":true,"importWatchlist":false,"watchlistSent":true,"watchlistFull":false,"ratings":false,"syncRatings":false},
+		{"service":"simkl","connection":"code","music":false,"available":false,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":true,"importWatchlist":false,"watchlistSent":true,"watchlistFull":false,"ratings":false,"syncRatings":false},
+		{"service":"mdblist","connection":"key","music":false,"available":true,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":true,"importWatchlist":false,"watchlistSent":true,"watchlistFull":false,"ratings":false,"syncRatings":false},
+		{"service":"publicmetadb","connection":"key","music":false,"available":true,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":true,"importWatchlist":false,"watchlistSent":true,"watchlistFull":false,"ratings":false,"syncRatings":false},
+		{"service":"anilist","connection":"pin","music":false,"available":false,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":true,"importWatchlist":false,"watchlistSent":false,"watchlistFull":false,"ratings":true,"syncRatings":false},
+		{"service":"myanimelist","connection":"redirect","music":false,"available":false,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":true,"importWatchlist":false,"watchlistSent":false,"watchlistFull":false,"ratings":true,"syncRatings":false},
+		{"service":"lastfm","connection":"signin","music":true,"available":false,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":false,"importWatchlist":false,"watchlistSent":false,"watchlistFull":false,"ratings":false,"syncRatings":false},
+		{"service":"listenbrainz","connection":"key","music":true,"available":true,"connected":false,"account":null,"connectedAt":null,"lastSentAt":null,"problem":null,"code":null,"expiresAt":null,"importHistory":false,"importing":false,"lastImport":null,"nextImportAt":null,"watchlist":false,"importWatchlist":false,"watchlistSent":false,"watchlistFull":false,"ratings":false,"syncRatings":false}]}`
 	var expected map[string]any
 	_ = json.Unmarshal([]byte(want), &expected)
 	if encoded, _ := json.Marshal(body); status != http.StatusOK || string(encoded) != mustCompact(t, expected) {
@@ -225,8 +226,8 @@ func TestHistoryImportFollowsTheContract(t *testing.T) {
 		// The music services have no history.
 		{http.MethodPatch, "/account/tracking/listenbrainz", map[string]bool{"importHistory": true}, http.StatusNotFound, "not_found"},
 		{http.MethodPost, "/account/tracking/lastfm/import", nil, http.StatusNotFound, "not_found"},
-		// Only Trakt and Simkl have a watchlist Polyfin imports.
-		{http.MethodPatch, "/account/tracking/mdblist", map[string]bool{"importWatchlist": true}, http.StatusNotFound, "not_found"},
+		// The music services have no watchlist Polyfin imports.
+		{http.MethodPatch, "/account/tracking/listenbrainz", map[string]bool{"importWatchlist": true}, http.StatusNotFound, "not_found"},
 	} {
 		if status, body, _ := member.call(check.method, check.path, check.body); status != check.status || body["error"] != check.code {
 			t.Errorf("%s %s: %d %v", check.method, check.path, status, body)

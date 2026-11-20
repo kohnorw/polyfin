@@ -7,6 +7,8 @@ import (
 	"math"
 	"slices"
 	"time"
+
+	"github.com/moodiness/polyfin/internal/media"
 )
 
 const (
@@ -25,6 +27,11 @@ const (
 	// shortestTail is the shortest a last segment may be: a keyframe closer
 	// to the end does not start one.
 	shortestTail = time.Second
+	// fastLength is how long a fast segment aims to be, and fastSpan, two
+	// of them, the length a segment must pass to be cut into fast ones
+	// (see FastFrom).
+	fastLength = 2 * time.Second
+	fastSpan   = 2 * fastLength
 )
 
 // segmentLength is how long segment n aims to be.
@@ -46,6 +53,19 @@ type Plan struct {
 	// searched marks a plan whose version FFmpeg seeks in by searching its
 	// timestamps (see Searched).
 	searched bool
+	// fastFrom and fastTo are the plan's fast segments, from fastFrom up
+	// to fastTo excluded, both zero for none (see FastFrom).
+	fastFrom, fastTo int
+}
+
+// planned is how much of a version lasting duration is cut into
+// segments: all of it, and media.MaxDuration of one said to last longer.
+// A plan's segments, and what its methods count from its duration, then
+// follow no number a caller took from elsewhere than an analysis: it
+// holds one segment per fastLength of media.MaxDuration at most, the
+// shortest a segment aims to be.
+func planned(duration time.Duration) time.Duration {
+	return min(duration, media.MaxDuration)
 }
 
 // NewGridPlan cuts a version lasting duration, whose keyframes are not
@@ -54,9 +74,10 @@ type Plan struct {
 // targetDuration. Only converted video, whose keyframes the encoder
 // places at each segment's start, can be cut so: FFmpeg starts on an
 // earlier keyframe, and what comes before the segment is left out (see
-// encoding.take).
+// encoding.take). No more than media.MaxDuration is cut (see planned).
 func NewGridPlan(duration time.Duration) Plan {
-	starts := []time.Duration{0}
+	duration = planned(duration)
+	starts := make([]time.Duration, 1, 2+max(duration, 0)/targetDuration)
 	for at := firstDuration; at <= duration-shortestTail; at += segmentLength(len(starts)) {
 		starts = append(starts, at)
 	}
@@ -86,8 +107,9 @@ func (p Plan) IsSearched() bool { return p.searched }
 // keyframes: the first ends on the first keyframe at least firstDuration
 // in, each next one on the first keyframe at least targetDuration after
 // its start. The first segment starts at zero, whatever the first
-// keyframe.
+// keyframe. No more than media.MaxDuration is cut (see planned).
 func NewPlan(keyframes []time.Duration, duration time.Duration) Plan {
+	duration = planned(duration)
 	starts := []time.Duration{0}
 	for i, keyframe := range keyframes {
 		if keyframe <= 0 || keyframe > duration-shortestTail {
@@ -140,6 +162,86 @@ func (p Plan) TargetDuration() int {
 	return int(math.Ceil(longest.Seconds()))
 }
 
+// FastFrom returns the plan of a play starting at t that starts with fast
+// segments, which an encoding makes quickly at a lower quality (see
+// Remux.Fast): the segment playing at t is cut anew every fastLength, its
+// last part up to twice as long. A player waits for its first segment
+// before it shows anything: the first fast segment comes once fastLength
+// of the version is read and converted, rather than the whole segment.
+// The segments before and after keep their times, and the fast segments
+// end on the keyframe the next one starts on. It reports false, and
+// returns p, when the segment playing at t lasts fastSpan or less: its
+// picture comes about as soon without fast segments.
+func (p Plan) FastFrom(t time.Duration) (Plan, bool) {
+	if len(p.starts) == 0 {
+		return p, false
+	}
+	from := p.Segment(t)
+	start, end := p.Start(from), p.End(from)
+	if end-start <= fastSpan {
+		return p, false
+	}
+	starts := slices.Clone(p.starts[:from])
+	for at := start; ; at += fastLength {
+		starts = append(starts, at)
+		if end-at-fastLength < fastLength {
+			break
+		}
+	}
+	p.fastFrom, p.fastTo = from, len(starts)
+	p.starts = append(starts, p.starts[from+1:]...)
+	return p, true
+}
+
+// HasFast reports whether the plan has fast segments (see FastFrom).
+func (p Plan) HasFast() bool {
+	return p.fastTo > 0
+}
+
+// Fast reports whether segment n is one of the plan's fast segments (see
+// FastFrom).
+func (p Plan) Fast(n int) bool {
+	return n >= p.fastFrom && n < p.fastTo
+}
+
+// Until returns the plan of a version that ends at end, before p does
+// (see Manager.End): the segments starting before end, the last one
+// lasting up to it, and the fast segments among them (see FastFrom). It
+// returns p when end is not before p's end, or not past its start.
+func (p Plan) Until(end time.Duration) Plan {
+	if end >= p.duration || end <= 0 || len(p.starts) == 0 {
+		return p
+	}
+	n, _ := slices.BinarySearch(p.starts, end)
+	p.starts, p.duration = slices.Clip(p.starts[:n]), end
+	p.fastTo = min(p.fastTo, n)
+	if p.fastFrom >= p.fastTo {
+		p.fastFrom, p.fastTo = 0, 0
+	}
+	return p
+}
+
+// switches reports whether segment n is made otherwise than the one
+// before it: the first fast segment, or the first after them. A playlist
+// marks it with a discontinuity.
+func (p Plan) switches(n int) bool {
+	return n > 0 && p.fastTo > 0 && (n == p.fastFrom || n == p.fastTo)
+}
+
+// stretchEnd is the first segment after n made otherwise than n: the
+// first fast segment for one before them, the first after them for a fast
+// one, else the plan's length.
+func (p Plan) stretchEnd(n int) int {
+	switch {
+	case p.fastTo == 0:
+	case n < p.fastFrom:
+		return p.fastFrom
+	case n < p.fastTo:
+		return p.fastTo
+	}
+	return len(p.starts)
+}
+
 // seekPast is how far past the time FFmpeg should start at it is asked
 // for (see seekTime).
 const seekPast = 132 * time.Millisecond
@@ -158,10 +260,14 @@ const seekPast = 132 * time.Millisecond
 // distance asked before it, as they are in a plan cut on them; a job that
 // lands past it starts again with a longer lookback (see
 // encoding.searchFurther). Zero, when lookback reaches the version's
-// start, has FFmpeg read it from there, without seeking.
+// start, or for segment 1, whose previous segment starts the version, has
+// FFmpeg read it from there, without seeking.
 func (p Plan) seekTime(n int, lookback time.Duration) time.Duration {
 	if !p.searched {
 		return p.starts[n] + seekPast
+	}
+	if n == 1 {
+		return 0
 	}
 	return max(min(p.starts[n-1]+seekPast, p.starts[n]-lookback), 0)
 }

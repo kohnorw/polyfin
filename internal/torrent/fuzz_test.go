@@ -22,15 +22,16 @@ import (
 )
 
 // The fuzz tests feed Polyfin's parsers what other programs send: peers,
-// trackers, DHT nodes, the SOCKS5 proxy and addons. None may panic, and
-// what they keep stays within the limits set. The inputs that made one
-// fail are in testdata/fuzz, run as regular tests.
+// trackers, DHT nodes, the SOCKS5 proxy and addons, and the WireGuard
+// configurations providers hand out. None may panic, and what they keep
+// stays within the limits set. The inputs that made one fail are in
+// testdata/fuzz, run as regular tests.
 
 // fuzzTorrent is a torrent of two files and three pieces, each of one
 // block; large, of two pieces, of two blocks and one. Its bytes are always
 // the same, so that the corpus keeps matching it.
 func fuzzTorrent(large bool) *torrenttest.Torrent {
-	size, pieceLength := 2<<10+300, 1<<10
+	size, pieceLength := 2*blockSize+300, blockSize
 	if large {
 		size, pieceLength = 40<<10+17, 32<<10
 	}
@@ -143,6 +144,10 @@ func (c *datagramConn) WriteTo(p []byte, _ string) error {
 	return nil
 }
 
+func (c *datagramConn) WriteToAddrPort(p []byte, to netip.AddrPort) error {
+	return c.WriteTo(p, to.String())
+}
+
 func (c *datagramConn) ReadFrom(p []byte) (int, netip.AddrPort, error) {
 	if len(c.datagrams) == 0 {
 		return 0, netip.AddrPort{}, timeoutError{}
@@ -247,10 +252,39 @@ func checkInfoBounds(t *testing.T, info Info) {
 	if size := info.pieceSize(last); size <= 0 || size > info.PieceLength {
 		t.Fatalf("a last piece of %d bytes, of %d at most", size, info.PieceLength)
 	}
-	if file, err := info.File(-1); err == nil && file.Length > 0 {
+	if file, err := info.File(Spec{File: -1}); err == nil && file.Length > 0 {
 		if index := (file.Offset + file.Length - 1) / info.PieceLength; index < 0 || index > int64(last) {
 			t.Fatalf("the file's end is in piece %d of %d", index, len(info.Pieces))
 		}
+	}
+}
+
+// infoPathsFactor is how many times a dictionary's bytes the paths read
+// from it hold at most: a file's entry is 13 bytes at least, and its path
+// holds the torrent's name and a slash besides what the entry writes.
+const infoPathsFactor = (maxFileName + 1 + 12) / 13
+
+// checkInfoSize checks that what was read from an info dictionary of size
+// bytes stays a small multiple of it: its paths, which hold the torrent's
+// name once for each file, and all it takes in memory.
+func checkInfoSize(t *testing.T, info Info, size int) {
+	t.Helper()
+	paths := 0
+	for _, file := range info.Files {
+		if len(file.Path) > maxFilePath {
+			t.Fatalf("a path of %d bytes", len(file.Path))
+		}
+		paths += len(file.Path)
+	}
+	if paths > infoPathsFactor*size {
+		t.Fatalf("%d files' paths hold %d bytes, read from %d", len(info.Files), paths, size)
+	}
+	if len(info.Name) > maxFileName || len(info.Files) > maxInfoFiles ||
+		info.size() > size+len(info.Files)*(maxFileName+1+fileBytes) {
+		t.Fatalf("a name of %d bytes and %d files, %d bytes in all, read from %d", len(info.Name), len(info.Files), info.size(), size)
+	}
+	if info.PieceLength < minPieceLength {
+		t.Fatalf("pieces of %d bytes", info.PieceLength)
 	}
 }
 
@@ -258,15 +292,32 @@ func FuzzParseInfo(f *testing.F) {
 	f.Add(fuzzTorrent(false).Info)
 	f.Add(fuzzTorrent(true).Info)
 	f.Add(torrenttest.Build("One", 16<<10, torrenttest.File{Name: "a.mkv", Data: make([]byte, 20<<10)}).Info)
-	f.Add(encode(map[string]any{"name": "Padded", "piece length": 16, "pieces": strings.Repeat("x", 40),
+	f.Add(encode(map[string]any{"name": "Padded", "piece length": blockSize, "pieces": strings.Repeat("x", 20),
 		"files": []any{map[string]any{"length": 10, "path": []any{"a"}}, map[string]any{"length": 6, "path": []any{"pad"}, "attr": "p"},
 			map[string]any{"length": 16, "path": []any{"b", "c"}}}}))
+	// Lengths whose sum overflows, in pieces long enough to be read, and
+	// pieces one byte too short.
+	f.Add(encode(map[string]any{"name": "x", "piece length": blockSize, "pieces": strings.Repeat("x", 20),
+		"files": []any{map[string]any{"length": int64(math.MaxInt64), "path": []any{"a"}}, map[string]any{"length": int64(math.MaxInt64), "path": []any{"b"}},
+			map[string]any{"length": 3, "path": []any{"c"}}}}))
+	f.Add(encode(map[string]any{"name": "x", "piece length": blockSize - 1, "pieces": strings.Repeat("x", 20), "length": 3}))
+	// A name longer than a file's, which each file's path would hold.
+	f.Add(infoOf(strings.Repeat("A", 4<<10), filesNamed(256)...))
+	f.Add(infoOf(strings.Repeat("A", maxFileName), filesNamed(64)...))
 	f.Fuzz(func(t *testing.T, data []byte) {
+		// The values counted before decoding are those decoding reads: no
+		// fewer than it keeps, and as many when no key is written twice.
+		if value, rest, err := decode(data); err == nil && len(rest) == 0 {
+			if n := values(value); valuesWithin(data, n-1) || bytes.Equal(encode(value), data) && !valuesWithin(data, n) {
+				t.Fatalf("%q holds %d values, which is not what was counted", data, n)
+			}
+		}
 		info, err := parseInfo(data)
 		if err != nil {
 			return
 		}
 		checkInfoBounds(t, info)
+		checkInfoSize(t, info, len(data))
 	})
 }
 
@@ -309,7 +360,8 @@ func (s fuzzSwarm) messages() []byte {
 		wire(msgCancel, u32(1, 0, second)),
 		wire(msgPort, []byte{0x1a, 0xe1}),
 		{0, 0, 0, 0},
-		extendedMessage(0, map[string]any{"m": map[string]any{"ut_metadata": 1}, "metadata_size": len(s.tor.Info), "v": "Peer"}, nil),
+		extendedMessage(0, map[string]any{"m": map[string]any{"ut_metadata": 1, "ut_pex": 2}, "metadata_size": len(s.tor.Info), "v": "Peer"}, nil),
+		wire(msgExtended, []byte{extPEX}, pexPayload(append(addresses(0, 2), netip.MustParseAddrPort("[2001:db8::1]:6881")), pexUTP, addresses(5, 1)...)),
 		extendedMessage(extMetadata, map[string]any{"msg_type": 0, "piece": 0}, nil),
 		extendedMessage(extMetadata, map[string]any{"msg_type": 0, "piece": 1}, nil),
 		wire(msgNotInterested),
@@ -333,7 +385,7 @@ func fuzzEngine(tb testing.TB, logger *slog.Logger, swarms ...fuzzSwarm) *Engine
 		logger = slog.New(slog.DiscardHandler)
 	}
 	e, err := New(Config{Settings: func() Settings { return Settings{Enabled: true, UploadMbps: 1000} }, Dir: tb.TempDir(),
-		Budget: func() int64 { return 64 << 20 }, Logger: logger})
+		Budget: func() int64 { return 64 << 20 }, Public: torrenttest.OnLoopback, Logger: logger})
 	if err != nil {
 		tb.Fatal(err)
 	}
@@ -430,10 +482,11 @@ func FuzzPeerMessages(f *testing.F) {
 func TestPeerLimits(t *testing.T) {
 	t.Parallel()
 	s := newFuzzSwarm(t, false)
-	e := fuzzEngine(t, nil, s)
+	// Each subtest reads with an engine of its own, its upload limit its
+	// own while the subtests run together.
 	read := func(t *testing.T, mode byte, stream []byte, setup func(*torrent)) (*torrent, *peer, error) {
 		t.Helper()
-		tr, p, err := newFuzzPeer(e, s, mode, stream)
+		tr, p, err := newFuzzPeer(fuzzEngine(t, nil, s), s, mode, stream)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -452,23 +505,27 @@ func TestPeerLimits(t *testing.T) {
 	}
 
 	t.Run("a bitfield past the pieces a torrent may have", func(t *testing.T) {
+		t.Parallel()
 		_, p, err := read(t, 0, wire(msgBitfield, make([]byte, (maxPieces+7)/8+1)), nil)
 		if err == nil || !strings.Contains(err.Error(), "bitfield") || p.has != nil {
 			t.Fatalf("got %v, with %d pieces", err, len(p.has))
 		}
 	})
 	t.Run("a bitfield past the torrent's pieces", func(t *testing.T) {
+		t.Parallel()
 		if _, _, err := read(t, 1, wire(msgBitfield, []byte{0xff, 0xff}), nil); err == nil || !strings.Contains(err.Error(), "bitfield") {
 			t.Fatalf("got %v", err)
 		}
 	})
 	t.Run("a have past the pieces a torrent may have", func(t *testing.T) {
+		t.Parallel()
 		_, p, err := read(t, 0, append(wire(msgHave, u32(maxPieces-1)), wire(msgHave, u32(maxPieces))...), nil)
 		if err == nil || !strings.Contains(err.Error(), "have") || len(p.has) != maxPieces {
 			t.Fatalf("got %v, with %d pieces", err, len(p.has))
 		}
 	})
 	t.Run("metadata is answered while the peer reads", func(t *testing.T) {
+		t.Parallel()
 		_, p, err := read(t, 1|4, metadataRequests(400), func(tr *torrent) { tr.infoData = make([]byte, 4*metadataBlock) })
 		if !errors.Is(err, io.EOF) {
 			t.Fatal(err)
@@ -484,6 +541,7 @@ func TestPeerLimits(t *testing.T) {
 		}
 	})
 	t.Run("a peer that does not read", func(t *testing.T) {
+		t.Parallel()
 		requests := maxOutbox / len(extendedMessage(extMetadata, map[string]any{"msg_type": 0, "piece": 0}, nil))
 		_, p, err := read(t, 1|4, metadataRequests(requests+10), nil)
 		if !errors.Is(err, net.ErrClosed) || queuedBytes(p) > maxOutbox {
@@ -588,7 +646,7 @@ func FuzzUDPTracker(f *testing.F) {
 		conn := &datagramConn{datagrams: [][]byte{connect, reply}, echo: echo}
 		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
 		defer cancel()
-		answer, err := announceUDP(ctx, packetRoute{conn}, "tracker.invalid:6969", announce{port: announcedPort, left: 1})
+		answer, err := announceUDP(ctx, packetRoute{conn}, "tracker.invalid:6969", announce{port: 51413, left: 1})
 		if err != nil {
 			return
 		}
@@ -614,7 +672,7 @@ func FuzzDHTLookup(f *testing.F) {
 	f.Fuzz(func(t *testing.T, stream []byte) {
 		conn := &datagramConn{datagrams: frames(stream), from: netip.MustParseAddrPort("127.0.0.1:6881")}
 		seen := map[netip.AddrPort]bool{}
-		err := lookupPeers(context.Background(), conn, hash, []string{"127.0.0.1:6881"}, func(peers []netip.AddrPort) {
+		closest, err := lookupPeers(context.Background(), conn, hash, []string{"127.0.0.1:6881"}, torrenttest.OnLoopback, func(peers []netip.AddrPort) {
 			for _, peer := range peers {
 				if !peer.IsValid() || peer.Port() == 0 || seen[peer] {
 					t.Fatalf("a peer at %v, or found twice", peer)
@@ -627,6 +685,9 @@ func FuzzDHTLookup(f *testing.F) {
 		}
 		if conn.writes > dhtQueries {
 			t.Fatalf("%d queries, %d at most", conn.writes, dhtQueries)
+		}
+		if len(closest) > dhtKept {
+			t.Fatalf("%d nodes kept, %d at most", len(closest), dhtKept)
 		}
 	})
 }
@@ -694,11 +755,11 @@ func FuzzNewSpec(f *testing.F) {
 			}
 			return
 		}
-		if spec.File < -1 || len(spec.Trackers) > maxTrackers || len(spec.Nodes) > maxNodes {
+		if spec.File < -1 || len(spec.Trackers) > MaxTrackers || len(spec.Nodes) > maxNodes {
 			t.Fatalf("got %+v", spec)
 		}
 		for _, tracker := range spec.Trackers {
-			if !validTracker(tracker) {
+			if !ValidTracker(tracker) {
 				t.Fatalf("an invalid tracker %q", tracker)
 			}
 		}
@@ -706,6 +767,45 @@ func FuzzNewSpec(f *testing.F) {
 			if !validNode(node) {
 				t.Fatalf("an invalid DHT node %q", node)
 			}
+		}
+	})
+}
+
+// FuzzWireGuardConfig checks a configuration that was read writes back as
+// one that reads the same, and that a refusal tells its line and key
+// without repeating a value.
+func FuzzWireGuardConfig(f *testing.F) {
+	key := "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk="
+	valid := "[Interface]\nPrivateKey = " + key + "\nAddress = 10.2.0.2/32, fd00::2\nDNS = 10.2.0.1, 2001:db8::53\nMTU = 1280\n" +
+		"ListenPort = 51820\nPostUp = true\n\n[Peer]\nPublicKey = " + key + "\nPresharedKey = " + key + "\n" +
+		"Endpoint = vpn.example.com:51820\nAllowedIPs = 0.0.0.0/0, ::/0\nPersistentKeepalive = 25\n"
+	for _, seed := range []string{valid, strings.ReplaceAll(valid, "\n", "\r\n"), strings.ToUpper(valid),
+		strings.Replace(valid, "vpn.example.com", "[2001:db8::1]", 1), strings.Replace(valid, "0.0.0.0/0", "::ffff:0.0.0.0/96", 1),
+		"[Interface]\n# only a comment\n[Peer]\n", "[Interface\n", "Key = Value\n", "[Peer]\nEndpoint = a..b:1\n"} {
+		f.Add(seed)
+	}
+	f.Fuzz(func(t *testing.T, text string) {
+		c, err := ParseWireGuardConfig(text)
+		if err != nil {
+			var configErr *WireGuardConfigError
+			if !errors.As(err, &configErr) || configErr.Line < 0 || configErr.Line > strings.Count(text, "\n")+1 || len(err.Error()) > 200 {
+				t.Fatalf("%q is refused with %#v", text, err)
+			}
+			if strings.Contains(err.Error(), key) {
+				t.Fatalf("the refusal of %q tells a key: %v", text, err)
+			}
+			return
+		}
+		if !c.ipv4().IsValid() || c.Endpoint == "" || len(c.AllowedIPs) == 0 {
+			t.Fatalf("%q reads as %+v", text, c)
+		}
+		written := c.Marshal()
+		again, err := ParseWireGuardConfig(written)
+		if err != nil {
+			t.Fatalf("%q writes as %q, refused: %v", text, written, err)
+		}
+		if !reflect.DeepEqual(again, c) || again.Marshal() != written {
+			t.Fatalf("%q writes as %q, which reads as %+v rather than %+v", text, written, again, c)
 		}
 	})
 }

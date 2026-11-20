@@ -100,7 +100,7 @@ func (s dlnaSetup) browse(t *testing.T, object, flag string, start, count int) b
 	request, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, s.site+"/dlna/control/ContentDirectory", strings.NewReader(body))
 	request.Header.Set("SOAPAction", `"urn:schemas-upnp-org:service:ContentDirectory:1#Browse"`)
 	request.Header.Set("User-Agent", "TestTV DLNADOC/1.50")
-	response, err := http.DefaultClient.Do(request)
+	response, err := testClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -175,7 +175,7 @@ func fetch(t *testing.T, address string, headers map[string]string) (*http.Respo
 	for name, value := range headers {
 		request.Header.Set(name, value)
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := testClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -565,7 +565,8 @@ func TestDLNAArtFollowsTheDevicesUser(t *testing.T) {
 	if response, _ := fetch(t, art, nil); response.StatusCode != http.StatusNotFound {
 		t.Errorf("the PG movie's art for the child's device: %d", response.StatusCode)
 	}
-	grant := s.testServer.handler.Playback.Signer().Sign(playback.Grant{Version: movie, User: child.ID, Relay: true})
+	// An address as the DLNA service signs them, in its own domain.
+	grant := s.testServer.handler.Playback.Signer().Domain("dlna").Sign(playback.Grant{Version: movie, User: child.ID, Relay: true})
 	media := s.site + "/dlna/media/" + movie.String() + ".mkv?g=" + url.QueryEscape(grant)
 	if response, _ := fetch(t, media, nil); response.StatusCode != http.StatusNotFound {
 		t.Errorf("the PG movie's media for the child's device: %d", response.StatusCode)
@@ -592,7 +593,7 @@ func TestDLNASearchesFromHugeIndexes(t *testing.T) {
 			`<SearchCriteria>dc:title contains "Rated"</SearchCriteria><Filter>*</Filter><StartingIndex>%d</StartingIndex>`+
 			`<RequestedCount>10</RequestedCount><SortCriteria></SortCriteria></u:Search></s:Body></s:Envelope>`, start)
 		request, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, s.site+"/dlna/control/ContentDirectory", strings.NewReader(body))
-		response, err := http.DefaultClient.Do(request)
+		response, err := testClient.Do(request)
 		if err != nil {
 			t.Fatalf("a search from %d: %v", start, err)
 		}
@@ -685,5 +686,49 @@ func TestEndedDLNAPlaybacksLeaveSessions(t *testing.T) {
 	clock.Store(&later)
 	if playing() {
 		t.Error("the playback is still listed two minutes after the device's last request")
+	}
+}
+
+// A device lists the user's watchlist before Continue Watching, under its
+// name, with its entries in the playlist's order; it lists it empty once
+// the user deleted the playlist.
+func TestADLNADeviceListsTheWatchlistInItsOrder(t *testing.T) {
+	t.Parallel()
+	s := sharingOverDLNA(t)
+	s.browse(t, "0", "BrowseDirectChildren", 0, 0)
+	s.show(t, s.user)
+	name := func(id string) string {
+		t.Helper()
+		var item BaseItemDto
+		if status := s.get(t, "/Items/"+id, s.token, &item); status != http.StatusOK {
+			t.Fatalf("item %s: %d", id, status)
+		}
+		return item.Name
+	}
+	for _, id := range []string{s.remote, s.movie} {
+		if status, body := s.call(http.MethodPost, "/Polyfin/UserItems/"+id+"/Watchlist", app("tv", s.token), nil); status != http.StatusNoContent {
+			t.Fatalf("adding %s: %d %s", id, status, body)
+		}
+	}
+	watchlist := func() []string {
+		t.Helper()
+		views, _ := parseDIDL(t, s.browse(t, "0", "BrowseDirectChildren", 0, 0).didl)
+		names := titles(views)
+		if len(views) < 4 || names[len(names)-3] != "Watchlist" || names[len(names)-2] != "Continue Watching" {
+			t.Fatalf("views: %v", names)
+		}
+		_, items := parseDIDL(t, s.browse(t, views[len(views)-3].ID, "BrowseDirectChildren", 0, 0).didl)
+		return titles(items)
+	}
+	if got := watchlist(); !slices.Equal(got, []string{name(s.movie), name(s.remote)}) {
+		t.Errorf("watchlist: %v", got)
+	}
+	var held WatchlistDto
+	s.get(t, "/Polyfin/UserItems/Watchlist", s.token, &held)
+	if status, body := s.call(http.MethodDelete, "/Items/"+held.PlaylistId, app("tv", s.token), nil); status != http.StatusNoContent {
+		t.Fatalf("deleting the playlist: %d %s", status, body)
+	}
+	if got := watchlist(); len(got) != 0 {
+		t.Errorf("deleted watchlist: %v", got)
 	}
 }

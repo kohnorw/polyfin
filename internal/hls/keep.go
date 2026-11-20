@@ -78,12 +78,12 @@ func (k Key) sameDevice(other Key) bool {
 }
 
 // keeps reports whether the encoding of key is kept video: kept video is
-// on, key converts the video it describes, its session has no encoding
-// of its own already, and no other session plays the same video that did
-// not stop.
+// on, key converts the video it describes, without fast segments, its
+// session has no encoding of its own already, and no other session plays
+// the same video that did not stop.
 func (m *Manager) keeps(key Key) bool {
 	keep := m.keepVideo.Load()
-	if keep == nil || !(*keep)() || !key.Converts || key.Video == "" || key.Session == "" {
+	if keep == nil || !(*keep)() || !key.Converts || key.Video == "" || key.Session == "" || key.FastStart {
 		return false
 	}
 	m.mu.Lock()
@@ -102,11 +102,13 @@ func (m *Manager) keeps(key Key) bool {
 }
 
 // videoAlone is open, the audio left out: the kept video's FFmpeg makes
-// the video alone.
+// the video alone. Its input is never switched for another (see
+// Remux.Switch): its audio's FFmpeg reads the version on its own.
 func videoAlone(open Opener) Opener {
 	return func(ctx context.Context) (Remux, func(), error) {
 		r, release, err := open(ctx)
-		r.Audio, r.ADTS, r.AudioCodec, r.AudioChannels, r.AudioBitrate, r.AudioFilter = -1, false, "", 0, 0, ""
+		r.Audio, r.ADTS, r.AudioCodec, r.AudioChannels, r.AudioBitrate, r.AudioFilter, r.AudioDecoder = -1, false, "", 0, 0, "", nil
+		r.Switch = nil
 		return r, release, err
 	}
 }
@@ -144,7 +146,7 @@ func (m *Manager) keptFile(ctx context.Context, key Key, open Opener, n int) (*o
 		if err != nil {
 			return nil, err
 		}
-		if n < 0 && e.remux.Format != FMP4 || n >= e.remux.Plan.Len() {
+		if n < 0 && e.remux.Format != FMP4 || n >= 0 && e.beyond(n) {
 			return nil, ErrNotFound
 		}
 		m.mu.Lock()

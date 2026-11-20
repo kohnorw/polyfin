@@ -130,6 +130,10 @@ func matroskaVideo(f *file) (*Video, error) {
 		if point.cluster >= uint64(f.size) || off >= f.size {
 			return nil, m.outside(point.cluster, "Cluster of a keyframe")
 		}
+		// The keyframe is relative bytes into its Cluster's data.
+		if point.relative >= uint64(f.size-off) {
+			return nil, m.outside(point.cluster+min(point.relative, uint64(f.size)), "keyframe")
+		}
 		v.Keyframes = append(v.Keyframes, point.time)
 		v.frames = append(v.frames, frameAt{off: off, relative: int64(point.relative), hasRelative: point.hasRelative})
 	}
@@ -218,7 +222,8 @@ func videoCues(cues []byte, track, scale uint64) ([]videoCue, error) {
 }
 
 // mp4VideoFrames reads the first video track of an MP4 file: its sample
-// description, and the times and places of its sync samples.
+// description, and the times and places of its sync samples, which stay
+// in the slices they were read into.
 func mp4VideoFrames(f *file) (*Video, error) {
 	t, movieTimescale, err := mp4Video(f)
 	if err != nil {
@@ -257,27 +262,11 @@ func mp4VideoFrames(f *file) (*Video, error) {
 	if err := v.describe(stsd); err != nil {
 		return nil, err
 	}
-	places, err := sampleRanges(samples, stsz, stsc, stco, wide)
-	if err != nil {
+	v.Keyframes = times
+	if v.frames, _, err = sampleRanges(samples, stsz, stsc, stco, wide, f.size); err != nil {
 		return nil, err
 	}
-	type keyframe struct {
-		time  time.Duration
-		place Range
-	}
-	keyframes := make([]keyframe, len(times))
-	for i := range times {
-		if places[i].Off < 0 || places[i].Off >= f.size || int64(places[i].N) > f.size-places[i].Off {
-			return nil, fmt.Errorf("sample %d past the end of the file: %w", samples[i], errInvalid)
-		}
-		keyframes[i] = keyframe{times[i], places[i]}
-	}
-	slices.SortStableFunc(keyframes, func(a, b keyframe) int { return cmp.Compare(a.time, b.time) })
-	keyframes = slices.CompactFunc(keyframes, func(a, b keyframe) bool { return a.time == b.time })
-	for _, k := range keyframes {
-		v.Keyframes = append(v.Keyframes, k.time)
-		v.frames = append(v.frames, frameAt{off: k.place.Off, n: int64(k.place.N)})
-	}
+	v.inOrder()
 	return v, nil
 }
 
@@ -384,31 +373,31 @@ func appendID(b []byte, id uint32) []byte {
 	return append(b, byte(id))
 }
 
-// sampleRanges returns where samples, ascending, are in the file, from
-// the sample sizes (stsz), the samples of each chunk (stsc) and where
-// each chunk starts (stco, or co64 when wide).
-func sampleRanges(samples []uint64, stsz, stsc, stco []byte, wide bool) ([]Range, error) {
+// sampleRanges returns where samples, ascending, are in a file of size
+// bytes, from the sample sizes (stsz), the samples of each chunk (stsc)
+// and where each chunk starts (stco, or co64 when wide). When stsz gives
+// one size for every sample, their count is only declared: a sample's
+// place in its chunk is computed. When it lists their sizes, the place is
+// the sum of those before it in the chunk, read one by one, as many as
+// the table holds at most. walked counts the sizes read so, for tests.
+func sampleRanges(samples []uint64, stsz, stsc, stco []byte, wide bool, size int64) (frames []frameAt, walked int, err error) {
 	if len(stsz) < 12 {
-		return nil, fmt.Errorf("stsz of %d bytes: %w", len(stsz), errInvalid)
+		return nil, 0, fmt.Errorf("stsz of %d bytes: %w", len(stsz), errInvalid)
 	}
-	uniform := binary.BigEndian.Uint32(stsz[4:])
+	uniform := int64(binary.BigEndian.Uint32(stsz[4:]))
 	total := uint64(binary.BigEndian.Uint32(stsz[8:]))
 	var sizes []byte
 	if uniform == 0 {
 		if total > uint64(len(stsz)-12)/4 {
-			return nil, fmt.Errorf("stsz of %d entries in %d bytes: %w", total, len(stsz), errInvalid)
+			return nil, 0, fmt.Errorf("stsz of %d entries in %d bytes: %w", total, len(stsz), errInvalid)
 		}
 		sizes = stsz[12 : 12+total*4]
-	}
-	sizeOf := func(sample uint64) int64 {
-		if sizes == nil {
-			return int64(uniform)
-		}
-		return int64(binary.BigEndian.Uint32(sizes[sample*4:]))
+	} else if uniform > maxFrame && len(samples) > 0 {
+		return nil, 0, fmt.Errorf("sample %d of %d bytes: %w", samples[0], uniform, errInvalid)
 	}
 	chunks, err := table(stsc, "stsc", 12)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	width := 4
 	if wide {
@@ -416,7 +405,7 @@ func sampleRanges(samples []uint64, stsz, stsc, stco []byte, wide bool) ([]Range
 	}
 	offsets, err := table(stco, "stco", width)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	chunkCount := uint64(len(offsets) / width)
 	chunkOffset := func(chunk uint64) int64 {
@@ -426,7 +415,20 @@ func sampleRanges(samples []uint64, stsz, stsc, stco []byte, wide bool) ([]Range
 		return int64(binary.BigEndian.Uint32(offsets[chunk*4:]))
 	}
 
-	result := make([]Range, len(samples))
+	// place returns the n bytes within bytes into the chunk at off, which
+	// starts in the file, when they are a frame in the file. within is
+	// far below what an int64 holds: a sum or a product of 32-bit sizes.
+	place := func(sample uint64, off, within, n int64) (frameAt, error) {
+		if n > maxFrame {
+			return frameAt{}, fmt.Errorf("sample %d of %d bytes: %w", sample, n, errInvalid)
+		}
+		if within >= size-off || n > size-off-within {
+			return frameAt{}, fmt.Errorf("sample %d past the end of the file: %w", sample, errInvalid)
+		}
+		return frameAt{off: off + within, n: n}, nil
+	}
+
+	frames = make([]frameAt, len(samples))
 	next := 0
 	sample := uint64(0)
 	for entry := 0; entry*12 < len(chunks) && next < len(samples); entry++ {
@@ -437,36 +439,53 @@ func sampleRanges(samples []uint64, stsz, stsc, stco []byte, wide bool) ([]Range
 			last = uint64(binary.BigEndian.Uint32(chunks[(entry+1)*12:]))
 		}
 		if first == 0 || last < first || last > chunkCount+1 || perChunk == 0 {
-			return nil, fmt.Errorf("stsc entry %d: %w", entry, errInvalid)
+			return nil, walked, fmt.Errorf("stsc entry %d: %w", entry, errInvalid)
 		}
 		for chunk := first; chunk < last && next < len(samples); chunk++ {
 			end := sample + perChunk
 			if end > total {
-				return nil, fmt.Errorf("chunk %d past the last sample: %w", chunk, errInvalid)
+				return nil, walked, fmt.Errorf("chunk %d past the last sample: %w", chunk, errInvalid)
 			}
 			if samples[next] >= end {
 				sample = end
 				continue
 			}
+			// A chunk is checked to start in the file before its samples
+			// are placed from its start.
 			off := chunkOffset(chunk - 1)
-			for s := sample; s < end && next < len(samples); s++ {
-				n := sizeOf(s)
-				if samples[next] == s {
-					if n > maxFrame {
-						return nil, fmt.Errorf("sample %d of %d bytes: %w", s, n, errInvalid)
+			if off < 0 || off >= size {
+				return nil, walked, fmt.Errorf("chunk %d past the end of the file: %w", chunk, errInvalid)
+			}
+			if uniform != 0 {
+				// A sample's number in its chunk is 32-bit and its size
+				// maxFrame at most: their product fits.
+				for ; next < len(samples) && samples[next] < end; next++ {
+					if frames[next], err = place(samples[next], off, int64(samples[next]-sample)*uniform, uniform); err != nil {
+						return nil, walked, err
 					}
-					result[next] = Range{Off: off, N: int(n)}
+				}
+				sample = end
+				continue
+			}
+			within := int64(0)
+			for s := sample; s < end && next < len(samples); s++ {
+				n := int64(binary.BigEndian.Uint32(sizes[s*4:]))
+				walked++
+				if samples[next] == s {
+					if frames[next], err = place(s, off, within, n); err != nil {
+						return nil, walked, err
+					}
 					next++
 				}
-				off += n
+				within += n
 			}
 			sample = end
 		}
 	}
 	if next < len(samples) {
-		return nil, fmt.Errorf("sample %d in no chunk: %w", samples[next], errInvalid)
+		return nil, walked, fmt.Errorf("sample %d in no chunk: %w", samples[next], errInvalid)
 	}
-	return result, nil
+	return frames, walked, nil
 }
 
 // ReadFrames reads the keyframes numbered by indexes, in the order of
@@ -477,8 +496,21 @@ func sampleRanges(samples []uint64, stsz, stsc, stco []byte, wide bool) ([]Range
 // does not give, one or rarely two. When f is also a RangeFetcher, several
 // keyframes are read with each request.
 func (v *Video) ReadFrames(ctx context.Context, f Fetcher, indexes []int, fn func(index int, frame []byte) error) error {
-	r := &frameReader{v: v, f: f, guess: firstFrameGuess}
+	return v.Frames(f).Read(ctx, indexes, fn)
+}
+
+// Frames reads the keyframes of v through f, as ReadFrames does, one Read
+// after another: what a Read learns of the keyframes' sizes, and whether f
+// serves several ranges with one request, the next Read keeps.
+func (v *Video) Frames(f Fetcher) *FrameReader {
+	r := &FrameReader{v: v, f: f, guess: firstFrameGuess}
 	_, r.ranges = f.(RangeFetcher)
+	return r
+}
+
+// Read reads the keyframes numbered by indexes, as ReadFrames does.
+func (r *FrameReader) Read(ctx context.Context, indexes []int, fn func(index int, frame []byte) error) error {
+	v := r.v
 	for len(indexes) > 0 {
 		batch := []Range{}
 		var bytes int64
@@ -486,7 +518,10 @@ func (v *Video) ReadFrames(ctx context.Context, f Fetcher, indexes []int, fn fun
 			if index < 0 || index >= len(v.frames) {
 				return fmt.Errorf("no keyframe %d", index)
 			}
-			place := r.first(v.frames[index])
+			place, err := r.first(v.frames[index])
+			if err != nil {
+				return fmt.Errorf("keyframe at %v: %w", v.Keyframes[index], err)
+			}
 			if len(batch) > 0 && (!r.ranges || len(batch) == batchFrames || bytes+int64(place.N) > batchBytes) {
 				break
 			}
@@ -515,9 +550,9 @@ func (v *Video) ReadFrames(ctx context.Context, f Fetcher, indexes []int, fn fun
 	return nil
 }
 
-// frameReader reads keyframes, learning as it goes how long Cluster
+// FrameReader reads keyframes, learning as it goes how long Cluster
 // headers are and how large keyframes are.
-type frameReader struct {
+type FrameReader struct {
 	v *Video
 	f Fetcher
 	// ranges is set while f serves several ranges with one request.
@@ -532,10 +567,11 @@ type frameReader struct {
 // first is the range read first for a keyframe: an MP4 sample exactly;
 // for a Matroska block, a guess of its size, from the start of its
 // Cluster until the length of a Cluster header is known, or when its
-// index does not say where in the Cluster the block is.
-func (r *frameReader) first(place frameAt) Range {
+// index does not say where in the Cluster the block is. A Matroska block
+// its index places where the file has no byte left is unreadable.
+func (r *FrameReader) first(place frameAt) (Range, error) {
 	if !r.v.matroska {
-		return Range{Off: place.off, N: int(place.n)}
+		return Range{Off: place.off, N: int(place.n)}, nil
 	}
 	off := place.off
 	n := r.guess
@@ -549,14 +585,17 @@ func (r *frameReader) first(place frameAt) Range {
 	default:
 		off += r.header + place.relative
 	}
-	return Range{Off: off, N: int(min(n, r.v.size-off))}
+	if n = min(n, r.v.size-off); n <= 0 {
+		return Range{}, fmt.Errorf("keyframe at %d of a file of %d bytes: %w", off, r.v.size, errInvalid)
+	}
+	return Range{Off: off, N: int(n)}, nil
 }
 
 // fetchBatch reads ranges with one request when the source serves
 // several at once, else with one each. A source found not to now has the
 // first range alone read, so that a reader running out of requests has the
 // keyframes read so far.
-func (r *frameReader) fetchBatch(ctx context.Context, ranges []Range) ([][]byte, error) {
+func (r *FrameReader) fetchBatch(ctx context.Context, ranges []Range) ([][]byte, error) {
 	if rf, ok := r.f.(RangeFetcher); ok && r.ranges && len(ranges) > 1 {
 		data, err := rf.FetchRanges(ctx, ranges)
 		switch {
@@ -581,8 +620,12 @@ func (r *frameReader) fetchBatch(ctx context.Context, ranges []Range) ([][]byte,
 	return data, nil
 }
 
-// fetch reads exactly the n bytes at off.
-func (r *frameReader) fetch(ctx context.Context, off, n int64) ([]byte, error) {
+// fetch reads exactly the n bytes at off. A length below zero is refused
+// here, as Fetchers do not all refuse it.
+func (r *FrameReader) fetch(ctx context.Context, off, n int64) ([]byte, error) {
+	if n < 0 {
+		return nil, fmt.Errorf("fetching %d bytes at %d: %w", n, off, errInvalid)
+	}
 	data, err := r.f.Fetch(ctx, off, int(n))
 	if err != nil {
 		return nil, err
@@ -595,7 +638,7 @@ func (r *frameReader) fetch(ctx context.Context, off, n int64) ([]byte, error) {
 
 // frame returns the keyframe at place from data, read at start, reading
 // what data lacks.
-func (r *frameReader) frame(ctx context.Context, place frameAt, data []byte, start int64) ([]byte, error) {
+func (r *FrameReader) frame(ctx context.Context, place frameAt, data []byte, start int64) ([]byte, error) {
 	if !r.v.matroska {
 		if int64(len(data)) < place.n {
 			return nil, fmt.Errorf("fetching %d bytes at %d: %w", place.n, place.off, io.ErrUnexpectedEOF)
@@ -645,7 +688,7 @@ func (r *frameReader) frame(ctx context.Context, place frameAt, data []byte, sta
 // firstBlock returns the frame of the first block of the track in the
 // Cluster whose data starts at from, which must be a keyframe. Only the
 // elements whose headers data, read at start, holds are walked.
-func (r *frameReader) firstBlock(ctx context.Context, from int64, data []byte, start int64) ([]byte, error) {
+func (r *FrameReader) firstBlock(ctx context.Context, from int64, data []byte, start int64) ([]byte, error) {
 	for at := from; at+min(maxHeader, r.v.size-at) <= start+int64(len(data)); {
 		frame, err := r.block(ctx, at, data, start)
 		if !errors.Is(err, errMisplaced) {
@@ -662,7 +705,7 @@ func (r *frameReader) firstBlock(ctx context.Context, from int64, data []byte, s
 
 // elementAt reads the element header at at, from *data read at *start
 // when it holds it, else from a new read, which replaces them.
-func (r *frameReader) elementAt(ctx context.Context, at int64, data *[]byte, start *int64) (header, error) {
+func (r *FrameReader) elementAt(ctx context.Context, at int64, data *[]byte, start *int64) (header, error) {
 	if at >= r.v.size {
 		return header{}, fmt.Errorf("element past the end of the file: %w", io.ErrUnexpectedEOF)
 	}
@@ -684,7 +727,7 @@ func (r *frameReader) elementAt(ctx context.Context, at int64, data *[]byte, sta
 // BlockGroup, at at: a keyframe of the track. Its bytes are taken from
 // data, read at start, as far as it holds them. errMisplaced when no
 // keyframe of the track is there.
-func (r *frameReader) block(ctx context.Context, at int64, data []byte, start int64) ([]byte, error) {
+func (r *FrameReader) block(ctx context.Context, at int64, data []byte, start int64) ([]byte, error) {
 	h, err := r.elementAt(ctx, at, &data, &start)
 	switch {
 	case err != nil && !errors.Is(err, errInvalid):

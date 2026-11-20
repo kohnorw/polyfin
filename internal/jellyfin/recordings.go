@@ -54,7 +54,7 @@ func (h *Handler) recordingRoutes(rt *router, signedIn func(method, pattern stri
 	managing(http.MethodPost, "/LiveTv/SeriesTimers/{timerId}", h.updateSeriesTimer)
 	managing(http.MethodDelete, "/LiveTv/SeriesTimers/{timerId}", h.cancelSeriesTimer)
 	// Players fetch it without credentials: see liveRecordingFile.
-	rt.handle(http.MethodGet, "/LiveTv/LiveRecordings/{recordingId}/stream", http.HandlerFunc(h.liveRecordingFile))
+	rt.handle(http.MethodGet, "/LiveTv/LiveRecordings/{recordingId}/stream", h.meteredFile(h.liveRecordingFile))
 }
 
 // liveTvManagement refuses the routes managing recordings to users without
@@ -270,9 +270,10 @@ func (h *Handler) visibleTimers(ctx context.Context, user accounts.User, timers 
 	if err != nil {
 		return nil, nil, err
 	}
+	country := h.Accounts.RatingCountry()
 	return slices.DeleteFunc(timers, func(t recordings.Timer) bool {
 		_, reached := channels[t.Channel]
-		return !reached || !recordings.Allows(user, recordings.ProgramKind, t.Rating, t.Genres)
+		return !reached || !recordings.Allows(user, country, recordings.ProgramKind, t.Rating, t.Genres)
 	}), channels, nil
 }
 
@@ -444,7 +445,7 @@ func (h *Handler) guideProgram(ctx context.Context, user accounts.User, raw stri
 	}
 	program, err := h.Library.Item(ctx, user, id)
 	if err == nil && (program.Kind != library.KindProgram || program.Channel == nil ||
-		!recordings.Allows(user, recordings.ProgramKind, program.OfficialRating, program.Genres)) {
+		!recordings.Allows(user, h.Accounts.RatingCountry(), recordings.ProgramKind, program.ParentalRating(), program.Genres)) {
 		err = library.ErrNotFound
 	}
 	return program, err
@@ -499,7 +500,7 @@ func (h *Handler) timerProgramme(ctx context.Context, user accounts.User, body t
 	}
 	for _, program := range programs {
 		if program.Channel.ID == channel && program.StartDate.Sub(start).Abs() <= 3*time.Minute &&
-			recordings.Allows(user, recordings.ProgramKind, program.OfficialRating, program.Genres) {
+			recordings.Allows(user, h.Accounts.RatingCountry(), recordings.ProgramKind, program.ParentalRating(), program.Genres) {
 			return recordings.ProgrammeOf(program), nil
 		}
 	}
@@ -721,8 +722,9 @@ func (h *Handler) cancelSeriesTimer(w http.ResponseWriter, r *http.Request) {
 
 // visibleRecordings keeps the recordings user sees: those of the timers
 // they made, and those of channels they reach, which their parental
-// control and blocked genres let them reach. It returns the channels they
-// reach.
+// control and blocked genres let them reach. A recording of a channel their
+// channel rule hides is not shown, even to the user who scheduled it. It
+// returns the channels they reach.
 func (h *Handler) visibleRecordings(ctx context.Context, user accounts.User, list []recordings.Recording) ([]recordings.Recording, map[accounts.ID]library.Item, error) {
 	ids := make([]accounts.ID, 0, len(list))
 	for _, rec := range list {
@@ -732,10 +734,15 @@ func (h *Handler) visibleRecordings(ctx context.Context, user accounts.User, lis
 	if err != nil {
 		return nil, nil, err
 	}
+	hidden, err := h.Library.HiddenChannels(ctx, user, ids)
+	if err != nil {
+		return nil, nil, err
+	}
+	country := h.Accounts.RatingCountry()
 	return slices.DeleteFunc(list, func(rec recordings.Recording) bool {
 		_, reached := channels[rec.Channel]
-		mine := rec.User != nil && *rec.User == user.ID
-		return !reached && !mine || !recordings.Allows(user, recordings.RecordingKind, rec.Rating, rec.Genres)
+		mine := rec.User != nil && *rec.User == user.ID && !hidden[rec.Channel]
+		return !reached && !mine || !recordings.Allows(user, country, recordings.RecordingKind, rec.Rating, rec.Genres)
 	}), channels, nil
 }
 
@@ -1077,9 +1084,12 @@ func (h *Handler) liveRecordingFile(w http.ResponseWriter, r *http.Request) {
 		notFoundProblem(w)
 		return
 	}
-	user, _, ok := h.streamAccess(r)
+	user, grant, ok := h.streamAccess(r, servedToAnyone)
 	if !ok {
 		w.WriteHeader(http.StatusUnauthorized)
+		return
+	}
+	if !h.admitPlay(w, r, user, grant.Device) {
 		return
 	}
 	part, done, ok := h.Recordings.Active(id)
@@ -1162,13 +1172,53 @@ func (h *Handler) mayWatchActive(ctx context.Context, user accounts.User, id acc
 // addTimers adds to the DTOs of programmes their timers and series timers,
 // as Jellyfin describes guide programmes.
 func (h *Handler) addTimers(ctx context.Context, dtos []BaseItemDto) {
+	h.markTimers(ctx, len(dtos), func(i int) (timedProgramme, bool) {
+		id, ok := parseGUID(dtos[i].Id)
+		if !ok || dtos[i].Type != "Program" {
+			return timedProgramme{}, false
+		}
+		p := timedProgramme{id: id, name: dtos[i].Name}
+		if dtos[i].ChannelId != nil {
+			p.channel, p.onChannel = parseGUID(*dtos[i].ChannelId)
+		}
+		return p, true
+	}, func(i int, marks timerMarks) {
+		if marks.timer != "" {
+			dtos[i].TimerId, dtos[i].Status = marks.timer, marks.status
+		}
+		if marks.seriesTimer != "" {
+			dtos[i].SeriesTimerId = marks.seriesTimer
+		}
+	})
+}
+
+// timedProgramme is what markTimers matches a programme's timers by: its
+// identifier, its name and, when onChannel, its channel.
+type timedProgramme struct {
+	id        accounts.ID
+	name      string
+	channel   accounts.ID
+	onChannel bool
+}
+
+// timerMarks are a programme's timers as Jellyfin marks guide programmes:
+// the timer recording it and its status, unless cancelled or failed, and
+// the series timer recording it; empty when none.
+type timerMarks struct {
+	timer, status, seriesTimer string
+}
+
+// markTimers finds the timers of n programmes, programme(i) describing
+// the i-th, false for one that is not a programme, and gives mark those
+// of each programme a timer records.
+func (h *Handler) markTimers(ctx context.Context, n int, programme func(i int) (timedProgramme, bool), mark func(i int, marks timerMarks)) {
 	if !h.recordable() {
 		return
 	}
 	var ids []accounts.ID
-	for _, dto := range dtos {
-		if id, ok := parseGUID(dto.Id); ok && dto.Type == "Program" {
-			ids = append(ids, id)
+	for i := range n {
+		if p, ok := programme(i); ok {
+			ids = append(ids, p.id)
 		}
 	}
 	if len(ids) == 0 {
@@ -1185,26 +1235,31 @@ func (h *Handler) addTimers(ctx context.Context, dtos []BaseItemDto) {
 		}
 		return
 	}
-	for i := range dtos {
-		id, ok := parseGUID(dtos[i].Id)
-		if !ok || dtos[i].Type != "Program" {
+	for i := range n {
+		p, ok := programme(i)
+		if !ok {
 			continue
 		}
-		if t, ok := timers[id]; ok {
+		var marks timerMarks
+		if t, ok := timers[p.id]; ok {
 			if t.Status != recordings.StatusCancelled && t.Status != recordings.StatusError {
-				dtos[i].TimerId, dtos[i].Status = t.ID.String(), string(t.Status)
+				marks.timer, marks.status = t.ID.String(), string(t.Status)
 			}
 			if t.SeriesTimer != nil {
-				dtos[i].SeriesTimerId = t.SeriesTimer.String()
-				continue
+				marks.seriesTimer = t.SeriesTimer.String()
 			}
 		}
-		for _, st := range series {
-			if strings.EqualFold(strings.TrimSpace(st.Name), strings.TrimSpace(dtos[i].Name)) &&
-				(st.RecordAnyChannel || dtos[i].ChannelId != nil && *dtos[i].ChannelId == st.Channel.String()) {
-				dtos[i].SeriesTimerId = st.ID.String()
-				break
+		if marks.seriesTimer == "" {
+			for _, st := range series {
+				if strings.EqualFold(strings.TrimSpace(st.Name), strings.TrimSpace(p.name)) &&
+					(st.RecordAnyChannel || p.onChannel && p.channel == st.Channel) {
+					marks.seriesTimer = st.ID.String()
+					break
+				}
 			}
+		}
+		if marks != (timerMarks{}) {
+			mark(i, marks)
 		}
 	}
 }

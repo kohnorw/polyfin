@@ -6,21 +6,31 @@
 <meta name="robots" content="noindex, nofollow">
 <meta name="referrer" content="no-referrer">
 <title>{{if .Title}}{{.Title.Name}} · {{end}}{{.Text.PageTitle}}</title>
-<link rel="stylesheet" href="/share/assets/share.css">
-<script src="/share/assets/hls.min.js" defer></script>
-<script src="/share/assets/share.js" defer></script>
+<link rel="icon" href="{{.Assets.Logo}}">
+<link rel="preload" href="/share/assets/figtree-latin-wght-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="stylesheet" href="{{.Assets.Style}}">
+<script src="{{.Assets.Script}}" defer></script>
 </head>
 <body{{if .Title}} class="has-title"{{end}}>
-<main class="share">
+{{- if .Title}}
+<div class="room" aria-hidden="true"><img alt=""></div>
+{{- end}}
+<main class="share"{{if .Link}} data-link="{{.Link}}"{{end}}{{if .Gone}} data-gone{{end}}{{if .Title}} data-runtime="{{.Title.Seconds}}" data-hls="{{.Assets.Hls}}"{{end}}>
+<header class="top">
+<img class="mark" src="{{.Assets.Logo}}" alt="" width="40" height="40">
 <p class="from">{{.Text.SharedFrom}} <strong>{{.Server}}</strong></p>
+</header>
 {{- if .Title}}
 <div class="player">
 <video id="video" controls playsinline preload="none" poster="" data-backdrop="image/backdrop"></video>
-<button id="play" class="play" type="button">{{.Text.Play}}</button>
+<div class="start">
+<button id="resume" class="play" type="button" data-label="{{.Text.ResumeAt}}" hidden></button>
+<button id="play" class="play" type="button" data-again="{{.Text.FromStart}}">{{.Text.Play}}</button>
+</div>
 </div>
 <p id="message" class="message" role="status" aria-live="polite" hidden></p>
 <section class="title">
-<img class="poster" src="" data-src="image/primary" alt="" width="160" hidden>
+<img class="poster" src="" data-src="image/primary" alt="" width="200" hidden>
 <div>
 <h1>{{.Title.Name}}</h1>
 {{- if .Title.Subtitle}}

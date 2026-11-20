@@ -9,18 +9,21 @@ import (
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
+	"github.com/moodiness/polyfin/internal/importlinks"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/watchlist"
 )
 
-// A user who turns it on has their watchlist on Trakt, or their Plan to
-// Watch list on Simkl, read whole with each import of the service, and
-// put on their Polyfin watchlist (see package watchlist): its movies and
-// series, a season or an episode listed counting for its series. Titles
-// are found as the history's are; those not found count among the titles
-// not found. An import that reads the list whole takes off the watchlist
-// what the list no longer holds, unless another list holds it; one that
-// could not read it whole only adds what it read.
+// A user who turns it on has their watchlist on Trakt, MDBList or
+// PublicMetaDB, or their Plan to Watch list on Simkl, read whole with each
+// import of the service, and put on their Polyfin watchlist (see package
+// watchlist): its movies and series, a season or an episode listed
+// counting for its series. MDBList's is read only once it changed since
+// the last import read it. Titles are found as the history's are; those
+// not found count among the titles not found. An import that reads the
+// list whole takes off the watchlist what the list no longer holds, unless
+// another list holds it; one that could not read it whole, or did not read
+// it, only adds what it read.
 
 // listedEntry is a movie or series a watchlist holds, and when it was
 // added there, nil when the service does not tell.
@@ -31,11 +34,14 @@ type listedEntry struct {
 
 // watchlistRead is what an import read of a watchlist: whole once it read
 // it all, and how many titles it names that it could not name by any
-// identifier Polyfin finds titles by.
+// identifier Polyfin finds titles by. cursor tells when the list last
+// changed, for the services that tell it: the next import reads it only
+// once that changed.
 type watchlistRead struct {
 	entries []listedEntry
 	whole   bool
 	unknown int
+	cursor  string
 }
 
 // add adds the title ref names, added at at, unless it has no identifier
@@ -55,13 +61,18 @@ func (t titleJSON) seriesRef() library.TitleRef {
 	return ref
 }
 
-// readWatchlist reads the watchlist of the connection whole.
-func (r *reader) readWatchlist(ctx context.Context) (watchlistRead, error) {
+// readWatchlist reads the watchlist of the connection whole, or, when
+// cursor tells it did not change since, not at all.
+func (r *reader) readWatchlist(ctx context.Context, cursor string) (watchlistRead, error) {
 	switch r.key.service {
 	case Trakt:
 		return r.readTraktWatchlist(ctx)
 	case AniList, MyAnimeList:
 		return r.readAnimeWatchlist(ctx)
+	case PublicMetaDB:
+		return r.readPublicMetaDBWatchlist(ctx)
+	case MDBList:
+		return r.readMDBListWatchlist(ctx, cursor)
 	}
 	return r.readSimklWatchlist(ctx)
 }
@@ -106,6 +117,157 @@ func (r *reader) readTraktWatchlist(ctx context.Context) (watchlistRead, error) 
 		}
 	}
 	list.whole = true
+	return list, nil
+}
+
+// readPublicMetaDBWatchlist reads PublicMetaDB's watchlist, its movies and
+// series, a page at a time. It is read whole only once found among the
+// user's lists and read to its last page; the list is never created here.
+func (r *reader) readPublicMetaDBWatchlist(ctx context.Context) (watchlistRead, error) {
+	var list watchlistRead
+	var id string
+	for page := 1; id == ""; page++ {
+		answer, err := r.get(ctx, "/api/external/lists", url.Values{"page": {strconv.Itoa(page)}, "perPage": {"500"}})
+		if err != nil {
+			return list, err
+		}
+		var lists struct {
+			Items []struct {
+				ID   string `json:"id"`
+				Type string `json:"type"`
+			} `json:"items"`
+			TotalPages int `json:"totalPages"`
+		}
+		if json.Unmarshal(answer.body, &lists) != nil {
+			return list, ErrUnreachable
+		}
+		for _, l := range lists.Items {
+			if l.Type == "watchlist" && l.ID != "" {
+				id = l.ID
+				break
+			}
+		}
+		if len(lists.Items) == 0 || page >= lists.TotalPages {
+			break
+		}
+	}
+	if id == "" {
+		// No watchlist yet: nothing is taken off.
+		return list, nil
+	}
+	for page := 1; ; page++ {
+		answer, err := r.get(ctx, "/api/external/lists/"+url.PathEscape(id)+"/items",
+			url.Values{"page": {strconv.Itoa(page)}, "perPage": {"500"}})
+		if err != nil {
+			return list, err
+		}
+		var items struct {
+			Items []struct {
+				publicMetaDBListItem
+				CreatedAt string `json:"created_at"`
+			} `json:"items"`
+			TotalPages int `json:"totalPages"`
+		}
+		if json.Unmarshal(answer.body, &items) != nil {
+			return list, ErrUnreachable
+		}
+		for _, item := range items.Items {
+			ref := library.TitleRef{TMDB: int(item.TMDB)}
+			switch item.MediaType {
+			case "movie":
+			case "tv":
+				ref.Series = true
+			default:
+				continue
+			}
+			list.add(ref, date(item.CreatedAt))
+		}
+		if len(items.Items) == 0 || page >= items.TotalPages {
+			break
+		}
+	}
+	list.whole = true
+	return list, nil
+}
+
+// mdblistListed is a movie or show of MDBList's watchlist: its identifiers
+// under ids, or beside it, id being TMDB's.
+type mdblistListed struct {
+	titleJSON
+	ID     flexInt `json:"id"`
+	IMDbID string  `json:"imdb_id"`
+	TVDBID flexInt `json:"tvdb_id"`
+}
+
+func (m mdblistListed) ref() library.TitleRef {
+	ref := m.titleJSON.ref(false, 0, 0)
+	ref.IMDb = cmpOr(ref.IMDb, m.IMDbID)
+	ref.TMDB = cmpOr(ref.TMDB, int(m.ID))
+	ref.TVDB = cmpOr(ref.TVDB, int(m.TVDBID))
+	return ref
+}
+
+// readMDBListWatchlist reads MDBList's watchlist, its movies and shows,
+// the latest added first, a page at a time, unless its last activities
+// tell it did not change since cursor. MDBList gives no date for them, so
+// their order is the answer's: with sort=added, order=asc is the newest
+// first ("`asc` (default) returns ... newest first for dates (...
+// `added`)", https://api.mdblist.com/docs/, GET /watchlist/items, order).
+// A read that announces more, by pagination.has_more or the X-Has-More
+// header, but gives no new cursor to reach it, or an empty page, is cut
+// short: it is not whole, and ends unreachable.
+func (r *reader) readMDBListWatchlist(ctx context.Context, cursor string) (watchlistRead, error) {
+	list := watchlistRead{cursor: cursor}
+	answer, err := r.get(ctx, "/sync/last_activities", nil)
+	if err != nil {
+		return list, err
+	}
+	var activities struct {
+		WatchlistedAt string `json:"watchlisted_at"`
+	}
+	if json.Unmarshal(answer.body, &activities) != nil {
+		return list, ErrUnreachable
+	}
+	if cursor != "" && activities.WatchlistedAt == cursor {
+		// Unchanged: nothing is read, nor taken off.
+		return list, nil
+	}
+	query := url.Values{"limit": {"1000"}, "sort": {"added"}, "order": {"asc"}}
+	for {
+		answer, err := r.get(ctx, "/watchlist/items", query)
+		if err != nil {
+			return list, err
+		}
+		var page struct {
+			Movies     []mdblistListed `json:"movies"`
+			Shows      []mdblistListed `json:"shows"`
+			NextCursor string          `json:"next_cursor"`
+			Pagination struct {
+				NextCursor string `json:"next_cursor"`
+				HasMore    bool   `json:"has_more"`
+			} `json:"pagination"`
+		}
+		if json.Unmarshal(answer.body, &page) != nil {
+			return list, ErrUnreachable
+		}
+		for _, movie := range page.Movies {
+			list.add(movie.ref(), nil)
+		}
+		for _, show := range page.Shows {
+			ref := show.ref()
+			ref.Series = true
+			list.add(ref, nil)
+		}
+		next := cmpOr(page.Pagination.NextCursor, page.NextCursor)
+		if next == "" || next == query.Get("cursor") || len(page.Movies)+len(page.Shows) == 0 {
+			if page.Pagination.HasMore || strings.EqualFold(answer.header.Get("X-Has-More"), "true") {
+				return list, ErrUnreachable
+			}
+			break
+		}
+		query.Set("cursor", next)
+	}
+	list.whole, list.cursor = true, activities.WatchlistedAt
 	return list, nil
 }
 
@@ -180,21 +342,29 @@ func (r *reader) readSimklWatchlist(ctx context.Context) (watchlistRead, error) 
 // mergeWatchlist finds the titles of list and saves them as the
 // connection's watchlist, counting what it adds and what it does not find.
 // Of the titles found for one entry, one an anime catalog lists counts
-// only when nothing else was found, as in the history.
-func (s *Service) mergeWatchlist(ctx context.Context, r *reader, list watchlistRead, result *ImportResult) error {
+// only when nothing else was found, as in the history. The titles linked
+// by hand are named by their links. It returns what the import keeps of
+// the titles it did not find; those no mapping knows are only counted.
+func (s *Service) mergeWatchlist(ctx context.Context, r *reader, list watchlistRead, linked importlinks.Linked,
+	result *ImportResult) ([]importlinks.Entry, error) {
+	listName := watchlist.Tracking(r.key.service)
 	refs := make([]library.TitleRef, len(list.entries))
+	entries := make([]importlinks.Entry, len(list.entries))
 	for i, e := range list.entries {
-		refs[i] = e.ref
+		refs[i], entries[i] = keptTitle(linked, e.ref, nil)
+		entries[i].Watchlist, entries[i].AddedAt = listName, e.at
 	}
 	targets, err := s.resolve(ctx, r, refs)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	var titles []watchlist.Title
+	var kept []importlinks.Entry
 	unmapped := map[library.TitleRef]bool{}
 	for i, e := range list.entries {
 		if len(targets[i]) == 0 {
-			unmapped[e.ref] = true
+			unmapped[refs[i]] = true
+			kept = append(kept, entries[i])
 		}
 		for _, t := range targets[i] {
 			if !counts(targets[i], t) {
@@ -208,6 +378,6 @@ func (s *Service) mergeWatchlist(ctx context.Context, r *reader, list watchlistR
 		}
 	}
 	result.Unmapped += len(unmapped) + list.unknown
-	result.Watchlist, err = s.watchlist.Save(ctx, r.key.user, watchlist.Tracking(r.key.service), titles, list.whole)
-	return err
+	result.Watchlist, err = s.watchlist.Save(ctx, r.key.user, listName, titles, list.whole)
+	return kept, err
 }

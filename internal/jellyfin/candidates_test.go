@@ -16,8 +16,16 @@ import (
 	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/media"
+	"github.com/moodiness/polyfin/internal/playback"
 	"github.com/moodiness/polyfin/internal/stremio"
 )
+
+// waitForEveryVersion has the server's plays wait for every version they
+// read before they pass one over, however long a busy machine takes to
+// read it (see Handler.patienceEnd).
+func (s testServer) waitForEveryVersion() {
+	s.handler.patienceEnd = func(time.Duration) <-chan time.Time { return nil }
+}
 
 // manyVersionsAddon serves one movie, without a runtime, with n streams
 // named Version 1 to Version n, whose files are not media. With subtitles
@@ -46,7 +54,7 @@ func manyVersionsAddon(t *testing.T, n int, subtitles chan struct{}) string {
 			for i := 1; i <= n; i++ {
 				file := fmt.Sprintf("Movie.%d.mkv", i)
 				streams = append(streams, stremio.Stream{Name: fmt.Sprintf("Version %d", i), URL: server.URL + "/files/" + file,
-					BehaviorHints: stremio.StreamBehavior{Filename: file, VideoSize: stremio.Number(1_000_000 * i)}})
+					BehaviorHints: stremio.StreamBehavior{Filename: file, VideoSize: stremio.Number64(1_000_000 * i)}})
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"streams": streams})
 		case strings.HasPrefix(path, "/subtitles/movie/tt4000"):
@@ -191,6 +199,33 @@ func TestPreferDirectPlayLooksNoFurtherThanTheVersionsReadAtOnce(t *testing.T) {
 	}
 }
 
+// PlaybackInfo waits for the addons' subtitles a second at most once the
+// versions are in: those that come later reach the next PlaybackInfo.
+func TestPlaybackInfoWaitsForSubtitlesASecondAtMost(t *testing.T) {
+	t.Parallel()
+	subtitles := make(chan struct{})
+	p := manyOn(t, newTestServer(t, 10), manyVersionsAddon(t, 1, subtitles))
+	p.analyzed(t, p.versions[0], "h264-aac-mp4")
+	chrome := p.profile(t, "jellyfin-web-chrome")
+	hasSubtitle := func(source MediaSourceInfo) bool {
+		return slices.ContainsFunc(source.MediaStreams, func(s playback.MediaStream) bool { return s.Type == "Subtitle" && s.IsExternal })
+	}
+	started := time.Now()
+	source := firstSource(t, p.ask(t, p.token, p.movie, chrome, nil))
+	// The subtitles answer only once let go, below: a play that waited for
+	// them would wait for their request's 15-second timeout.
+	if elapsed := time.Since(started); elapsed < subtitleGrace || elapsed > 7500*time.Millisecond {
+		t.Errorf("answered after %s while the subtitles were held", elapsed)
+	}
+	if hasSubtitle(source) {
+		t.Errorf("a subtitle listed before its addon answered: %+v", source.MediaStreams)
+	}
+	close(subtitles)
+	eventually(t, "the subtitles to be listed", func() bool {
+		return hasSubtitle(firstSource(t, p.ask(t, p.token, p.movie, chrome, nil)))
+	})
+}
+
 // A title page is told of its versions on the user's jellyfin-web sockets as
 // the addons answer, without asking.
 func TestVersionsArePushedToTheTitlePage(t *testing.T) {
@@ -310,7 +345,7 @@ func TestVersionsTellWhetherTheWebPlayerAddsThem(t *testing.T) {
 	}
 	request, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, h.url+"/Polyfin/Items/"+h.movie+"/Versions/Search", nil)
 	request.Header.Set("Authorization", app("tv", h.token))
-	response, err := http.DefaultClient.Do(request)
+	response, err := testClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -351,13 +386,15 @@ func newListsAddon(t *testing.T) *listsAddon {
 				return
 			}
 			streams := make([]stremio.Stream, len(names))
+			// The size announced is the one served: the same small file for
+			// versions announced far larger is a host's error file.
 			for i, name := range names {
 				streams[i] = stremio.Stream{Name: name, URL: server.URL + "/files/" + name + ".mkv",
-					BehaviorHints: stremio.StreamBehavior{Filename: name + ".mkv", VideoSize: 1_000_000}}
+					BehaviorHints: stremio.StreamBehavior{Filename: name + ".mkv", VideoSize: stremio.Number64(len(mediaBytes))}}
 			}
 			_ = json.NewEncoder(w).Encode(map[string]any{"streams": streams})
 		case strings.HasPrefix(path, "/files/"):
-			http.ServeContent(w, r, "", time.Time{}, strings.NewReader("\x1a\x45\xdf\xa3 media bytes"))
+			http.ServeContent(w, r, "", time.Time{}, strings.NewReader(mediaBytes))
 		default:
 			http.NotFound(w, r)
 		}

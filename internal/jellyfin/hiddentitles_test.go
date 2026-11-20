@@ -5,10 +5,6 @@ import (
 	"net/http"
 	"slices"
 	"testing"
-	"time"
-
-	"github.com/moodiness/polyfin/internal/accounts"
-	"github.com/moodiness/polyfin/internal/watchlist"
 )
 
 func TestRemovingFromContinueWatchingKeepsThePlayedState(t *testing.T) {
@@ -20,7 +16,7 @@ func TestRemovingFromContinueWatchingKeepsThePlayedState(t *testing.T) {
 	tr.mark(t, http.MethodPost, "/UserPlayedItems/"+tr.movie+"?datePlayed=2026-01-02T03:04:05Z")
 	for _, id := range []string{tr.movie, tr.episodes[0]} {
 		tr.report(t, "/Sessions/Playing", map[string]any{"ItemId": id, "PositionTicks": 0})
-		tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": id, "PositionTicks": 12_000_000_000})
+		tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": id, "PositionTicks": int64(12_000_000_000)})
 	}
 	before := tr.userData(t, tr.movie)
 	if !before.Played || before.PlayCount != 2 || before.PlaybackPositionTicks == 0 || before.LastPlayedDate == nil {
@@ -51,7 +47,7 @@ func TestRemovingFromContinueWatchingKeepsThePlayedState(t *testing.T) {
 
 	// Playing it again sets a resume point as usual.
 	tr.report(t, "/Sessions/Playing", map[string]any{"ItemId": tr.movie, "PositionTicks": 0})
-	tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": tr.movie, "PositionTicks": 20_000_000_000})
+	tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": tr.movie, "PositionTicks": int64(20_000_000_000)})
 	if got := resume(); !slices.Equal(got, []string{tr.movie}) {
 		t.Errorf("resume after playing again: %v", got)
 	}
@@ -93,16 +89,14 @@ func TestAHiddenTitleLeavesTheUsersListsOnly(t *testing.T) {
 	var others QueryResult
 	tr.get(t, "/Items?ParentId="+tr.views["Top"], tr.token, &others)
 	similarTo := others.Items[2].Id
-	member, err := accounts.ParseID(tr.user)
-	if err != nil {
-		t.Fatal(err)
+	if status := tr.send(t, http.MethodPost, "/Polyfin/UserItems/"+tr.movie+"/Watchlist", nil); status != http.StatusNoContent {
+		t.Fatalf("adding to the watchlist: %d", status)
 	}
-	movieID, _ := accounts.ParseID(tr.movie)
-	if _, err := watchlist.New(tr.pool).Save(t.Context(), member, watchlist.Import,
-		[]watchlist.Title{{ID: movieID, AddedAt: new(time.Date(2026, 9, 1, 0, 0, 0, 0, time.UTC))}}, false); err != nil {
-		t.Fatal(err)
+	var held WatchlistDto
+	if tr.get(t, "/Polyfin/UserItems/Watchlist", tr.token, &held); held.PlaylistId == "" {
+		t.Fatal("no watchlist")
 	}
-	watchlistID := tr.viewIDs(t, tr.token)["Watchlist"]
+	watchlistID := held.PlaylistId
 	lists := map[string]string{
 		"library":     "/Items?ParentId=" + tr.views["Top"],
 		"latest":      "/Items/Latest?ParentId=" + tr.views["Top"],
@@ -174,7 +168,7 @@ func TestHidingASeriesLeavesItsEpisodesOutOfTheHomeRows(t *testing.T) {
 	tr := newTracking(t)
 	tr.mark(t, http.MethodPost, "/UserPlayedItems/"+tr.episodes[0])
 	tr.report(t, "/Sessions/Playing", map[string]any{"ItemId": tr.episodes[2], "PositionTicks": 0})
-	tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": tr.episodes[2], "PositionTicks": 12_000_000_000})
+	tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": tr.episodes[2], "PositionTicks": int64(12_000_000_000)})
 	if got := tr.list(t, "/Shows/NextUp"); !slices.Equal(got, tr.episodes[1:2]) {
 		t.Fatalf("next up: %v", got)
 	}

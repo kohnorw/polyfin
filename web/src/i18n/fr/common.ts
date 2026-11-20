@@ -1,7 +1,6 @@
 import type en from '../en/common'
 
 const common: typeof en = {
-  documentTitle: 'Administration Polyfin',
   header: {
     productName: 'Polyfin',
   },
@@ -9,6 +8,10 @@ const common: typeof en = {
     label: 'Langue de l’interface',
     en: { short: 'EN', name: 'English' },
     fr: { short: 'FR', name: 'Français' },
+    de: { short: 'DE', name: 'Deutsch' },
+    es: { short: 'ES', name: 'Español' },
+    it: { short: 'IT', name: 'Italiano' },
+    'pt-BR': { short: 'PT', name: 'Português (Brasil)' },
   },
   common: {
     enterNumber: 'Saisissez un nombre.',
@@ -18,10 +21,12 @@ const common: typeof en = {
     cancel: 'Annuler',
     retry: 'Réessayer',
     never: 'Jamais',
-    colon: '\u202F:',
+    colon: '\u202f:',
     passwordRule: 'Au moins 8 caractères.',
-    nameRule: "De 1 à 64 caractères : lettres, chiffres, espaces et - _ ' . @ +",
+    nameRule: "De 1 à 64 caractères\u202f: lettres, chiffres, espaces et - _ ' . @ +",
     passwordMismatch: 'Les deux mots de passe ne correspondent pas.',
+    importRunningHelp:
+      'Vous pouvez quitter cette page\u202f: l’importation continue. Si Polyfin redémarre entre-temps, elle s’arrête\u202f: ce qu’elle a importé reste, et importer à nouveau n’ajoute rien deux fois.',
     moveUp: (name: string) => `Monter ${name}`,
     moveDown: (name: string) => `Descendre ${name}`,
     moved: (name: string, position: number, count: number) =>
@@ -36,7 +41,7 @@ const common: typeof en = {
     invalid_setup_code:
       'Ce code d’installation n’est pas valide. Copiez-le à nouveau depuis le journal du serveur.',
     invalid_name:
-      "Le nom doit comporter de 1 à 64 caractères : lettres, chiffres, espaces et - _ ' . @ +",
+      "Le nom doit comporter de 1 à 64 caractères\u202f: lettres, chiffres, espaces et - _ ' . @ +",
     invalid_password: 'Le mot de passe doit comporter au moins 8 caractères.',
     setup_complete: 'L’installation est déjà terminée. Connectez-vous.',
     too_many_attempts: 'Trop de tentatives. Patientez quelques minutes avant de réessayer.',
@@ -50,16 +55,22 @@ const common: typeof en = {
     two_step_on: 'La connexion en deux étapes est déjà activée.',
     two_step_off: 'La connexion en deux étapes est désactivée pour ce compte.',
     two_step_not_started:
-      'Recommencez : activez la connexion en deux étapes pour obtenir une nouvelle clé.',
+      'Recommencez\u202f: activez la connexion en deux étapes pour obtenir une nouvelle clé.',
     two_step_required:
-      'Les administrateurs doivent utiliser la connexion en deux étapes sur ce serveur : elle ne peut pas être désactivée.',
+      'Les administrateurs doivent utiliser la connexion en deux étapes sur ce serveur\u202f: elle ne peut pas être désactivée.',
     two_step_own: 'Désactivez votre propre connexion en deux étapes depuis Mon compte.',
     not_found: 'Cet élément n’existe plus. La liste a été actualisée.',
+    not_local: 'Seule la version d’un dossier local peut avoir ses vignettes refaites.',
+    thumbnails_off:
+      'Les vignettes et images de chapitres sont désactivées\u202f: activez-en une dans Paramètres › Vignettes (trickplay).',
     not_set:
-      'Aucune valeur enregistrée : elle a été supprimée, ou ne peut pas être déchiffrée avec POLYFIN_SECRET_KEY. Rechargez la page.',
+      'Aucune valeur enregistrée\u202f: elle a été supprimée, ou ne peut pas être déchiffrée avec POLYFIN_SECRET_KEY. Rechargez la page.',
     not_revealable: 'Cette connexion n’a pas de clé à afficher.',
     unknown_code: 'Aucun appareil n’attend avec ce code. Il a peut-être expiré ou été mal saisi.',
     quick_connect_disabled: 'Quick Connect est désactivé sur ce serveur.',
+    unconfirmed_code: 'Saisissez le code que l’appareil affiche avant de l’autoriser.',
+    identity_required:
+      'Confirmez que c’est bien vous avec un code en deux étapes ou votre mot de passe.',
     name_taken: 'Ce nom est déjà utilisé par un autre utilisateur.',
     invalid_invite_uses:
       'Les comptes qu’un lien d’invitation peut créer doivent être un nombre entier de 1 à 100.',
@@ -70,31 +81,36 @@ const common: typeof en = {
     invite_expired: 'Ce lien d’invitation a expiré.',
     invite_revoked: 'Ce lien d’invitation a été révoqué.',
     share_links_off:
-      'Vous ne pouvez pas créer de lien de partage : un administrateur les a désactivés pour ce serveur ou pour votre compte.',
+      'Vous ne pouvez pas créer de lien de partage\u202f: un administrateur les a désactivés pour ce serveur ou pour votre compte.',
     not_shareable: 'Seul un film ou un épisode que vous pouvez voir peut être partagé.',
     invalid_share_expiry: 'Choisissez l’expiration du lien dans la liste.',
     invalid_share_viewers:
       'Le nombre de spectateurs à la fois doit être un nombre entier de 1 à 5.',
     last_administrator:
-      'C’est le dernier administrateur actif : il ne peut être ni supprimé, ni rétrogradé, ni désactivé.',
+      'C’est le dernier administrateur actif\u202f: il ne peut être ni supprimé, ni rétrogradé, ni désactivé.',
     admin_cannot_join_group:
       'Les administrateurs ne peuvent pas rejoindre un groupe, car leurs autorisations diffèrent. Rechargez la page pour voir qui l’est à présent.',
     invalid_group: 'Ce groupe n’existe plus. Rechargez la page et choisissez-en un autre.',
     follows_group:
-      'Cet utilisateur suit son groupe : modifiez le groupe, ou désactivez d’abord « Suivre le groupe ».',
+      'Cet utilisateur suit son groupe dans cette section\u202f: modifiez le groupe, ou choisissez d’abord «\u202fPropres à cet utilisateur\u202f».',
     invalid_copy_from: 'Cet utilisateur n’existe plus. Choisissez-en un autre.',
     invalid_server_name: 'Le nom du serveur doit comporter de 1 à 64 caractères.',
     invalid_language: 'Choisissez une langue dans la liste.',
+    invalid_used_by: 'Un groupe ou un utilisateur coché n’existe plus. Rechargez la page.',
+    used_by_everyone:
+      'Cette source est désormais utilisée par tout le monde\u202f: changez qui l’utilise sur sa page.',
+    invalid_audio_region: 'Choisissez une région dans la liste.',
+    invalid_interface_size: 'Choisissez une taille dans la liste.',
     invalid_catalog_limit:
       'Le nombre de titres lus par catalogue doit être un nombre entier de 100 à 20 000.',
     invalid_channel_limit:
       'Le nombre de chaînes lues par catalogue de TV en direct doit être un nombre entier de 100 à 50 000.',
     invalid_played_percent:
-      'Le pourcentage « Marqué comme vu après » doit être un nombre entier de 50 à 100.',
+      'Le pourcentage «\u202fMarqué comme vu après\u202f» doit être un nombre entier de 50 à 100.',
     invalid_resume_percent:
-      'Le pourcentage « Point de reprise gardé après » doit être un nombre entier de 0 à 50.',
+      'Le pourcentage «\u202fPoint de reprise gardé après\u202f» doit être un nombre entier de 0 à 50.',
     resume_not_below_played:
-      'Le pourcentage « Point de reprise gardé après » doit être plus petit que « Marqué comme vu après ».',
+      'Le pourcentage «\u202fPoint de reprise gardé après\u202f» doit être plus petit que «\u202fMarqué comme vu après\u202f».',
     invalid_version_list_minutes:
       'La durée de conservation des listes de versions doit être un nombre entier de minutes de 1 à 360.',
     invalid_catalog_refresh_minutes:
@@ -104,7 +120,7 @@ const common: typeof en = {
     invalid_version_attempts:
       'Le nombre de versions essayées doit être un nombre entier de 1 à 10.',
     invalid_version_order:
-      'Choisissez au plus quatre critères pour trier les versions, un de chaque sorte. Rechargez la page.',
+      'Choisissez au plus six critères pour trier les versions, un de chaque sorte. Rechargez la page.',
     invalid_version_codec_order:
       'L’ordre des codecs vidéo doit citer chaque codec une fois. Rechargez la page.',
     invalid_version_source_order:
@@ -115,9 +131,30 @@ const common: typeof en = {
       'Cette liste de codecs masqués n’est pas prise en charge. Rechargez la page.',
     invalid_hidden_version_words:
       'Saisissez au plus 50 mots masquant des versions, un par ligne, de 100 caractères au plus chacun.',
+    invalid_hidden_releases:
+      'Cette liste de genres de sorties masqués n’est pas prise en charge. Rechargez la page.',
+    invalid_version_edition_order:
+      'L’ordre des éditions doit citer chaque édition une fois. Rechargez la page.',
+    invalid_version_mb_per_minute:
+      'La taille par minute doit être un nombre entier de Mo de 0 à 1 000.',
+    invalid_version_label_rules:
+      'Saisissez au plus 40 règles de libellés, chacune d’au plus 200 caractères, une expression régulière valide là où elle est cochée, et un score de −100 à 100 autre que 0 sauf pour masquer.',
     invalid_max_conversions:
       'Le nombre de conversions vidéo en même temps doit être un nombre entier de 0 à 32.',
     invalid_max_conversion_height: 'Choisissez la qualité max des vidéos converties dans la liste.',
+    invalid_subtitle_ocr:
+      'Choisissez dans la liste quand les sous-titres en images sont lus en texte.',
+    invalid_subtitle_ocr_tracks:
+      'Le nombre de pistes de sous-titres en images lues en même temps doit être un nombre entier de 1 à 4.',
+    tessdata_unknown_language:
+      'Polyfin n’a pas de données Tesseract à télécharger pour cette langue.',
+    tessdata_no_folder:
+      'Indiquez dans POLYFIN_TESSDATA_DIR le dossier des données de Tesseract, puis redémarrez Polyfin.',
+    tessdata_folder: 'Le dossier que nomme POLYFIN_TESSDATA_DIR ne peut pas être écrit.',
+    tessdata_download: 'Les données de la langue n’ont pas pu être téléchargées.',
+    tessdata_checksum:
+      'Le fichier téléchargé n’est pas celui des données de Tesseract, son SHA-256 diffère\u202f: il n’a pas été gardé.',
+    invalid_default_language: 'Choisissez une langue par défaut dans la liste.',
     invalid_encoder_preset: 'Choisissez une vitesse d’encodage dans la liste.',
     invalid_video_quality: 'La qualité vidéo doit être 0, ou un nombre entier de 1 à 51.',
     invalid_hardware_acceleration: 'Choisissez une carte graphique dans la liste.',
@@ -141,13 +178,13 @@ const common: typeof en = {
     invalid_ahead_seconds:
       'Le nombre de secondes préparées à l’avance doit être un nombre entier de 30 à 600.',
     parental_control:
-      'Le contrôle parental s’applique à ce compte : il garde les addons du serveur, qui donnent les classifications sur lesquelles il s’appuie.',
+      'Le contrôle parental s’applique à ce compte\u202f: il garde les addons du serveur, qui donnent les classifications sur lesquelles il s’appuie.',
     invalid_parental_control:
       'Ce réglage du contrôle parental n’est pas pris en charge. Rechargez la page.',
     invalid_max_playbacks:
       'Le nombre de lectures en même temps doit être un nombre entier de 0 à 20.',
     invalid_max_bitrate: 'Choisissez la qualité maximale dans la liste.',
-    invalid_sync_play: 'Choisissez une option de « Regarder ensemble » dans la liste.',
+    invalid_sync_play: 'Choisissez une option de «\u202fRegarder ensemble\u202f» dans la liste.',
     invalid_manifest_url:
       'Saisissez l’adresse du manifeste d’un addon, commençant par https://, http:// ou stremio:// et se terminant par /manifest.json.',
     addon_exists: 'Cet addon est déjà installé ici.',
@@ -156,10 +193,14 @@ const common: typeof en = {
     invalid_manifest: 'Cette adresse n’a pas renvoyé de manifeste d’addon Stremio.',
     private_network:
       'Cet addon se trouve à une adresse du réseau local. Seuls les administrateurs peuvent installer ce type d’addon.',
-    invalid_order: 'La liste des addons a changé entre-temps. Elle a été actualisée : réessayez.',
+    invalid_order:
+      'La liste des addons a changé entre-temps. Elle a été actualisée\u202f: réessayez.',
     invalid_library:
       'Une bibliothèque fait référence à un catalogue qui n’existe plus ou ne peut pas être parcouru. Retirez les bibliothèques signalées comme plus disponibles, puis enregistrez à nouveau.',
     invalid_library_name: 'Le nom d’une bibliothèque doit comporter de 1 à 64 caractères.',
+    invalid_addon_name: 'Le nom d’un addon doit comporter de 1 à 64 caractères imprimables.',
+    addon_not_renamable:
+      'Seuls les addons Stremio et Eclipse prennent un nom à eux. Les sources IPTV, les tuners et les dossiers locaux se nomment dans leurs propres réglages.',
     invalid_library_genre:
       'Le genre d’une bibliothèque n’est pas proposé par son catalogue. Choisissez-en un autre dans la liste, puis enregistrez à nouveau.',
     invalid_library_max_items:
@@ -169,12 +210,23 @@ const common: typeof en = {
       'Choisissez si la liste s’affiche comme une bibliothèque ou comme une collection.',
     invalid_smart_list_catalogs: 'Choisissez de 1 à 50 catalogues dont la liste tire ses titres.',
     invalid_smart_list_rules:
-      'Une règle est incomplète : donnez une valeur à chacune, et au moins une borne à chaque année ou note.',
+      'Une règle est incomplète\u202f: donnez une valeur à chacune, et au moins une borne à chaque année ou note.',
     invalid_smart_list_sort: 'Choisissez comment la liste est triée.',
     invalid_smart_list_max_items:
       'Le nombre maximum de titres d’une liste intelligente doit être un nombre entier de 1 à 20 000, ou rester vide.',
     too_many_smart_lists:
       'Il y a déjà 100 listes intelligentes ici. Supprimez-en une pour en créer une autre.',
+    invalid_own_channel_name: 'Le nom d’une chaîne doit comporter de 1 à 64 caractères.',
+    invalid_channel_number:
+      'Le numéro d’une chaîne doit être un nombre entier de 1 à 9 999, ou rester vide.',
+    invalid_channel_source:
+      'Choisissez une collection, une liste intelligente ou une série, ou au moins un titre, qui existe encore.',
+    channel_without_titles:
+      'Les titres choisis ne contiennent aucun film ni épisode à diffuser, ou plus de 5 000. Choisissez-en d’autres.',
+    invalid_channel_blocks:
+      'Les tranches horaires doivent finir après leur début, dans la journée, sans se chevaucher, 12 au plus.',
+    too_many_channels:
+      'Il y a déjà 100 chaînes de vos titres. Supprimez-en une pour en créer une autre.',
     invalid_image: 'Choisissez une image JPEG, PNG ou WebP de 10 Mo au plus.',
     invalid_image_url: 'Saisissez une adresse d’image commençant par https:// ou http://.',
     image_unreachable:
@@ -208,15 +260,23 @@ const common: typeof en = {
       'Les proxys connus doivent être des adresses IP, des réseaux comme 172.18.0.0/16 ou des noms d’hôte comme traefik, un par ligne, 64 au plus.',
     personal_addons_disabled:
       'Un administrateur a désactivé vos propres addons. Ils sont conservés, mais vous ne pouvez pas en ajouter, ni les actualiser, ni les activer.',
+    parental_control_own_sources:
+      'Le contrôle parental s’applique à votre compte\u202f: vos propres sources et listes intelligentes sont conservées mais pas utilisées, et aucune ne peut être ajoutée ni modifiée.',
     invalid_hidden_libraries: 'La liste des bibliothèques a changé entre-temps. Rechargez la page.',
     invalid_blocked_genres:
       'Un genre doit comporter de 1 à 100 caractères, et 100 genres au plus peuvent être bloqués.',
+    invalid_live_tv_channels:
+      'Le choix des chaînes n’est pas valide\u202f: «\u202fToutes\u202f», «\u202fSeulement celles-ci\u202f» ou «\u202fToutes sauf celles-ci\u202f», avec au plus 10 000 groupes et 10 000 chaînes.',
     invalid_access_schedules:
       'Les horaires vont de 00:00 à 24:00, et chaque fin doit venir après son début (50 lignes au plus).',
     outside_allowed_hours:
       'Ce compte ne peut pas être utilisé à cette heure-ci. Réessayez pendant ses horaires autorisés.',
+    outside_local_network:
+      'Ce compte ne peut être utilisé que depuis le réseau local. Connectez-vous depuis celui-ci, ou demandez à un administrateur.',
+    remote_access_self:
+      'Vous êtes connecté depuis l’extérieur du réseau local\u202f: désactiver vos propres connexions depuis l’extérieur vous bloquerait. Faites-le depuis le réseau local.',
     invalid_guide_url:
-      'Saisissez une adresse de guide commençant par https:// ou http://, de 4 096 caractères au plus.',
+      'Saisissez une adresse de guide commençant par https:// ou http://, de 4 096 caractères au plus, ou le chemin absolu d’un fichier du serveur.',
     invalid_app:
       'Le nom de l’application doit comporter de 1 à 64 caractères, sans caractères spéciaux.',
     invalid_trickplay_interval:
@@ -235,26 +295,46 @@ const common: typeof en = {
       'L’intervalle d’actualisation doit être un nombre entier d’heures de 1 à 168.',
     invalid_local_scan_hours:
       'L’intervalle d’analyse doit être un nombre entier d’heures de 0 à 168.',
+    invalid_watchlist_check_hours:
+      'L’intervalle de vérification des titres à regarder doit être un nombre entier d’heures de 0 à 168.',
     invalid_custom_css: 'Le CSS personnalisé ne doit pas dépasser 2 Mo.',
     invalid_custom_js: 'Le JavaScript personnalisé ne doit pas dépasser 2 Mo.',
+    invalid_web_theme: 'Choisissez un thème dans la liste.',
+    web_theme_locked: 'Votre administrateur a choisi le thème de votre lecteur web.',
+    theme_copy_running: 'Une copie du thème est déjà en cours. Réessayez dans un instant.',
+    theme_copy_nothing: 'Les textes personnalisés enregistrés ne chargent rien d’ailleurs.',
+    theme_copy_failed: 'Aucun fichier n’a pu être enregistré, donc aucune copie n’a été faite.',
+    custom_texts_changed: 'Les textes personnalisés ont changé pendant la copie. Réessayez.',
     invalid_login_disclaimer: 'Le message de connexion ne doit pas dépasser 8 Ko.',
     invalid_publicmetadb_key:
       'PublicMetaDB n’a pas accepté cette clé. Copiez-la de nouveau depuis votre compte PublicMetaDB. Rien n’a été enregistré.',
     publicmetadb_unreachable:
-      'PublicMetaDB n’a pas pu être joint pour vérifier la clé. Rien n’a été enregistré : réessayez plus tard.',
+      'PublicMetaDB n’a pas pu être joint pour vérifier la clé. Rien n’a été enregistré\u202f: réessayez plus tard.',
     invalid_theintrodb_key:
       'TheIntroDB n’a pas accepté cette clé. Copiez-la de nouveau depuis votre compte TheIntroDB. Rien n’a été enregistré.',
     theintrodb_unreachable:
-      'TheIntroDB n’a pas pu être joint pour vérifier la clé, ou limite les demandes pour le moment. Rien n’a été enregistré : réessayez plus tard.',
+      'TheIntroDB n’a pas pu être joint pour vérifier la clé, ou limite les demandes pour le moment. Rien n’a été enregistré\u202f: réessayez plus tard.',
     invalid_mdblist_ratings_key:
       'MDBList n’a pas accepté cette clé. Copiez-la de nouveau depuis votre compte MDBList. Rien n’a été enregistré.',
     mdblist_unreachable:
-      'MDBList n’a pas pu être joint pour vérifier la clé. Rien n’a été enregistré : réessayez plus tard.',
+      'MDBList n’a pas pu être joint pour vérifier la clé. Rien n’a été enregistré\u202f: réessayez plus tard.',
     invalid_tmdb_key:
       'TMDB n’a pas accepté cette clé. Copiez de nouveau la clé d’API ou le jeton d’accès en lecture depuis votre compte TMDB. Rien n’a été enregistré.',
+    unknown_episode_group:
+      'TMDB ne donne plus cet ordre pour cette série. Rouvrez-la et choisissez-en un autre.',
+    episode_groups_unreachable:
+      'TMDB n’a pas pu être joint pour lister les ordres de cette série. Rien n’a été enregistré\u202f: réessayez plus tard.',
+    invalid_numbering:
+      'Choisissez comme le catalogue, par saison, à la suite depuis la saison 1, absolue, ou un ordre d’épisodes.',
+    no_tmdb_key:
+      'Ajoutez d’abord une clé TMDB dans Paramètres › Contenu\u202f: les ordres viennent de TMDB.',
     tmdb_unreachable:
-      'TMDB n’a pas pu être joint pour vérifier la clé. Rien n’a été enregistré : réessayez plus tard.',
+      'TMDB n’a pas pu être joint pour vérifier la clé. Rien n’a été enregistré\u202f: réessayez plus tard.',
     invalid_critic_rating_shows: 'Choisissez dans la liste le score qu’affiche la note critique.',
+    invalid_version_names: 'Choisissez dans la liste comment s’écrit le nom des versions.',
+    invalid_poster_badge_size: 'Choisissez dans la liste la taille des badges.',
+    invalid_poster_template:
+      'Le modèle d’adresse des affiches doit être une adresse web commençant par http:// ou https://, nommant {imdb_id} ou {tmdb_id}, sans espace, nom d’utilisateur ni fragment.',
     invalid_measure_loudness: 'Choisissez dans la liste les chansons dont le volume est mesuré.',
     invalid_segment_order:
       'L’ordre des sources de repères doit citer chaque source une fois. Rechargez la page.',
@@ -262,30 +342,42 @@ const common: typeof en = {
       'Le client ID et le client secret Trakt doivent faire au plus 256 caractères, sans espaces ni caractères spéciaux. Copiez-les de nouveau depuis votre application Trakt.',
     invalid_simkl_app:
       'Le client ID Simkl doit faire au plus 256 caractères, sans espaces ni caractères spéciaux. Copiez-le de nouveau depuis votre application Simkl.',
-    invalid_backup_hour: 'Choisissez l’heure des sauvegardes dans la liste.',
     invalid_backups_kept:
       'Le nombre de sauvegardes conservées doit être un nombre entier de 1 à 90.',
     invalid_torrent_route:
-      'Les flux torrent demandent une seule route : un nom d’interface réseau (Linux seulement), ou un proxy SOCKS5 sous la forme hôte:port, pas les deux.',
+      'Les flux torrent demandent une seule route\u202f: un nom d’interface réseau (Linux seulement), un proxy SOCKS5 sous la forme hôte:port, ou une configuration WireGuard.',
+    invalid_wireguard_config: 'La configuration WireGuard n’est pas valide.',
     invalid_torrent_limit: 'Les limites doivent être des nombres entiers de Mbit/s, de 0 à 10000.',
+    invalid_torrent_trackers:
+      'Saisissez 30 trackers au plus, chacun une URL d’annonce HTTP, HTTPS ou UDP, UDP avec son port, de 500 caractères au plus.',
     invalid_cache_size: 'L’espace disque doit être un nombre entier de Go, de 1 à 2000.',
+    invalid_source_cache:
+      'Les parties lues sont gardées un nombre entier de jours, de 0 à 365, avec 0 à 30 jours de plus par nouvelle lecture.',
+    invalid_preload:
+      'Le préchargement prend 1 à 3 épisodes par série, une limite de débit de 1 à 1000 Mbit/s et 1 à 1000 Go d’espace libre à garder.',
     invalid_vaapi_device: 'Choisissez la carte graphique dans la liste.',
     invalid_recordings_folder:
       'Le dossier des enregistrements doit être un chemin absolu vers un dossier où Polyfin peut écrire.',
     invalid_backup_folder:
       'Le dossier des sauvegardes doit être un chemin absolu vers un dossier où Polyfin peut écrire.',
+    invalid_conversion_folder:
+      'Le dossier de conversion doit être un chemin absolu vers un dossier où Polyfin peut écrire.',
+    invalid_reading_folder:
+      'Le dossier des fichiers en cours de lecture doit être un chemin absolu vers un dossier où Polyfin peut écrire.',
+    invalid_cache_folder:
+      'Le dossier du cache doit être un chemin absolu vers un dossier où Polyfin peut écrire.',
     too_many_destinations:
-      'Il y a déjà 10 destinations des sauvegardes : supprimez-en une d’abord.',
-    too_many_home_rows: 'Il y a déjà 20 rangées d’accueil : supprimez-en une d’abord.',
+      'Il y a déjà 10 destinations des sauvegardes\u202f: supprimez-en une d’abord.',
+    too_many_home_rows: 'Il y a déjà 20 rangées d’accueil\u202f: supprimez-en une d’abord.',
     invalid_home_row:
       'Donnez à la rangée un nom de 100 caractères au plus, et choisissez son catalogue ou sa collection.',
     invalid_destination_kind: 'Choisissez le type de destination dans la liste.',
     invalid_destination_address:
-      'Saisissez l’adresse demandée : une adresse http:// ou https:// sans chemin pour un stockage S3, un nom d’hôte ou une adresse IP pour un serveur SFTP, l’adresse d’un dossier pour un serveur WebDAV.',
+      'Saisissez l’adresse demandée\u202f: une adresse http:// ou https:// sans chemin pour un stockage S3, un nom d’hôte ou une adresse IP pour un serveur SFTP, l’adresse d’un dossier pour un serveur WebDAV.',
     invalid_bucket:
-      'Saisissez le nom du compartiment : 3 à 63 minuscules, chiffres, points, traits d’union ou tirets bas.',
+      'Saisissez le nom du compartiment\u202f: 3 à 63 minuscules, chiffres, points, traits d’union ou tirets bas.',
     invalid_destination_folder:
-      'Le dossier ne doit pas remonter avec « .. », ni contenir de caractères de contrôle, et fait au plus 512 octets.',
+      'Le dossier ne doit pas remonter avec «\u202f..\u202f», ni contenir de caractères de contrôle, et fait au plus 512 octets.',
     invalid_region:
       'La région est faite de minuscules, de chiffres et de traits d’union, comme eu-west-3.',
     invalid_port: 'Le port est un nombre entier de 1 à 65535.',
@@ -293,35 +385,63 @@ const common: typeof en = {
     invalid_destination_secret:
       'Saisissez le mot de passe, la clé secrète pour un stockage S3, ou pour un serveur SFTP une clé privée.',
     invalid_private_key: 'La clé privée doit être une clé OpenSSH ou PEM sans phrase de passe.',
-    backups_off: 'Les sauvegardes sont désactivées : activez-les d’abord ci-dessus.',
+    backups_off: 'Les sauvegardes sont désactivées\u202f: activez-les d’abord ci-dessus.',
     pg_restore_missing:
-      'pg_restore est introuvable sur le serveur : installez les outils clients de PostgreSQL 18, que l’image Docker contient.',
-    backup_not_found: 'Cette sauvegarde n’est plus là : choisissez-en une autre.',
+      'pg_restore est introuvable sur le serveur\u202f: installez les outils clients de PostgreSQL 18, que l’image Docker contient.',
+    backup_not_found: 'Cette sauvegarde n’est plus là\u202f: choisissez-en une autre.',
     not_a_backup: 'Ce fichier n’est pas une sauvegarde de la base de données de Polyfin.',
     newer_backup:
-      'Cette sauvegarde a été faite par un Polyfin plus récent : mettez d’abord Polyfin à jour.',
+      'Cette sauvegarde a été faite par un Polyfin plus récent\u202f: mettez d’abord Polyfin à jour.',
     changed_backup:
       'Cette sauvegarde a été faite par un Polyfin dont les migrations de la base de données diffèrent de celles de celui-ci.',
-    restore_expired: 'La sauvegarde choisie n’est plus prête : choisissez-la à nouveau.',
+    restore_expired: 'La sauvegarde choisie n’est plus prête\u202f: choisissez-la à nouveau.',
     unreadable_secrets:
-      'Cette sauvegarde contient des clés que POLYFIN_SECRET_KEY ne peut pas déchiffrer : confirmez avec Restaurer quand même.',
+      'Cette sauvegarde contient des clés que POLYFIN_SECRET_KEY ne peut pas déchiffrer\u202f: confirmez avec Restaurer quand même.',
     restoring: 'Une restauration est déjà en cours.',
     wrong_server_name: 'Saisissez le nom du serveur exactement comme il est affiché.',
     too_large: 'Le fichier est trop volumineux.',
     destination_failed: 'La destination n’a pas pu être lue.',
-    restore_failed: 'La restauration n’a pas pu commencer : rien n’a été modifié.',
-    invalid_collection_read_hour:
-      'Choisissez dans la liste l’heure de lecture des collections, ou Jamais.',
+    restore_failed: 'La restauration n’a pas pu commencer\u202f: rien n’a été modifié.',
+    invalid_backup_passphrase:
+      'La phrase de passe des sauvegardes fait au moins 12 caractères, sur une ligne, et 256 octets au plus.',
+    passphrase_required:
+      'Cette sauvegarde est chiffrée\u202f: ouvrez-la d’abord avec sa phrase de passe.',
+    wrong_passphrase: 'Cette phrase de passe n’ouvre pas la sauvegarde.',
+    damaged_backup:
+      'Cette sauvegarde chiffrée est endommagée\u202f: une partie a été modifiée ou manque. Rien n’a été restauré.',
+    not_encrypted: 'Cette sauvegarde n’est pas chiffrée.',
+    unlock_failed: 'La sauvegarde n’a pas pu être déchiffrée.',
+    task_locked:
+      'La planification de cette tâche est fixe\u202f: ses déclencheurs ne peuvent pas être modifiés.',
+    invalid_triggers:
+      'Ces déclencheurs ne conviennent pas à cette tâche. Vérifiez leurs types, heures et intervalles, puis réessayez.',
     invalid_collection_library_apps:
       'Choisissez dans la liste les applis qui présentent les bibliothèques de collections par collection.',
     invalid_remuxdb_url:
       'L’adresse de RemuxDB doit être une adresse web commençant par http:// ou https://.',
+    invalid_update_tool_url:
+      'L’adresse de l’outil de mise à jour doit être une adresse web commençant par http:// ou https://, sans nom d’utilisateur ni fragment.',
+    invalid_update_tool_token:
+      'Le jeton de l’outil de mise à jour ne contient pas d’espace, et 1024 caractères au plus.',
+    invalid_provider:
+      'Vérifiez le fournisseur d’identité\u202f: son émetteur est une adresse web commençant par http:// ou https://, sans requête ni fragment\u202f; l’ID client, le secret et les claims ne contiennent pas d’espace\u202f; un claim nomme l’utilisateur.',
+    provider_link_refused:
+      'Un administrateur, ou un compte avec la connexion en deux étapes, se lie lui-même dans Mon compte.',
+    restart_unconfirmed:
+      'Polyfin ne sait pas si quelque chose le relance\u202f: confirmez d’abord l’avertissement.',
+    no_update: 'Polyfin Desktop ne propose pas cette mise à jour pour le moment.',
+    not_desktop: 'Polyfin ne tourne pas dans Polyfin Desktop.',
+    no_update_tool: 'Aucun outil de mise à jour n’est réglé dans Paramètres › Général.',
+    update_tool_timeout:
+      'L’outil de mise à jour n’a pas répondu en 50 secondes\u202f: il est peut-être encore en train de mettre à jour.',
+    update_tool_unreachable: 'L’outil de mise à jour n’a pas pu être joint.',
     invalid_public_address:
       'L’adresse publique doit être une adresse web commençant par http:// ou https://, sans paramètres.',
     invalid_local_address:
       'L’adresse sur le réseau local doit être une adresse web commençant par http:// ou https://, comme http://192.168.1.10:8096, sans paramètres.',
     invalid_dlna_name: 'Le nom sur le réseau ne peut pas dépasser 256 octets.',
-    invalid_dlna_user: 'Cet utilisateur n’existe plus. Choisissez-en un autre, ou « Personne ».',
+    invalid_dlna_user:
+      'Cet utilisateur n’existe plus. Choisissez-en un autre, ou «\u202fPersonne\u202f».',
     invalid_dlna_profile: 'Ce n’est pas un profil DLNA au format XML du plugin DLNA de Jellyfin.',
     invalid_smtp_host:
       'Saisissez le nom d’hôte du serveur SMTP, comme smtp.example.org, sans espaces.',
@@ -339,34 +459,51 @@ const common: typeof en = {
     invalid_target_name: 'Le nom d’une cible doit faire de 1 à 64 caractères.',
     invalid_target_address: 'Saisissez une adresse web commençant par https:// ou http://.',
     private_target_address:
-      'Cette adresse est sur un réseau local : seules les cibles d’un administrateur peuvent y accéder.',
+      'Cette adresse est sur un réseau local\u202f: seules les cibles d’un administrateur peuvent y accéder.',
     invalid_email_address: 'Saisissez une adresse e-mail, comme sam@example.org.',
     email_unavailable:
-      'L’e-mail demande un serveur SMTP : un administrateur le règle dans Paramètres › Notifications.',
+      'L’e-mail demande un serveur SMTP\u202f: un administrateur le règle dans Paramètres › Notifications.',
     invalid_topic: 'Un sujet ntfy fait de 1 à 64 lettres, chiffres, tirets et tirets bas.',
     invalid_chat:
       'Saisissez le numéro de la discussion, comme -1001234567890, ou le nom d’une chaîne publique, comme @news_example.',
     invalid_token:
-      'Saisissez le jeton : 256 caractères au plus, sans espaces. Celui d’un bot Telegram ressemble à 123456:ABC-DEF.',
+      'Saisissez le jeton\u202f: 256 caractères au plus, sans espaces. Celui d’un bot Telegram ressemble à 123456:ABC-DEF.',
     invalid_user_key: 'Une clé d’utilisateur Pushover ne contient que des lettres et des chiffres.',
     invalid_events: 'Un des événements choisis n’est pas disponible pour cette cible.',
     invalid_reminder_settings: 'Choisissez 1, 5, 10, 15, 30 ou 60 minutes.',
     too_many_targets: 'Il y a déjà 20 cibles. Supprimez-en une pour en ajouter une autre.',
+    test_too_soon:
+      'Un test a été envoyé à cette cible il y a moins de trente secondes, ou elle a atteint son nombre de messages par minute. Réessayez dans un instant.',
+    too_many_tests: 'Au plus 10 tests peuvent être envoyés par heure. Réessayez plus tard.',
+    invalid_per_minute: 'Messages par minute\u202f: de 1 à 60, ou vide pour aucune limite.',
+    invalid_group_minutes:
+      'Regroupement\u202f: de 1 à 1 440 minutes, ou vide pour tout envoyer aussitôt.',
+    invalid_summary:
+      'Seuls le résumé de la semaine, le bilan du mois et celui de l’année ont un aperçu.',
     target_unreadable:
       'L’adresse ou le jeton de cette cible ne peut pas être déchiffré avec POLYFIN_SECRET_KEY. Saisissez-le de nouveau.',
     invalid_source_name: 'Le nom d’une source doit faire de 1 à 64 caractères.',
     invalid_source_address:
-      'Saisissez une adresse commençant par https:// ou http://, et pour un compte Xtream Codes un identifiant et un mot de passe.',
+      'Saisissez une adresse commençant par https:// ou http://, ou pour une playlist le chemin absolu d’un fichier du serveur, et pour un compte Xtream Codes un identifiant et un mot de passe.',
+    file_missing:
+      'Il n’y a pas de fichier à ce chemin sur le serveur. Avec Docker, donnez son chemin dans le conteneur, dans un volume monté.',
+    file_unreadable:
+      'Polyfin ne peut pas lire ce fichier\u202f: vérifiez que c’est un fichier, pas un dossier, et que Polyfin a le droit de le lire.',
+    local_file_refused: 'Seuls les administrateurs peuvent utiliser un fichier du serveur.',
+    invalid_user_agent:
+      'Un agent utilisateur fait au plus 512 caractères, sans saut de ligne ni caractère de contrôle.',
     tuner_added: 'Ce tuner est déjà une source du serveur.',
     invalid_folder_name: 'Le nom d’un dossier doit faire de 1 à 64 caractères.',
     invalid_folder_path:
-      'Saisissez le chemin complet du dossier là où tourne Polyfin, autre que la racine du système : dans son conteneur, commençant par / ; sous Windows, avec son lecteur, comme D:\\Films, ou son partage, comme \\\\nas\\media\\Films.',
+      'Saisissez le chemin complet du dossier là où tourne Polyfin, autre que la racine du système\u202f: dans son conteneur, commençant par /\u202f; sous Windows, avec son lecteur, comme D:\\Films, ou son partage, comme \\\\nas\\media\\Films.',
     invalid_share_address:
-      'Saisissez une adresse comme smb://serveur/partage/dossier, https://serveur/dossier, s3://bucket/préfixe, sftp://serveur/dossier ou rclone://serveur:port/dossier, sans utilisateur ni mot de passe : ils ont leurs propres champs.',
+      'Saisissez une adresse comme smb://serveur/partage/dossier, https://serveur/dossier, s3://bucket/préfixe, sftp://serveur/dossier ou rclone://serveur:port/dossier, sans utilisateur ni mot de passe\u202f: ils ont leurs propres champs.',
     invalid_share_endpoint:
       'Saisissez le point de terminaison sous forme d’adresse http:// ou https://, comme https://s3.example.org, et une région d’au plus 64 caractères sans espace.',
     invalid_share_key:
       'Collez une clé privée OpenSSH ou PEM entière, et la phrase de passe qui l’ouvre si elle en a une.',
+    offered_host_key_changed:
+      'La clé d’hôte présentée par le serveur a changé depuis son affichage, et rien n’a été accepté. Comparez l’empreinte affichée maintenant avant de l’accepter.',
     invalid_rclone_remote:
       'Saisissez le nom de l’un des remotes de rclone, sans deux-points ni barre oblique, d’au plus 128 caractères.',
     invalid_poll_minutes:
@@ -386,7 +523,7 @@ const common: typeof en = {
     iptv_login_refused: 'Le serveur IPTV a refusé cet identifiant ou ce mot de passe.',
     invalid_message: 'Écrivez un message de 1 à 500 caractères.',
     not_controllable:
-      'Cette appli n’accepte pas le contrôle à distance : impossible de l’arrêter ou de lui envoyer un message d’ici.',
+      'Cette appli n’accepte pas le contrôle à distance\u202f: impossible de l’arrêter ou de lui envoyer un message d’ici.',
     remote_control_refused:
       'Votre compte ne peut pas contrôler les applis des autres utilisateurs. Un autre administrateur peut vous donner ce droit sur la page Utilisateurs.',
     too_soon: 'Cet addon a été vérifié il y a moins d’une minute. Réessayez dans un instant.',
@@ -394,7 +531,7 @@ const common: typeof en = {
     addon_kind_changed:
       'Cette adresse mène maintenant à un autre type d’addon (de musique au lieu de vidéo, ou l’inverse). Installez-le plutôt comme un nouvel addon.',
     invalid_addon_settings:
-      'L’addon a refusé ces réglages : une valeur ne fait pas partie de ses choix, est trop longue ou hors limites. Vérifiez les champs et réessayez.',
+      'L’addon a refusé ces réglages\u202f: une valeur ne fait pas partie de ses choix, est trop longue ou hors limites. Vérifiez les champs et réessayez.',
     invalid_options: 'Ces options d’import ne sont pas acceptées. Rechargez la page et réessayez.',
     invalid_category_name: 'Le nom d’une catégorie doit comporter de 1 à 64 caractères.',
     category_not_custom: 'Seules vos propres catégories peuvent être supprimées.',
@@ -422,10 +559,10 @@ const common: typeof en = {
     jellyfin_key_limited:
       'Cette clé ou ce compte ne peut pas lister les utilisateurs du serveur. Utilisez une clé d’API de son tableau de bord, ou le compte d’un administrateur.',
     jellyfin_key_owner_only:
-      'Cette clé ne lit que les données de visionnage de son propriétaire. Saisissez le mot de passe des autres utilisateurs sur le serveur, ou décochez « Importer les données de visionnage » pour eux.',
+      'Cette clé ne lit que les données de visionnage de son propriétaire. Saisissez le mot de passe des autres utilisateurs sur le serveur, ou décochez «\u202fImporter les données de visionnage\u202f» pour eux.',
     jellyfin_sign_in_refused: 'Jellyfin a refusé ce nom ou ce mot de passe.',
     jellyfin_sign_in_forbidden:
-      'Jellyfin ne laisse pas ce compte se connecter : il est peut-être désactivé, ou hors de ses horaires autorisés.',
+      'Jellyfin ne laisse pas ce compte se connecter\u202f: il est peut-être désactivé, ou hors de ses horaires autorisés.',
     jellyfin_password_refused:
       'Jellyfin a refusé ce mot de passe. Laissez vide si le compte n’en a pas.',
     jellyfin_other_user:
@@ -445,9 +582,9 @@ const common: typeof en = {
     server_imports_disabled:
       'L’importation de votre historique depuis un autre serveur ou une appli est désactivée sur ce serveur.',
     letterboxd_export_invalid:
-      'Ce fichier n’est pas un export Letterboxd : choisissez le fichier ZIP que donne Letterboxd, tel quel. Il contient watched.csv ou diary.csv.',
+      'Ce fichier n’est pas un export Letterboxd\u202f: choisissez le fichier ZIP que donne Letterboxd, tel quel. Il contient watched.csv ou diary.csv.',
     letterboxd_export_too_large:
-      'Ce fichier dépasse 20 Mo ou compte plus de 50 000 films : choisissez le fichier ZIP que donne Letterboxd.',
+      'Ce fichier dépasse 20 Mo ou compte plus de 50 000 films\u202f: choisissez le fichier ZIP que donne Letterboxd.',
     invalid_nuvio_address:
       'Saisissez l’adresse du serveur Nuvio, par exemple https://api.nuvio.tv, ou laissez vide pour celui de Nuvio.',
     nuvio_sign_in_refused: 'Nuvio a refusé cet e-mail ou ce mot de passe.',
@@ -460,6 +597,7 @@ const common: typeof en = {
     nuvio_backup_unsupported:
       'Nuvio a donné les données du compte sous une forme que cette version de Polyfin ne lit pas. Polyfin lit la version 1 de la sauvegarde de compte de Nuvio.',
     stremio_sign_in_refused: 'Stremio a refusé cet e-mail ou ce mot de passe.',
+    stremio_pin_refused: 'Stremio a refusé ce code PIN.',
     stremio_key_refused:
       'Stremio a refusé cette clé d’authentification. Recopiez-la depuis l’appli web de Stremio, connectée à votre compte.',
     stremio_link_expired: 'Le code de liaison a expiré, ou il a déjà servi. Demandez-en un autre.',
@@ -469,17 +607,30 @@ const common: typeof en = {
     app_import_expired:
       'Ce qui a été lu du compte n’est plus gardé, après quelques minutes. Reconnectez-vous.',
     app_import_running: 'Une importation dans ce compte est en cours. Attendez qu’elle se termine.',
+    plex_sign_in_ended:
+      'La connexion à Plex a pris fin\u202f: elle a expiré, a été remplacée, ou a servi à une importation. Reconnectez-vous avec Plex.',
+    plex_sign_in_pending:
+      'Plex ne vous a pas encore connecté. Terminez la connexion sur la page de Plex.',
+    plex_unknown_profile: 'Ce Plex Home n’a pas ce profil. Reconnectez-vous avec Plex.',
+    plex_profile_pin_refused: 'Plex a refusé ce code PIN. Saisissez à nouveau celui du profil.',
+    plex_profile_forbidden: 'Plex ne laisse pas ce compte passer à ce profil.',
+    plex_unknown_server: 'Votre compte Plex n’a pas accès à ce serveur. Choisissez-en un autre.',
+    plex_not_owner:
+      'Ce compte Plex n’est pas propriétaire du serveur. Connectez-vous avec le compte Plex du propriétaire.',
+    plex_server_unreachable:
+      'Aucune des adresses que Plex donne pour ce serveur n’a répondu comme lui. Vérifiez qu’il fonctionne, et que Polyfin peut le joindre.',
+    plex_tv_failed: 'plex.tv n’a pas répondu comme prévu. Réessayez plus tard.',
+    plex_tv_unreachable: 'plex.tv est injoignable. Vérifiez la connexion de Polyfin à Internet.',
     app_not_connected: 'Cette appli n’est plus connectée au compte.',
     app_connection_stopped:
-      'L’appli a refusé la connexion que Polyfin gardait. Reconnectez-vous, avec « Rester connecté » coché.',
-    invalid_ends_on: 'Choisissez la date de fin du compte, ou « Jamais ».',
+      'L’appli a refusé la connexion que Polyfin gardait. Reconnectez-vous, avec «\u202fRester connecté\u202f» coché.',
+    invalid_ends_on: 'Choisissez la date de fin du compte, ou «\u202fJamais\u202f».',
     administrator_cannot_end:
       'Le compte d’un administrateur ne prend jamais fin. Faites-en d’abord un membre pour lui donner une date de fin.',
     invalid_invite_account_end: 'Choisissez dans la liste quand les comptes prennent fin.',
   },
   status: {
     title: 'État du serveur',
-    description: 'L’essentiel sur le fonctionnement de ce serveur Polyfin.',
     version: 'Version',
     serverId: 'Identifiant du serveur',
     database: 'Base de données',
@@ -502,18 +653,20 @@ const common: typeof en = {
     address: 'Adresse',
     signOut: 'Déconnecter',
     signOutConfirm: (device: string) =>
-      `Déconnecter « ${device} » ? L’application devra se reconnecter.`,
-    signedOut: (device: string) => `« ${device} » a été déconnecté.`,
+      `Déconnecter «\u202f${device}\u202f»\u202f? L’application devra se reconnecter.`,
+    signedOut: (device: string) => `«\u202f${device}\u202f» a été déconnecté.`,
   },
   stremioTypes: {
     movie: 'Films',
     series: 'Séries',
     channel: 'Chaînes',
+    other: 'Autres vidéos',
     tv: 'TV',
     track: 'Titres',
     album: 'Albums',
     artist: 'Artistes',
     playlist: 'Playlists',
+    collection: 'Collections',
   },
   stremioResources: {
     catalog: 'Catalogues',
@@ -541,12 +694,23 @@ const common: typeof en = {
     hide: 'Masquer',
     close: 'Fermer',
     dismiss: 'Fermer le message',
-    notifications: 'Notifications',
+    messages: 'Messages',
     unsaved: 'Modifications non enregistrées',
     allSaved: 'Tout est enregistré',
     discard: 'Annuler les modifications',
     searchList: 'Chercher dans la liste',
     noMatch: 'Rien ne correspond.',
+    changes: (count: number) => (count <= 1 ? `${count} modification` : `${count} modifications`),
+    was: (value: string) => `avant\u202f: ${value}`,
+    moreHelp: 'Suite',
+    lessHelp: 'Réduire',
+    notSet: 'Non défini',
+    byDefault: 'Par défaut\u202f:',
+    ofTotal: (total: number | string) => `sur ${total}`,
+    cause: 'Cause',
+    fix: 'Solution',
+    meanwhile: 'En attendant',
+    alertKind: { danger: 'Erreur', warn: 'Attention', info: 'À noter' },
     secret: {
       saved: 'Valeur enregistrée',
       notSet: 'Aucune valeur',
@@ -557,7 +721,7 @@ const common: typeof en = {
       cancelReplace: 'Garder la valeur enregistrée',
       remove: 'Supprimer',
       keep: 'Garder la valeur',
-      removeHint: 'Enregistrez pour la supprimer, ou choisissez «\u202FGarder la valeur\u202F».',
+      removeHint: 'Enregistrez pour la supprimer, ou choisissez «\u202fGarder la valeur\u202f».',
       show: 'Afficher la clé',
       hide: 'Masquer la clé',
       savedHidden: 'Clé enregistrée, masquée',

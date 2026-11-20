@@ -99,9 +99,12 @@ export function InviteLinks({ onCreate }: { onCreate: () => void }) {
               key={invite.id}
               leading={LinkIcon}
               title={text.uses(invite.uses, invite.maxUses)}
+              titleAside={
+                <StatusPill tone={stateTones[invite.state]}>{text.states[invite.state]}</StatusPill>
+              }
               muted={invite.state !== 'active'}
               meta={
-                <span className="truncate">
+                <span className="min-w-0">
                   {invite.model === null
                     ? text.newUserSettings
                     : text.settingsOf(invite.model.name)}
@@ -125,25 +128,20 @@ export function InviteLinks({ onCreate }: { onCreate: () => void }) {
                 </span>
               }
               trailing={
-                <span className="flex items-center gap-3">
-                  <StatusPill tone={stateTones[invite.state]}>
-                    {text.states[invite.state]}
-                  </StatusPill>
-                  {invite.state === 'active' && (
-                    <Button
-                      size="sm"
-                      variant="danger"
-                      icon={ProhibitIcon}
-                      loading={revoke.isPending && revoke.variables.id === invite.id}
-                      onClick={() => {
-                        revoke.reset()
-                        setAsked(invite)
-                      }}
-                    >
-                      {text.revoke}
-                    </Button>
-                  )}
-                </span>
+                invite.state !== 'active' ? undefined : (
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    icon={ProhibitIcon}
+                    loading={revoke.isPending && revoke.variables.id === invite.id}
+                    onClick={() => {
+                      revoke.reset()
+                      setAsked(invite)
+                    }}
+                  >
+                    {text.revoke}
+                  </Button>
+                )
               }
             />
           ))}
@@ -240,7 +238,7 @@ export function CreateInviteModal({
         </>
       }
     >
-      <form id={formId} onSubmit={submit} noValidate className="space-y-5 p-5">
+      <form id={formId} onSubmit={submit} noValidate className="space-y-4 p-5">
         <Field label={text.maxUses} help={text.maxUsesHelp} error={usesError}>
           <NumberInput
             value={maxUses}
@@ -356,7 +354,7 @@ function NewLink({
         </code>
         <div aria-live="polite">
           {copy === 'copied' && <Notice tone="ok">{text.copied}</Notice>}
-          {copy === 'failed' && <Notice tone="danger">{text.copyFailed}</Notice>}
+          {copy === 'failed' && <Notice tone="danger">{t.shareLinks.copyFailed}</Notice>}
         </div>
       </div>
     </Modal>

@@ -10,6 +10,7 @@ const nav = {
     sources: 'Sources',
     libraries: 'Libraries',
     liveTv: 'Live TV',
+    versions: 'Versions',
     health: 'Health',
     statistics: 'Statistics',
     schedule: 'Schedule',
@@ -25,10 +26,10 @@ const nav = {
     settingsSections: {
       general: 'General',
       playback: 'Playback',
-      conversion: 'Conversion',
+      conversion: 'Conversion (transcoding)',
       content: 'Content',
       catalogs: 'Catalogs',
-      thumbnails: 'Thumbnails',
+      thumbnails: 'Thumbnails (trickplay)',
       security: 'Security',
       tracking: 'Tracking',
       liveTv: 'Live TV',
@@ -38,7 +39,6 @@ const nav = {
       backups: 'Backups',
       notifications: 'Notifications',
       webPlayer: 'Web player',
-      branding: 'Branding',
       diagnostics: 'Diagnostics',
     },
     settingsSectionsLabel: 'Settings sections',
@@ -46,6 +46,7 @@ const nav = {
     searchShortcut: (keys: string) => `Search (${keys})`,
     webPlayer: 'Web player',
     webPlayerHint: 'Opens the Jellyfin web app of this server in a new tab.',
+    backToWebPlayer: 'Back to the web player',
     accountOf: (name: string) => `Account of ${name}`,
     accountMenu: 'Account',
     administrator: 'Administrator',
@@ -54,6 +55,10 @@ const nav = {
     signOut: 'Sign out',
     signingOut: 'Signing out…',
     menu: 'Menu',
+    closeMenu: 'Close the menu',
+    /** Beside System in the top row: how many things Health asks to look at. */
+    toLookAt: (count: number) =>
+      count === 1 ? '1 thing to look at' : `${count} things to look at`,
     skipToContent: 'Skip to content',
   },
   palette: {

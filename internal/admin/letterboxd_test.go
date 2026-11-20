@@ -24,6 +24,7 @@ import (
 	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/userdata"
 	"github.com/moodiness/polyfin/internal/watchlist"
+	"github.com/moodiness/polyfin/internal/watchlist/watchlisttest"
 )
 
 // newMovieSearchAddon serves a metadata addon whose movie search finds the
@@ -153,12 +154,11 @@ func letterboxdDone(t *testing.T, b browser, path string) map[string]any {
 // A member uploads their Letterboxd export under My account, with its
 // switches, and follows the import: the movies found are played with
 // their dates and play counts, rated, put on the Watchlist, and made
-// favorites with the switch on; those not found are listed with why and
-// their link, and importing again adds nothing. The form tells whether
-// the metadata addons search movies. Files that are not an export, or too
-// large, are refused, and so is everything once the setting is off; an
-// administrator imports for a user whatever the setting says, and a
-// member may not.
+// favorites with the switch on; those not found are counted, and importing
+// again adds nothing. The form tells whether the metadata addons search
+// movies. Files that are not an export, or too large, are refused, and so
+// is everything once the setting is off; an administrator imports for a
+// user whatever the setting says, and a member may not.
 func TestLetterboxdImport(t *testing.T) {
 	t.Parallel()
 	var lib *library.Service
@@ -168,7 +168,7 @@ func TestLetterboxdImport(t *testing.T) {
 	api := newTestAPI(t, 10, func(o *Options, deps testDeps) {
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 		lib = library.New(deps.pool, deps.addons, deps.client, logger, o.Accounts.Settings)
-		data, lists, store = userdata.New(deps.pool), watchlist.New(deps.pool), deps.addons
+		data, lists, store = userdata.New(deps.pool), watchlisttest.Store(deps.pool), deps.addons
 		o.Letterboxd = letterboxd.New(letterboxd.Options{Titles: lib, UserData: data, Watchlist: lists, Logger: logger})
 		t.Cleanup(o.Letterboxd.Close)
 	})
@@ -223,10 +223,8 @@ func TestLetterboxdImport(t *testing.T) {
 		added["ratings"] != 1.0 || added["favorites"] != 1.0 || done["unmatchedCount"] != 2.0 {
 		t.Errorf("the member's import: %v", done)
 	}
-	if unmatched, _ := done["unmatched"].([]any); len(unmatched) != 2 ||
-		unmatched[0].(map[string]any)["reason"] != "ambiguous" || unmatched[0].(map[string]any)["link"] != "https://boxd.it/bbb3" ||
-		unmatched[1].(map[string]any)["reason"] != "not_found" || unmatched[1].(map[string]any)["year"] != 1971.0 {
-		t.Errorf("unmatched: %v", done["unmatched"])
+	if _, listed := done["unmatched"]; listed {
+		t.Errorf("the movies not found are listed in the import's status: %v", done["unmatched"])
 	}
 	found, err := lib.Resolve(t.Context(), []library.TitleRef{{IMDb: "tt7200001"}, {IMDb: "tt7200002"}})
 	if err != nil || len(found[0]) != 1 || len(found[1]) != 1 {

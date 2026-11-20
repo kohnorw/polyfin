@@ -20,6 +20,7 @@ func on(weekday time.Weekday, hour, minute, second int) time.Time {
 }
 
 func TestAccessSchedulesAllowTheirHours(t *testing.T) {
+	t.Parallel()
 	if !(User{}).AllowedAt(on(time.Monday, 3, 0, 0)) {
 		t.Error("a user without schedules is refused")
 	}
@@ -69,6 +70,7 @@ func TestAccessSchedulesAllowTheirHours(t *testing.T) {
 }
 
 func TestUserContentIsStoredNormalized(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	user := mustCreate(t, store, NewUser{Name: "child", Password: "correct horse"})
 	if user.HiddenLibraries == nil || len(user.HiddenLibraries) != 0 || user.BlockedGenres == nil || len(user.BlockedGenres) != 0 ||
@@ -143,6 +145,7 @@ func TestUserContentIsStoredNormalized(t *testing.T) {
 }
 
 func TestUserContentRangesAreCheckedByTheDatabase(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	user := mustCreate(t, store, NewUser{Name: "child", Password: "correct horse"})
 	for value, valid := range map[string]bool{
@@ -162,5 +165,27 @@ func TestUserContentRangesAreCheckedByTheDatabase(t *testing.T) {
 	if _, err := store.db.Exec(t.Context(), "UPDATE users SET blocked_genres = array_fill('Horror'::text, ARRAY[$2::int]) WHERE id = $1",
 		user.ID, MaxBlockedGenres+1); err == nil {
 		t.Error("too many blocked genres stored")
+	}
+}
+
+// The poster address template is an address naming an identifier to fill
+// in, as the poster of every title would otherwise be the same.
+func TestPosterTemplatesNameAnIdentifier(t *testing.T) {
+	t.Parallel()
+	for template, valid := range map[string]bool{
+		"": true,
+		"https://posters.example/{type}/{imdb_id}.jpg":  true,
+		"http://192.168.1.2:8080/poster?tmdb={tmdb_id}": true,
+		"https://posters.example/poster.jpg":            false,
+		"https://posters.example/{type}.jpg":            false,
+		"ftp://posters.example/{imdb_id}.jpg":           false,
+		"https://user:pass@posters.example/{imdb_id}":   false,
+		"https://posters.example/{imdb_id} .jpg":        false,
+		"https://posters.example/{imdb_id}#top":         false,
+		"/{imdb_id}.jpg":                                false,
+	} {
+		if got := ValidPosterTemplate(template); got != valid {
+			t.Errorf("%q: valid %v, want %v", template, got, valid)
+		}
 	}
 }

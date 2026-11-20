@@ -6,9 +6,11 @@ import (
 	"path/filepath"
 	"runtime"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/stremio"
 )
 
@@ -16,6 +18,7 @@ import (
 // and year; an identifier in its name wins over the search; several titles,
 // another year or none leave it unmatched, with why.
 func TestFilesAreMatchedThroughTheMetadataAddons(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	addon, _ := e.folder(KindMovies, map[string]int{
 		"Night of the Living Dead (1968).mkv":                   10,
@@ -50,16 +53,23 @@ func TestFilesAreMatchedThroughTheMetadataAddons(t *testing.T) {
 		t.Errorf("unmatched: %d %+v %v", total, unmatched, err)
 	}
 	// The title matched by its identifier is named as the addon describes
-	// it, not as the file is.
+	// it, not as the file is; the files left unmatched are plain videos,
+	// named as their names read.
 	metas, err := e.service.Catalog(t.Context(), addon.ID, "movie", catalogID, 0, "")
 	if err != nil {
 		t.Fatal(err)
 	}
 	names := map[string]string{}
+	var plain []string
 	for _, meta := range metas {
 		names[meta.ID] = meta.Name + " " + string(meta.Year)
+		if strings.HasPrefix(meta.ID, library.PlainIDPrefix) {
+			plain = append(plain, names[meta.ID])
+		}
 	}
-	if len(metas) != 3 || names["tt0017925"] != "The General 1926" || names["tt0063350"] != "Night of the Living Dead 1968" {
+	slices.Sort(plain)
+	if len(metas) != 6 || names["tt0017925"] != "The General 1926" || names["tt0063350"] != "Night of the Living Dead 1968" ||
+		!slices.Equal(plain, []string{"An Unknown Picture 1950", "Night of the Living Dead ", "Nosferatu 1930"}) {
 		t.Errorf("catalog: %v", names)
 	}
 }
@@ -68,6 +78,7 @@ func TestFilesAreMatchedThroughTheMetadataAddons(t *testing.T) {
 // read again, files gone forgotten, and a symbolic link leading out of the
 // folder is not followed.
 func TestScansAreIncremental(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	addon, dir := e.folder(KindMovies, map[string]int{
 		"Night of the Living Dead (1968).mkv": 10,
@@ -120,6 +131,7 @@ func TestScansAreIncremental(t *testing.T) {
 // so through rescans, even once changed; a show's folder links its
 // episodes.
 func TestLinksSurviveRescans(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	addon, dir := e.folder(KindMovies, map[string]int{"Night of the Living Dead.mkv": 10})
 	if err := e.service.Link(t.Context(), addon.ID, "Night of the Living Dead.mkv", " TT0100258 "); err != nil {
@@ -182,6 +194,7 @@ func TestLinksSurviveRescans(t *testing.T) {
 // A folder Polyfin cannot read is reported, and what its scans found is
 // kept: a share that is not mounted for a while empties no library.
 func TestUnreadableFoldersAreReported(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	addon, dir := e.folder(KindMovies, map[string]int{"Night of the Living Dead (1968).mkv": 10})
 	moved := dir + ".unmounted"
@@ -227,6 +240,7 @@ func TestUnreadableFoldersAreReported(t *testing.T) {
 // episodes those of both, named after the folder with their resolution and
 // size.
 func TestEpisodesAreStreams(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	addon, _ := e.folder(KindShows, map[string]int{
 		"The Lone Ranger (1949)/Season 01/The Lone Ranger - S01E01-E02 - 720p.mkv": 1_500_000,
@@ -266,6 +280,7 @@ func TestEpisodesAreStreams(t *testing.T) {
 // is deleted by the scan that finds a file renamed or changed; what was
 // read of a file still as it was stays.
 func TestScansForgetTheAudioOfFilesGoneOrChanged(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	season := "The Lone Ranger (1949)/Season 01/"
 	addon, dir := e.folder(KindShows, map[string]int{

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -14,9 +15,11 @@ import (
 
 // sourceRequest adds or changes an IPTV source: its name; its account,
 // a playlist address (M3U) or a server address, username and password
-// (Xtream Codes); on adding, the XMLTV guide of its catalog, or the one
-// the Xtream server publishes for the account with ProviderGuide; its
-// import options, fields left out keeping their values.
+// (Xtream Codes), and the User-Agent its list and streams are requested
+// with, empty for the default; on adding, the XMLTV guide of its catalog,
+// or the one the Xtream server publishes for the account with
+// ProviderGuide; its import options, fields left out keeping their
+// values.
 type sourceRequest struct {
 	Name          *string            `json:"name"`
 	Kind          string             `json:"kind"`
@@ -24,16 +27,24 @@ type sourceRequest struct {
 	Server        string             `json:"server"`
 	Username      string             `json:"username"`
 	Password      string             `json:"password"`
+	UserAgent     *string            `json:"userAgent"`
 	GuideURL      string             `json:"guideUrl"`
 	ProviderGuide bool               `json:"providerGuide"`
 	Options       *iptv.OptionsPatch `json:"options"`
 	// Groups, from v0.8, gave the groups shown: categories replaced them,
 	// and a request that still sends them is refused.
 	Groups json.RawMessage `json:"groups"`
+	// UsedBy is who uses a server source, on adding it; everyone when
+	// left out.
+	UsedBy *usedByJSON `json:"usedBy"`
 }
 
 func (body sourceRequest) account(kind string) iptv.Account {
-	return iptv.Account{Kind: kind, URL: body.URL, Server: body.Server, Username: body.Username, Password: body.Password}
+	account := iptv.Account{Kind: kind, URL: body.URL, Server: body.Server, Username: body.Username, Password: body.Password}
+	if body.UserAgent != nil {
+		account.UserAgent = *body.UserAgent
+	}
+	return account
 }
 
 // addSource adds an IPTV source to the scope, as installing an addon does,
@@ -70,9 +81,16 @@ func (h *handler) addSource(w http.ResponseWriter, r *http.Request) {
 	}
 	// The list is worth keeping when the admin app stops waiting.
 	ctx := context.WithoutCancel(r.Context())
-	addon, err := h.IPTV.Add(ctx, scope, iptv.NewSource{Name: name, Account: account, Guide: guide, Options: body.Options}, confined(r))
+	limited, ok := usedBy(w, scope, body.UsedBy)
+	if !ok {
+		return
+	}
+	addon, err := h.IPTV.Add(ctx, scope, iptv.NewSource{Name: name, Account: account, Guide: guide, Options: body.Options, UsedBy: limited}, confined(r))
 	if err == nil {
-		h.Activity.AddonInstalled(ctx, sessionFrom(ctx).User, addon.Manifest.Name, addon.Manifest.Version, scope.Owner == nil)
+		h.Activity.AddonInstalled(ctx, sessionFrom(ctx).User, addon.Name(), addon.Manifest.Version, scope.Owner == nil)
+		if addon.UsedBy.Listed {
+			h.usedByChanged(ctx, addon)
+		}
 		if guide != "" {
 			if err := h.fetchGuide(r, scope, addons.LibraryKey{AddonID: addon.ID, CatalogType: "tv", CatalogID: addon.Manifest.Catalogs[0].ID}); err != nil {
 				h.internalError(w, r, err)
@@ -84,8 +102,8 @@ func (h *handler) addSource(w http.ResponseWriter, r *http.Request) {
 }
 
 // updateSource changes an IPTV source of the scope: its name, its account,
-// fetched first, or its import options. A password left empty keeps the
-// current one.
+// fetched first, its User-Agent, or its import options. A password left
+// empty keeps the current one.
 func (h *handler) updateSource(w http.ResponseWriter, r *http.Request) {
 	scope, ok := h.scope(w, r)
 	if !ok || h.personalAddonsRefused(w, r, scope) {
@@ -103,7 +121,7 @@ func (h *handler) updateSource(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	changes := iptv.Changes{Name: body.Name, Options: body.Options}
+	changes := iptv.Changes{Name: body.Name, UserAgent: body.UserAgent, Options: body.Options}
 	if body.URL != "" || body.Server != "" || body.Username != "" || body.Password != "" {
 		account := body.account("")
 		changes.Account = &account
@@ -394,12 +412,14 @@ type channelJSON struct {
 	Moved              bool                `json:"moved"`
 	Enabled            bool                `json:"enabled"`
 	Shown              bool                `json:"shown"`
-	Number             *int                `json:"number"`
-	ProviderNumber     *int                `json:"providerNumber"`
-	FixedNumber        *int                `json:"fixedNumber"`
-	GuideID            string              `json:"guideId"`
-	Mapping            *mappingJSON        `json:"mapping"`
-	Streams            []lineupStreamJSON  `json:"streams"`
+	// Number is the number the channel shows, and ProviderNumber the
+	// provider's, as written ("104.5"); FixedNumber the administrator's.
+	Number         *string            `json:"number"`
+	ProviderNumber *string            `json:"providerNumber"`
+	FixedNumber    *int               `json:"fixedNumber"`
+	GuideID        string             `json:"guideId"`
+	Mapping        *mappingJSON       `json:"mapping"`
+	Streams        []lineupStreamJSON `json:"streams"`
 	// ArchiveDays is how many days back the provider keeps the channel's
 	// past programmes, played from Replay; 0 for no archive.
 	ArchiveDays int `json:"archiveDays"`
@@ -440,9 +460,17 @@ func newMappingJSON(guide *accounts.ID, guideChannel *string, name string, manua
 func newChannelJSON(c iptv.Channel) channelJSON {
 	result := channelJSON{ID: c.ID.String(), Name: c.Name, ProviderName: c.ProviderName, Renamed: c.Renamed, Logo: c.Logo,
 		ProviderLogo: c.ProviderLogo, Description: c.Description, Category: channelCategoryJSON{ID: c.Category.String(), Name: c.CategoryName},
-		ProviderCategoryID: c.ProviderCategory.String(), Moved: c.Moved, Enabled: c.Enabled, Shown: c.Shown, Number: c.Number,
-		ProviderNumber: c.ProviderNumber, FixedNumber: c.FixedNumber, GuideID: c.GuideID, Streams: make([]lineupStreamJSON, 0, len(c.Streams)),
-		ArchiveDays: c.ArchiveDays}
+		ProviderCategoryID: c.ProviderCategory.String(), Moved: c.Moved, Enabled: c.Enabled, Shown: c.Shown, FixedNumber: c.FixedNumber,
+		GuideID: c.GuideID, Streams: make([]lineupStreamJSON, 0, len(c.Streams)), ArchiveDays: c.ArchiveDays}
+	if c.ProviderNumber != nil {
+		result.ProviderNumber = new(cmp.Or(c.GuideNumber, strconv.Itoa(*c.ProviderNumber)))
+	}
+	switch {
+	case c.FixedNumber != nil:
+		result.Number = new(strconv.Itoa(*c.FixedNumber))
+	case c.Number != nil:
+		result.Number = new(cmp.Or(c.GuideNumber, strconv.Itoa(*c.Number)))
+	}
 	if m := c.Mapping; m != nil {
 		result.Mapping = newMappingJSON(m.Guide, m.GuideChannel, m.GuideChannelName, m.Manual)
 	}

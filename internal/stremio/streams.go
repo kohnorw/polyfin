@@ -8,6 +8,8 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+
+	"github.com/moodiness/polyfin/internal/drm"
 )
 
 // Stream is one way to play a title, as an addon's stream resource lists it.
@@ -29,20 +31,44 @@ type Stream struct {
 	Sources       []string       `json:"sources,omitempty"`
 	Subtitles     []Subtitle     `json:"subtitles,omitempty"`
 	BehaviorHints StreamBehavior `json:"behaviorHints,omitzero"`
+	// Usenet is a Usenet download's NZB link, and RARs to Tars archives'
+	// files: streams Polyfin does not play. They are decoded only to count
+	// them in a log line, never asked for.
+	Usenet   string            `json:"nzbUrl,omitempty"`
+	RARs     []json.RawMessage `json:"rarUrls,omitempty"`
+	Zips     []json.RawMessage `json:"zipUrls,omitempty"`
+	SevenZip []json.RawMessage `json:"7zipUrls,omitempty"`
+	TGZs     []json.RawMessage `json:"tgzUrls,omitempty"`
+	Tars     []json.RawMessage `json:"tarUrls,omitempty"`
 	// Identity is Polyfin's, never an addon's: the file an earlier answer
 	// of the addon listed the stream as, when the stream's link or hints
 	// changed since, empty otherwise.
 	Identity string `json:"-"`
+	// UserAgent is Polyfin's, never an addon's: the User-Agent Polyfin's
+	// own requests for the stream send when its ProxyHeaders name none.
+	// Unlike those, it is no header the stream needs: an app that can
+	// reach the source itself may still be sent there.
+	UserAgent string `json:"-"`
+	// Protection is Polyfin's, never an addon's: how an IPTV list says the
+	// stream is encrypted, with its ClearKey keys, which never leave
+	// Polyfin; nil when it says nothing.
+	Protection *drm.Protection `json:"-"`
+	// Confined is Polyfin's, never an addon's: set for a stream whose
+	// address the source's owner gave themselves, as an IPTV channel's
+	// custom stream, it tells whether the stream is fetched from public
+	// addresses only, as that owner may, rather than as what the source's
+	// answers name is; nil for a stream the source named.
+	Confined *bool `json:"-"`
 }
 
 // StreamBehavior holds hints about how a stream is played.
 type StreamBehavior struct {
 	// BingeGroup names streams of the same kind across episodes, so that
 	// the next episode can be played from the same source.
-	BingeGroup string `json:"bingeGroup,omitempty"`
-	Filename   string `json:"filename,omitempty"`
-	VideoSize  Number `json:"videoSize,omitempty"`
-	VideoHash  string `json:"videoHash,omitempty"`
+	BingeGroup string   `json:"bingeGroup,omitempty"`
+	Filename   string   `json:"filename,omitempty"`
+	VideoSize  Number64 `json:"videoSize,omitempty"`
+	VideoHash  string   `json:"videoHash,omitempty"`
 	// ProxyHeaders are the headers the stream must be requested with.
 	ProxyHeaders *ProxyHeaders `json:"proxyHeaders,omitempty"`
 	NotWebReady  bool          `json:"notWebReady,omitempty"`
@@ -64,6 +90,12 @@ func (s Stream) Playable() bool { return webURL(s.URL) }
 func (s Stream) Torrent() bool {
 	raw, err := hex.DecodeString(s.InfoHash)
 	return s.URL == "" && err == nil && len(raw) == 20 && (s.FileIdx == nil || *s.FileIdx >= 0)
+}
+
+// Archive reports whether the stream is an archive's file, which Polyfin
+// does not play.
+func (s Stream) Archive() bool {
+	return len(s.RARs)+len(s.Zips)+len(s.SevenZip)+len(s.TGZs)+len(s.Tars) > 0
 }
 
 // Details returns the description, from whichever field the addon used.
@@ -141,35 +173,47 @@ func (m Manifest) ServesType(resource, contentType string) bool {
 }
 
 // Streams lists the streams an addon offers for a title, or for an episode
-// by its video identifier.
+// by its video identifier, waiting StreamTimeout for its answer. Of its
+// list, the first MaxListed elements are read, and those that tell
+// nothing, as an empty object, are left out (see tells).
 func (c *Client) Streams(ctx context.Context, manifestURL, streamType, id string, confined bool) ([]Stream, error) {
-	body, err := c.get(ctx, manifestURL, BaseURL(manifestURL)+"/stream/"+encodeComponent(streamType)+"/"+encodeComponent(id)+".json", confined)
+	body, err := c.get(ctx, manifestURL, ResourceURL(manifestURL, "/stream/"+encodeComponent(streamType)+"/"+encodeComponent(id)+".json"), confined, c.streamTimeout)
 	if err != nil {
 		return nil, err
 	}
 	var response struct {
-		Streams []Stream `json:"streams"`
+		Streams json.RawMessage `json:"streams"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		return nil, fmt.Errorf("%w: streams: %v", ErrInvalidResponse, err)
 	}
-	return response.Streams, nil
+	streams, err := decodeList(response.Streams, MaxListed, &room{left: listedRoom}, decodeStream, tells)
+	if err != nil {
+		return nil, fmt.Errorf("%w: streams: %v", ErrInvalidResponse, err)
+	}
+	return streams, nil
 }
 
 // Subtitles lists the subtitles an addon offers for a title, or for an
 // episode by its video identifier. extra describes the video they should
-// match (filename, videoSize, videoHash), when known.
+// match (filename, videoSize, videoHash), when known. Of its list, the
+// first MaxListed elements are read, and those that cannot be downloaded
+// are left out.
 func (c *Client) Subtitles(ctx context.Context, manifestURL, subtitlesType, id string, extra []ExtraValue, confined bool) ([]Subtitle, error) {
-	target := BaseURL(manifestURL) + "/subtitles/" + encodeComponent(subtitlesType) + "/" + encodeComponent(id) + extraPath(extra)
-	body, err := c.get(ctx, manifestURL, target+".json", confined)
+	target := ResourceURL(manifestURL, "/subtitles/"+encodeComponent(subtitlesType)+"/"+encodeComponent(id)+extraPath(extra)+".json")
+	body, err := c.get(ctx, manifestURL, target, confined, c.timeout)
 	if err != nil {
 		return nil, err
 	}
 	var response struct {
-		Subtitles []Subtitle `json:"subtitles"`
+		Subtitles json.RawMessage `json:"subtitles"`
 	}
 	if err := json.Unmarshal(body, &response); err != nil {
 		return nil, fmt.Errorf("%w: subtitles: %v", ErrInvalidResponse, err)
 	}
-	return response.Subtitles, nil
+	subtitles, err := decodeList(response.Subtitles, MaxListed, &room{left: listedRoom}, whole[Subtitle], downloadable)
+	if err != nil {
+		return nil, fmt.Errorf("%w: subtitles: %v", ErrInvalidResponse, err)
+	}
+	return subtitles, nil
 }

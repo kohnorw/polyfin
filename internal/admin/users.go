@@ -11,14 +11,16 @@ import (
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
-	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/config"
+	"github.com/moodiness/polyfin/internal/diskspace"
+	"github.com/moodiness/polyfin/internal/forwarded"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/localization"
 	"github.com/moodiness/polyfin/internal/mediasegments"
 	"github.com/moodiness/polyfin/internal/quickconnect"
 	"github.com/moodiness/polyfin/internal/ratings"
 	"github.com/moodiness/polyfin/internal/tmdb"
+	"github.com/moodiness/polyfin/internal/torrent"
 )
 
 type userJSON struct {
@@ -30,6 +32,9 @@ type userJSON struct {
 	CreatedAt       time.Time  `json:"createdAt"`
 	LastLoginAt     *time.Time `json:"lastLoginAt"`
 	LastActivityAt  *time.Time `json:"lastActivityAt"`
+	// LastActivityApp is the app of the last activity: the name a Jellyfin
+	// or Silo app sends, or accounts.AdminApp. Empty when unknown.
+	LastActivityApp string `json:"lastActivityApp"`
 	// The settings a group holds; a member who follows their group has its
 	// values.
 	limitsJSON
@@ -47,29 +52,57 @@ type userJSON struct {
 	// one of the server's addons' languages, empty for the server's
 	// descriptions.
 	MetadataLanguage string `json:"metadataLanguage"`
+	// WebTheme is the user's web player theme, lumaaglaass, none or custom,
+	// empty for the server's; WebThemeLocked keeps them from changing it
+	// under My account.
+	WebTheme       string `json:"webTheme"`
+	WebThemeLocked bool   `json:"webThemeLocked"`
+	// AudioRegion is the regional variant of audio the user prefers, one
+	// of AudioRegions, empty for none; AudioRegions are those offered.
+	AudioRegion  string   `json:"audioRegion"`
+	AudioRegions []string `json:"audioRegions"`
 	// EndsOn is the date the account ends, YYYY-MM-DD in the server's time
-	// zone, null for never; Ended is set once it has come, and the account
-	// is refused as a disabled one is.
-	EndsOn *string `json:"endsOn"`
-	Ended  bool    `json:"ended"`
+	// zone, null for never; EndsAt is the exact time it ends instead, as an
+	// invite link sets it, null for none, so at most one of them is set.
+	// Ended is set once the end has come, and the account is refused as a
+	// disabled one is.
+	EndsOn *string    `json:"endsOn"`
+	EndsAt *time.Time `json:"endsAt"`
+	Ended  bool       `json:"ended"`
 	// GroupID and GroupName are the user's group, null for none;
-	// FollowGroup tells whether they follow it, set without a group.
-	GroupID     *string `json:"groupId"`
-	GroupName   *string `json:"groupName"`
-	FollowGroup bool    `json:"followGroup"`
+	// OwnSections lists the sections in which they keep their own values
+	// (accounts.GroupSections), following the group in the others; empty
+	// without a group.
+	GroupID     *string  `json:"groupId"`
+	GroupName   *string  `json:"groupName"`
+	OwnSections []string `json:"ownSections"`
 	// TwoStep tells whether the user signs in with a code from an
 	// authenticator app after their password.
 	TwoStep bool `json:"twoStep"`
+	// ProviderOnly tells whether the user signs in through the identity
+	// provider only, their password refused.
+	ProviderOnly bool `json:"providerOnly"`
+	// ProviderLinked tells whether the account is linked to someone at
+	// the identity provider set up, who signs in as it there; withPins
+	// reads it from providerIssuer, the issuer of the account's link.
+	ProviderLinked bool `json:"providerLinked"`
+	providerIssuer string
+	// ProviderLinkAllowed tells whether an administrator allowed the
+	// account to be linked at the next sign-in through the provider of
+	// the person it is named after; the link turns it off.
+	ProviderLinkAllowed bool `json:"providerLinkAllowed"`
 }
 
 // limitsJSON are the settings a group holds, as a user's JSON and a
 // group's show them.
 type limitsJSON struct {
 	ParentalControl parentalControlJSON `json:"parentalControl"`
-	// Transcoding is set when the user may have both video and audio
-	// converted; Downloads, when they may download.
-	Transcoding bool `json:"transcoding"`
-	Downloads   bool `json:"downloads"`
+	// VideoTranscoding and AudioTranscoding are set when the user may have
+	// their video, and their audio, converted; Downloads, when they may
+	// download.
+	VideoTranscoding bool `json:"videoTranscoding"`
+	AudioTranscoding bool `json:"audioTranscoding"`
+	Downloads        bool `json:"downloads"`
 	// PersonalAddons is set when the user may add and use their own addons.
 	PersonalAddons bool `json:"personalAddons"`
 	// MaxPlaybacks is how many of the user's other devices may be playing
@@ -87,7 +120,7 @@ type limitsJSON struct {
 	// hidden; AccessSchedules, the hours the user may use the server in.
 	HiddenLibraries []string `json:"hiddenLibraries"`
 	// HiddenLiveTv are the IPTV sources and line-up categories the user
-	// does not reach.
+	// does not reach (this fork).
 	HiddenLiveTv    []string             `json:"hiddenLiveTv"`
 	BlockedGenres   []string             `json:"blockedGenres"`
 	AccessSchedules []accessScheduleJSON `json:"accessSchedules"`
@@ -107,9 +140,23 @@ type limitsJSON struct {
 	// TorrentStreams offers the user the torrents' files addons list,
 	// while the server plays them.
 	TorrentStreams bool `json:"torrentStreams"`
+	// RemoteAccess lets the user sign in and use the server from outside
+	// the local network, as Known proxies tells it.
+	RemoteAccess bool `json:"remoteAccess"`
 	// QualityGroup is the tallest video the user is offered, in lines: 480,
 	// 720, 1080, 1440 or 2160, or 0 for Original, no limit.
 	QualityGroup int `json:"qualityGroup"`
+	// LiveTvChannels chooses the Live TV channels of the server's sources
+	// the user sees.
+	LiveTvChannels channelRuleJSON `json:"liveTvChannels"`
+	// LocalFirst offers the user the versions of local folders and network
+	// shares before the others, whatever the version order's criteria.
+	LocalFirst bool `json:"localFirst"`
+	// BoostVolume makes the user's web player louder in the browser;
+	// ConvertSound converts and evens the audio of their videos and
+	// channels, the video copied (see accounts.User).
+	BoostVolume  bool `json:"boostVolume"`
+	ConvertSound bool `json:"convertSound"`
 }
 
 func newLimitsJSON(limits accounts.Limits) limitsJSON {
@@ -119,7 +166,8 @@ func newLimitsJSON(limits accounts.Limits) limitsJSON {
 			MaxSubRating: limits.Parental.MaxSubRating,
 			BlockUnrated: append([]string{}, limits.Parental.BlockUnrated...),
 		},
-		Transcoding:          limits.VideoTranscoding && limits.AudioTranscoding,
+		VideoTranscoding:     limits.VideoTranscoding,
+		AudioTranscoding:     limits.AudioTranscoding,
 		Downloads:            limits.ContentDownloading,
 		PersonalAddons:       limits.PersonalAddons,
 		MaxPlaybacks:         limits.MaxPlaybacks,
@@ -136,16 +184,21 @@ func newLimitsJSON(limits accounts.Limits) limitsJSON {
 		SubtitleManagement:   limits.SubtitleManagement,
 		CanShare:             limits.CanShare,
 		TorrentStreams:       limits.TorrentStreams,
+		RemoteAccess:         limits.RemoteAccess,
 		QualityGroup:         limits.QualityGroup,
+		LiveTvChannels:       newChannelRuleJSON(limits.LiveTvChannels),
+		LocalFirst:           limits.LocalFirst,
+		BoostVolume:          limits.BoostVolume,
+		ConvertSound:         limits.ConvertSound,
 	}
 }
 
 // limitChanges are the settings a group holds as a change to a user or a
 // group sets them; see limitsJSON.
 type limitChanges struct {
-	ParentalControl *parentalControlJSON `json:"parentalControl"`
-	// Transcoding sets both video and audio conversion.
-	Transcoding          *bool                    `json:"transcoding"`
+	ParentalControl      *parentalControlJSON     `json:"parentalControl"`
+	VideoTranscoding     *bool                    `json:"videoTranscoding"`
+	AudioTranscoding     *bool                    `json:"audioTranscoding"`
 	Downloads            *bool                    `json:"downloads"`
 	PersonalAddons       *bool                    `json:"personalAddons"`
 	MaxPlaybacks         *int                     `json:"maxPlaybacks"`
@@ -161,16 +214,21 @@ type limitChanges struct {
 	SubtitleManagement   *bool                    `json:"subtitleManagement"`
 	CanShare             *bool                    `json:"canShare"`
 	TorrentStreams       *bool                    `json:"torrentStreams"`
+	RemoteAccess         *bool                    `json:"remoteAccess"`
 	LiveTvManagement     *bool                    `json:"liveTvManagement"`
 	QualityGroup         *int                     `json:"qualityGroup"`
+	LiveTvChannels       *channelRuleJSON         `json:"liveTvChannels"`
+	LocalFirst           *bool                    `json:"localFirst"`
+	BoostVolume          *bool                    `json:"boostVolume"`
+	ConvertSound         *bool                    `json:"convertSound"`
 }
 
 // changes returns what l sets, or answers the request with its error and
 // returns false.
 func (l limitChanges) changes(w http.ResponseWriter) (accounts.UserChanges, bool) {
 	changes := accounts.UserChanges{
-		VideoTranscoding:     l.Transcoding,
-		AudioTranscoding:     l.Transcoding,
+		VideoTranscoding:     l.VideoTranscoding,
+		AudioTranscoding:     l.AudioTranscoding,
 		ContentDownloading:   l.Downloads,
 		PersonalAddons:       l.PersonalAddons,
 		MaxPlaybacks:         l.MaxPlaybacks,
@@ -185,6 +243,10 @@ func (l limitChanges) changes(w http.ResponseWriter) (accounts.UserChanges, bool
 		QualityGroup:         l.QualityGroup,
 		CanShare:             l.CanShare,
 		TorrentStreams:       l.TorrentStreams,
+		RemoteAccess:         l.RemoteAccess,
+		LocalFirst:           l.LocalFirst,
+		BoostVolume:          l.BoostVolume,
+		ConvertSound:         l.ConvertSound,
 	}
 	if p := l.ParentalControl; p != nil {
 		changes.Parental = &accounts.ParentalControl{MaxRating: p.MaxRating, MaxSubRating: p.MaxSubRating, BlockUnrated: p.BlockUnrated}
@@ -220,6 +282,9 @@ func (l limitChanges) changes(w http.ResponseWriter) (accounts.UserChanges, bool
 		}
 		changes.AccessSchedules = &schedules
 	}
+	if l.LiveTvChannels != nil {
+		changes.LiveTvChannels = new(l.LiveTvChannels.rule())
+	}
 	return changes, true
 }
 
@@ -228,15 +293,17 @@ type passwordResetPinJSON struct {
 	ExpiresAt time.Time `json:"expiresAt"`
 }
 
-// withPins adds to users the password reset PINs still valid, and the
-// names of their groups.
+// withPins adds to users the password reset PINs still valid, the names
+// of their groups, and whether they are linked at the identity provider.
 func (h *handler) withPins(r *http.Request, users ...userJSON) ([]userJSON, error) {
 	pins, err := h.Accounts.PasswordResetPINs(r.Context())
 	if err != nil {
 		return nil, err
 	}
 	var names map[string]string
+	issuer := h.Accounts.Settings().ProviderIssuer
 	for i, user := range users {
+		users[i].ProviderLinked = user.providerIssuer != "" && user.providerIssuer == issuer
 		id, _ := accounts.ParseID(user.ID)
 		if pin, ok := pins[id]; ok {
 			users[i].PasswordResetPin = &passwordResetPinJSON{Pin: pin.PIN, ExpiresAt: pin.ExpiresAt}
@@ -299,16 +366,24 @@ func newUserJSON(user accounts.User) userJSON {
 		CreatedAt:        user.CreatedAt,
 		LastLoginAt:      user.LastLoginAt,
 		LastActivityAt:   user.LastActivityAt,
+		LastActivityApp:  user.LastActivityApp,
 		limitsJSON:       newLimitsJSON(user.Limits()),
 		BlockedUntil:     blockedUntil(user),
 		ImageTag:         imageTag(user),
 		MetadataLanguage: user.MetadataLanguage,
+		WebTheme:         user.WebTheme,
+		WebThemeLocked:   user.WebThemeLocked,
+		AudioRegion:      user.AudioRegion,
+		AudioRegions:     localization.AudioVariants,
 		// When the account ends.
-		EndsOn:      endsOn(user),
-		Ended:       user.Ended(time.Now()),
-		FollowGroup: user.FollowGroup || user.GroupID == nil,
-		TwoStep:     user.TwoStep,
+		EndsOn:       endsOn(user),
+		EndsAt:       user.EndsAt,
+		Ended:        user.Ended(time.Now()),
+		OwnSections:  user.OwnSections,
+		TwoStep:      user.TwoStep,
+		ProviderOnly: user.ProviderOnly,
 	}
+	result.providerIssuer, result.ProviderLinkAllowed = user.ProviderIssuer, user.ProviderLinkAllowed
 	if user.GroupID != nil {
 		result.GroupID = new(user.GroupID.String())
 	}
@@ -376,54 +451,16 @@ type libraryChoiceJSON struct {
 	Name string `json:"name"`
 }
 
-// liveTvChoiceJSON is an IPTV source of the server that can be taken from a
-// user, whole or by category.
-type liveTvChoiceJSON struct {
-	ID         string              `json:"id"`
-	Name       string              `json:"name"`
-	Categories []libraryChoiceJSON `json:"categories"`
-}
-
-// liveTvChoices lists the server's IPTV sources with their categories
-// turned on, in line-up order.
-func (h *handler) liveTvChoices(ctx context.Context) ([]liveTvChoiceJSON, error) {
-	choices := []liveTvChoiceJSON{}
-	if h.IPTV == nil {
-		return choices, nil
-	}
-	installed, err := h.Addons.Addons(ctx, addons.Shared())
-	if err != nil {
-		return nil, err
-	}
-	for _, addon := range installed {
-		if !addon.IPTV() {
-			continue
-		}
-		categories, err := h.IPTV.Categories(ctx, addons.Shared(), addon.ID, "")
-		if err != nil {
-			return nil, err
-		}
-		choice := liveTvChoiceJSON{ID: addon.ID.String(), Name: addon.Manifest.Name, Categories: []libraryChoiceJSON{}}
-		for _, c := range categories {
-			if c.Enabled {
-				choice.Categories = append(choice.Categories, libraryChoiceJSON{ID: c.ID.String(), Name: c.Name})
-			}
-		}
-		choices = append(choices, choice)
-	}
-	return choices, nil
-}
-
 // userContentChoices lists what the admin app offers for a user's content:
 // the server's libraries, in order, and the genres the server's libraries
-// can be narrowed to, which name their genre pages, sorted, and the IPTV
-// sources to assign.
+// can be narrowed to, which name their genre pages, sorted.
 func (h *handler) userContentChoices(w http.ResponseWriter, r *http.Request) {
 	libraries, err := library.ServerLibraries(r.Context(), h.Addons, h.SmartLists, h.Accounts.Settings().Language)
 	if err != nil {
 		h.internalError(w, r, err)
 		return
 	}
+	// The server's IPTV sources to take from a user (this fork).
 	liveTv, err := h.liveTvChoices(r.Context())
 	if err != nil {
 		h.internalError(w, r, err)
@@ -455,11 +492,11 @@ type ratingJSON struct {
 }
 
 // parentalRatings lists the ratings a user's limit can be set to, those
-// Jellyfin apps offer, without the entry for unrated titles: blocking them
-// is a choice of its own.
+// Jellyfin apps offer under the server's rating country, without the entry
+// for unrated titles: blocking them is a choice of its own.
 func (h *handler) parentalRatings(w http.ResponseWriter, _ *http.Request) {
 	var result []ratingJSON
-	for _, rating := range localization.Ratings() {
+	for _, rating := range localization.Ratings(h.Accounts.Settings().RatingCountry) {
 		if rating.Score != nil {
 			result = append(result, ratingJSON{Name: rating.Name, Score: rating.Score.Score, SubScore: rating.Score.SubScore})
 		}
@@ -486,11 +523,15 @@ type settingsJSON struct {
 	QuickConnectEnabled bool   `json:"quickConnectEnabled"`
 	LegacyAuthorization bool   `json:"legacyAuthorization"`
 	Language            string `json:"language"`
-	PrepareAhead        *bool  `json:"prepareAhead"`
-	Transcoding         *bool  `json:"transcoding"`
-	CatalogLimit        *int   `json:"catalogLimit"`
-	ChannelLimit        *int   `json:"channelLimit"`
-	UpdateCheck         *bool  `json:"updateCheck"`
+	// RatingCountry, see accounts.Settings, keeps its current value when a
+	// PUT leaves it out.
+	RatingCountry      *string `json:"ratingCountry"`
+	PrepareAhead       *bool   `json:"prepareAhead"`
+	Transcoding        *bool   `json:"transcoding"`
+	CatalogLimit       *int    `json:"catalogLimit"`
+	ChannelLimit       *int    `json:"channelLimit"`
+	UpdateCheck        *bool   `json:"updateCheck"`
+	IncludePrereleases *bool   `json:"includePrereleases"`
 	// LocalDiscovery and LocalAddress keep their current values when a
 	// PUT leaves them out; an empty address announces the interface's.
 	LocalDiscovery *bool   `json:"localDiscovery"`
@@ -538,23 +579,19 @@ type settingsJSON struct {
 	MDBListRatingsKey    *string `json:"mdblistRatingsKey,omitempty"`
 	CriticRatingShows    *string `json:"criticRatingShows"`
 	// TMDBKeySet and TMDBKey are the same for the server's TMDB key, which
-	// TMDB checks too.
-	TMDBKeySet bool    `json:"tmdbKeySet"`
-	TMDBKey    *string `json:"tmdbKey,omitempty"`
+	// TMDB checks too. WaitDigitalRelease hides movies until they are out
+	// at home, as TMDB tells.
+	TMDBKeySet         bool    `json:"tmdbKeySet"`
+	TMDBKey            *string `json:"tmdbKey,omitempty"`
+	WaitDigitalRelease *bool   `json:"waitDigitalRelease"`
 	// The security settings keep their current values when a PUT leaves
 	// them out, too.
-	PersonalAddons          *bool   `json:"personalAddons"`
-	ServerImports           *bool   `json:"serverImports"`
-	ShareLinks              *bool   `json:"shareLinks"`
-	Registration            *bool   `json:"registration"`
-	RegistrationCodes       *bool   `json:"registrationCodes"`
-	DefaultAudioLanguage    *string `json:"defaultAudioLanguage"`
-	DefaultSubtitleLanguage *string `json:"defaultSubtitleLanguage"`
-	ExactTitleMatch         *bool   `json:"exactTitleMatch"`
-	SubtitleExtraction      *bool   `json:"subtitleExtraction"`
-	LoginAttempts           *int    `json:"loginAttempts"`
-	InactiveDeviceDays      *int    `json:"inactiveDeviceDays"`
-	DetailedLog             *bool   `json:"detailedLog"`
+	PersonalAddons     *bool `json:"personalAddons"`
+	ServerImports      *bool `json:"serverImports"`
+	ShareLinks         *bool `json:"shareLinks"`
+	LoginAttempts      *int  `json:"loginAttempts"`
+	InactiveDeviceDays *int  `json:"inactiveDeviceDays"`
+	DetailedLog        *bool `json:"detailedLog"`
 	// TwoStepAdministrators requires two-step sign-in of administrators.
 	TwoStepAdministrators *bool `json:"twoStepAdministrators"`
 	// KnownProxies lists addresses, networks such as 172.18.0.0/16, and
@@ -572,14 +609,15 @@ type settingsJSON struct {
 	ACMEEmail        *string   `json:"acmeEmail"`
 	ACMETerms        *bool     `json:"acmeTerms"`
 	ACMEChallenge    *string   `json:"acmeChallenge"`
-	// AnalysisTimeout, VersionAttempts, PreferDirectPlay,
-	// MaxConversions and MaxConversionHeight keep their
+	// AnalysisTimeout, VersionAttempts, PreferDirectPlay, SendAppsToSource,
+	// SyncAddonSubtitles, MaxConversions and MaxConversionHeight keep their
 	// current values when a PUT leaves them out.
 	AnalysisTimeout  *int  `json:"analysisTimeout"`
 	VersionAttempts  *int  `json:"versionAttempts"`
 	PreferDirectPlay *bool `json:"preferDirectPlay"`
+	SendAppsToSource *bool `json:"sendAppsToSource"`
 	// The version rules keep their current values when a PUT leaves them
-	// out: VersionOrder holds up to four criteria (see
+	// out: VersionOrder holds up to six criteria (see
 	// accounts.VersionCriteria), VersionCodecOrder every video codec once,
 	// VersionSourceOrder the IDs of some of VersionSources, each once, and
 	// HiddenVersionWords the words, one per entry. VersionSources are the
@@ -592,14 +630,38 @@ type settingsJSON struct {
 	HideVersionsLargerGB *int                `json:"hideVersionsLargerGb"`
 	HiddenVersionCodecs  *[]string           `json:"hiddenVersionCodecs"`
 	HiddenVersionWords   *[]string           `json:"hiddenVersionWords"`
-	HiddenRipTypes       *[]string           `json:"hiddenRipTypes"`
-	HideSpecials         *bool               `json:"hideSpecials"`
+	// HiddenReleases are kinds of accounts.ReleaseKinds, each once; it keeps
+	// its current value when a PUT leaves it out.
+	HiddenReleases *[]string `json:"hiddenReleases"`
+	// VersionEditionOrder holds every edition once (see
+	// accounts.VersionEditions), VersionMBPerMinute the megabytes a minute
+	// the size-per-minute criterion aims at, 0 for the largest, and
+	// VersionLabelRules the label rules, in order; each keeps its current
+	// value when a PUT leaves it out.
+	VersionEditionOrder *[]string                    `json:"versionEditionOrder"`
+	VersionMBPerMinute  *int                         `json:"versionMbPerMinute"`
+	VersionLabelRules   *[]accounts.VersionLabelRule `json:"versionLabelRules"`
 	// NameHowVersionsPlay keeps its current value when a PUT leaves it out.
 	NameHowVersionsPlay *bool `json:"nameHowVersionsPlay"`
-	MaxConversions      *int  `json:"maxConversions"`
-	MaxConversionHeight *int  `json:"maxConversionHeight"`
-	ConvertedDownloads  *bool `json:"convertedDownloads"`
-	WebSafeVideo        *bool `json:"webSafeVideo"`
+	// VersionNames is "addon" or "short".
+	VersionNames        *string `json:"versionNames"`
+	SyncAddonSubtitles  *bool   `json:"syncAddonSubtitles"`
+	MaxConversions      *int    `json:"maxConversions"`
+	MaxConversionHeight *int    `json:"maxConversionHeight"`
+	ConvertedDownloads  *bool   `json:"convertedDownloads"`
+	// SubtitleOCR ("off", "played" or "scans"), SubtitleOCRTracks and
+	// SubtitleOCRDownload keep their current values when a PUT leaves them
+	// out.
+	SubtitleOCR         *string `json:"subtitleOcr"`
+	SubtitleOCRTracks   *int    `json:"subtitleOcrTracks"`
+	SubtitleOCRDownload *bool   `json:"subtitleOcrDownload"`
+	// DefaultAudioLanguage and DefaultSubtitleLanguage, "" or one of the
+	// ISO 639-2/B codes of TrackLanguages, keep their current values when
+	// a PUT leaves them out. TrackLanguages are the languages they offer,
+	// those of users' own preferences; a PUT ignores them.
+	DefaultAudioLanguage    *string             `json:"defaultAudioLanguage"`
+	DefaultSubtitleLanguage *string             `json:"defaultSubtitleLanguage"`
+	TrackLanguages          []trackLanguageJSON `json:"trackLanguages"`
 	// The settings tuning conversions keep their current values when a
 	// PUT leaves them out. ConversionHardware is what conversions run on;
 	// a PUT cannot change it.
@@ -624,9 +686,12 @@ type settingsJSON struct {
 	DownmixBoost               *float64               `json:"downmixBoost"`
 	MaxAudioChannels           *int                   `json:"maxAudioChannels"`
 	AudioBitratePerChannel     *int                   `json:"audioBitratePerChannel"`
+	NormalizeConvertedAudio    *bool                  `json:"normalizeConvertedAudio"`
+	DynamicRangeCompression    *string                `json:"dynamicRangeCompression"`
 	EncodingThreads            *int                   `json:"encodingThreads"`
 	AheadSeconds               *int                   `json:"aheadSeconds"`
 	KeepConvertedVideo         *bool                  `json:"keepConvertedVideo"`
+	FastStart                  *bool                  `json:"fastStart"`
 	ConversionHardware         conversionHardwareJSON `json:"conversionHardware"`
 	// The thumbnail settings keep their current values when a PUT leaves
 	// them out.
@@ -648,6 +713,8 @@ type settingsJSON struct {
 	LiveTvRefreshHours *int `json:"liveTvRefreshHours"`
 	// LocalScanHours keeps its current value when a PUT leaves it out.
 	LocalScanHours *int `json:"localScanHours"`
+	// WatchlistCheckHours keeps its current value when a PUT leaves it out.
+	WatchlistCheckHours *int `json:"watchlistCheckHours"`
 	// WatchLocalFolders keeps its current value when a PUT leaves it out.
 	WatchLocalFolders *bool `json:"watchLocalFolders"`
 	// ConvertRecordings, ConvertRecordingsFrom, ConvertRecordingsUntil and
@@ -657,16 +724,19 @@ type settingsJSON struct {
 	ConvertRecordingsFrom        *int  `json:"convertRecordingsFrom"`
 	ConvertRecordingsUntil       *int  `json:"convertRecordingsUntil"`
 	ConvertRecordingsOnProcessor *bool `json:"convertRecordingsOnProcessor"`
-	// CustomCss, CustomJs and LoginDisclaimer, for jellyfin-web, keep their
-	// current values when a PUT leaves them out; empty clears them.
+	// WebTheme, CustomCss, CustomJs and LoginDisclaimer, for jellyfin-web,
+	// keep their current values when a PUT leaves them out; empty clears
+	// the texts. CustomCss and CustomJs are the Custom theme's, kept while
+	// another is chosen.
+	WebTheme        *string `json:"webTheme"`
 	CustomCss       *string `json:"customCss"`
 	CustomJs        *string `json:"customJs"`
 	LoginDisclaimer *string `json:"loginDisclaimer"`
-	// BrandLogo is a data URL, empty for Jellyfin's logo.
-	BrandLogo *string `json:"brandLogo"`
 	// AddVersionsToOpenPage keeps its current value when a PUT leaves it
 	// out.
 	AddVersionsToOpenPage *bool `json:"addVersionsToOpenPage"`
+	// VersionBadges keeps its current value when a PUT leaves it out.
+	VersionBadges *bool `json:"versionBadges"`
 	// TraktClientID, TraktClientSecret and SimklClientID keep their current
 	// values when a PUT leaves them out; empty removes them. The secret is
 	// never sent back: TraktClientSecretSet tells whether one is saved, and
@@ -688,11 +758,9 @@ type settingsJSON struct {
 	MyAnimeListClientID        *string `json:"myAnimeListClientId"`
 	MyAnimeListClientSecret    *string `json:"myAnimeListClientSecret,omitempty"`
 	MyAnimeListClientSecretSet bool    `json:"myAnimeListClientSecretSet"`
-	// BackupHour, BackupsKept, CollectionReadHour and CollectionLibraryApps
-	// keep their current values when a PUT leaves them out.
-	BackupHour            *int      `json:"backupHour"`
+	// BackupsKept and CollectionLibraryApps keep their current values when
+	// a PUT leaves them out.
 	BackupsKept           *int      `json:"backupsKept"`
-	CollectionReadHour    *int      `json:"collectionReadHour"`
 	CollectionLibraryApps *[]string `json:"collectionLibraryApps"`
 	// RemuxDB and RemuxDBURL keep their current values when a PUT leaves
 	// them out.
@@ -713,6 +781,11 @@ type settingsJSON struct {
 	RecordingsFolderDefault string   `json:"recordingsFolderDefault"`
 	BackupFolderDefault     string   `json:"backupFolderDefault"`
 	RenderNodes             []string `json:"renderNodes"`
+	// BackupPassphrase, which encrypts the backups, keeps its value when a
+	// PUT leaves it out, and "" turns encryption off; it is never sent
+	// back: BackupPassphraseSet tells whether one is saved.
+	BackupPassphrase    *string `json:"backupPassphrase,omitempty"`
+	BackupPassphraseSet bool    `json:"backupPassphraseSet"`
 	// PublicAddress keeps its current value when a PUT leaves it out; empty
 	// sends notifications without links.
 	PublicAddress *string `json:"publicAddress"`
@@ -750,25 +823,106 @@ type settingsJSON struct {
 	// newMetricsToken).
 	Metrics         *bool `json:"metrics"`
 	MetricsTokenSet bool  `json:"metricsTokenSet"`
+	// RestartConfirmed and UpdateToolURL keep their current values when a
+	// PUT leaves them out. The update tool's token is never sent back:
+	// UpdateToolTokenSet tells whether one is saved; a PUT leaving it out
+	// keeps it, and empty removes it.
+	RestartConfirmed   *bool   `json:"restartConfirmed"`
+	UpdateToolURL      *string `json:"updateToolUrl"`
+	UpdateToolToken    *string `json:"updateToolToken,omitempty"`
+	UpdateToolTokenSet bool    `json:"updateToolTokenSet"`
 	// TorrentStreams, TorrentInterface, TorrentProxy, TorrentProxyUser,
-	// TorrentDownloadMbps and TorrentUploadMbps keep their current values
-	// when a PUT leaves them out. The proxy's password is never sent back:
+	// TorrentDownloadMbps, TorrentUploadMbps, TorrentsAtOnce and
+	// TorrentTrackers, one announce URL per entry, keep their current
+	// values when a PUT leaves them out. The proxy's password is
+	// never sent back:
 	// TorrentProxyPasswordSet tells whether one is saved; a PUT leaving it
-	// out keeps it, and empty removes it. InterfaceRoutes tells whether
-	// this system binds sockets to an interface, Linux alone; a PUT
-	// ignores it.
-	TorrentStreams          *bool   `json:"torrentStreams"`
-	TorrentInterface        *string `json:"torrentInterface"`
-	TorrentProxy            *string `json:"torrentProxy"`
-	TorrentProxyUser        *string `json:"torrentProxyUser"`
-	TorrentProxyPassword    *string `json:"torrentProxyPassword,omitempty"`
-	TorrentProxyPasswordSet bool    `json:"torrentProxyPasswordSet"`
-	TorrentDownloadMbps     *int    `json:"torrentDownloadMbps"`
-	TorrentUploadMbps       *int    `json:"torrentUploadMbps"`
-	InterfaceRoutes         bool    `json:"interfaceRoutes"`
+	// out keeps it, and empty removes it. The WireGuard configuration is
+	// never sent back either, its private key with it:
+	// TorrentWireGuardSaved tells what the saved one says, null for none;
+	// a PUT leaving TorrentWireGuard out keeps it, and empty removes it.
+	// InterfaceRoutes tells whether this system binds sockets to an
+	// interface, Linux alone; a PUT ignores it and TorrentWireGuardSaved.
+	TorrentStreams          *bool          `json:"torrentStreams"`
+	TorrentInterface        *string        `json:"torrentInterface"`
+	TorrentProxy            *string        `json:"torrentProxy"`
+	TorrentProxyUser        *string        `json:"torrentProxyUser"`
+	TorrentProxyPassword    *string        `json:"torrentProxyPassword,omitempty"`
+	TorrentProxyPasswordSet bool           `json:"torrentProxyPasswordSet"`
+	TorrentWireGuard        *string        `json:"torrentWireGuard,omitempty"`
+	TorrentWireGuardSaved   *wireGuardJSON `json:"torrentWireGuardSaved"`
+	TorrentDownloadMbps     *int           `json:"torrentDownloadMbps"`
+	TorrentUploadMbps       *int           `json:"torrentUploadMbps"`
+	TorrentsAtOnce          *int           `json:"torrentsAtOnce"`
+	TorrentTrackers         *[]string      `json:"torrentTrackers"`
+	InterfaceRoutes         bool           `json:"interfaceRoutes"`
+	// ConversionFolder, ReadingFolder and CacheFolder keep their current
+	// values when a PUT leaves them out; empty is the cache in the data
+	// folder, CacheFolderDefault, which a PUT ignores. Each applies at the
+	// next start.
+	ConversionFolder   *string `json:"conversionFolder"`
+	ReadingFolder      *string `json:"readingFolder"`
+	CacheFolder        *string `json:"cacheFolder"`
+	CacheFolderDefault string  `json:"cacheFolderDefault"`
+	// SiloApps keeps its current value when a PUT leaves it out.
+	SiloApps *bool `json:"siloApps"`
+	// PosterRatings keeps its current value when a PUT leaves it out.
+	PosterRatings *bool `json:"posterRatings"`
+	// PosterBadges, PosterBadgeSize and PosterTemplate keep their current
+	// values when a PUT leaves them out.
+	PosterBadges    *bool   `json:"posterBadges"`
+	PosterBadgeSize *string `json:"posterBadgeSize"`
+	PosterTemplate  *string `json:"posterTemplate"`
+	// The source cache and the next-episode preloading keep their current
+	// values when a PUT leaves them out. A preset other than custom sets
+	// cacheSizeGb, sourceCacheDays, sourceCacheCreditDays and
+	// preloadWholeFiles as SourceCachePresetLimits tell; a PUT setting one
+	// of them to another value without a preset makes it custom.
+	// ReadingFree is the space free on the disk of the folder for files
+	// being read, null when unknown; a PUT ignores it and the limits.
+	SourceCachePreset       *string                          `json:"sourceCachePreset"`
+	SourceCacheDays         *int                             `json:"sourceCacheDays"`
+	SourceCacheCreditDays   *int                             `json:"sourceCacheCreditDays"`
+	PreloadNextEpisodes     *bool                            `json:"preloadNextEpisodes"`
+	PreloadEpisodes         *int                             `json:"preloadEpisodes"`
+	PreloadMbps             *int                             `json:"preloadMbps"`
+	PreloadReserveGB        *int                             `json:"preloadReserveGb"`
+	PreloadWholeFiles       *bool                            `json:"preloadWholeFiles"`
+	SourceCachePresetLimits map[string]sourceCacheLimitsJSON `json:"sourceCachePresetLimits,omitempty"`
+	ReadingFree             *int64                           `json:"readingFree"`
+	// The identity provider keeps its current values when a PUT leaves
+	// them out; an empty issuer or client ID turns its sign-in off. The
+	// client secret is never sent back: ProviderClientSecretSet tells
+	// whether one is saved, and a PUT ignores it; empty removes it.
+	// ProviderRedirectURI, the address the provider sends browsers back
+	// to, built from the public address, empty without one, is to be
+	// registered at the provider; a PUT ignores it.
+	ProviderIssuer          *string `json:"providerIssuer"`
+	ProviderName            *string `json:"providerName"`
+	ProviderClientID        *string `json:"providerClientId"`
+	ProviderClientSecret    *string `json:"providerClientSecret,omitempty"`
+	ProviderClientSecretSet bool    `json:"providerClientSecretSet"`
+	ProviderUserClaim       *string `json:"providerUserClaim"`
+	ProviderCreateAccounts  *bool   `json:"providerCreateAccounts"`
+	ProviderAdminClaim      *string `json:"providerAdminClaim"`
+	ProviderAdminValue      *string `json:"providerAdminValue"`
+	ProviderRedirectURI     string  `json:"providerRedirectUri"`
+	// LumaaGlaass is the custom CSS and script the web player gets for
+	// the theme Polyfin bundles, which the admin app shows; a PUT ignores
+	// it.
+	LumaaGlaass *webThemeTextsJSON `json:"lumaaGlaass,omitempty"`
 	// Bounds are what each setting accepts, and its default, by its name
 	// here; a PUT ignores them.
 	Bounds map[string]settingBoundsJSON `json:"bounds,omitempty"`
+
+	// This fork's settings (see users_fork.go).
+	forkSettingsJSON
+}
+
+// webThemeTextsJSON is the custom CSS and script of a theme.
+type webThemeTextsJSON struct {
+	Css string `json:"css"`
+	Js  string `json:"js"`
 }
 
 // settingBoundsJSON is what a setting accepts, and its default (see
@@ -802,11 +956,13 @@ func newSettingsJSON(settings accounts.Settings) settingsJSON {
 		QuickConnectEnabled: settings.QuickConnectEnabled,
 		LegacyAuthorization: settings.LegacyAuthorization,
 		Language:            settings.Language,
+		RatingCountry:       &settings.RatingCountry,
 		PrepareAhead:        &settings.PrepareAhead,
 		Transcoding:         &settings.Transcoding,
 		CatalogLimit:        &settings.CatalogLimit,
 		ChannelLimit:        &settings.ChannelLimit,
 		UpdateCheck:         &settings.UpdateCheck,
+		IncludePrereleases:  &settings.IncludePrereleases,
 		LocalDiscovery:      &settings.LocalDiscovery,
 		LocalAddress:        &settings.LocalAddress,
 		DLNA:                &settings.DLNA,
@@ -814,62 +970,68 @@ func newSettingsJSON(settings accounts.Settings) settingsJSON {
 		DLNANewDevicesUser:  dlnaUserJSON(settings.DLNANewDevicesUser),
 		DLNAMarkPlayed:      &settings.DLNAMarkPlayed,
 
-		SkipButtons:             &settings.SkipButtons,
-		PublicMetaDBKeySet:      settings.PublicMetaDBKey != "",
-		TheIntroDBKeySet:        settings.TheIntroDBKey != "",
-		SegmentOrder:            settings.SegmentOrder,
-		SegmentSourcesOff:       &settings.SegmentSourcesOff,
-		AudioIntros:             &settings.AudioIntros,
-		SimilarTitles:           &settings.SimilarTitles,
-		GenerateImages:          &settings.GenerateImages,
-		MDBListRatingsKeySet:    settings.MDBListRatingsKey != "",
-		CriticRatingShows:       &settings.CriticRatingShows,
-		TMDBKeySet:              settings.TMDBKey != "",
-		Lyrics:                  &settings.Lyrics,
-		EvenVolume:              &settings.EvenVolume,
-		MeasureLoudness:         &settings.MeasureLoudness,
-		PlayedPercent:           &settings.PlayedPercent,
-		ResumePercent:           &settings.ResumePercent,
-		VersionListMinutes:      &settings.VersionListMinutes,
-		CatalogRefreshMinutes:   &settings.CatalogRefreshMinutes,
-		PersonalAddons:          &settings.PersonalAddons,
-		ServerImports:           &settings.ServerImports,
-		ShareLinks:              &settings.ShareLinks,
-		Registration:            &settings.Registration,
-		RegistrationCodes:       &settings.RegistrationCodes,
+		SkipButtons:           &settings.SkipButtons,
+		PublicMetaDBKeySet:    settings.PublicMetaDBKey != "",
+		TheIntroDBKeySet:      settings.TheIntroDBKey != "",
+		SegmentOrder:          settings.SegmentOrder,
+		SegmentSourcesOff:     &settings.SegmentSourcesOff,
+		AudioIntros:           &settings.AudioIntros,
+		SimilarTitles:         &settings.SimilarTitles,
+		GenerateImages:        &settings.GenerateImages,
+		MDBListRatingsKeySet:  settings.MDBListRatingsKey != "",
+		CriticRatingShows:     &settings.CriticRatingShows,
+		TMDBKeySet:            settings.TMDBKey != "",
+		WaitDigitalRelease:    &settings.WaitDigitalRelease,
+		Lyrics:                &settings.Lyrics,
+		EvenVolume:            &settings.EvenVolume,
+		MeasureLoudness:       &settings.MeasureLoudness,
+		PlayedPercent:         &settings.PlayedPercent,
+		ResumePercent:         &settings.ResumePercent,
+		VersionListMinutes:    &settings.VersionListMinutes,
+		CatalogRefreshMinutes: &settings.CatalogRefreshMinutes,
+		PersonalAddons:        &settings.PersonalAddons,
+		ServerImports:         &settings.ServerImports,
+		ShareLinks:            &settings.ShareLinks,
+		LoginAttempts:         &settings.LoginAttempts,
+		TwoStepAdministrators: &settings.TwoStepAdministrators,
+		InactiveDeviceDays:    &settings.InactiveDeviceDays,
+		KnownProxies:          new(accounts.FormatKnownProxies(settings.KnownProxies, settings.KnownProxyNames)),
+		HTTPSMode:             &settings.HTTPSMode,
+		HTTPSPort:             &settings.HTTPSPort,
+		HTTPSRedirect:         &settings.HTTPSRedirect,
+		HTTPSCertificate:      &settings.HTTPSCertificate,
+		HTTPSPrivateKey:       &settings.HTTPSPrivateKey,
+		ACMEHosts:             &settings.ACMEHosts,
+		ACMEEmail:             &settings.ACMEEmail,
+		ACMETerms:             &settings.ACMETerms,
+		ACMEChallenge:         &settings.ACMEChallenge,
+		DetailedLog:           &settings.DetailedLog,
+		AnalysisTimeout:       &settings.AnalysisTimeout,
+		VersionAttempts:       &settings.VersionAttempts,
+		PreferDirectPlay:      &settings.PreferDirectPlay,
+		SendAppsToSource:      &settings.SendAppsToSource,
+		VersionOrder:          &settings.VersionOrder,
+		VersionCodecOrder:     &settings.VersionCodecOrder,
+		HideVersionsLargerGB:  &settings.HideVersionsLargerGB,
+		HiddenVersionCodecs:   &settings.HiddenVersionCodecs,
+		HiddenVersionWords:    &settings.HiddenVersionWords,
+		NameHowVersionsPlay:   &settings.NameHowVersionsPlay,
+		VersionNames:          &settings.VersionNames,
+		HiddenReleases:        &settings.HiddenReleases,
+		VersionEditionOrder:   &settings.VersionEditionOrder,
+		VersionMBPerMinute:    &settings.VersionMBPerMinute,
+		VersionLabelRules:     &settings.VersionLabelRules,
+		SyncAddonSubtitles:    &settings.SyncAddonSubtitles,
+		MaxConversions:        &settings.MaxConversions,
+		MaxConversionHeight:   &settings.MaxConversionHeight,
+		ConvertedDownloads:    &settings.ConvertedDownloads,
+		SubtitleOCR:           &settings.SubtitleOCR,
+		SubtitleOCRTracks:     &settings.SubtitleOCRTracks,
+		SubtitleOCRDownload:   &settings.SubtitleOCRDownload,
+
 		DefaultAudioLanguage:    &settings.DefaultAudioLanguage,
 		DefaultSubtitleLanguage: &settings.DefaultSubtitleLanguage,
-		ExactTitleMatch:         &settings.ExactTitleMatch,
-		SubtitleExtraction:      &settings.SubtitleExtraction,
-		LoginAttempts:           &settings.LoginAttempts,
-		TwoStepAdministrators:   &settings.TwoStepAdministrators,
-		InactiveDeviceDays:      &settings.InactiveDeviceDays,
-		KnownProxies:            new(accounts.FormatKnownProxies(settings.KnownProxies, settings.KnownProxyNames)),
-		HTTPSMode:               &settings.HTTPSMode,
-		HTTPSPort:               &settings.HTTPSPort,
-		HTTPSRedirect:           &settings.HTTPSRedirect,
-		HTTPSCertificate:        &settings.HTTPSCertificate,
-		HTTPSPrivateKey:         &settings.HTTPSPrivateKey,
-		ACMEHosts:               &settings.ACMEHosts,
-		ACMEEmail:               &settings.ACMEEmail,
-		ACMETerms:               &settings.ACMETerms,
-		ACMEChallenge:           &settings.ACMEChallenge,
-		DetailedLog:             &settings.DetailedLog,
-		AnalysisTimeout:         &settings.AnalysisTimeout,
-		VersionAttempts:         &settings.VersionAttempts,
-		PreferDirectPlay:        &settings.PreferDirectPlay,
-		VersionOrder:            &settings.VersionOrder,
-		VersionCodecOrder:       &settings.VersionCodecOrder,
-		HideVersionsLargerGB:    &settings.HideVersionsLargerGB,
-		HiddenVersionCodecs:     &settings.HiddenVersionCodecs,
-		HiddenVersionWords:      &settings.HiddenVersionWords,
-		HiddenRipTypes:          &settings.HiddenRipTypes,
-		HideSpecials:            &settings.HideSpecials,
-		NameHowVersionsPlay:     &settings.NameHowVersionsPlay,
-		MaxConversions:          &settings.MaxConversions,
-		MaxConversionHeight:     &settings.MaxConversionHeight,
-		ConvertedDownloads:      &settings.ConvertedDownloads,
-		WebSafeVideo:            &settings.WebSafeVideo,
+		TrackLanguages:          trackLanguages(),
 
 		EncoderPreset:              &settings.EncoderPreset,
 		H264Quality:                &settings.H264Quality,
@@ -890,9 +1052,12 @@ func newSettingsJSON(settings accounts.Settings) settingsJSON {
 		DownmixBoost:               &settings.DownmixBoost,
 		MaxAudioChannels:           &settings.MaxAudioChannels,
 		AudioBitratePerChannel:     &settings.AudioBitratePerChannel,
+		NormalizeConvertedAudio:    &settings.NormalizeConvertedAudio,
+		DynamicRangeCompression:    &settings.DynamicRangeCompression,
 		EncodingThreads:            &settings.EncodingThreads,
 		AheadSeconds:               &settings.AheadSeconds,
 		KeepConvertedVideo:         &settings.KeepConvertedVideo,
+		FastStart:                  &settings.FastStart,
 
 		Trickplay:          &settings.Trickplay,
 		TrickplayInterval:  &settings.TrickplayInterval,
@@ -906,6 +1071,7 @@ func newSettingsJSON(settings accounts.Settings) settingsJSON {
 		RecordingCommercials:   &settings.RecordingCommercials,
 		LiveTvRefreshHours:     &settings.LiveTvRefreshHours,
 		LocalScanHours:         &settings.LocalScanHours,
+		WatchlistCheckHours:    &settings.WatchlistCheckHours,
 		WatchLocalFolders:      &settings.WatchLocalFolders,
 
 		ConvertRecordings:            &settings.ConvertRecordings,
@@ -913,11 +1079,13 @@ func newSettingsJSON(settings accounts.Settings) settingsJSON {
 		ConvertRecordingsUntil:       &settings.ConvertRecordingsUntil,
 		ConvertRecordingsOnProcessor: &settings.ConvertRecordingsOnProcessor,
 
+		WebTheme:              &settings.WebTheme,
 		CustomCss:             &settings.CustomCss,
 		CustomJs:              &settings.CustomJs,
+		LumaaGlaass:           &webThemeTextsJSON{Css: accounts.LumaaGlaassCss, Js: accounts.LumaaGlaassJs},
 		LoginDisclaimer:       &settings.LoginDisclaimer,
-		BrandLogo:             &settings.BrandLogo,
 		AddVersionsToOpenPage: &settings.AddVersionsToOpenPage,
+		VersionBadges:         &settings.VersionBadges,
 
 		TraktClientID:        &settings.TraktClientID,
 		TraktClientSecretSet: settings.TraktClientSecret != "",
@@ -930,9 +1098,7 @@ func newSettingsJSON(settings accounts.Settings) settingsJSON {
 		MyAnimeListClientID:        &settings.MyAnimeListClientID,
 		MyAnimeListClientSecretSet: settings.MyAnimeListClientSecret != "",
 
-		BackupHour:            &settings.BackupHour,
 		BackupsKept:           &settings.BackupsKept,
-		CollectionReadHour:    &settings.CollectionReadHour,
 		CollectionLibraryApps: &settings.CollectionLibraryApps,
 
 		RemuxDB:    &settings.RemuxDB,
@@ -944,6 +1110,8 @@ func newSettingsJSON(settings accounts.Settings) settingsJSON {
 		RecordingsFolder: &settings.RecordingsFolder,
 		Backups:          &settings.Backups,
 		BackupFolder:     &settings.BackupFolder,
+
+		BackupPassphraseSet: settings.BackupPassphrase != "",
 
 		PublicAddress: &settings.PublicAddress,
 
@@ -966,15 +1134,79 @@ func newSettingsJSON(settings accounts.Settings) settingsJSON {
 		Metrics:         &settings.Metrics,
 		MetricsTokenSet: settings.MetricsToken != "",
 
+		RestartConfirmed:   &settings.RestartConfirmed,
+		UpdateToolURL:      &settings.UpdateToolURL,
+		UpdateToolTokenSet: settings.UpdateToolToken != "",
+
 		TorrentStreams:          &settings.TorrentStreams,
 		TorrentInterface:        &settings.TorrentInterface,
 		TorrentProxy:            &settings.TorrentProxy,
 		TorrentProxyUser:        &settings.TorrentProxyUser,
 		TorrentProxyPasswordSet: settings.TorrentProxyPassword != "",
+		TorrentWireGuardSaved:   savedWireGuard(settings.TorrentWireGuard),
 		TorrentDownloadMbps:     &settings.TorrentDownloadMbps,
 		TorrentUploadMbps:       &settings.TorrentUploadMbps,
+		TorrentsAtOnce:          &settings.TorrentsAtOnce,
+		TorrentTrackers:         &settings.TorrentTrackers,
+		ConversionFolder:        &settings.ConversionFolder,
+		ReadingFolder:           &settings.ReadingFolder,
+		CacheFolder:             &settings.CacheFolder,
 		InterfaceRoutes:         accounts.InterfaceRoutes,
+		SiloApps:                &settings.SiloApps,
+		PosterRatings:           &settings.PosterRatings,
+		PosterBadges:            &settings.PosterBadges,
+		PosterBadgeSize:         &settings.PosterBadgeSize,
+		PosterTemplate:          &settings.PosterTemplate,
+		SourceCachePreset:       &settings.SourceCachePreset,
+		SourceCacheDays:         &settings.SourceCacheDays,
+		SourceCacheCreditDays:   &settings.SourceCacheCreditDays,
+		PreloadNextEpisodes:     &settings.PreloadNextEpisodes,
+		PreloadEpisodes:         &settings.PreloadEpisodes,
+		PreloadMbps:             &settings.PreloadMbps,
+		PreloadReserveGB:        &settings.PreloadReserveGB,
+		PreloadWholeFiles:       &settings.PreloadWholeFiles,
+
+		ProviderIssuer:          &settings.ProviderIssuer,
+		ProviderName:            &settings.ProviderName,
+		ProviderClientID:        &settings.ProviderClientID,
+		ProviderClientSecretSet: settings.ProviderClientSecret != "",
+		ProviderUserClaim:       &settings.ProviderUserClaim,
+		ProviderCreateAccounts:  &settings.ProviderCreateAccounts,
+		ProviderAdminClaim:      &settings.ProviderAdminClaim,
+		ProviderAdminValue:      &settings.ProviderAdminValue,
+		ProviderRedirectURI:     providerRedirectURI(settings),
+
+		forkSettingsJSON: newForkSettingsJSON(settings.ForkSettings),
 	}
+}
+
+// wireGuardJSON is what a saved WireGuard configuration says, without its
+// keys: its server, the tunnel's addresses, and its DNS servers, empty
+// when it names none.
+type wireGuardJSON struct {
+	Endpoint  string   `json:"endpoint"`
+	Addresses []string `json:"addresses"`
+	DNS       []string `json:"dns"`
+}
+
+// savedWireGuard tells what the WireGuard configuration config says, nil
+// for none, or one the key cannot open.
+func savedWireGuard(config string) *wireGuardJSON {
+	if config == "" {
+		return nil
+	}
+	parsed, err := torrent.ParseWireGuardConfig(config)
+	if err != nil {
+		return nil
+	}
+	saved := &wireGuardJSON{Endpoint: parsed.Endpoint, Addresses: []string{}, DNS: []string{}}
+	for _, prefix := range parsed.Addresses {
+		saved.Addresses = append(saved.Addresses, prefix.String())
+	}
+	for _, addr := range parsed.DNS {
+		saved.DNS = append(saved.DNS, addr.String())
+	}
+	return saved
 }
 
 // pathID parses an identifier path value, answering 404 when it is malformed.
@@ -987,6 +1219,11 @@ func pathID(w http.ResponseWriter, r *http.Request, name string) (accounts.ID, b
 	return id, true
 }
 
+// changePassword replaces the signed-in user's password once they gave the
+// current one. Wrong current passwords count as wrong passwords at sign-in
+// do: toward the client's failed attempts and the user's, whichever client
+// sent them (429 once too many), and toward the block of the client for
+// the account, which is told as at sign-in.
 func (h *handler) changePassword(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		CurrentPassword string `json:"currentPassword"`
@@ -996,7 +1233,22 @@ func (h *handler) changePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	session := sessionFrom(r.Context())
-	err := h.Accounts.ChangePassword(r.Context(), session.User.ID, body.CurrentPassword, body.NewPassword, session.TokenHash)
+	key := forwarded.Client(r)
+	attempt := h.reserve(w, key, twoStepKey(session.User.ID))
+	if attempt == nil {
+		return
+	}
+	// A right current password takes back only its own attempt, even when
+	// the new one is refused: it signs nobody in.
+	defer attempt.Cancel()
+	err := h.Accounts.ChangePasswordAt(r.Context(), session.User.ID, body.CurrentPassword, body.NewPassword, session.TokenHash, key)
+	if errors.Is(err, accounts.ErrWrongPassword) {
+		attempt.Fail()
+	}
+	var blocked *accounts.BlockError
+	if errors.As(err, &blocked) && h.Notifications != nil {
+		h.Notifications.AccountBlocked(blocked.User, accounts.DeviceInfo{Client: accounts.AdminApp, RemoteAddress: key})
+	}
 	if accountError(w, err) {
 		return
 	}
@@ -1053,36 +1305,97 @@ func (h *handler) revokeOwnDevice(w http.ResponseWriter, r *http.Request) {
 	h.revokeDevice(w, r, sessionFrom(r.Context()).User.ID, "id")
 }
 
-func (h *handler) quickConnectRequest(w http.ResponseWriter, r *http.Request) {
+// quickConnectPending is the request waiting behind a code, for the
+// signed-in user who gives it, or false after answering: 409
+// quick_connect_disabled, 404 unknown_code for a code no request waits
+// with, already decided or withdrawn ones included, or 429. Such a code
+// counts as a wrong password does, toward the attempts of the user and of
+// their client's address, in the Jellyfin API and Silo's apps too (see
+// quickconnect.AttemptKey); a known one counts for nothing.
+func (h *handler) quickConnectPending(w http.ResponseWriter, r *http.Request, code string) (quickconnect.Request, bool) {
 	if !h.Accounts.Settings().QuickConnectEnabled {
 		writeError(w, http.StatusConflict, "quick_connect_disabled")
+		return quickconnect.Request{}, false
+	}
+	attempt := h.reserve(w, forwarded.Client(r), quickconnect.AttemptKey(sessionFrom(r.Context()).User.ID))
+	if attempt == nil {
+		return quickconnect.Request{}, false
+	}
+	defer attempt.Cancel()
+	request, err := h.QuickConnect.ByCode(code)
+	if err != nil || request.State != quickconnect.Pending {
+		attempt.Fail()
+		writeError(w, http.StatusNotFound, "unknown_code")
+		return quickconnect.Request{}, false
+	}
+	return request, true
+}
+
+// quickConnectRequest describes the device waiting behind a code to the
+// signed-in user about to approve it. The names are the device's own
+// words; address is where the server saw it ask from, and network tells
+// that place from the user's: "own", their own address, "local", both on
+// the local network, or "other". identity tells whether the approval asks
+// who they are (see quickConnectApprove).
+func (h *handler) quickConnectRequest(w http.ResponseWriter, r *http.Request) {
+	request, ok := h.quickConnectPending(w, r, r.PathValue("code"))
+	if !ok {
 		return
 	}
-	request, err := h.QuickConnect.ByCode(r.PathValue("code"))
-	if errors.Is(err, quickconnect.ErrUnknown) {
-		writeError(w, http.StatusNotFound, "unknown_code")
-		return
+	network := "other"
+	switch {
+	case quickconnect.SameClient(request.Origin.Address, forwarded.Client(r)):
+		network = "own"
+	case request.Origin.Local && forwarded.InLocalNetwork(r):
+		network = "local"
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"deviceName":  request.DeviceName,
 		"appName":     request.AppName,
 		"appVersion":  request.AppVersion,
 		"requestedAt": request.CreatedAt,
+		"address":     request.Origin.Address,
+		"network":     network,
+		"identity":    sessionFrom(r.Context()).User.TwoStep,
 	})
 }
 
+// quickConnectApprove approves a code for the signed-in user: the device
+// waiting behind it then signs in as them, without their password. The
+// code alone does not approve, since a link carries one: confirmation is
+// the code as the person entered it from their device's screen, and must
+// be the same; 400 unconfirmed_code otherwise. A user with two-step
+// sign-in also confirms who they are, with a code or their password (see
+// checkIdentity), since the device signs in without the second step; 403
+// identity_required without either.
 func (h *handler) quickConnectApprove(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Code string `json:"code"`
+		Code         string   `json:"code"`
+		Confirmation string   `json:"confirmation"`
+		Identity     identity `json:"identity"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	if !h.Accounts.Settings().QuickConnectEnabled {
-		writeError(w, http.StatusConflict, "quick_connect_disabled")
+	if !quickconnect.SameCode(body.Code, body.Confirmation) {
+		writeError(w, http.StatusBadRequest, "unconfirmed_code")
 		return
 	}
-	if err := h.QuickConnect.Authorize(body.Code, sessionFrom(r.Context()).User.ID); err != nil {
+	request, ok := h.quickConnectPending(w, r, body.Code)
+	if !ok {
+		return
+	}
+	user := sessionFrom(r.Context()).User
+	if user.TwoStep {
+		if body.Identity == (identity{}) {
+			writeError(w, http.StatusForbidden, "identity_required")
+			return
+		}
+		if !h.checkIdentity(w, r, user, body.Identity) {
+			return
+		}
+	}
+	if err := h.QuickConnect.Authorize(request.Code, user.ID); err != nil {
 		writeError(w, http.StatusNotFound, "unknown_code")
 		return
 	}
@@ -1137,7 +1450,8 @@ func (h *handler) groupName(r *http.Request, id *accounts.ID) string {
 }
 
 // recordMembership records the changes to a user's group from before to
-// after: leaving a group, joining one, or no longer following it.
+// after: leaving a group, joining one, or following it in fewer or more
+// sections.
 func (h *handler) recordMembership(r *http.Request, before, after accounts.User) {
 	same := func(a, b *accounts.ID) bool { return (a == nil) == (b == nil) && (a == nil || *a == *b) }
 	if !same(before.GroupID, after.GroupID) {
@@ -1149,9 +1463,20 @@ func (h *handler) recordMembership(r *http.Request, before, after accounts.User)
 		}
 		return
 	}
-	if after.GroupID != nil && before.FollowGroup && !after.FollowGroup {
-		h.Activity.GroupMemberDetached(r.Context(), after, h.groupName(r, after.GroupID), "")
+	if after.GroupID == nil {
+		return
 	}
+	if own := newSections(before.OwnSections, after.OwnSections); len(own) > 0 {
+		h.Activity.GroupMemberDetached(r.Context(), after, h.groupName(r, after.GroupID), own, "")
+	}
+	if followed := newSections(after.OwnSections, before.OwnSections); len(followed) > 0 {
+		h.Activity.GroupMemberFollows(r.Context(), after, h.groupName(r, after.GroupID), followed)
+	}
+}
+
+// newSections lists the sections in after that are not in before.
+func newSections(before, after []string) []string {
+	return slices.DeleteFunc(slices.Clone(after), func(section string) bool { return slices.Contains(before, section) })
 }
 
 func (h *handler) createUser(w http.ResponseWriter, r *http.Request) {
@@ -1160,6 +1485,9 @@ func (h *handler) createUser(w http.ResponseWriter, r *http.Request) {
 		Password        string `json:"password"`
 		IsAdministrator bool   `json:"isAdministrator"`
 		IsHidden        bool   `json:"isHidden"`
+		// ProviderOnly has the account sign in through the identity
+		// provider only; it then needs no password.
+		ProviderOnly bool `json:"providerOnly"`
 		// GroupID is the group the account joins and follows, empty or
 		// left out for none.
 		GroupID *string `json:"groupId"`
@@ -1176,6 +1504,7 @@ func (h *handler) createUser(w http.ResponseWriter, r *http.Request) {
 	}
 	user, err := h.Accounts.CreateUser(r.Context(), accounts.NewUser{
 		Name: body.Name, Password: body.Password, IsAdministrator: body.IsAdministrator, IsHidden: body.IsHidden, Group: group,
+		ProviderOnly: body.ProviderOnly,
 	})
 	if accountError(w, err) {
 		return
@@ -1203,16 +1532,28 @@ func (h *handler) updateUser(w http.ResponseWriter, r *http.Request) {
 		IsHidden        *bool   `json:"isHidden"`
 		IsDisabled      *bool   `json:"isDisabled"`
 		// The settings a group holds, see userJSON; refused while the user
-		// follows their group, unless followGroup turns that off.
+		// follows their group, unless ownSections makes their section own.
 		limitChanges
-		// EndsOn, see userJSON: a date, or null for never.
+		// EndsOn, see userJSON: a date, or null for never; either clears
+		// the exact end (endsAt), which no other change touches.
 		EndsOn json.RawMessage `json:"endsOn"`
 		// GroupID is the group the user joins and follows, empty for none;
-		// FollowGroup has them follow it, or keep its values as their own.
-		GroupID     *string `json:"groupId"`
-		FollowGroup *bool   `json:"followGroup"`
+		// OwnSections lists the sections in which they keep their own
+		// values, all of them: a section left out follows the group again.
+		GroupID     *string   `json:"groupId"`
+		OwnSections *[]string `json:"ownSections"`
 		// MetadataLanguage, see userJSON.
 		MetadataLanguage *string `json:"metadataLanguage"`
+		// AudioRegion, see userJSON.
+		AudioRegion *string `json:"audioRegion"`
+		// ProviderOnly, see userJSON.
+		ProviderOnly *bool `json:"providerOnly"`
+		// ProviderLinkAllowed, see userJSON: 409 provider_link_refused
+		// for an administrator or an account with two-step sign-in.
+		ProviderLinkAllowed *bool `json:"providerLinkAllowed"`
+		// WebTheme and WebThemeLocked, see userJSON.
+		WebTheme       *string `json:"webTheme"`
+		WebThemeLocked *bool   `json:"webThemeLocked"`
 	}
 	if !decode(w, r, &body) {
 		return
@@ -1226,8 +1567,23 @@ func (h *handler) updateUser(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if !h.knownChannelGroups(w, r, changes.LiveTvChannels, func() (accounts.ChannelRule, error) {
+		user, err := h.Accounts.User(r.Context(), id)
+		return user.LiveTvChannels, err
+	}) {
+		return
+	}
+	if id == session.User.ID && locksOutCaller(r, changes.RemoteAccess) {
+		writeError(w, http.StatusConflict, "remote_access_self")
+		return
+	}
 	changes.MetadataLanguage = body.MetadataLanguage
+	changes.AudioRegion = body.AudioRegion
 	if body.MetadataLanguage != nil && !h.metadataLanguageOffered(w, r, *body.MetadataLanguage) {
+		return
+	}
+	changes.WebTheme, changes.WebThemeLocked = body.WebTheme, body.WebThemeLocked
+	if body.WebTheme != nil && !webThemeOffered(w, h.Accounts.Settings(), *body.WebTheme) {
 		return
 	}
 	changes.Name = body.Name
@@ -1235,7 +1591,9 @@ func (h *handler) updateUser(w http.ResponseWriter, r *http.Request) {
 	changes.IsAdministrator = body.IsAdministrator
 	changes.IsHidden = body.IsHidden
 	changes.IsDisabled = body.IsDisabled
-	changes.FollowGroup = body.FollowGroup
+	changes.OwnSections = body.OwnSections
+	changes.ProviderOnly = body.ProviderOnly
+	changes.ProviderLinkAllowed = body.ProviderLinkAllowed
 	if changes.Group, ok = groupParam(w, body.GroupID); !ok {
 		return
 	}
@@ -1384,16 +1742,18 @@ func (h *handler) settingsJSON(ctx context.Context, settings accounts.Settings) 
 	body.VersionSourceOrder = new(sourceIDs(placedSources(settings.VersionSourceOrder, sources)))
 	body.VersionSources = make([]versionSourceJSON, len(sources))
 	for i, source := range sources {
-		body.VersionSources[i] = versionSourceJSON{ID: source.ID.String(), Name: source.Manifest.Name}
+		body.VersionSources[i] = versionSourceJSON{ID: source.ID.String(), Name: source.Name()}
 	}
 	body.Bounds = settingsBounds
 	body.RecordingsFolderDefault = accounts.DefaultRecordingsFolder(h.DataDir)
 	body.BackupFolderDefault = accounts.DefaultBackupFolder(h.DataDir)
-	body.RenderNodes = renderNodes()
+	body.CacheFolderDefault = accounts.DefaultCacheFolder(h.DataDir)
+	body.RenderNodes = renderNodes(h.renderNodesPattern)
 	body.ConversionHardware = conversionHardwareJSON{Encoders: []string{}}
 	if encoder := h.Health.Encoder; encoder != nil {
 		if hw := encoder.Hardware(); hw != nil {
-			body.ConversionHardware.GPU = newHardwareJSON(hw)
+			// The form applies its own GPU tone mapping switch, saved or not.
+			body.ConversionHardware.GPU = newHardwareJSON(hw, encoder.HDRPath(hw), true)
 		}
 		for _, name := range []string{"libx264", "libx265"} {
 			if slices.Contains(encoder.Encoders(), name) {
@@ -1405,8 +1765,37 @@ func (h *handler) settingsJSON(ctx context.Context, settings accounts.Settings) 
 			body.ConversionHardware.ToneMappingHeight = encoder.ToneMappedHeight()
 		}
 		body.ConversionHardware.Bwdif = encoder.HasFilters("bwdif")
+		body.ConversionHardware.OlderDriverFFmpeg = newOlderDriverJSON(encoder)
+	}
+	body.SourceCachePresetLimits = map[string]sourceCacheLimitsJSON{}
+	for preset, limits := range accounts.SourceCachePresetLimits {
+		body.SourceCachePresetLimits[preset] = sourceCacheLimitsJSON{SizeGB: limits.SizeGB, Days: limits.Days,
+			CreditDays: limits.CreditDays, WholeFiles: limits.WholeFiles}
+	}
+	if reading := h.Health.Folders.Reading; reading != "" {
+		if free, _, _, ok := diskspace.Measure(reading); ok {
+			body.ReadingFree = &free
+		}
 	}
 	return body, nil
+}
+
+// sourceCacheLimitsJSON is what a source cache preset sets (see
+// accounts.SourceCacheLimits).
+type sourceCacheLimitsJSON struct {
+	SizeGB     int  `json:"cacheSizeGb"`
+	Days       int  `json:"sourceCacheDays"`
+	CreditDays int  `json:"sourceCacheCreditDays"`
+	WholeFiles bool `json:"preloadWholeFiles"`
+}
+
+// presetChanged reports whether settings set a limit of the source cache
+// to another value than their preset's: an older page, or an API client,
+// that changed the limit alone.
+func presetChanged(settings accounts.Settings) bool {
+	limits, ok := accounts.SourceCachePresetLimits[settings.SourceCachePreset]
+	return ok && limits != accounts.SourceCacheLimits{SizeGB: settings.CacheSizeGB, Days: settings.SourceCacheDays,
+		CreditDays: settings.SourceCacheCreditDays, WholeFiles: settings.PreloadWholeFiles}
 }
 
 // conversionHardwareJSON is what conversions run on: the GPU chosen, null
@@ -1414,13 +1803,14 @@ func (h *handler) settingsJSON(ctx context.Context, settings accounts.Settings) 
 // HDR and the bwdif deinterlacer. ToneMappingHeight is the height
 // Automatic caps HDR tone mapped on the processor at, as a timing at
 // startup chose it (720 until it ends), 0 when the processor cannot tone
-// map.
+// map. OlderDriverFFmpeg is as System › Health tells it.
 type conversionHardwareJSON struct {
-	GPU               *hardwareJSON `json:"gpu"`
-	Encoders          []string      `json:"encoders"`
-	ToneMapping       bool          `json:"toneMapping"`
-	ToneMappingHeight int           `json:"toneMappingHeight"`
-	Bwdif             bool          `json:"bwdif"`
+	GPU               *hardwareJSON    `json:"gpu"`
+	Encoders          []string         `json:"encoders"`
+	ToneMapping       bool             `json:"toneMapping"`
+	ToneMappingHeight int              `json:"toneMappingHeight"`
+	Bwdif             bool             `json:"bwdif"`
+	OlderDriverFFmpeg *olderDriverJSON `json:"olderDriverFFmpeg"`
 }
 
 func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
@@ -1479,11 +1869,13 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		QuickConnectEnabled: body.QuickConnectEnabled,
 		LegacyAuthorization: body.LegacyAuthorization,
 		Language:            body.Language,
+		RatingCountry:       valueOr(body.RatingCountry, current.RatingCountry),
 		PrepareAhead:        valueOr(body.PrepareAhead, current.PrepareAhead),
 		Transcoding:         valueOr(body.Transcoding, current.Transcoding),
 		CatalogLimit:        valueOr(body.CatalogLimit, current.CatalogLimit),
 		ChannelLimit:        valueOr(body.ChannelLimit, current.ChannelLimit),
 		UpdateCheck:         valueOr(body.UpdateCheck, current.UpdateCheck),
+		IncludePrereleases:  valueOr(body.IncludePrereleases, current.IncludePrereleases),
 		LocalDiscovery:      valueOr(body.LocalDiscovery, current.LocalDiscovery),
 		LocalAddress:        valueOr(body.LocalAddress, current.LocalAddress),
 		DLNA:                valueOr(body.DLNA, current.DLNA),
@@ -1491,64 +1883,69 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		DLNANewDevicesUser:  dlnaUser,
 		DLNAMarkPlayed:      valueOr(body.DLNAMarkPlayed, current.DLNAMarkPlayed),
 
-		SkipButtons:             valueOr(body.SkipButtons, current.SkipButtons),
-		PublicMetaDBKey:         publicMetaDBKey,
-		TheIntroDBKey:           theIntroDBKey,
-		SegmentOrder:            segmentOrder,
-		SegmentSourcesOff:       valueOr(body.SegmentSourcesOff, current.SegmentSourcesOff),
-		AudioIntros:             valueOr(body.AudioIntros, current.AudioIntros),
-		SimilarTitles:           valueOr(body.SimilarTitles, current.SimilarTitles),
-		GenerateImages:          valueOr(body.GenerateImages, current.GenerateImages),
-		MDBListRatingsKey:       ratingsKey,
-		CriticRatingShows:       valueOr(body.CriticRatingShows, current.CriticRatingShows),
-		TMDBKey:                 tmdbKey,
-		Lyrics:                  valueOr(body.Lyrics, current.Lyrics),
-		EvenVolume:              valueOr(body.EvenVolume, current.EvenVolume),
-		MeasureLoudness:         valueOr(body.MeasureLoudness, current.MeasureLoudness),
-		PlayedPercent:           valueOr(body.PlayedPercent, current.PlayedPercent),
-		ResumePercent:           valueOr(body.ResumePercent, current.ResumePercent),
-		VersionListMinutes:      valueOr(body.VersionListMinutes, current.VersionListMinutes),
-		CatalogRefreshMinutes:   valueOr(body.CatalogRefreshMinutes, current.CatalogRefreshMinutes),
-		PersonalAddons:          valueOr(body.PersonalAddons, current.PersonalAddons),
-		ServerImports:           valueOr(body.ServerImports, current.ServerImports),
-		ShareLinks:              valueOr(body.ShareLinks, current.ShareLinks),
-		Registration:            valueOr(body.Registration, current.Registration),
-		RegistrationCodes:       valueOr(body.RegistrationCodes, current.RegistrationCodes),
+		SkipButtons:           valueOr(body.SkipButtons, current.SkipButtons),
+		PublicMetaDBKey:       publicMetaDBKey,
+		TheIntroDBKey:         theIntroDBKey,
+		SegmentOrder:          segmentOrder,
+		SegmentSourcesOff:     valueOr(body.SegmentSourcesOff, current.SegmentSourcesOff),
+		AudioIntros:           valueOr(body.AudioIntros, current.AudioIntros),
+		SimilarTitles:         valueOr(body.SimilarTitles, current.SimilarTitles),
+		GenerateImages:        valueOr(body.GenerateImages, current.GenerateImages),
+		MDBListRatingsKey:     ratingsKey,
+		CriticRatingShows:     valueOr(body.CriticRatingShows, current.CriticRatingShows),
+		TMDBKey:               tmdbKey,
+		WaitDigitalRelease:    valueOr(body.WaitDigitalRelease, current.WaitDigitalRelease),
+		Lyrics:                valueOr(body.Lyrics, current.Lyrics),
+		EvenVolume:            valueOr(body.EvenVolume, current.EvenVolume),
+		MeasureLoudness:       valueOr(body.MeasureLoudness, current.MeasureLoudness),
+		PlayedPercent:         valueOr(body.PlayedPercent, current.PlayedPercent),
+		ResumePercent:         valueOr(body.ResumePercent, current.ResumePercent),
+		VersionListMinutes:    valueOr(body.VersionListMinutes, current.VersionListMinutes),
+		CatalogRefreshMinutes: valueOr(body.CatalogRefreshMinutes, current.CatalogRefreshMinutes),
+		PersonalAddons:        valueOr(body.PersonalAddons, current.PersonalAddons),
+		ServerImports:         valueOr(body.ServerImports, current.ServerImports),
+		ShareLinks:            valueOr(body.ShareLinks, current.ShareLinks),
+		LoginAttempts:         valueOr(body.LoginAttempts, current.LoginAttempts),
+		TwoStepAdministrators: valueOr(body.TwoStepAdministrators, current.TwoStepAdministrators),
+		InactiveDeviceDays:    valueOr(body.InactiveDeviceDays, current.InactiveDeviceDays),
+		KnownProxies:          knownProxies,
+		KnownProxyNames:       knownProxyNames,
+		HTTPSMode:             valueOr(body.HTTPSMode, current.HTTPSMode),
+		HTTPSPort:             valueOr(body.HTTPSPort, current.HTTPSPort),
+		HTTPSRedirect:         valueOr(body.HTTPSRedirect, current.HTTPSRedirect),
+		HTTPSCertificate:      valueOr(body.HTTPSCertificate, current.HTTPSCertificate),
+		HTTPSPrivateKey:       valueOr(body.HTTPSPrivateKey, current.HTTPSPrivateKey),
+		ACMEHosts:             valueOr(body.ACMEHosts, current.ACMEHosts),
+		ACMEEmail:             valueOr(body.ACMEEmail, current.ACMEEmail),
+		ACMETerms:             valueOr(body.ACMETerms, current.ACMETerms),
+		ACMEChallenge:         valueOr(body.ACMEChallenge, current.ACMEChallenge),
+		DetailedLog:           valueOr(body.DetailedLog, current.DetailedLog),
+		AnalysisTimeout:       valueOr(body.AnalysisTimeout, current.AnalysisTimeout),
+		VersionAttempts:       valueOr(body.VersionAttempts, current.VersionAttempts),
+		PreferDirectPlay:      valueOr(body.PreferDirectPlay, current.PreferDirectPlay),
+		SendAppsToSource:      valueOr(body.SendAppsToSource, current.SendAppsToSource),
+		VersionOrder:          valueOr(body.VersionOrder, current.VersionOrder),
+		VersionCodecOrder:     valueOr(body.VersionCodecOrder, current.VersionCodecOrder),
+		VersionSourceOrder:    sourceOrder,
+		HideVersionsLargerGB:  valueOr(body.HideVersionsLargerGB, current.HideVersionsLargerGB),
+		HiddenVersionCodecs:   valueOr(body.HiddenVersionCodecs, current.HiddenVersionCodecs),
+		HiddenVersionWords:    valueOr(body.HiddenVersionWords, current.HiddenVersionWords),
+		NameHowVersionsPlay:   valueOr(body.NameHowVersionsPlay, current.NameHowVersionsPlay),
+		VersionNames:          valueOr(body.VersionNames, current.VersionNames),
+		HiddenReleases:        valueOr(body.HiddenReleases, current.HiddenReleases),
+		VersionEditionOrder:   valueOr(body.VersionEditionOrder, current.VersionEditionOrder),
+		VersionMBPerMinute:    valueOr(body.VersionMBPerMinute, current.VersionMBPerMinute),
+		VersionLabelRules:     valueOr(body.VersionLabelRules, current.VersionLabelRules),
+		SyncAddonSubtitles:    valueOr(body.SyncAddonSubtitles, current.SyncAddonSubtitles),
+		MaxConversions:        valueOr(body.MaxConversions, current.MaxConversions),
+		MaxConversionHeight:   valueOr(body.MaxConversionHeight, current.MaxConversionHeight),
+		ConvertedDownloads:    valueOr(body.ConvertedDownloads, current.ConvertedDownloads),
+		SubtitleOCR:           valueOr(body.SubtitleOCR, current.SubtitleOCR),
+		SubtitleOCRTracks:     valueOr(body.SubtitleOCRTracks, current.SubtitleOCRTracks),
+		SubtitleOCRDownload:   valueOr(body.SubtitleOCRDownload, current.SubtitleOCRDownload),
+
 		DefaultAudioLanguage:    valueOr(body.DefaultAudioLanguage, current.DefaultAudioLanguage),
 		DefaultSubtitleLanguage: valueOr(body.DefaultSubtitleLanguage, current.DefaultSubtitleLanguage),
-		ExactTitleMatch:         valueOr(body.ExactTitleMatch, current.ExactTitleMatch),
-		SubtitleExtraction:      valueOr(body.SubtitleExtraction, current.SubtitleExtraction),
-		LoginAttempts:           valueOr(body.LoginAttempts, current.LoginAttempts),
-		TwoStepAdministrators:   valueOr(body.TwoStepAdministrators, current.TwoStepAdministrators),
-		InactiveDeviceDays:      valueOr(body.InactiveDeviceDays, current.InactiveDeviceDays),
-		KnownProxies:            knownProxies,
-		KnownProxyNames:         knownProxyNames,
-		HTTPSMode:               valueOr(body.HTTPSMode, current.HTTPSMode),
-		HTTPSPort:               valueOr(body.HTTPSPort, current.HTTPSPort),
-		HTTPSRedirect:           valueOr(body.HTTPSRedirect, current.HTTPSRedirect),
-		HTTPSCertificate:        valueOr(body.HTTPSCertificate, current.HTTPSCertificate),
-		HTTPSPrivateKey:         valueOr(body.HTTPSPrivateKey, current.HTTPSPrivateKey),
-		ACMEHosts:               valueOr(body.ACMEHosts, current.ACMEHosts),
-		ACMEEmail:               valueOr(body.ACMEEmail, current.ACMEEmail),
-		ACMETerms:               valueOr(body.ACMETerms, current.ACMETerms),
-		ACMEChallenge:           valueOr(body.ACMEChallenge, current.ACMEChallenge),
-		DetailedLog:             valueOr(body.DetailedLog, current.DetailedLog),
-		AnalysisTimeout:         valueOr(body.AnalysisTimeout, current.AnalysisTimeout),
-		VersionAttempts:         valueOr(body.VersionAttempts, current.VersionAttempts),
-		PreferDirectPlay:        valueOr(body.PreferDirectPlay, current.PreferDirectPlay),
-		VersionOrder:            valueOr(body.VersionOrder, current.VersionOrder),
-		VersionCodecOrder:       valueOr(body.VersionCodecOrder, current.VersionCodecOrder),
-		VersionSourceOrder:      sourceOrder,
-		HideVersionsLargerGB:    valueOr(body.HideVersionsLargerGB, current.HideVersionsLargerGB),
-		HiddenVersionCodecs:     valueOr(body.HiddenVersionCodecs, current.HiddenVersionCodecs),
-		HiddenVersionWords:      valueOr(body.HiddenVersionWords, current.HiddenVersionWords),
-		HiddenRipTypes:          valueOr(body.HiddenRipTypes, current.HiddenRipTypes),
-		HideSpecials:            valueOr(body.HideSpecials, current.HideSpecials),
-		NameHowVersionsPlay:     valueOr(body.NameHowVersionsPlay, current.NameHowVersionsPlay),
-		MaxConversions:          valueOr(body.MaxConversions, current.MaxConversions),
-		MaxConversionHeight:     valueOr(body.MaxConversionHeight, current.MaxConversionHeight),
-		ConvertedDownloads:      valueOr(body.ConvertedDownloads, current.ConvertedDownloads),
-		WebSafeVideo:            valueOr(body.WebSafeVideo, current.WebSafeVideo),
 
 		EncoderPreset:              valueOr(body.EncoderPreset, current.EncoderPreset),
 		H264Quality:                valueOr(body.H264Quality, current.H264Quality),
@@ -1569,9 +1966,12 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		DownmixBoost:               valueOr(body.DownmixBoost, current.DownmixBoost),
 		MaxAudioChannels:           valueOr(body.MaxAudioChannels, current.MaxAudioChannels),
 		AudioBitratePerChannel:     valueOr(body.AudioBitratePerChannel, current.AudioBitratePerChannel),
+		NormalizeConvertedAudio:    valueOr(body.NormalizeConvertedAudio, current.NormalizeConvertedAudio),
+		DynamicRangeCompression:    valueOr(body.DynamicRangeCompression, current.DynamicRangeCompression),
 		EncodingThreads:            valueOr(body.EncodingThreads, current.EncodingThreads),
 		AheadSeconds:               valueOr(body.AheadSeconds, current.AheadSeconds),
 		KeepConvertedVideo:         valueOr(body.KeepConvertedVideo, current.KeepConvertedVideo),
+		FastStart:                  valueOr(body.FastStart, current.FastStart),
 
 		Trickplay:          valueOr(body.Trickplay, current.Trickplay),
 		TrickplayInterval:  valueOr(body.TrickplayInterval, current.TrickplayInterval),
@@ -1585,6 +1985,7 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		RecordingCommercials:   valueOr(body.RecordingCommercials, current.RecordingCommercials),
 		LiveTvRefreshHours:     valueOr(body.LiveTvRefreshHours, current.LiveTvRefreshHours),
 		LocalScanHours:         valueOr(body.LocalScanHours, current.LocalScanHours),
+		WatchlistCheckHours:    valueOr(body.WatchlistCheckHours, current.WatchlistCheckHours),
 		WatchLocalFolders:      valueOr(body.WatchLocalFolders, current.WatchLocalFolders),
 
 		ConvertRecordings:            valueOr(body.ConvertRecordings, current.ConvertRecordings),
@@ -1592,11 +1993,12 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		ConvertRecordingsUntil:       valueOr(body.ConvertRecordingsUntil, current.ConvertRecordingsUntil),
 		ConvertRecordingsOnProcessor: valueOr(body.ConvertRecordingsOnProcessor, current.ConvertRecordingsOnProcessor),
 
+		WebTheme:              valueOr(body.WebTheme, current.WebTheme),
 		CustomCss:             valueOr(body.CustomCss, current.CustomCss),
 		CustomJs:              valueOr(body.CustomJs, current.CustomJs),
 		LoginDisclaimer:       valueOr(body.LoginDisclaimer, current.LoginDisclaimer),
-		BrandLogo:             valueOr(body.BrandLogo, current.BrandLogo),
 		AddVersionsToOpenPage: valueOr(body.AddVersionsToOpenPage, current.AddVersionsToOpenPage),
+		VersionBadges:         valueOr(body.VersionBadges, current.VersionBadges),
 
 		TraktClientID:     valueOr(body.TraktClientID, current.TraktClientID),
 		TraktClientSecret: valueOr(body.TraktClientSecret, current.TraktClientSecret),
@@ -1609,9 +2011,7 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		MyAnimeListClientID:     valueOr(body.MyAnimeListClientID, current.MyAnimeListClientID),
 		MyAnimeListClientSecret: valueOr(body.MyAnimeListClientSecret, current.MyAnimeListClientSecret),
 
-		BackupHour:            valueOr(body.BackupHour, current.BackupHour),
 		BackupsKept:           valueOr(body.BackupsKept, current.BackupsKept),
-		CollectionReadHour:    valueOr(body.CollectionReadHour, current.CollectionReadHour),
 		CollectionLibraryApps: valueOr(body.CollectionLibraryApps, current.CollectionLibraryApps),
 
 		RemuxDB:    valueOr(body.RemuxDB, current.RemuxDB),
@@ -1623,6 +2023,7 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		RecordingsFolder: valueOr(body.RecordingsFolder, current.RecordingsFolder),
 		Backups:          valueOr(body.Backups, current.Backups),
 		BackupFolder:     valueOr(body.BackupFolder, current.BackupFolder),
+		BackupPassphrase: valueOr(body.BackupPassphrase, current.BackupPassphrase),
 
 		PublicAddress: valueOr(body.PublicAddress, current.PublicAddress),
 
@@ -1645,13 +2046,51 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		Metrics:      valueOr(body.Metrics, current.Metrics),
 		MetricsToken: current.MetricsToken,
 
+		RestartConfirmed: valueOr(body.RestartConfirmed, current.RestartConfirmed),
+		UpdateToolURL:    valueOr(body.UpdateToolURL, current.UpdateToolURL),
+		UpdateToolToken:  valueOr(body.UpdateToolToken, current.UpdateToolToken),
+
 		TorrentStreams:       valueOr(body.TorrentStreams, current.TorrentStreams),
 		TorrentInterface:     valueOr(body.TorrentInterface, current.TorrentInterface),
 		TorrentProxy:         valueOr(body.TorrentProxy, current.TorrentProxy),
 		TorrentProxyUser:     valueOr(body.TorrentProxyUser, current.TorrentProxyUser),
 		TorrentProxyPassword: valueOr(body.TorrentProxyPassword, current.TorrentProxyPassword),
+		TorrentWireGuard:     valueOr(body.TorrentWireGuard, current.TorrentWireGuard),
 		TorrentDownloadMbps:  valueOr(body.TorrentDownloadMbps, current.TorrentDownloadMbps),
 		TorrentUploadMbps:    valueOr(body.TorrentUploadMbps, current.TorrentUploadMbps),
+		TorrentsAtOnce:       valueOr(body.TorrentsAtOnce, current.TorrentsAtOnce),
+		TorrentTrackers:      valueOr(body.TorrentTrackers, current.TorrentTrackers),
+		ConversionFolder:     valueOr(body.ConversionFolder, current.ConversionFolder),
+		ReadingFolder:        valueOr(body.ReadingFolder, current.ReadingFolder),
+		CacheFolder:          valueOr(body.CacheFolder, current.CacheFolder),
+		SiloApps:             valueOr(body.SiloApps, current.SiloApps),
+		PosterRatings:        valueOr(body.PosterRatings, current.PosterRatings),
+		PosterBadges:         valueOr(body.PosterBadges, current.PosterBadges),
+		PosterBadgeSize:      valueOr(body.PosterBadgeSize, current.PosterBadgeSize),
+		PosterTemplate:       valueOr(body.PosterTemplate, current.PosterTemplate),
+
+		SourceCachePreset:     valueOr(body.SourceCachePreset, current.SourceCachePreset),
+		SourceCacheDays:       valueOr(body.SourceCacheDays, current.SourceCacheDays),
+		SourceCacheCreditDays: valueOr(body.SourceCacheCreditDays, current.SourceCacheCreditDays),
+		PreloadNextEpisodes:   valueOr(body.PreloadNextEpisodes, current.PreloadNextEpisodes),
+		PreloadEpisodes:       valueOr(body.PreloadEpisodes, current.PreloadEpisodes),
+		PreloadMbps:           valueOr(body.PreloadMbps, current.PreloadMbps),
+		PreloadReserveGB:      valueOr(body.PreloadReserveGB, current.PreloadReserveGB),
+		PreloadWholeFiles:     valueOr(body.PreloadWholeFiles, current.PreloadWholeFiles),
+
+		ProviderIssuer:         valueOr(body.ProviderIssuer, current.ProviderIssuer),
+		ProviderName:           valueOr(body.ProviderName, current.ProviderName),
+		ProviderClientID:       valueOr(body.ProviderClientID, current.ProviderClientID),
+		ProviderClientSecret:   valueOr(body.ProviderClientSecret, current.ProviderClientSecret),
+		ProviderUserClaim:      valueOr(body.ProviderUserClaim, current.ProviderUserClaim),
+		ProviderCreateAccounts: valueOr(body.ProviderCreateAccounts, current.ProviderCreateAccounts),
+		ProviderAdminClaim:     valueOr(body.ProviderAdminClaim, current.ProviderAdminClaim),
+		ProviderAdminValue:     valueOr(body.ProviderAdminValue, current.ProviderAdminValue),
+
+		ForkSettings: body.forkSettings(current.ForkSettings),
+	}
+	if body.SourceCachePreset == nil && presetChanged(next) {
+		next.SourceCachePreset = accounts.SourceCacheCustom
 	}
 	if code := h.unwritableFolder(next, current); code != "" {
 		writeError(w, http.StatusBadRequest, code)
@@ -1662,6 +2101,14 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	settings, err := h.Accounts.UpdateSettings(r.Context(), next)
+	// A WireGuard configuration refused tells where and why, for the
+	// admin app to say it in its language; never a value of it.
+	var configErr *torrent.WireGuardConfigError
+	if errors.As(err, &configErr) {
+		writeJSON(w, http.StatusBadRequest, map[string]any{"error": "invalid_wireguard_config", "message": configErr.Error(),
+			"line": configErr.Line, "key": configErr.Key, "reason": configErr.Reason})
+		return
+	}
 	if accountError(w, err) {
 		return
 	}
@@ -1678,6 +2125,11 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 	if encoder := h.Health.Encoder; encoder != nil &&
 		(settings.HardwareAcceleration != current.HardwareAcceleration || settings.VAAPIDevice != current.VAAPIDevice) {
 		encoder.SelectHardware(settings.HardwareAcceleration, settings.VAAPIDevice)
+	}
+	// Pre-releases included, or the check turned on, are looked for at
+	// once rather than at the next daily check.
+	if settings.UpdateCheck && settings.IncludePrereleases && (!current.UpdateCheck || !current.IncludePrereleases) {
+		h.Health.Updates.Wake()
 	}
 	// Recording turned on, or moved, has the scheduler look at its timers.
 	if settings.RecordingsDir(h.DataDir) != current.RecordingsDir(h.DataDir) {
@@ -1697,13 +2149,13 @@ func (h *handler) updateSettings(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, answer)
 }
 
-// renderNodesPattern matches the render nodes VAAPI may open.
-var renderNodesPattern = "/dev/dri/renderD*"
+// defaultRenderNodes matches the render nodes VAAPI may open.
+const defaultRenderNodes = "/dev/dri/renderD*"
 
-// renderNodes lists the render nodes the server has, sorted; none is an
+// renderNodes lists the render nodes pattern matches, sorted; none is an
 // empty list.
-func renderNodes() []string {
-	nodes, _ := filepath.Glob(renderNodesPattern)
+func renderNodes(pattern string) []string {
+	nodes, _ := filepath.Glob(pattern)
 	if nodes == nil {
 		return []string{}
 	}
@@ -1714,9 +2166,11 @@ func renderNodes() []string {
 // unwritableFolder checks the recordings and backup folders next turns to,
 // against the current settings: recording turned on, or its folder
 // changed while it is on, needs a folder Polyfin can write into, the
-// default one being created first; likewise for backups. It returns the
-// error code of the first that fails, empty when none does. A folder that
-// is not a path is left to UpdateSettings to refuse.
+// default one being created first; likewise for backups, and for the
+// conversion folder, the folder for files being read and the cache
+// folder, always in use, once changed. It returns the error code of the
+// first that fails, empty when none does. A folder that is not a path is
+// left to UpdateSettings to refuse.
 func (h *handler) unwritableFolder(next, current accounts.Settings) string {
 	for _, f := range []struct {
 		on, wasOn                bool
@@ -1727,6 +2181,9 @@ func (h *handler) unwritableFolder(next, current accounts.Settings) string {
 			"invalid_recordings_folder"},
 		{next.Backups, current.Backups, next.BackupFolder, current.BackupFolder, accounts.DefaultBackupFolder(h.DataDir),
 			"invalid_backup_folder"},
+		{true, true, next.ConversionFolder, current.ConversionFolder, accounts.DefaultCacheFolder(h.DataDir), "invalid_conversion_folder"},
+		{true, true, next.ReadingFolder, current.ReadingFolder, accounts.DefaultCacheFolder(h.DataDir), "invalid_reading_folder"},
+		{true, true, next.CacheFolder, current.CacheFolder, accounts.DefaultCacheFolder(h.DataDir), "invalid_cache_folder"},
 	} {
 		folder, ok := accounts.CleanFolder(f.folder)
 		if !f.on || !ok || f.wasOn && folder == f.was {

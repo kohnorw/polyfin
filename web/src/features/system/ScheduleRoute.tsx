@@ -1,4 +1,5 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
+import { useSearchParams } from 'react-router'
 import {
   useMutation,
   useQuery,
@@ -6,9 +7,10 @@ import {
   type UseQueryResult,
 } from '@tanstack/react-query'
 import {
-  ArchiveIcon,
   CalendarDotsIcon,
+  ClockIcon,
   ListChecksIcon,
+  LockSimpleIcon,
   PlayIcon,
   RecordIcon,
   StopIcon,
@@ -26,6 +28,7 @@ import {
   type Task,
 } from '@/api'
 import { PageLayout } from '@/app/PageLayout'
+import { settingsPath } from '@/app/navigation'
 import {
   Badge,
   Block,
@@ -36,19 +39,22 @@ import {
   Row,
   RowList,
   Skeleton,
+  SettingHelp,
   SkeletonRows,
   SkeletonText,
   StatusPill,
+  TextLink,
   useToast,
   RelativeTime,
 } from '@/ui'
-import { dateTime, errorMessage, formatHour, formatSpan } from '@/format'
+import { dateTime, errorMessage, formatSpan } from '@/format'
 import { useI18n } from '@/i18n'
 import { TunersShort } from '@/features/livetv/TunersShort'
 import BackupStatus from './BackupStatus'
 import OwnerChip from './OwnerChip'
 import RestoreBackup from './RestoreBackup'
 import { Anchor } from './parts'
+import { TaskTriggers, triggerLabel } from './TaskTriggers'
 
 /** The task that backs the database up every day while backups are on in the settings. */
 const backupTaskKey = 'BackUpDatabase'
@@ -90,11 +96,23 @@ type TasksQuery = UseQueryResult<Task[]>
 type TaskAction = { task: Task; action: 'run' | 'stop' }
 type Act = UseMutationResult<void, Error, TaskAction>
 
-const columns = 'md:grid-cols-[minmax(0,1.6fr)_minmax(0,1fr)_minmax(0,1fr)_minmax(8.5rem,auto)]'
-
 function Tasks({ tasks, act }: { tasks: TasksQuery; act: Act }) {
   const { t } = useI18n()
   const text = t.system.schedule
+  // Jellyfin's task page, tasks/edit?id=, comes as ?task=<id>: that task's triggers open once.
+  const [params, setParams] = useSearchParams()
+  const asked = params.get('task')
+  const loaded = tasks.data !== undefined
+  useEffect(() => {
+    if (asked === null || !loaded) return
+    setParams(
+      (current) => {
+        current.delete('task')
+        return current
+      },
+      { replace: true },
+    )
+  }, [asked, loaded, setParams])
   const categories = new Map<string, Task[]>()
   for (const task of tasks.data ?? []) {
     categories.set(task.category, [...(categories.get(task.category) ?? []), task])
@@ -104,7 +122,7 @@ function Tasks({ tasks, act }: { tasks: TasksQuery; act: Act }) {
     <Anchor id="tasks">
       <Block title={text.tasksTitle} count={tasks.data?.length} aside={text.autoRefresh}>
         {tasks.isPending ? (
-          <SkeletonRows rows={4} />
+          <SkeletonRows rows={6} />
         ) : tasks.isError ? (
           <InlineError onRetry={() => void tasks.refetch()} retrying={tasks.isFetching}>
             {errorMessage(t, tasks.error)}
@@ -114,40 +132,13 @@ function Tasks({ tasks, act }: { tasks: TasksQuery; act: Act }) {
             {text.noTasksHint}
           </EmptyState>
         ) : (
-          <div className="space-y-6">
-            <div
-              aria-hidden="true"
-              className={`hidden gap-4 px-[18px] text-small font-medium text-ink-3 md:grid ${columns}`}
-            >
-              <span>{text.task}</span>
-              <span>{text.lastRun}</span>
-              <span>{text.nextRun}</span>
-              <span />
-            </div>
+          <div className="space-y-6 max-md:space-y-5">
             {[...categories].map(([category, list]) => (
               <section key={category} aria-label={category}>
-                <h3 className="mb-2.5 px-1 text-micro font-semibold tracking-[0.06em] text-ink-3 uppercase">
-                  {category}
-                </h3>
-                <ul className="overflow-hidden rounded-panel border border-line-2 bg-s1">
+                <h3 className="mb-2 text-group text-ink">{category}</h3>
+                <ul className="grid grid-cols-[minmax(0,1fr)] gap-1.5">
                   {list.map((task) => (
-                    <li
-                      key={task.id}
-                      className={`grid gap-3 px-[18px] py-4 not-first:border-t not-first:border-line md:items-center md:gap-4 max-sm:px-4 ${columns}`}
-                    >
-                      <div className="min-w-0">
-                        <p className="text-[14.5px] font-medium text-ink">{task.name}</p>
-                        <p className="mt-0.5 text-small text-ink-3">{task.description}</p>
-                      </div>
-                      <div className="text-small">
-                        <p className="text-ink-3 md:sr-only">{text.lastRun}</p>
-                        <LastRun task={task} />
-                      </div>
-                      <NextRun task={task} />
-                      <div className="flex gap-2 md:justify-end">
-                        <TaskButton task={task} act={act} />
-                      </div>
-                    </li>
+                    <TaskRow key={task.id} task={task} act={act} asked={asked === task.id} />
                   ))}
                 </ul>
               </section>
@@ -156,6 +147,67 @@ function Tasks({ tasks, act }: { tasks: TasksQuery; act: Act }) {
         )}
       </Block>
     </Anchor>
+  )
+}
+
+/**
+ * One task on one row: its name with its description as a one-line caption (More reads the
+ * rest), how its last run went, when it runs next and on what triggers, Triggers, which opens
+ * them in a dialog, and Run now. Below 1024 px the name and caption take the row's width, and the
+ * last and next runs go under them, beside the buttons; on a phone the buttons go under them too.
+ * A row asked for by the address opens its triggers at once.
+ */
+function TaskRow({ task, act, asked }: { task: Task; act: Act; asked: boolean }) {
+  const { t } = useI18n()
+  const text = t.system.schedule
+  const id = useId()
+  const [editing, setEditing] = useState(asked)
+  // The dialog unmounts as it closes, so the focus comes back to Triggers here.
+  const closed = useRef(false)
+  useEffect(() => {
+    if (editing || !closed.current) return
+    closed.current = false
+    document.getElementById(`${id}-triggers`)?.focus()
+  }, [editing, id])
+  const error = task.state === 'Idle' && task.last !== null ? task.last.error : ''
+  return (
+    <li className="grid min-h-15 grid-cols-[minmax(0,1fr)_auto] items-center gap-x-4 gap-y-1.5 rounded-row bg-s1 py-2 pr-2.5 pl-4 lg:grid-cols-[minmax(0,1fr)_16.5rem_10rem_auto] lg:gap-y-1">
+      <div className="col-span-full min-w-0 lg:col-span-1">
+        <p className="text-h3 break-words hyphens-auto text-ink">{task.name}</p>
+        {task.description !== '' && (
+          <SettingHelp id={`${id}-about`} lines={1}>
+            {task.description}
+          </SettingHelp>
+        )}
+      </div>
+      <div className="col-span-full row-start-2 flex min-w-0 flex-col gap-y-0.5 sm:col-span-1 sm:col-start-1 lg:contents">
+        <LastRun task={task} />
+        <NextRun task={task} />
+      </div>
+      <div className="col-span-full flex flex-wrap justify-end gap-2 sm:col-span-1 sm:col-start-2 sm:row-start-2 sm:self-end lg:col-start-4 lg:row-start-1 lg:self-center">
+        <Button
+          id={`${id}-triggers`}
+          size="sm"
+          variant="ghost"
+          icon={task.limits.locked === '' ? ClockIcon : LockSimpleIcon}
+          aria-label={text.triggersLabel(task.name)}
+          onClick={() => setEditing(true)}
+        >
+          {text.triggersButton}
+        </Button>
+        <TaskButton task={task} act={act} />
+      </div>
+      {error !== '' && <p className="col-span-full text-small break-words text-danger">{error}</p>}
+      {editing && (
+        <TaskTriggers
+          task={task}
+          onClose={() => {
+            closed.current = true
+            setEditing(false)
+          }}
+        />
+      )}
+    </li>
   )
 }
 
@@ -188,53 +240,69 @@ function TaskButton({ task, act }: { task: Task; act: Act }) {
   )
 }
 
+/** When the task runs next, then its triggers; "Next run" is for screen readers. */
 function NextRun({ task }: { task: Task }) {
   const { language, t } = useI18n()
   const text = t.system.schedule
+  const triggers = task.triggers
+    .map((trigger) => triggerLabel(text.triggers, trigger, language))
+    .join(' · ')
   return (
-    <div className="text-small tabular-nums">
-      <p className="text-ink-3 md:sr-only">{text.nextRun}</p>
+    <div className="flex min-w-0 flex-wrap items-baseline gap-x-2 text-small figures lg:block">
+      <span className="sr-only">{text.nextRun}</span>
       {task.next !== null ? (
-        <p className="text-ink">
+        <span className="text-ink lg:block">
           <RelativeTime iso={task.next} />
-        </p>
+        </span>
       ) : (
-        <p className="text-ink-3">{text.byHandOnly}</p>
+        triggers === '' && <span className="text-ink lg:block">{text.byHandOnly}</span>
       )}
-      {task.interval > 0 && (
-        <p className="text-ink-3">{text.every(formatSpan(task.interval, language))}</p>
-      )}
-      {task.daily !== null && (
-        <p className="text-ink-3">{text.daily(formatHour(task.daily, language))}</p>
-      )}
+      {triggers !== '' && <span className="text-ink-3 lg:block lg:text-micro">{triggers}</span>}
     </div>
   )
 }
 
+/**
+ * How the task's last run went, and how long it took, which a phone leaves out to keep it on one
+ * line; "Last run" is for screen readers.
+ */
 function LastRun({ task }: { task: Task }) {
   const { language, t } = useI18n()
   const text = t.system.schedule
+  const label = <span className="sr-only">{text.lastRun}</span>
+  const box = 'flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-small figures lg:gap-y-0'
   if (task.state !== 'Idle') {
     return (
-      <StatusPill tone="live">
-        <span className="motion-safe:animate-pulse">
-          {task.state === 'Running' ? text.running : text.cancelling}
-        </span>
-      </StatusPill>
+      <div className={box}>
+        {label}
+        <StatusPill tone="live">
+          <span className="motion-safe:animate-pulse">
+            {task.state === 'Running' ? text.running : text.cancelling}
+          </span>
+        </StatusPill>
+      </div>
     )
   }
-  if (task.last === null) return <p className="text-ink-3">{text.notRunYet}</p>
+  if (task.last === null) {
+    return (
+      <div className={box}>
+        {label}
+        <span className="text-ink-2">{text.notRunYet}</span>
+      </div>
+    )
+  }
   const last = task.last
   const tone = last.status === 'Completed' ? 'ok' : last.status === 'Failed' ? 'danger' : 'muted'
   return (
-    <div>
+    <div className={box}>
+      {label}
       <StatusPill tone={tone}>{text.results[last.status] ?? last.status}</StatusPill>
-      <p className="mt-0.5 text-ink-3 tabular-nums">
+      <span className="text-ink-2">
         <RelativeTime iso={last.end} />
-        {' · '}
+      </span>
+      <span className="text-ink-3 max-sm:hidden lg:basis-full lg:text-micro">
         {text.took(formatSpan((Date.parse(last.end) - Date.parse(last.start)) / 1000, language))}
-      </p>
-      {last.error !== '' && <p className="mt-0.5 break-words text-danger">{last.error}</p>}
+      </span>
     </div>
   )
 }
@@ -243,7 +311,7 @@ function LastRun({ task }: { task: Task }) {
 function Backups({ tasks, act }: { tasks: Task[] | undefined; act: Act }) {
   const { t } = useI18n()
   const text = t.system.schedule
-  // The Health page polls this every 10 seconds; here it follows the backup task's runs.
+  // The Health page polls this every 30 seconds; here it follows the backup task's runs.
   const health = useQuery({
     queryKey: queryKeys.health,
     queryFn: ({ signal }) => fetchHealth(signal),
@@ -274,9 +342,12 @@ function Backups({ tasks, act }: { tasks: Task[] | undefined; act: Act }) {
             {errorMessage(t, health.error)}
           </InlineError>
         ) : health.data.backup === null ? (
-          <EmptyState icon={ArchiveIcon} title={t.system.health.backupTitle}>
-            {t.system.health.backupOff}
-          </EmptyState>
+          <div className="space-y-3">
+            <p className="max-w-[66ch] text-small text-ink-2">{t.system.health.backupOff}</p>
+            <TextLink to={settingsPath('backups')} className="-ml-3">
+              {t.system.health.checks.openSettings}
+            </TextLink>
+          </div>
         ) : (
           <BackupStatus backup={health.data.backup} />
         )}
@@ -364,7 +435,7 @@ function Timers() {
                     {timer.status === 'Error' && (
                       <StatusPill tone="danger">{text.failed}</StatusPill>
                     )}
-                    {timer.tunersShort && <TunersShort text={text} />}
+                    {timer.tunersShort && <TunersShort text={t.livetv} />}
                   </span>
                 }
                 meta={

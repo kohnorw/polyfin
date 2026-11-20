@@ -1,0 +1,19 @@
+LumaaGlaass, a theme for jellyfin-web, by Om Gupta and Dyhlio.
+Licensed under the MIT License: see LICENSE.
+
+Polyfin bundles the theme's assets/ folder (its stylesheet, its script and
+their extensions) at commit 89b25b5da1d975aa23f76dd5ce26228022a6b991 of
+its repository, at internal/webtheme/lumaaglaass, with Polyfin's patches
+(patches/), applied by scripts/lumaaglaass.sh:
+- 0001-bundled-assets.patch
+- 0002-loader-defaults.patch
+- 0003-pass-per-frame.patch
+- 0004-studio-logos.patch
+- 0005-list-headings.patch
+- 0006-random-carousel-pool.patch
+
+The web client serves them at /web/polyfin/themes/lumaaglaass/, where the
+custom CSS and script Polyfin serves for the LumaaGlaass theme load them:
+nothing is loaded from elsewhere.
+
+Source: https://github.com/Dyhlio/LumaaGlaass/tree/89b25b5da1d975aa23f76dd5ce26228022a6b991

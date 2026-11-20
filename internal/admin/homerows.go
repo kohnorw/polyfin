@@ -1,10 +1,12 @@
 package admin
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net/http"
 	"slices"
+	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/homerows"
@@ -12,45 +14,120 @@ import (
 	"github.com/moodiness/polyfin/internal/library"
 )
 
-// HomeRowChoices tells the collections a home row may list, as the Jellyfin
-// API describes them to user.
+// HomeRowChoices tells the collections and playlists a home row may list,
+// as the Jellyfin API describes them to user.
 type HomeRowChoices interface {
 	HomeRowCollections(ctx context.Context, user accounts.User) ([]jellyfin.HomeRowCollection, error)
+	HomeRowPlaylists(ctx context.Context) ([]jellyfin.HomeRowPlaylist, error)
+}
+
+// HomeRowPreviews tells the rows a user sees now on the web player's home
+// page, each with its first titles, as the Jellyfin API answers them to
+// the web player, the name of their Watchlist, which names a Watchlist row
+// for them, and whether they may see a playlist, without which its
+// Playlist row is none of theirs.
+type HomeRowPreviews interface {
+	PreviewHomeRows(ctx context.Context, user accounts.User) ([]jellyfin.HomeRowPreview, error)
+	WatchlistRowName(ctx context.Context, user accounts.User) (string, error)
+	SeesPlaylist(ctx context.Context, user accounts.User, id accounts.ID) (bool, error)
 }
 
 // homeRowJSON is a row of the web player's home page (Settings › Web
 // player › Home rows, see package homerows). addonId, catalogType and
 // catalogId name a catalog row's catalog; collectionId a collection
-// row's collection; count is how many rows a Because you watched row
-// makes; users are those a row not shown to everyone is shown to.
+// row's collection; playlistId a playlist row's playlist; count is how
+// many rows a Because you watched or a My playlists row makes; users are
+// those a row not shown to everyone is shown to; schedule is when it
+// shows. shownNow, in answers only, tells whether the schedule shows it
+// now.
 type homeRowJSON struct {
-	ID           string   `json:"id"`
-	Name         string   `json:"name"`
-	Kind         string   `json:"kind"`
-	Place        string   `json:"place"`
-	AddonID      string   `json:"addonId"`
-	CatalogType  string   `json:"catalogType"`
-	CatalogID    string   `json:"catalogId"`
-	CollectionID string   `json:"collectionId"`
-	Count        int      `json:"count"`
-	Everyone     bool     `json:"everyone"`
-	Users        []string `json:"users"`
-	Library      bool     `json:"library"`
+	ID           string              `json:"id"`
+	Name         string              `json:"name"`
+	Kind         string              `json:"kind"`
+	Place        string              `json:"place"`
+	AddonID      string              `json:"addonId"`
+	CatalogType  string              `json:"catalogType"`
+	CatalogID    string              `json:"catalogId"`
+	CollectionID string              `json:"collectionId"`
+	PlaylistID   string              `json:"playlistId"`
+	Count        int                 `json:"count"`
+	Everyone     bool                `json:"everyone"`
+	Users        []string            `json:"users"`
+	Library      bool                `json:"library"`
+	Schedule     homeRowScheduleJSON `json:"schedule"`
+	ShownNow     bool                `json:"shownNow"`
 }
 
-func newHomeRowJSON(r homerows.Row) homeRowJSON {
+// homeRowScheduleJSON is when a row shows, in the server's time zone
+// (see homerows.Schedule): from startDate to endDate, YYYY-MM-DD, empty
+// for no bound; on its days, 0 for Sunday to 6 for Saturday, none for
+// every day; from startHour, 0 to 23, to endHour, 1 to 24, both null for
+// all day.
+type homeRowScheduleJSON struct {
+	StartDate string `json:"startDate"`
+	EndDate   string `json:"endDate"`
+	Days      []int  `json:"days"`
+	StartHour *int   `json:"startHour"`
+	EndHour   *int   `json:"endHour"`
+}
+
+func newHomeRowJSON(r homerows.Row, now time.Time) homeRowJSON {
 	result := homeRowJSON{ID: r.ID.String(), Name: r.Name, Kind: string(r.Kind), Place: string(r.Place), CatalogType: r.CatalogType,
-		CatalogID: r.CatalogID, Count: r.Count, Everyone: r.Everyone, Users: []string{}, Library: r.Library}
+		CatalogID: r.CatalogID, Count: r.Count, Everyone: r.Everyone, Users: []string{}, Library: r.Library,
+		Schedule: homeRowScheduleJSON{Days: []int{}}, ShownNow: r.ShowsAt(now)}
 	if r.Addon != (accounts.ID{}) {
 		result.AddonID = r.Addon.String()
 	}
 	if r.Collection != (accounts.ID{}) {
 		result.CollectionID = r.Collection.String()
 	}
+	if r.Playlist != (accounts.ID{}) {
+		result.PlaylistID = r.Playlist.String()
+	}
 	for _, user := range r.Users {
 		result.Users = append(result.Users, user.String())
 	}
+	s := r.Schedule
+	if !s.Start.IsZero() {
+		result.Schedule.StartDate = s.Start.Format(time.DateOnly)
+	}
+	if !s.End.IsZero() {
+		result.Schedule.EndDate = s.End.Format(time.DateOnly)
+	}
+	for _, day := range s.Days {
+		result.Schedule.Days = append(result.Schedule.Days, int(day))
+	}
+	if s.Hours != nil {
+		result.Schedule.StartHour, result.Schedule.EndHour = &s.Hours.From, &s.Hours.To
+	}
 	return result
+}
+
+// schedule reads a schedule from its JSON, and reports whether it could:
+// dates that are not ones, or a single hour, cannot be read. Days come in
+// any order.
+func (j homeRowScheduleJSON) schedule() (homerows.Schedule, bool) {
+	var s homerows.Schedule
+	ok := true
+	date := func(raw string) time.Time {
+		if raw == "" {
+			return time.Time{}
+		}
+		t, err := time.Parse(time.DateOnly, raw)
+		ok = ok && err == nil
+		return t
+	}
+	s.Start, s.End = date(j.StartDate), date(j.EndDate)
+	for _, day := range slices.Compact(slices.Sorted(slices.Values(j.Days))) {
+		s.Days = append(s.Days, time.Weekday(day))
+	}
+	switch {
+	case j.StartHour != nil && j.EndHour != nil:
+		s.Hours = &homerows.Hours{From: *j.StartHour, To: *j.EndHour}
+	case j.StartHour != nil || j.EndHour != nil:
+		ok = false
+	}
+	return s, ok
 }
 
 // row reads a row from its JSON: a count left out is the default one, an
@@ -74,6 +151,7 @@ func (j homeRowJSON) row() (homerows.Row, bool) {
 	}
 	parse(j.AddonID, &r.Addon)
 	parse(j.CollectionID, &r.Collection)
+	parse(j.PlaylistID, &r.Playlist)
 	for _, raw := range j.Users {
 		var user accounts.ID
 		parse(raw, &user)
@@ -82,7 +160,9 @@ func (j homeRowJSON) row() (homerows.Row, bool) {
 	if r.Everyone {
 		r.Users = nil
 	}
-	return r, ok && r.Valid()
+	schedule, read := j.Schedule.schedule()
+	r.Schedule = schedule
+	return r, ok && read && r.Valid()
 }
 
 // homeRowError answers the errors of the rows' store, and reports whether
@@ -109,8 +189,9 @@ func (h *handler) homeRows(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := make([]homeRowJSON, 0, len(rows))
+	now := h.now()
 	for _, row := range rows {
-		result = append(result, newHomeRowJSON(row))
+		result = append(result, newHomeRowJSON(row, now))
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Rows []homeRowJSON `json:"rows"`
@@ -132,6 +213,15 @@ type homeRowCollectionJSON struct {
 	ID     string `json:"id"`
 	Name   string `json:"name"`
 	Source string `json:"source"`
+}
+
+// homeRowPlaylistJSON is a playlist a row may list: its owner's name, and
+// who may see it: public (everyone), shared or private (its owner).
+type homeRowPlaylistJSON struct {
+	ID        string `json:"id"`
+	Name      string `json:"name"`
+	OwnerName string `json:"ownerName"`
+	Access    string `json:"access"`
 }
 
 // homeRowCatalogs lists the catalogs a row may list: those of the server's
@@ -160,9 +250,10 @@ func (h *handler) offeredHomeRow(ctx context.Context, user accounts.User, row ho
 	}), err
 }
 
-// homeRowChoices answers the catalogs and collections a row may list: the
-// catalogs of the server's addons that can be browsed, and the
-// collections the administrator sees.
+// homeRowChoices answers the catalogs, collections and playlists a row may
+// list: the catalogs of the server's addons that can be browsed, the
+// collections the administrator sees, and the playlists of the server but
+// the Watchlists.
 func (h *handler) homeRowChoices(w http.ResponseWriter, r *http.Request) {
 	user := sessionFrom(r.Context()).User
 	found, err := h.homeRowCatalogs(r.Context(), user)
@@ -176,6 +267,7 @@ func (h *handler) homeRowChoices(w http.ResponseWriter, r *http.Request) {
 			CatalogID: c.Catalog.ID, CatalogName: c.Catalog.Name})
 	}
 	collections := []homeRowCollectionJSON{}
+	lists := []homeRowPlaylistJSON{}
 	if h.HomeRowChoices != nil {
 		found, err := h.HomeRowChoices.HomeRowCollections(r.Context(), user)
 		if err != nil {
@@ -185,11 +277,20 @@ func (h *handler) homeRowChoices(w http.ResponseWriter, r *http.Request) {
 		for _, c := range found {
 			collections = append(collections, homeRowCollectionJSON{ID: c.ID.String(), Name: c.Name, Source: c.Source})
 		}
+		playlists, err := h.HomeRowChoices.HomeRowPlaylists(r.Context())
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		for _, p := range playlists {
+			lists = append(lists, homeRowPlaylistJSON{ID: p.ID.String(), Name: p.Name, OwnerName: p.OwnerName, Access: p.Access})
+		}
 	}
 	writeJSON(w, http.StatusOK, struct {
 		Catalogs    []homeRowCatalogJSON    `json:"catalogs"`
 		Collections []homeRowCollectionJSON `json:"collections"`
-	}{catalogs, collections})
+		Playlists   []homeRowPlaylistJSON   `json:"playlists"`
+	}{catalogs, collections, lists})
 }
 
 // homeRowFrom reads the row of a request's body, and answers 400 when it
@@ -228,7 +329,7 @@ func (h *handler) createHomeRow(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, newHomeRowJSON(created))
+	writeJSON(w, http.StatusCreated, newHomeRowJSON(created, h.now()))
 }
 
 // updateHomeRow changes a row.
@@ -249,7 +350,7 @@ func (h *handler) updateHomeRow(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, newHomeRowJSON(updated))
+	writeJSON(w, http.StatusOK, newHomeRowJSON(updated, h.now()))
 }
 
 // deleteHomeRow deletes a row: 204.
@@ -293,6 +394,73 @@ func (h *handler) orderHomeRows(w http.ResponseWriter, r *http.Request) {
 	h.homeRows(w, r)
 }
 
+// homeRowPreviewJSON is a row of a user's home page in the web player:
+// its folder in Jellyfin apps (id), the row it comes from (rowId), its
+// name there, its kind and place as the admin API names them, and its
+// first titles.
+type homeRowPreviewJSON struct {
+	ID     string             `json:"id"`
+	RowID  string             `json:"rowId"`
+	Name   string             `json:"name"`
+	Kind   string             `json:"kind"`
+	Place  string             `json:"place"`
+	Titles []homeRowTitleJSON `json:"titles"`
+}
+
+// homeRowTitleJSON is a title of a row's preview. posterId is the item
+// whose Primary image is its poster: the series of an episode.
+type homeRowTitleJSON struct {
+	ID       string `json:"id"`
+	Kind     string `json:"kind"`
+	Name     string `json:"name"`
+	Year     int    `json:"year"`
+	PosterID string `json:"posterId"`
+}
+
+// previewHomeRows answers the rows the user of the path sees now on the
+// web player's home page, in order, each with its first titles, as the web
+// player signed in as them shows them (Preview as).
+func (h *handler) previewHomeRows(w http.ResponseWriter, r *http.Request) {
+	if h.HomeRowPreviews == nil {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	user, err := h.Accounts.User(r.Context(), id)
+	if accountError(w, err) {
+		return
+	}
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	rows, err := h.HomeRowPreviews.PreviewHomeRows(r.Context(), user)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	result := make([]homeRowPreviewJSON, 0, len(rows))
+	for _, row := range rows {
+		preview := homeRowPreviewJSON{ID: row.ID.String(), RowID: row.Row.ID.String(), Name: row.Name, Kind: string(row.Row.Kind),
+			Place: string(row.Row.Place), Titles: make([]homeRowTitleJSON, 0, len(row.Titles))}
+		for _, title := range row.Titles {
+			poster := title.ID
+			if title.Kind == library.KindEpisode && title.SeriesID != (accounts.ID{}) {
+				poster = title.SeriesID
+			}
+			preview.Titles = append(preview.Titles, homeRowTitleJSON{ID: title.ID.String(), Kind: string(title.Kind), Name: title.Name,
+				Year: title.ProductionYear, PosterID: poster.String()})
+		}
+		result = append(result, preview)
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Rows []homeRowPreviewJSON `json:"rows"`
+	}{result})
+}
+
 // ownHomeRowJSON is a row shown to the user signed in, and whether they
 // turned it off.
 type ownHomeRowJSON struct {
@@ -323,9 +491,33 @@ func (h *handler) ownHomeRows(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
+	watchlistName := ""
+	if h.HomeRowPreviews != nil && slices.ContainsFunc(rows, func(row homerows.Row) bool {
+		return row.Kind == homerows.KindWatchlist && row.ShownTo(user.ID)
+	}) {
+		if watchlistName, err = h.HomeRowPreviews.WatchlistRowName(r.Context(), user); err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+	}
 	for _, row := range rows {
+		if row.ShownTo(user.ID) && row.Kind == homerows.KindPlaylist && h.HomeRowPreviews != nil {
+			// A Playlist row shows only to those who may see its playlist.
+			sees, err := h.HomeRowPreviews.SeesPlaylist(r.Context(), user, row.Playlist)
+			if err != nil {
+				h.internalError(w, r, err)
+				return
+			}
+			if !sees {
+				continue
+			}
+		}
 		if row.ShownTo(user.ID) {
-			result = append(result, ownHomeRowJSON{ID: row.ID.String(), Name: row.Name, Kind: string(row.Kind), Place: string(row.Place),
+			name := row.Name
+			if row.Kind == homerows.KindWatchlist {
+				name = cmp.Or(watchlistName, name)
+			}
+			result = append(result, ownHomeRowJSON{ID: row.ID.String(), Name: name, Kind: string(row.Kind), Place: string(row.Place),
 				Off: off[row.ID]})
 		}
 	}

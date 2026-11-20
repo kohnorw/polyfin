@@ -115,6 +115,22 @@ func (s *sockets) latest(device accounts.ID) *websocket.Conn {
 	return open[len(open)-1]
 }
 
+// webUsers lists the users who keep a jellyfin-web socket open.
+func (s *sockets) webUsers() []accounts.ID {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var users []accounts.ID
+	for user, open := range s.open {
+		for _, web := range open {
+			if web {
+				users = append(users, user)
+				break
+			}
+		}
+	}
+	return users
+}
+
 // close closes the sockets of a device, whose serving then ends.
 func (s *sockets) close(device accounts.ID) {
 	s.mu.Lock()
@@ -179,10 +195,12 @@ func (h *Handler) socket(w http.ResponseWriter, r *http.Request) {
 	case err != nil:
 		h.internalError(w, r, err)
 		return
-	case !ok || c.APIKey != nil:
+	case !ok || c.APIKey != nil || remoteRefused(r, c.User):
 		// Jellyfin refuses a socket without a valid token with a 403,
 		// where other requests get a 401. Polyfin's sockets are those of
-		// signed-in devices: an API key, which has none, is refused too.
+		// signed-in devices: an API key, which has none, is refused too,
+		// and so is a user outside the local network without remote access,
+		// as their other requests are.
 		processingError(w, http.StatusForbidden)
 		return
 	}

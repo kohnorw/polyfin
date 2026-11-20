@@ -31,7 +31,8 @@ func TestSettingsConversion(t *testing.T) {
 	keys := []string{"encoderPreset", "h264Quality", "hevcQuality", "allowHevcEncoding", "adaptiveQuality", "hardwareAcceleration", "hardwareDecodingCodecs",
 		"toneMapping", "toneMappingAlgorithm", "toneMappingPeak", "toneMappingDesat", "gpuToneMapping", "processorToneMappingHeight",
 		"deinterlaceMethod", "deinterlaceDoubleRate",
-		"downmixAlgorithm", "downmixBoost", "maxAudioChannels", "audioBitratePerChannel", "encodingThreads", "aheadSeconds", "keepConvertedVideo"}
+		"downmixAlgorithm", "downmixBoost", "maxAudioChannels", "audioBitratePerChannel", "encodingThreads", "aheadSeconds", "keepConvertedVideo", "fastStart",
+		"normalizeConvertedAudio", "dynamicRangeCompression"}
 	tuning := func(body map[string]any) map[string]any {
 		got := map[string]any{}
 		for _, key := range keys {
@@ -43,8 +44,8 @@ func TestSettingsConversion(t *testing.T) {
 		"hardwareDecodingCodecs": []any{"h264", "hevc", "hevc_10bit", "vp9", "av1", "mpeg2video", "vc1"}, "toneMapping": true, "toneMappingAlgorithm": "auto",
 		"toneMappingPeak": 0.0, "toneMappingDesat": 0.0, "gpuToneMapping": true, "processorToneMappingHeight": 0.0,
 		"deinterlaceMethod": "yadif", "deinterlaceDoubleRate": false, "downmixAlgorithm": "None",
-		"downmixBoost": 1.0, "maxAudioChannels": 0.0, "audioBitratePerChannel": 0.0, "encodingThreads": 0.0, "aheadSeconds": 120.0,
-		"adaptiveQuality": "off", "keepConvertedVideo": false}
+		"downmixBoost": 2.0, "maxAudioChannels": 0.0, "audioBitratePerChannel": 0.0, "encodingThreads": 0.0, "aheadSeconds": 120.0,
+		"adaptiveQuality": "off", "keepConvertedVideo": false, "fastStart": false, "normalizeConvertedAudio": false, "dynamicRangeCompression": "encoded"}
 	_, body, _ := administrator.call(http.MethodGet, "/settings", nil)
 	if got := tuning(body); !reflect.DeepEqual(got, defaults) {
 		t.Errorf("defaults: %v", got)
@@ -74,13 +75,14 @@ func TestSettingsConversion(t *testing.T) {
 		"toneMappingDesat": 0.5, "gpuToneMapping": false, "processorToneMappingHeight": 1440.0,
 		"deinterlaceMethod": "bwdif", "deinterlaceDoubleRate": true, "downmixAlgorithm": "Rfc7845", "downmixBoost": 2.5,
 		"maxAudioChannels": 2.0, "audioBitratePerChannel": 96.0, "encodingThreads": 8.0, "aheadSeconds": 300.0,
-		"adaptiveQuality": "remote", "keepConvertedVideo": true}
+		"adaptiveQuality": "remote", "keepConvertedVideo": true, "fastStart": true, "normalizeConvertedAudio": true, "dynamicRangeCompression": "night"}
 	put := maps.Clone(base)
 	maps.Copy(put, changed)
 	if status, body, _ := administrator.call(http.MethodPut, "/settings", put); status != http.StatusOK || !reflect.DeepEqual(tuning(body), changed) {
 		t.Fatalf("saving: %d %v", status, tuning(body))
 	}
-	if got := api.store.Settings(); got.EncoderPreset != "slow" || got.DownmixBoost != 2.5 || !slices.Equal(got.HardwareDecodingCodecs, []string{"h264", "av1"}) {
+	if got := api.store.Settings(); got.EncoderPreset != "slow" || got.DownmixBoost != 2.5 || !slices.Equal(got.HardwareDecodingCodecs, []string{"h264", "av1"}) ||
+		!got.NormalizeConvertedAudio {
 		t.Errorf("stored: %+v", got)
 	}
 	// A page or script older than them leaves them as they are.
@@ -107,6 +109,8 @@ func TestSettingsConversion(t *testing.T) {
 		{"deinterlaceMethod", "w3fdif", "invalid_deinterlace_method"},
 		{"downmixAlgorithm", "Stereo", "invalid_downmix_algorithm"},
 		{"downmixBoost", 4, "invalid_downmix_boost"},
+		{"dynamicRangeCompression", "light", "invalid_dynamic_range_compression"},
+		{"dynamicRangeCompression", "", "invalid_dynamic_range_compression"},
 		{"maxAudioChannels", 8, "invalid_max_audio_channels"},
 		{"audioBitratePerChannel", 1000, "invalid_audio_bitrate_per_channel"},
 		{"encodingThreads", 65, "invalid_encoding_threads"},

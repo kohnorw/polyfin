@@ -167,6 +167,9 @@ func (h *Handler) convertedDownload(w http.ResponseWriter, r *http.Request, exte
 	if remux.ConvertVideo != nil || remux.ConvertAudio != nil {
 		method = "Transcode"
 	}
+	// From here the download counts by itself (see downloadPlays), not as
+	// the place its request took for its play session's device.
+	h.leavePlace(w)
 	done := h.downloads.add(&downloadPlay{session: remux.Session, user: req.user.ID, device: device,
 		item: req.item.ID, version: remux.Version.ID, method: method, started: h.now()})
 	defer done()
@@ -178,15 +181,16 @@ func (h *Handler) convertedDownload(w http.ResponseWriter, r *http.Request, exte
 		h.remuxError(w, r, remux, err)
 	case errors.Is(err, hls.ErrStopped):
 	default:
-		h.Logger.Warn("A converted download was cut short", "addon", remux.Version.Addon, "error", err)
+		h.Logger.Warn("A converted download was cut short", "addon", remux.Version.AddonLog, "error", err)
 	}
 }
 
 // downloadDevice is the device a converted download's request names by
 // its token, zero when it names none; false when the token belongs to
-// another user than user.
+// another user than user. A converted download is a video stream, which
+// Jellyfin serves to anyone (see mediaToken).
 func (h *Handler) downloadDevice(r *http.Request, user accounts.User) (accounts.ID, bool) {
-	token := readCredentials(r, h.Accounts.Settings().LegacyAuthorization).Token
+	token := h.mediaToken(r, servedToAnyone)
 	if token == "" {
 		return accounts.ID{}, true
 	}

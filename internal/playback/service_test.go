@@ -23,6 +23,7 @@ import (
 	"github.com/moodiness/polyfin/internal/hls"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/media"
+	"github.com/moodiness/polyfin/internal/process"
 	"github.com/moodiness/polyfin/internal/source"
 	"github.com/moodiness/polyfin/internal/testdb/migrated"
 )
@@ -94,7 +95,7 @@ func newService(t *testing.T, opener source.Opener, ffprobe string, renew Renewe
 func newServiceOn(t *testing.T, pool *pgxpool.Pool, opener source.Opener, ffprobe string, renew Renewer) *Service {
 	t.Helper()
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
-	sources, err := source.New(t.TempDir(), func() int64 { return 1 << 30 }, opener, logger)
+	sources, err := source.New(t.TempDir(), func() source.Policy { return source.Policy{Limit: 1 << 30} }, opener, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -113,10 +114,30 @@ func newServiceOn(t *testing.T, pool *pgxpool.Pool, opener source.Opener, ffprob
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = s.Close() })
+	// A warm Plan started reads its version into the cache in the
+	// background (see warm): it is stopped, and waited for, before the
+	// cache closes. Left running, it would open the version's source again
+	// in the closed cache and write its blocks into the test's folder as
+	// it is removed.
+	t.Cleanup(func() {
+		for {
+			s.warmMu.Lock()
+			for _, run := range s.warming {
+				run.cancel()
+			}
+			left := len(s.warming)
+			s.warmMu.Unlock()
+			if left == 0 {
+				return
+			}
+			time.Sleep(time.Millisecond)
+		}
+	})
 	return s
 }
 
 func TestServeRedirectsOnlyWhenThePlayerCanFetchTheSource(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name     string
 		version  library.Version
@@ -127,8 +148,13 @@ func TestServeRedirectsOnlyWhenThePlayerCanFetchTheSource(t *testing.T) {
 		{"source needing headers", library.Version{URL: "https://93.184.216.34/movie.mkv", Headers: map[string]string{"Referer": "https://site.example/"}}, false, false},
 		{"source on the local network", library.Version{URL: "http://192.168.0.10:3000/movie.mkv"}, false, false},
 		{"player that cannot follow redirects", library.Version{URL: "https://93.184.216.34/movie.mkv"}, true, false},
+		// An IPTV source's default user agent is Polyfin's own: the player
+		// is still sent to the source, with its own.
+		{"source with Polyfin's user agent", library.Version{URL: "https://93.184.216.34/movie.mkv", UserAgent: "Browser/1"}, false, true},
+		{"source with Polyfin's user agent, relayed", library.Version{URL: "https://93.184.216.34/movie.mkv", UserAgent: "Browser/1"}, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			origin := &fakeSource{body: []byte("\x1a\x45\xdf\xa3")}
 			s := newService(t, origin, "ffprobe", nil)
 			tc.version.ID = accounts.ID{1}
@@ -148,7 +174,7 @@ func TestServeRedirectsOnlyWhenThePlayerCanFetchTheSource(t *testing.T) {
 					t.Fatalf("got %d to %q", response.Code, response.Header().Get("Location"))
 				}
 				// The source was checked before the player was sent to it.
-				if len(origin.requests) != 1 || origin.requests[0].Get("Range") != "bytes=0-0" {
+				if len(origin.requests) != 1 || origin.requests[0].Get("Range") != "bytes=0-0" || origin.requests[0].Get("User-Agent") != tc.version.UserAgent {
 					t.Errorf("checks: %v", origin.requests)
 				}
 				return
@@ -161,7 +187,7 @@ func TestServeRedirectsOnlyWhenThePlayerCanFetchTheSource(t *testing.T) {
 				t.Error("a source's cookie reached the player")
 			}
 			sent := origin.requests[0]
-			if sent.Get("Range") != "bytes=0-3" || sent.Get("Referer") != tc.version.Headers["Referer"] {
+			if sent.Get("Range") != "bytes=0-3" || sent.Get("Referer") != tc.version.Headers["Referer"] || sent.Get("User-Agent") != tc.version.UserAgent {
 				t.Errorf("headers sent to the source: %v", sent)
 			}
 		})
@@ -169,6 +195,7 @@ func TestServeRedirectsOnlyWhenThePlayerCanFetchTheSource(t *testing.T) {
 }
 
 func TestServeRefusesSourcesThatDoNotAnswer(t *testing.T) {
+	t.Parallel()
 	origin := &fakeSource{status: http.StatusNotFound}
 	s := newService(t, origin, "ffprobe", nil)
 	version := library.Version{ID: accounts.ID{2}, URL: "https://93.184.216.34/gone.mkv"}
@@ -187,6 +214,7 @@ func TestServeRefusesSourcesThatDoNotAnswer(t *testing.T) {
 }
 
 func TestExpiredLinksAreRenewedBeforeServing(t *testing.T) {
+	t.Parallel()
 	const old, fresh = "https://93.184.216.34/old.mkv", "https://93.184.216.34/new.mkv"
 	for _, relay := range []bool{false, true} {
 		origin := &fakeSource{body: []byte("\x1a\x45\xdf\xa3"), expired: map[string]bool{old: true}}
@@ -230,7 +258,7 @@ func fakeProbe(t *testing.T, output string, fail bool) (string, func() int) {
 		script += "cat " + result + "\n"
 	}
 	path := filepath.Join(dir, "ffprobe")
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+	if err := process.WriteExecutable(path, strings.NewReader(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return path, func() int {
@@ -240,6 +268,7 @@ func fakeProbe(t *testing.T, output string, fail bool) (string, func() int) {
 }
 
 func TestAnalysesAreKept(t *testing.T) {
+	t.Parallel()
 	probe, err := os.ReadFile(filepath.Join(playbackFixtures, "probes", "h264-aac-mp4.json"))
 	if err != nil {
 		t.Fatal(err)
@@ -270,17 +299,41 @@ func TestAnalysesAreKept(t *testing.T) {
 }
 
 func TestAnalysesAreSavedWhenTheAppStopsWaiting(t *testing.T) {
+	t.Parallel()
 	probe, err := os.ReadFile(filepath.Join(playbackFixtures, "probes", "h264-aac-mp4.json"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	path, _ := fakeProbe(t, string(probe), false)
+	path, runs := fakeProbe(t, string(probe), false)
+	// ffprobe answers once released.
+	released := filepath.Join(t.TempDir(), "released")
+	script, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	held := strings.Replace(string(script), "cat ", "while [ ! -f "+released+" ]; do sleep 0.05; done\ncat ", 1)
+	if err := process.WriteExecutable(path, strings.NewReader(held), 0o700); err != nil {
+		t.Fatal(err)
+	}
 	s := newService(t, &fileSource{data: make([]byte, 1000)}, path, nil)
 	version := library.Version{ID: accounts.ID{8}, URL: "https://93.184.216.34/movie.mp4", Size: 1234}
-	// The app stopped waiting before the analysis ended.
+	// The app stops waiting once the analysis started, before it ended.
 	ctx, cancel := context.WithCancel(t.Context())
+	analyzed := make(chan error, 1)
+	go func() {
+		_, err := s.Analyze(ctx, version)
+		analyzed <- err
+	}()
+	for deadline := time.Now().Add(time.Minute); runs() == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("ffprobe did not start")
+		}
+	}
 	cancel()
-	if _, err := s.Analyze(ctx, version); err != nil {
+	if err := <-analyzed; !errors.Is(err, context.Canceled) {
+		t.Fatalf("the request that stopped waiting got %v", err)
+	}
+	if err := os.WriteFile(released, nil, 0o600); err != nil {
 		t.Fatal(err)
 	}
 	// Polyfin, once restarted, finds it in the database.
@@ -289,12 +342,52 @@ func TestAnalysesAreSavedWhenTheAppStopsWaiting(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer restarted.Close()
-	if _, ok := restarted.Analyzed(t.Context(), version.ID); !ok {
-		t.Error("the analysis was not saved")
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(20 * time.Millisecond) {
+		if _, ok := restarted.Analyzed(t.Context(), version.ID); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("the analysis was not saved")
+		}
+	}
+}
+
+// An analysis whose caller stopped waiting before it started, as a play
+// that answered with another version before reaching this one, still runs
+// and is kept, as the play promised: the caller is told it stopped
+// waiting, and nothing is kept as the version's failure.
+func TestAnAnalysisWhoseCallerLeftBeforeItStartedStillRuns(t *testing.T) {
+	t.Parallel()
+	probe, err := os.ReadFile(filepath.Join(playbackFixtures, "probes", "h264-aac-mp4.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, runs := fakeProbe(t, string(probe), false)
+	s := newService(t, &fileSource{data: make([]byte, 1000)}, path, nil)
+	version := library.Version{ID: accounts.ID{9}, URL: "https://93.184.216.34/movie.mp4", Size: 1234}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	if _, err := s.Analyze(ctx, version); !errors.Is(err, context.Canceled) {
+		t.Fatalf("the request that stopped waiting got %v", err)
+	}
+	for deadline := time.Now().Add(time.Minute); ; time.Sleep(20 * time.Millisecond) {
+		if _, ok := s.Analyzed(t.Context(), version.ID); ok {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the analysis did not run (ffprobe ran %d times)", runs())
+		}
+	}
+	if s.Failed(version.ID) {
+		t.Error("the version is kept as failed")
+	}
+	if _, err := s.Analyze(t.Context(), version); err != nil || runs() != 1 {
+		t.Errorf("the next play: %v, ffprobe ran %d times", err, runs())
 	}
 }
 
 func TestShortClipsStandingInForTheTitleAreRefused(t *testing.T) {
+	t.Parallel()
 	clip := `{"format": {"filename": "http://127.0.0.1/x", "format_name": "mov,mp4", "duration": "30.000000"},
 		"streams": [{"index": 0, "codec_type": "video", "codec_name": "h264", "width": 3840, "height": 2160}]}`
 	path, runs := fakeProbe(t, clip, false)
@@ -318,6 +411,7 @@ func TestShortClipsStandingInForTheTitleAreRefused(t *testing.T) {
 }
 
 func TestUnreadableVersionsAreNotAnalyzedAgain(t *testing.T) {
+	t.Parallel()
 	path, runs := fakeProbe(t, "", true)
 	s := newService(t, &fileSource{data: make([]byte, 1000)}, path, nil)
 	version := library.Version{ID: accounts.ID{4}, URL: "https://93.184.216.34/page.html"}
@@ -332,9 +426,9 @@ func TestUnreadableVersionsAreNotAnalyzedAgain(t *testing.T) {
 }
 
 func TestSessionsFollowReports(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 10, 2, 20, 0, 0, 0, time.UTC)
-	sessions := NewSessions()
-	sessions.now = func() time.Time { return now }
+	sessions := NewSessions(func() time.Time { return now })
 	device, user, item := accounts.ID{1}, accounts.ID{2}, accounts.ID{3}
 	sessions.Start(device, user, PlayState{Item: item, MediaSourceID: "source", PlayMethod: "DirectPlay", CanSeek: true, Position: time.Minute})
 

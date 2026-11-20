@@ -16,17 +16,17 @@ func TestReleaseTitles(t *testing.T) {
 		{"Friends.FRENCH.S01E01.mkv", "friends"},
 		{"", ""},
 	} {
-		if got := releaseTitle(c.file); got != c.title {
+		if got := exactReleaseTitle(c.file); got != c.title {
 			t.Errorf("%q: %q, want %q", c.file, got, c.title)
 		}
 	}
-	if !sameReleaseTitle("friends", matchKey("Friends")) || sameReleaseTitle("smiling friends", matchKey("Friends")) {
+	if !exactSameReleaseTitle("friends", exactMatchKey("Friends")) || exactSameReleaseTitle("smiling friends", exactMatchKey("Friends")) {
 		t.Error("Friends and Smiling Friends are told apart wrong")
 	}
-	if !otherTitleWith("smiling friends", "friends") || otherTitleWith("friends", "friends") || otherTitleWith("movie", "test movie") {
+	if !exactOtherTitleWith("smiling friends", "friends") || exactOtherTitleWith("friends", "friends") || exactOtherTitleWith("movie", "test movie") {
 		t.Error("only longer titles holding the title are other titles")
 	}
-	if !sameReleaseTitle("spider man no way home", matchKey("Spider-Man: No Way Home")) || !sameReleaseTitle("office", matchKey("The Office")) {
+	if !exactSameReleaseTitle("spider man no way home", exactMatchKey("Spider-Man: No Way Home")) || !exactSameReleaseTitle("office", exactMatchKey("The Office")) {
 		t.Error("punctuation or the leading the counts")
 	}
 }
@@ -69,7 +69,7 @@ func TestMismatchedFiles(t *testing.T) {
 		{episode("VisionQuest", 1, 1), "VisionQuest.S01.1080p.mkv", false},
 		{episode("Friends", 1, 1), "[Group] Friends - 01 [1080p].mkv", false},
 	} {
-		if got := mismatched(c.t, matchKey(c.t.name), c.file); got != c.drop {
+		if got := exactMismatched(c.t, exactMatchKey(c.t.name), c.file); got != c.drop {
 			t.Errorf("%q for %q: left out %v, want %v", c.file, c.t.name, got, c.drop)
 		}
 	}

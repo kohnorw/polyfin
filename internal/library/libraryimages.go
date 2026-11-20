@@ -1,8 +1,8 @@
 package library
 
 import (
-	"cmp"
 	"context"
+	"errors"
 	"sync"
 	"time"
 
@@ -40,12 +40,21 @@ import (
 // its pages are read again.
 const automaticImageWait = 5 * time.Second
 
+// foundImage is a library's automatic image: its URL, and whether it is
+// wide, a backdrop or a wide poster, rather than a poster or music
+// artwork.
+type foundImage struct {
+	url  string
+	wide bool
+}
+
 // automaticImage returns the image a library shows when it finds its own
 // (see automaticImageOf) without waiting for an addon: the one remembered,
 // else the one the first page kept gives, else recorded, the image the
-// library's record remembers, while it is looked up in the background. src
-// is the library's catalog, narrowed to its genre (see catalogSource).
-func (s *Service) automaticImage(ctx context.Context, src source, recorded func() string) string {
+// library's record remembers, while it is looked up in the background,
+// taken as wide as automatic images are first looked for among backdrops.
+// src is the library's catalog, narrowed to its genre (see catalogSource).
+func (s *Service) automaticImage(ctx context.Context, src source, recorded func() string) foundImage {
 	key := src.key(0)
 	if kept, ok := s.libraryImages.Get(key); ok {
 		if !kept.fresh(s.now(), s.catalogLife()) {
@@ -59,9 +68,9 @@ func (s *Service) automaticImage(ctx context.Context, src source, recorded func(
 	}
 	// A music catalog's pages are not kept here.
 	if !src.addon.addon.HasMusic() {
-		if url, err := s.automaticImageOf(withKeptOnly(ctx), src); err == nil && url != "" {
-			s.libraryImages.Put(key, fetched[string]{url, s.now()})
-			return url
+		if found, err := s.automaticImageOf(withKeptOnly(ctx), src); err == nil && found.url != "" {
+			s.libraryImages.Put(key, fetched[foundImage]{found, s.now()})
+			return found
 		}
 	}
 	due := func() bool { _, found := s.libraryImages.Get(key); return !found }
@@ -69,12 +78,12 @@ func (s *Service) automaticImage(ctx context.Context, src source, recorded func(
 		s.findImage(ctx, src)
 		return nil
 	})
-	return recorded()
+	return foundImage{recorded(), true}
 }
 
 // lookUpImage returns a library's automatic image, waiting at most
 // automaticImageWait for its catalog when it is not remembered fresh.
-func (s *Service) lookUpImage(ctx context.Context, src source) string {
+func (s *Service) lookUpImage(ctx context.Context, src source) foundImage {
 	key := src.key(0)
 	if kept, ok := s.libraryImages.Get(key); ok && kept.fresh(s.now(), s.catalogLife()) {
 		return kept.value
@@ -86,8 +95,8 @@ func (s *Service) lookUpImage(ctx context.Context, src source) string {
 	})
 	// A lookup started in the background answers nothing: it remembered
 	// the image.
-	if url, ok := result.(string); ok {
-		return url
+	if found, ok := result.(foundImage); ok {
+		return found
 	}
 	kept, _ := s.libraryImages.Get(key)
 	return kept.value
@@ -100,18 +109,18 @@ func imageLookup(src source) string {
 // findImage looks a library's automatic image up and remembers it. A
 // catalog that cannot be read keeps the image remembered, if any, else
 // shows none, until the catalog refresh age.
-func (s *Service) findImage(ctx context.Context, src source) string {
+func (s *Service) findImage(ctx context.Context, src source) foundImage {
 	key := src.key(0)
 	ctx, cancel := context.WithTimeout(ctx, automaticImageWait)
 	defer cancel()
-	url, err := s.automaticImageOf(ctx, src)
+	found, err := s.automaticImageOf(ctx, src)
 	if err != nil {
-		s.logger.Debug("A library's image could not be found", "addon", src.addon.addon.Manifest.Name, "catalog", src.catalog.ID, "error", err)
+		s.logger.Debug("A library's image could not be found", "addon", src.addon.addon.LogName(), "catalog", src.catalog.ID, "error", err)
 		kept, _ := s.libraryImages.Get(key)
-		url = kept.value
+		found = kept.value
 	}
-	s.libraryImages.Put(key, fetched[string]{url, s.now()})
-	return url
+	s.libraryImages.Put(key, fetched[foundImage]{found, s.now()})
+	return found
 }
 
 // automaticImageOf finds a library's image in the first page of its
@@ -120,47 +129,50 @@ func (s *Service) findImage(ctx context.Context, src source) string {
 // music library, the artwork of the first item that has some. My music,
 // listed for each user from their own music, has none: it is not a row the
 // addon lists.
-func (s *Service) automaticImageOf(ctx context.Context, src source) (string, error) {
+func (s *Service) automaticImageOf(ctx context.Context, src source) (foundImage, error) {
 	if entry := src.addon; entry.addon.HasMusic() {
 		row, ok := entry.addon.Music.Catalog(src.catalog.ID)
 		if !ok {
-			return "", nil
+			return foundImage{}, nil
 		}
 		page, err := s.musicCatalogPage(ctx, entry, row, 0)
 		if err != nil {
-			return "", err
+			return foundImage{}, err
 		}
 		for _, r := range itemRecords(entry, page.items, nil) {
 			if r.Music != nil && r.Music.Artwork != "" {
-				return r.Music.Artwork, nil
+				return foundImage{url: r.Music.Artwork}, nil
 			}
 		}
-		return "", nil
+		return foundImage{}, nil
 	}
 	metas, err := s.page(ctx, source{addon: src.addon, catalog: src.catalog, genre: src.genre}, 0)
 	if err != nil {
-		return "", err
+		return foundImage{}, err
 	}
-	for _, pick := range []func(stremio.Meta) string{
-		func(m stremio.Meta) string { return m.Background },
-		func(m stremio.Meta) string { return m.LandscapePoster },
-		func(m stremio.Meta) string { return m.Poster },
+	for _, pick := range []struct {
+		url  func(stremio.Meta) string
+		wide bool
+	}{
+		{func(m stremio.Meta) string { return m.Background }, true},
+		{func(m stremio.Meta) string { return m.LandscapePoster }, true},
+		{func(m stremio.Meta) string { return m.Poster }, false},
 	} {
 		for _, meta := range metas {
-			if url := pick(meta); url != "" {
-				return url, nil
+			if url := pick.url(meta); url != "" {
+				return foundImage{url, pick.wide}, nil
 			}
 		}
 	}
-	return "", nil
+	return foundImage{}, nil
 }
 
 // automaticImages gives the automatic images of the libraries that find
-// their own, "" for the others, without waiting for an addon (see
+// their own, none for the others, without waiting for an addon (see
 // automaticImage): the libraries' records, read together, give those not
 // remembered.
-func (s *Service) automaticImages(ctx context.Context, libraries []library) []string {
-	images := make([]string, len(libraries))
+func (s *Service) automaticImages(ctx context.Context, libraries []library) []foundImage {
+	images := make([]foundImage, len(libraries))
 	var ids []accounts.ID
 	for _, l := range libraries {
 		if l.image == addons.LibraryImageAutomatic {
@@ -185,12 +197,12 @@ func (s *Service) automaticImages(ctx context.Context, libraries []library) []st
 }
 
 // libraryRecord is what Polyfin remembers of a library: its catalog, and
-// its automatic image, if any. Its key keeps the catalog type its
-// identifier comes from (see LibraryID).
+// its automatic image, if any. Its key keeps the catalog type and
+// identifier its identifier comes from (see LibraryID).
 func libraryRecord(l library, image string) record {
 	addon := l.addon.addon.ID
-	keyType := cmp.Or(l.addon.addon.LibraryKeyTypes[l.catalog.ID], l.catalog.Type)
-	return record{ID: l.item.ID, Key: libraryKey(addon, keyType, l.catalog.ID), Kind: KindLibrary, Addon: &addon,
+	key := l.addon.addon.LibraryKey(l.catalog.Type, l.catalog.ID)
+	return record{ID: l.item.ID, Key: libraryKey(addon, key.Type, key.ID), Kind: KindLibrary, Addon: &addon,
 		CatalogType: l.catalog.Type, CatalogID: l.catalog.ID, Confined: l.addon.confined, Poster: image}
 }
 
@@ -205,9 +217,11 @@ type LibraryImage struct {
 }
 
 // LibraryImages tells the image each of a scope's catalogs shows as a
-// library (see addons.Store.Libraries), confined when the scope's addons
-// may only reach public addresses. Catalogs that are not enabled
-// libraries have no item and show none; live TV catalogs make no library.
+// library (see addons.Store.Libraries). confined tells a member's scope,
+// whose addons may only reach public addresses; any other addon is
+// confined unless it is on a local network (see addons.Addon.Confined).
+// Catalogs that are not enabled libraries have no item and show none;
+// live TV catalogs make no library.
 // Automatic images are looked up as apps would, and remembered for the
 // libraries' items, so that the image can be loaded at once; generated
 // ones are chosen from what Polyfin keeps of the catalogs.
@@ -219,12 +233,12 @@ func (s *Service) LibraryImages(ctx context.Context, scope addons.Scope, confine
 	settings := s.settings()
 	// The view generated images read the catalogs in: the scope's
 	// enabled addons, as everyone sees them.
-	v := view{catalogLimit: settings.CatalogLimit, channelLimit: settings.ChannelLimit}.unfiltered()
+	v := view{catalogLimit: settings.CatalogLimit, channelLimit: settings.ChannelLimit, country: settings.RatingCountry}.unfiltered()
 	byID := map[accounts.ID]addons.Addon{}
 	for _, addon := range list {
 		byID[addon.ID] = addon
 		if addon.Enabled {
-			v.addons = append(v.addons, installed{addon: addon, confined: confined, shared: scope.Owner == nil})
+			v.addons = append(v.addons, installed{addon: addon, confined: addon.Confined(confined), shared: scope.Owner == nil})
 		}
 	}
 	// The libraries' names, as apps list them.
@@ -262,13 +276,13 @@ func (s *Service) LibraryImages(ctx context.Context, scope addons.Scope, confine
 		if !ok || !addon.Enabled {
 			continue
 		}
-		l := library{item: Item{ID: id, Kind: KindLibrary, Name: names[i]}, serverName: names[i], addon: installed{addon: addon, confined: confined, shared: scope.Owner == nil},
+		l := library{item: Item{ID: id, Kind: KindLibrary, Name: names[i]}, serverName: names[i], addon: installed{addon: addon, confined: addon.Confined(confined), shared: scope.Owner == nil},
 			catalog: c.Catalog, genre: c.Genre, maxItems: c.MaxItems, image: c.Image}
 		group.Go(func() error {
 			var image string
 			switch l.image {
 			case addons.LibraryImageAutomatic:
-				image = s.lookUpImage(ctx, l.catalogSource())
+				image = s.lookUpImage(ctx, l.catalogSource()).url
 			case addons.LibraryImageGenerated:
 				image, _ = s.libraryImage(ctx, v, l)
 			}
@@ -285,23 +299,15 @@ func (s *Service) LibraryImages(ctx context.Context, scope addons.Scope, confine
 
 // DownloadImage downloads the picture at address once, from public
 // addresses only when confined, and keeps it as an item's uploaded
-// artwork of imageType (see UploadImage).
+// artwork of imageType (see UploadImage). What its bytes tell is no
+// picture is an invalid image, as an upload of it is.
 func (s *Service) DownloadImage(ctx context.Context, id accounts.ID, imageType, address string, confined bool) error {
 	data, _, err := s.client.Image(ctx, address, confined)
+	if errors.Is(err, stremio.ErrNoPicture) {
+		return accounts.ErrInvalidImage
+	}
 	if err != nil {
 		return err
 	}
 	return s.UploadImage(ctx, id, imageType, data)
-}
-
-// DeleteLibraryImages drops the images uploaded for the libraries of a
-// removed addon: those of the items of every catalog of its manifest,
-// whether or not the catalog was an enabled library. A library merely
-// disabled keeps its image, for when it is enabled again.
-func (s *Service) DeleteLibraryImages(ctx context.Context, addon addons.Addon) error {
-	items := make([]accounts.ID, 0, len(addon.Manifest.Catalogs))
-	for _, catalog := range addon.Manifest.Catalogs {
-		items = append(items, LibraryID(addons.Library{AddonID: addon.ID, Catalog: catalog, KeyType: addon.LibraryKeyTypes[catalog.ID]}))
-	}
-	return s.deleteUploadedImages(ctx, items)
 }

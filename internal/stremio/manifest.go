@@ -30,6 +30,29 @@ type ManifestBehavior struct {
 	// EpgProvider marks an addon whose live TV catalogs taking the date
 	// extra return a programme guide, Stremio's Native EPG.
 	EpgProvider bool `json:"epgProvider,omitempty"`
+	// Configurable marks an addon with a configure page (see
+	// ConfigureURL).
+	Configurable bool `json:"configurable,omitempty"`
+}
+
+// ConfigureURL is the address of the configure page of the addon
+// manifestURL installs, and whether it has one: its manifest URL with the
+// manifest.json ending its path replaced by configure, the query kept, as
+// Stremio opens it (stremio-web src/routes/Addons/Addons.js, line 107 at
+// ca3d0ec1: transportUrl.replace('manifest.json', 'configure')). An
+// address whose path does not end in manifest.json has none. It holds
+// the addon's settings and keys, as the manifest URL does: it is never
+// logged.
+func ConfigureURL(manifestURL string) (string, bool) {
+	parsed, err := url.Parse(manifestURL)
+	if err != nil || parsed.Host == "" || !strings.HasSuffix(parsed.Path, "/manifest.json") {
+		return "", false
+	}
+	parsed.Path = strings.TrimSuffix(parsed.Path, "manifest.json") + "configure"
+	if parsed.RawPath != "" {
+		parsed.RawPath = strings.TrimSuffix(parsed.RawPath, "manifest.json") + "configure"
+	}
+	return parsed.String(), true
 }
 
 // Resource is a resource the addon serves. Manifests list resources either
@@ -86,9 +109,11 @@ func (c *Catalog) UnmarshalJSON(data []byte) error {
 			c.Extra = append(c.Extra, Extra{Name: name, IsRequired: slices.Contains(raw.ExtraRequired, name)})
 		}
 	}
-	if c.Name == "" {
+	// A catalog without a name, or named only spaces, is named after its id.
+	if c.Name = strings.TrimSpace(c.Name); c.Name == "" {
 		c.Name = c.ID
 	}
+	c.Name = Cut(c.Name, MaxName)
 	return nil
 }
 
@@ -150,6 +175,9 @@ func ParseManifest(data []byte) (Manifest, error) {
 	if manifest.Logo != "" && !strings.HasPrefix(manifest.Logo, "https://") {
 		manifest.Logo = ""
 	}
+	manifest.Name = Cut(manifest.Name, MaxName)
+	manifest.Description = Cut(manifest.Description, MaxOverview)
+	manifest.Logo = address(manifest.Logo)
 	return manifest, nil
 }
 
@@ -192,7 +220,30 @@ func RedactManifestURL(manifestURL string) string {
 	return parsed.Scheme + "://" + parsed.Host + "/…/manifest.json"
 }
 
-// BaseURL is the address resources are requested under.
+// BaseURL is the key the addon manifestURL installs is known by, in Health
+// and the metrics: its manifest URL without /manifest.json. A manifest URL
+// with a query stays whole, so that installs differing only by their query
+// stay apart. Resources are requested at ResourceURL.
 func BaseURL(manifestURL string) string {
 	return strings.TrimSuffix(manifestURL, "/manifest.json")
+}
+
+// SplitManifestURL returns the address the resources of the addon
+// manifestURL installs are under, its manifest URL's path without
+// /manifest.json, and the manifest URL's query, as it is written.
+func SplitManifestURL(manifestURL string) (base, rawQuery string) {
+	base, rawQuery, _ = strings.Cut(manifestURL, "?")
+	return strings.TrimSuffix(base, "/manifest.json"), rawQuery
+}
+
+// ResourceURL is the address of the resource at path, such as
+// /stream/movie/tt1.json, of the addon manifestURL installs: path takes
+// the place of /manifest.json, and the manifest URL's query, in which some
+// addons keep the user's token, follows it, as Stremio requests it.
+func ResourceURL(manifestURL, path string) string {
+	base, query := SplitManifestURL(manifestURL)
+	if query == "" {
+		return base + path
+	}
+	return base + path + "?" + query
 }

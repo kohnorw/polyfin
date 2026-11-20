@@ -1,0 +1,16 @@
+diff --git a/assets/extensions/preferences.js b/assets/extensions/preferences.js
+index fabda8f..9ff78a7 100644
+--- a/assets/extensions/preferences.js
++++ b/assets/extensions/preferences.js
+@@ -749,8 +749,10 @@
+         return parts.slice(1).map((_, index) => parts.slice(0, index + 1).join('.'));
+     }));
+     const THEME_VARIABLES_BY_NAME = new Map(THEME_VARIABLES.map(variable => [variable.name, variable]));
++    // Recommended profile - The starting settings, the loader's choices included: applying it returns an
++    // account to the server's choices, as Reset to defaults and Delete saved settings do.
+     const RECOMMENDED_PROFILE_SETTINGS = {};
+-    for (const [path, value] of Object.entries(RECOMMENDED_VALUES)) writePath(RECOMMENDED_PROFILE_SETTINGS, path, value);
++    for (const path of Object.keys(RECOMMENDED_VALUES)) writePath(RECOMMENDED_PROFILE_SETTINGS, path, startingValue(path));
+     // Normalize - Every field once: its saved value when valid, else its default. Saves made before a
+     // field existed gain it; unknown entries are dropped.
+     function normalizePreferences(saved) {

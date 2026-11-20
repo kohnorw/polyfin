@@ -13,7 +13,6 @@ import (
 	"strings"
 	"sync/atomic"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -54,6 +53,14 @@ var metaTitles = []stremio.Meta{
 	{ID: "tt0017925", Type: "movie", Name: "The General", Year: "1926"},
 	{ID: "tt0015864", Type: "movie", Name: "The Gold Rush", Year: "1925", TmdbID: "962"},
 	{ID: "tt0041038", Type: "series", Name: "The Lone Ranger", Year: "1949–1957"},
+	{ID: "tt0042084", Type: "series", Name: "The Cisco Kid", Year: "1950–1956", Videos: []stremio.Video{
+		{ID: "tt0042084:0:1", Title: "Behind the Scenes", Season: 0, Episode: 1, Released: "1950-01-01T00:00:00.000Z"},
+		{ID: "tt0042084:1:1", Title: "The Gay Caballero", Season: 1, Episode: 1, Released: "1950-09-05T00:00:00.000Z"},
+		{ID: "tt0042084:1:2", Title: "Boomerang", Season: 1, Episode: 2, Released: "1950-09-12T00:00:00.000Z"},
+		{ID: "tt0042084:1:3", Title: "Counterfeit Money", Season: 1, Episode: 3, Released: "1950-09-19T00:00:00.000Z"},
+		{ID: "tt0042084:2:1", Title: "Phony Sheriff", Season: 2, Episode: 1, Released: "1951-09-04T00:00:00.000Z"},
+		{ID: "tt0042084:2:2", Title: "Water Rights", Season: 2, Episode: 2, Released: "1951-09-11T00:00:00.000Z"},
+	}},
 }
 
 // metaAddon is a metadata addon: searchable movie and series catalogs and
@@ -98,17 +105,32 @@ func newMetaAddon(t *testing.T) string {
 
 func newEnv(t *testing.T) env {
 	t.Helper()
+	return newEnvWith(t, newMetaAddon(t))
+}
+
+// newEnvWith is an environment whose server addons are those of
+// manifests, installed in their order.
+func newEnvWith(t *testing.T, manifests ...string) env {
+	t.Helper()
 	pool := migrated.New(t)
 	users, err := accounts.Open(t.Context(), pool)
 	if err != nil {
+		t.Fatal(err)
+	}
+	// Upstream's tests run with upstream's defaults, this fork's off.
+	settings := users.Settings()
+	settings.HideSpecials, settings.ExactTitleMatch, settings.HiddenReleases = false, false, []string{}
+	if _, err := users.UpdateSettings(t.Context(), settings); err != nil {
 		t.Fatal(err)
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client := stremio.NewClient("test")
 	store := addons.New(pool, client)
 	lib := library.New(pool, store, client, logger, users.Settings)
-	if _, err := store.Install(t.Context(), addons.Shared(), newMetaAddon(t), false); err != nil {
-		t.Fatal(err)
+	for _, manifest := range manifests {
+		if _, err := store.Install(t.Context(), addons.Shared(), manifest, false); err != nil {
+			t.Fatal(err)
+		}
 	}
 	titles := &countedTitles{Service: lib}
 	service := New(pool, store, titles, logger, users.Settings, nil)
@@ -134,18 +156,21 @@ func (e env) folder(kind string, files map[string]int) (addons.Addon, string) {
 	return addon, dir
 }
 
-// idle waits for the scan of a folder under way to end.
+// idle waits for the scans of a folder under way to end, however long
+// they take: a search an addon fails is tried again seconds later (see
+// serverWaits), and the tests running beside a scan slow it further. A
+// scan that never ends is left to the test binary's timeout, whose
+// report shows where it stands.
 func (e env) idle(id accounts.ID) {
-	e.t.Helper()
-	for deadline := time.Now().Add(10 * time.Second); time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+	for {
 		e.service.mu.Lock()
-		_, busy := e.service.running[id]
+		current, busy := e.service.running[id]
 		e.service.mu.Unlock()
 		if !busy {
 			return
 		}
+		<-current.done
 	}
-	e.t.Fatal("the scan did not end")
 }
 
 // files reads a folder's files: by path, the title matched or the reason.

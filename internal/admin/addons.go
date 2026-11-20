@@ -15,12 +15,19 @@ import (
 	"github.com/moodiness/polyfin/internal/iptv"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/localfiles"
+	"github.com/moodiness/polyfin/internal/serverfile"
 	"github.com/moodiness/polyfin/internal/stremio"
+	"github.com/moodiness/polyfin/internal/tmdb"
 )
 
+// addonJSON describes an addon. Name is the name it is shown under:
+// ChosenName, the one it was given, null for its manifest's, else
+// ManifestName.
 type addonJSON struct {
 	ID           string    `json:"id"`
 	Name         string    `json:"name"`
+	ChosenName   *string   `json:"chosenName"`
+	ManifestName string    `json:"manifestName"`
 	Version      string    `json:"version"`
 	Description  string    `json:"description"`
 	Logo         *string   `json:"logo"`
@@ -30,6 +37,14 @@ type addonJSON struct {
 	Types        []string  `json:"types"`
 	CatalogCount int       `json:"catalogCount"`
 	RefreshedAt  time.Time `json:"refreshedAt"`
+	// Configurable tells a Stremio or Eclipse addon with a configure
+	// page. Its address holds the addon's settings and keys, and is in no
+	// answer.
+	Configurable bool `json:"configurable"`
+	// ConfigureLink is the link Configure opens, signed for the caller and
+	// valid configureLinkLife (see configureLink); empty but for a
+	// configurable addon whose address the caller may replace.
+	ConfigureLink string `json:"configureLink,omitempty"`
 	// Kind is "stremio" for a Stremio addon, "eclipse" for an Eclipse
 	// music addon, which Music then describes, "m3u", "xtream" or
 	// "hdhomerun" for an IPTV source, which Source then describes, or
@@ -41,18 +56,174 @@ type addonJSON struct {
 	// Language is the language of a server addon's descriptions, empty
 	// for none (see addons.Addon.Language).
 	Language string `json:"language"`
+	// UsedBy is who uses a server addon; a user's own addon is used by
+	// everyone, its owner being the only one to see it.
+	UsedBy usedByJSON `json:"usedBy"`
+	// Network is where the source is, "local" or "public", as Polyfin
+	// last read it, empty while that is not told (see addons.Network):
+	// only a source on the local network, the server's or an
+	// administrator's own, may name addresses there.
+	Network string `json:"network"`
+	// EnabledLibraries is, in the answer to adding the addon only, how
+	// many of its catalogs that made libraries of.
+	EnabledLibraries *int `json:"enabledLibraries,omitempty"`
+	// LibraryLimit is, in the answer to adding the addon only,
+	// addons.DefaultLibraries when none of its catalogs became a library
+	// because the scope had that many already, though some would have
+	// (see addons.Addon.EnabledByDefault); 0 otherwise.
+	LibraryLimit int `json:"libraryLimit,omitempty"`
+	// Libraries tells, in the answer to Refresh, Refresh everything or a
+	// new address only, which libraries followed their catalog's new
+	// identifier and which were removed with their catalog.
+	Libraries *catalogChangesJSON `json:"libraries,omitempty"`
+}
+
+// catalogChangesJSON is what a manifest downloaded again did to an
+// addon's libraries (see addons.CatalogChanges).
+type catalogChangesJSON struct {
+	Followed []changedLibraryJSON `json:"followed"`
+	Removed  []changedLibraryJSON `json:"removed"`
+}
+
+// changedLibraryJSON is a library that followed its catalog's new
+// identifier, NewID, or was removed with its catalog, NewID empty.
+type changedLibraryJSON struct {
+	Name        string `json:"name"`
+	CatalogType string `json:"catalogType"`
+	CatalogID   string `json:"catalogId"`
+	NewID       string `json:"newId,omitempty"`
+}
+
+func newCatalogChangesJSON(changes addons.CatalogChanges) *catalogChangesJSON {
+	list := func(libraries []addons.ChangedLibrary) []changedLibraryJSON {
+		result := make([]changedLibraryJSON, 0, len(libraries))
+		for _, l := range libraries {
+			result = append(result, changedLibraryJSON{Name: l.Name, CatalogType: l.CatalogType, CatalogID: l.CatalogID, NewID: l.NewID})
+		}
+		return result
+	}
+	return &catalogChangesJSON{Followed: list(changes.Followed), Removed: list(changes.Removed)}
+}
+
+// usedByJSON is who uses a server addon (see addons.UsedBy): Mode
+// "everyone", or "listed" for the groups and users listed by identifier,
+// which may be none.
+type usedByJSON struct {
+	Mode   string   `json:"mode"`
+	Groups []string `json:"groups"`
+	Users  []string `json:"users"`
+}
+
+func newUsedByJSON(usedBy addons.UsedBy) usedByJSON {
+	result := usedByJSON{Mode: "everyone", Groups: []string{}, Users: []string{}}
+	if usedBy.Listed {
+		result.Mode = "listed"
+	}
+	for _, id := range usedBy.Groups {
+		result.Groups = append(result.Groups, id.String())
+	}
+	for _, id := range usedBy.Users {
+		result.Users = append(result.Users, id.String())
+	}
+	return result
+}
+
+// usedBy reads a Used by setting, nil for none, answering 400
+// invalid_used_by for an unknown mode or identifier, and for a setting
+// given to a scope that is not the server's. Lists given with everyone
+// are not kept.
+func usedBy(w http.ResponseWriter, scope addons.Scope, body *usedByJSON) (addons.UsedBy, bool) {
+	if body == nil {
+		return addons.UsedBy{}, true
+	}
+	result := addons.UsedBy{Listed: body.Mode == "listed"}
+	if body.Mode != "everyone" && body.Mode != "listed" || scope.Owner != nil {
+		writeError(w, http.StatusBadRequest, "invalid_used_by")
+		return addons.UsedBy{}, false
+	}
+	if !result.Listed {
+		return result, true
+	}
+	for _, list := range []struct {
+		from []string
+		to   *[]accounts.ID
+	}{{body.Groups, &result.Groups}, {body.Users, &result.Users}} {
+		for _, raw := range list.from {
+			id, err := accounts.ParseID(raw)
+			if err != nil {
+				writeError(w, http.StatusBadRequest, "invalid_used_by")
+				return addons.UsedBy{}, false
+			}
+			*list.to = append(*list.to, id)
+		}
+	}
+	return result, true
+}
+
+// AddonCaches forgets or makes old what an addon gave: its version lists
+// for titles, in memory and saved, telling how many it forgot (see
+// library.Service.ForgetAddonVersionLists), or its catalog pages,
+// descriptions, page sizes and version lists at once (see
+// library.Service.MarkAddonStale).
+type AddonCaches interface {
+	ForgetAddonVersionLists(ctx context.Context, addon accounts.ID) (int, error)
+	MarkAddonStale(ctx context.Context, addon accounts.ID) (library.StaleAddon, error)
+}
+
+// forgetVersionLists forgets the version lists of addon, whose address
+// was replaced: reconfigured, it may list other streams, which each title
+// asks it for again. A failure is logged, the address staying replaced.
+func (h *handler) forgetVersionLists(ctx context.Context, addon addons.Addon) {
+	if h.AddonCaches == nil {
+		return
+	}
+	forgotten, err := h.AddonCaches.ForgetAddonVersionLists(ctx, addon.ID)
+	if err != nil {
+		h.Logger.Warn("Forgetting the version lists of an addon whose address was replaced failed", "addon", addon.LogName(), "error", err)
+		return
+	}
+	h.Logger.Info("Forgot the version lists of an addon whose address was replaced", "addon", addon.LogName(), "lists", forgotten)
+}
+
+// usedByChanged writes to the activity log that the caller set who uses
+// the server addon addon, by the names of the groups, then the users,
+// listed.
+func (h *handler) usedByChanged(ctx context.Context, addon addons.Addon) {
+	var groups, users []string
+	if addon.UsedBy.Listed {
+		all, err := h.Accounts.Groups(ctx)
+		if err != nil {
+			h.Logger.Warn("The groups an addon is limited to could not be named", "error", err)
+		}
+		for _, group := range all {
+			if slices.Contains(addon.UsedBy.Groups, group.ID) {
+				groups = append(groups, group.Name)
+			}
+		}
+		for _, id := range addon.UsedBy.Users {
+			if user, err := h.Accounts.User(ctx, id); err == nil {
+				users = append(users, user.Name)
+			}
+		}
+		slices.Sort(groups)
+		slices.Sort(users)
+	}
+	h.Activity.AddonUsedBy(ctx, sessionFrom(ctx).User, addon.Name(), !addon.UsedBy.Listed, slices.Concat(groups, users))
 }
 
 // sourceJSON describes an IPTV source: its address, redacted, as it holds
 // credentials; how many entries its list has, how it was last fetched and
 // when it is fetched again; its import options and its line-up's counts.
 type sourceJSON struct {
-	Address   string      `json:"address"`
-	Channels  int         `json:"channels"`
-	CheckedAt *time.Time  `json:"checkedAt"`
-	FetchedAt *time.Time  `json:"fetchedAt"`
-	NextAt    *time.Time  `json:"nextAt"`
-	Error     string      `json:"error"`
+	Address   string     `json:"address"`
+	Channels  int        `json:"channels"`
+	CheckedAt *time.Time `json:"checkedAt"`
+	FetchedAt *time.Time `json:"fetchedAt"`
+	NextAt    *time.Time `json:"nextAt"`
+	Error     string     `json:"error"`
+	// UserAgent is the one its administrator set for its list and
+	// streams, empty for the default.
+	UserAgent string      `json:"userAgent"`
 	Options   optionsJSON `json:"options"`
 	Lineup    lineupJSON  `json:"lineup"`
 	VOD       vodJSON     `json:"vod"`
@@ -121,6 +292,10 @@ func newAddonJSON(addon addons.Addon) addonJSON {
 	if addon.Manifest.Logo != "" {
 		logo = &addon.Manifest.Logo
 	}
+	var chosen *string
+	if addon.ChosenName != "" {
+		chosen = &addon.ChosenName
+	}
 	types, resources := addon.Manifest.Types, addon.Manifest.ResourceNames()
 	if addon.Eclipse() {
 		types, resources = addon.Music.Types, addon.Music.Resources
@@ -138,7 +313,9 @@ func newAddonJSON(addon addons.Addon) addonJSON {
 	}
 	return addonJSON{
 		ID:           addon.ID.String(),
-		Name:         addon.Manifest.Name,
+		Name:         addon.Name(),
+		ChosenName:   chosen,
+		ManifestName: addon.Manifest.Name,
 		Version:      addon.Manifest.Version,
 		Description:  addon.Manifest.Description,
 		Logo:         logo,
@@ -148,9 +325,12 @@ func newAddonJSON(addon addons.Addon) addonJSON {
 		Types:        types,
 		CatalogCount: len(addon.Manifest.Catalogs),
 		RefreshedAt:  addon.RefreshedAt,
+		Configurable: addon.Configurable(),
 		Kind:         addon.Kind,
 		Music:        newMusicJSON(addon),
 		Language:     addon.Language,
+		UsedBy:       newUsedByJSON(addon.UsedBy),
+		Network:      string(addon.Network),
 	}
 }
 
@@ -159,6 +339,7 @@ func newAddonJSON(addon addons.Addon) addonJSON {
 func (h *handler) addonJSON(r *http.Request, scope addons.Scope, addon addons.Addon) (addonJSON, error) {
 	result := newAddonJSON(addon)
 	if addon.Stremio() || addon.Eclipse() {
+		result.ConfigureLink = h.configureLink(r, scope, addon)
 		return result, nil
 	}
 	if addon.Local() {
@@ -175,7 +356,7 @@ func (h *handler) addonJSON(r *http.Request, scope addons.Scope, addon addons.Ad
 	}
 	o, n, vod := source.Options, source.Lineup, source.VOD
 	result.Source = &sourceJSON{Address: result.ManifestURL, Channels: source.Channels, CheckedAt: source.CheckedAt, FetchedAt: source.FetchedAt,
-		NextAt: source.NextAt, Error: source.Error,
+		NextAt: source.NextAt, Error: source.Error, UserAgent: source.UserAgent,
 		Options: optionsJSON{Categories: o.Categories, Channels: o.Channels, Excluded: o.Excluded, NewChannels: o.NewChannels, Numbering: o.Numbering,
 			LiveTv: o.LiveTv, Movies: o.Movies, Series: o.Series, VODExcluded: o.VODExcluded, VODLibraries: o.VODLibraries, Enrichment: o.Enrichment,
 			FavoritesOnly: o.FavoritesOnly},
@@ -219,6 +400,19 @@ type libraryJSON struct {
 	// HideInMenus leaves an enabled library out of the web player's menus
 	// (see addons.Library.HideInMenus); false for any other catalog.
 	HideInMenus bool `json:"hideInMenus"`
+	// SkipLocal leaves out of an enabled library the titles local folders
+	// hold (see addons.Library.SkipLocal); Skippable tells whether the
+	// catalog takes it.
+	SkipLocal bool `json:"skipLocal"`
+	Skippable bool `json:"skippable"`
+	// ShowAs is how an enabled library shows its catalog's titles, one of
+	// ShowAsChoices (see addons.Library.ShowAs), null while none is chosen:
+	// a catalog of other videos then shows as home videos until Polyfin
+	// decides from its first page, an anime catalog as movies and shows,
+	// the others as listed. ShowAsChoices is empty for a catalog that
+	// takes none.
+	ShowAs        *string  `json:"showAs"`
+	ShowAsChoices []string `json:"showAsChoices"`
 	// ItemID is the library's item in Jellyfin apps, null for a catalog
 	// that is not an enabled library. Image is how it finds the image apps
 	// show on its tile: "none", "automatic", "generated", or "custom" when
@@ -233,6 +427,11 @@ type libraryJSON struct {
 	// library.
 	Guide  *libraryGuideJSON `json:"guide"`
 	Guides []guideJSON       `json:"guides"`
+	// Refreshable tells whether an enabled library of the server's has its
+	// descriptions read again on request, and Refresh how its last
+	// refresh since the server started stands, null for none.
+	Refreshable bool                `json:"refreshable"`
+	Refresh     *libraryRefreshJSON `json:"refresh"`
 }
 
 // libraryGuideJSON describes a live TV catalog's first XMLTV guide, as
@@ -312,10 +511,14 @@ func (h *handler) newLibraryGuideJSON(l addons.Library, refreshHours int) *libra
 }
 
 // redactGuideURL keeps a guide address's scheme and host: its path, query
-// and credentials may hold the user's.
+// and credentials may hold the user's. A file of the server is shown
+// whole: its path holds no credential.
 func redactGuideURL(guideURL string) string {
 	if guideURL == "" {
 		return ""
+	}
+	if path, ok := serverfile.Path(guideURL); ok {
+		return path
 	}
 	parsed, err := url.Parse(guideURL)
 	if err != nil {
@@ -329,20 +532,22 @@ func redactGuideURL(guideURL string) string {
 
 // writeLibraries answers a scope's libraries with the names apps show
 // them under. A user's own libraries follow the server's when they use
-// them, as in their apps; the server's are named as for a user without
+// them, as in their apps, those of the server's addons they use (see
+// addons.UsedBy); the server's are named as for a user without
 // libraries of their own. Live TV catalogs list channels, not a library:
 // they have no such name.
 func (h *handler) writeLibraries(w http.ResponseWriter, r *http.Request, scope addons.Scope, libraries []addons.Library) {
 	var shown []addons.Library
 	// A scope with an owner is the caller's own (see scope).
-	if scope.Owner != nil && sessionFrom(r.Context()).User.UseSharedAddons {
+	if user := sessionFrom(r.Context()).User; scope.Owner != nil && user.UseSharedAddons {
 		list, err := h.Addons.Libraries(r.Context(), addons.Shared())
 		if err != nil {
 			h.internalError(w, r, err)
 			return
 		}
 		shown = slices.DeleteFunc(list, func(l addons.Library) bool {
-			return !l.Enabled || !l.AddonActive || library.LiveCatalog(l.Catalog.Type)
+			addon, err := h.Addons.Find(r.Context(), l.AddonID)
+			return !l.Enabled || !l.AddonActive || library.LiveCatalog(l.Catalog.Type) || err != nil || !addon.UsedBy.Uses(user)
 		})
 	}
 	first := len(shown)
@@ -365,6 +570,19 @@ func (h *handler) writeLibraries(w http.ResponseWriter, r *http.Request, scope a
 			return
 		}
 	}
+	var refreshes map[accounts.ID]library.LibraryRefresh
+	kinds := map[accounts.ID]addons.Addon{}
+	if scope.Owner == nil && h.LibraryRefreshes != nil {
+		refreshes = h.LibraryRefreshes.LibraryRefreshes()
+		list, err := h.Addons.Addons(r.Context(), scope)
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		for _, addon := range list {
+			kinds[addon.ID] = addon
+		}
+	}
 	result := make([]libraryJSON, 0, len(libraries))
 	for i, l := range libraries {
 		entry := libraryJSON{
@@ -380,6 +598,8 @@ func (h *handler) writeLibraries(w http.ResponseWriter, r *http.Request, scope a
 			Genres:      []string{},
 			Filterable:  l.Filterable,
 			HideInMenus: l.HideInMenus,
+			SkipLocal:   l.SkipLocal,
+			Skippable:   l.Skippable,
 			Image:       l.Image,
 			Guide:       h.newLibraryGuideJSON(l, h.Accounts.Settings().LiveTvRefreshHours),
 			Guides:      h.newGuidesJSON(l.Guides, h.Accounts.Settings().LiveTvRefreshHours),
@@ -390,8 +610,21 @@ func (h *handler) writeLibraries(w http.ResponseWriter, r *http.Request, scope a
 		if l.Genre != "" {
 			entry.Genre = new(l.Genre)
 		}
+		if l.ShowAs != "" {
+			entry.ShowAs = new(l.ShowAs)
+		}
+		entry.ShowAsChoices = l.ShowAsChoices
+		if entry.ShowAsChoices == nil {
+			entry.ShowAsChoices = []string{}
+		}
 		if l.MaxItems > 0 {
 			entry.MaxItems = new(l.MaxItems)
+		}
+		if addon, ok := kinds[l.AddonID]; ok && l.Enabled {
+			entry.Refreshable = library.Refreshable(addon, l.Catalog)
+			if state, ok := refreshes[library.LibraryID(l)]; ok && entry.Refreshable {
+				entry.Refresh = newLibraryRefreshJSON(state)
+			}
 		}
 		if images != nil && images[i].ID != (accounts.ID{}) {
 			entry.ItemID = new(images[i].ID.String())
@@ -432,15 +665,38 @@ func confined(r *http.Request) bool {
 	return !sessionFrom(r.Context()).User.IsAdministrator
 }
 
-// personalAddonsRefused answers 403 personal_addons_disabled and reports
-// true when scope is the caller's own addons and the server or the caller's
-// own permission turned them off: such addons are kept, and may be turned
-// off or removed, but not added, replaced, refreshed or turned on.
-func (h *handler) personalAddonsRefused(w http.ResponseWriter, r *http.Request, scope addons.Scope) bool {
-	if scope.Owner == nil || h.Accounts.Settings().PersonalAddonsAllowed(sessionFrom(r.Context()).User) {
+// serverFileRefused answers 403 local_file_refused and reports true when
+// one of addresses is a file of the server and the caller is no
+// administrator: only administrators may have the server read its files.
+func serverFileRefused(w http.ResponseWriter, r *http.Request, addresses ...string) bool {
+	if !confined(r) || !slices.ContainsFunc(addresses, func(a string) bool { _, file := serverfile.Path(a); return file }) {
 		return false
 	}
-	writeError(w, http.StatusForbidden, "personal_addons_disabled")
+	writeError(w, http.StatusForbidden, "local_file_refused")
+	return true
+}
+
+// personalAddonsRefused answers 403 and reports true when scope is the
+// caller's own addons and their apps do not use them (see
+// library.viewSources): personal_addons_disabled while the server or the
+// caller's own permission turned them off, parental_control_own_sources
+// while the caller's parental control or blocked genres keep them to the
+// server's addons. Such addons and smart lists are kept, and may be turned
+// off or removed, but not added, replaced, refreshed, turned on or
+// changed.
+func (h *handler) personalAddonsRefused(w http.ResponseWriter, r *http.Request, scope addons.Scope) bool {
+	if scope.Owner == nil {
+		return false
+	}
+	user := sessionFrom(r.Context()).User
+	switch {
+	case !h.Accounts.Settings().PersonalAddonsAllowed(user):
+		writeError(w, http.StatusForbidden, "personal_addons_disabled")
+	case user.Restricted():
+		writeError(w, http.StatusForbidden, "parental_control_own_sources")
+	default:
+		return false
+	}
 	return true
 }
 
@@ -466,11 +722,19 @@ func addonError(w http.ResponseWriter, err error) bool {
 		{addons.ErrInvalidGuideURL, http.StatusBadRequest, "invalid_guide_url"},
 		{addons.ErrNotStremio, http.StatusBadRequest, "invalid_request"},
 		{addons.ErrInvalidLanguage, http.StatusBadRequest, "invalid_language"},
+		{addons.ErrInvalidUsedBy, http.StatusBadRequest, "invalid_used_by"},
 		{addons.ErrNotEclipse, http.StatusBadRequest, "invalid_request"},
+		{addons.ErrUsedByEveryone, http.StatusConflict, "used_by_everyone"},
+		{addons.ErrInvalidName, http.StatusBadRequest, "invalid_addon_name"},
+		{addons.ErrNotRenamable, http.StatusBadRequest, "addon_not_renamable"},
 		{addons.ErrKindChanged, http.StatusUnprocessableEntity, "addon_kind_changed"},
 		{eclipse.ErrInvalidSettings, http.StatusBadRequest, "invalid_addon_settings"},
 		{iptv.ErrInvalidName, http.StatusBadRequest, "invalid_source_name"},
 		{iptv.ErrInvalidAddress, http.StatusBadRequest, "invalid_source_address"},
+		{iptv.ErrInvalidUserAgent, http.StatusBadRequest, "invalid_user_agent"},
+		{iptv.ErrLocalFile, http.StatusForbidden, "local_file_refused"},
+		{serverfile.ErrMissing, http.StatusBadRequest, "file_missing"},
+		{serverfile.ErrUnreadable, http.StatusBadRequest, "file_unreadable"},
 		{localfiles.ErrInvalidName, http.StatusBadRequest, "invalid_folder_name"},
 		{localfiles.ErrInvalidPath, http.StatusBadRequest, "invalid_folder_path"},
 		{localfiles.ErrInvalidAddress, http.StatusBadRequest, "invalid_share_address"},
@@ -483,6 +747,10 @@ func addonError(w http.ResponseWriter, err error) bool {
 		{localfiles.ErrInvalidIMDb, http.StatusBadRequest, "invalid_imdb_id"},
 		{localfiles.ErrInvalidEpisode, http.StatusBadRequest, "invalid_episode"},
 		{localfiles.ErrSearchFailed, http.StatusBadGateway, "title_search_failed"},
+		{localfiles.ErrInvalidNumbering, http.StatusBadRequest, "invalid_numbering"},
+		{localfiles.ErrNoGroups, http.StatusBadGateway, "episode_groups_unreachable"},
+		{library.ErrUnknownGroup, http.StatusBadRequest, "unknown_episode_group"},
+		{tmdb.ErrNoKey, http.StatusConflict, "no_tmdb_key"},
 		{iptv.ErrInvalidList, http.StatusUnprocessableEntity, "invalid_channel_list"},
 		{iptv.ErrTooLarge, http.StatusUnprocessableEntity, "channel_list_too_large"},
 		{iptv.ErrLoginRefused, http.StatusUnprocessableEntity, "iptv_login_refused"},
@@ -519,6 +787,13 @@ func addonError(w http.ResponseWriter, err error) bool {
 }
 
 func (h *handler) answerAddon(w http.ResponseWriter, r *http.Request, scope addons.Scope, status int, addon addons.Addon, err error) {
+	h.answerAddonChanges(w, r, scope, status, addon, nil, err)
+}
+
+// answerAddonChanges answers with the addon and, unless nil, what its
+// manifest downloaded again did to its libraries.
+func (h *handler) answerAddonChanges(w http.ResponseWriter, r *http.Request, scope addons.Scope, status int, addon addons.Addon,
+	changes *addons.CatalogChanges, err error) {
 	if addonError(w, err) {
 		return
 	}
@@ -530,6 +805,9 @@ func (h *handler) answerAddon(w http.ResponseWriter, r *http.Request, scope addo
 	if err != nil {
 		h.internalError(w, r, err)
 		return
+	}
+	if changes != nil {
+		result.Libraries = newCatalogChangesJSON(*changes)
 	}
 	writeJSON(w, status, result)
 }
@@ -562,16 +840,56 @@ func (h *handler) installAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		ManifestURL string `json:"manifestUrl"`
+		ManifestURL string      `json:"manifestUrl"`
+		UsedBy      *usedByJSON `json:"usedBy"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	addon, err := h.Addons.Install(r.Context(), scope, body.ManifestURL, confined(r))
-	if err == nil {
-		h.Activity.AddonInstalled(r.Context(), sessionFrom(r.Context()).User, addon.Manifest.Name, addon.Manifest.Version, scope.Owner == nil)
+	limited, ok := usedBy(w, scope, body.UsedBy)
+	if !ok {
+		return
 	}
-	h.answerAddon(w, r, scope, http.StatusCreated, addon, err)
+	addon, err := h.Addons.InstallFor(r.Context(), scope, body.ManifestURL, confined(r), limited)
+	if addonError(w, err) {
+		return
+	}
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	h.Activity.AddonInstalled(r.Context(), sessionFrom(r.Context()).User, addon.Name(), addon.Manifest.Version, scope.Owner == nil)
+	if addon.UsedBy.Listed {
+		h.usedByChanged(r.Context(), addon)
+	}
+	result, err := h.addonJSON(r, scope, addon)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	// How many of its catalogs it made libraries of: none tells the admin
+	// app to say where its catalogs are, and why when the scope's
+	// libraries reached the limit of those made automatically.
+	libraries, err := h.Addons.Libraries(r.Context(), scope)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	enabled, total := 0, 0
+	for _, l := range libraries {
+		if !l.Enabled {
+			continue
+		}
+		total++
+		if l.AddonID == addon.ID {
+			enabled++
+		}
+	}
+	result.EnabledLibraries = &enabled
+	if enabled == 0 && total >= addons.DefaultLibraries && slices.ContainsFunc(addon.Manifest.Catalogs, addon.EnabledByDefault) {
+		result.LibraryLimit = addons.DefaultLibraries
+	}
+	writeJSON(w, http.StatusCreated, result)
 }
 
 func (h *handler) updateAddon(w http.ResponseWriter, r *http.Request) {
@@ -584,15 +902,21 @@ func (h *handler) updateAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Enabled     *bool   `json:"enabled"`
-		ManifestURL *string `json:"manifestUrl"`
-		Language    *string `json:"language"`
+		Enabled     *bool       `json:"enabled"`
+		ManifestURL *string     `json:"manifestUrl"`
+		Language    *string     `json:"language"`
+		UsedBy      *usedByJSON `json:"usedBy"`
+		Name        *string     `json:"name"`
 	}
 	if !decode(w, r, &body) {
 		return
 	}
-	if body.ManifestURL == nil && body.Enabled == nil && body.Language == nil {
+	if body.ManifestURL == nil && body.Enabled == nil && body.Language == nil && body.UsedBy == nil && body.Name == nil {
 		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	limited, ok := usedBy(w, scope, body.UsedBy)
+	if !ok {
 		return
 	}
 	if (body.ManifestURL != nil || (body.Enabled != nil && *body.Enabled)) && h.personalAddonsRefused(w, r, scope) {
@@ -605,9 +929,25 @@ func (h *handler) updateAddon(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var addon addons.Addon
+	var changes *addons.CatalogChanges
 	var err error
-	if body.ManifestURL != nil {
-		addon, err = h.Addons.Replace(r.Context(), scope, id, *body.ManifestURL, confined(r))
+	// A name comes first, so that a refused one changes nothing else. A
+	// user names their own addons even while they may not use them.
+	if body.Name != nil {
+		var before addons.Addon
+		if before, err = h.Addons.Find(r.Context(), id); err == nil {
+			addon, err = h.Addons.SetName(r.Context(), scope, id, *body.Name)
+		}
+		if err == nil && before.Name() != addon.Name() {
+			h.Activity.AddonRenamed(r.Context(), sessionFrom(r.Context()).User, before.Name(), addon.Name(), scope.Owner == nil)
+		}
+	}
+	if err == nil && body.ManifestURL != nil {
+		var replaced addons.CatalogChanges
+		if addon, replaced, err = h.Addons.Replace(r.Context(), scope, id, *body.ManifestURL, confined(r)); err == nil {
+			changes = &replaced
+			h.forgetVersionLists(r.Context(), addon)
+		}
 	}
 	if err == nil && body.Enabled != nil {
 		addon, err = h.Addons.SetEnabled(r.Context(), scope, id, *body.Enabled)
@@ -615,7 +955,53 @@ func (h *handler) updateAddon(w http.ResponseWriter, r *http.Request) {
 	if err == nil && body.Language != nil {
 		addon, err = h.Addons.SetLanguage(r.Context(), scope, id, *body.Language)
 	}
-	h.answerAddon(w, r, scope, http.StatusOK, addon, err)
+	if err == nil && body.UsedBy != nil {
+		var before addons.Addon
+		if before, err = h.Addons.Find(r.Context(), id); err == nil {
+			addon, err = h.Addons.SetUsedBy(r.Context(), id, limited)
+		}
+		if err == nil && !sameUsedBy(before.UsedBy, addon.UsedBy) {
+			h.usedByChanged(r.Context(), addon)
+		}
+	}
+	h.answerAddonChanges(w, r, scope, http.StatusOK, addon, changes, err)
+}
+
+// sameUsedBy reports whether two Used by settings, as stored, are the
+// same.
+func sameUsedBy(a, b addons.UsedBy) bool {
+	return a.Listed == b.Listed && slices.Equal(a.Groups, b.Groups) && slices.Equal(a.Users, b.Users)
+}
+
+// groupSource answers PUT (uses) or DELETE on a group's server source:
+// the group is listed in, or taken off, the source's Used by, the rest of
+// the setting as it is, and the answer is the source. A source used by
+// everyone is left unchanged: 409 used_by_everyone, as its Used by lists
+// no group to change.
+func (h *handler) groupSource(uses bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		group, ok := pathID(w, r, "id")
+		if !ok {
+			return
+		}
+		id, ok := pathID(w, r, "source")
+		if !ok {
+			return
+		}
+		_, err := h.Accounts.Group(r.Context(), group)
+		if accountError(w, err) {
+			return
+		}
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		addon, changed, err := h.Addons.SetGroupUse(r.Context(), id, group, uses)
+		if err == nil && changed {
+			h.usedByChanged(r.Context(), addon)
+		}
+		h.answerAddon(w, r, addons.Shared(), http.StatusOK, addon, err)
+	}
 }
 
 func (h *handler) refreshAddon(w http.ResponseWriter, r *http.Request) {
@@ -643,8 +1029,33 @@ func (h *handler) refreshAddon(w http.ResponseWriter, r *http.Request) {
 		h.answerAddon(w, r, scope, http.StatusOK, addon, errors.Join(err, findErr))
 		return
 	}
-	addon, err := h.Addons.Refresh(r.Context(), scope, id, confined(r))
-	h.answerAddon(w, r, scope, http.StatusOK, addon, err)
+	addon, changes, err := h.Addons.Refresh(r.Context(), scope, id, confined(r))
+	h.answerAddonChanges(w, r, scope, http.StatusOK, addon, &changes, err)
+}
+
+// refreshAddonAll answers Refresh everything on an addon's page: its
+// manifest is downloaded again, as Refresh does, then what Polyfin keeps
+// of its answers is made old or forgotten (see AddonCaches), to be asked
+// for again as it is next needed, not at once. An IPTV source or a local
+// folder is refused, as for Replace the address (ErrNotStremio).
+func (h *handler) refreshAddonAll(w http.ResponseWriter, r *http.Request) {
+	scope, ok := h.scope(w, r)
+	if !ok || h.personalAddonsRefused(w, r, scope) {
+		return
+	}
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	addon, changes, err := h.Addons.Refresh(r.Context(), scope, id, confined(r))
+	if err == nil && h.AddonCaches != nil {
+		var stale library.StaleAddon
+		if stale, err = h.AddonCaches.MarkAddonStale(context.WithoutCancel(r.Context()), addon.ID); err == nil {
+			h.Logger.Info("Made what an addon gave old, to be asked for again", "addon", addon.LogName(), "pages", stale.Pages,
+				"descriptions", stale.Descriptions, "lists", stale.VersionLists)
+		}
+	}
+	h.answerAddonChanges(w, r, scope, http.StatusOK, addon, &changes, err)
 }
 
 func (h *handler) removeAddon(w http.ResponseWriter, r *http.Request) {
@@ -656,13 +1067,7 @@ func (h *handler) removeAddon(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	// The addon is named in the activity log, which needs its name first.
-	installed, err := h.Addons.Addons(r.Context(), scope)
-	if err != nil {
-		h.internalError(w, r, err)
-		return
-	}
-	err = h.Addons.Remove(r.Context(), scope, id)
+	addon, err := h.Addons.Remove(r.Context(), scope, id)
 	if addonError(w, err) {
 		return
 	}
@@ -670,18 +1075,7 @@ func (h *handler) removeAddon(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
-	for _, addon := range installed {
-		if addon.ID == id {
-			h.Activity.AddonRemoved(r.Context(), sessionFrom(r.Context()).User, addon.Manifest.Name, scope.Owner == nil)
-			// The images uploaded for its libraries go with the addon, even
-			// when the request is abandoned; the addon is gone either way.
-			if h.LibraryImages != nil {
-				if err := h.LibraryImages.DeleteLibraryImages(context.WithoutCancel(r.Context()), addon); err != nil {
-					h.Logger.Warn("The images of a removed addon's libraries could not be deleted", "addon", addon.Manifest.Name, "error", err)
-				}
-			}
-		}
-	}
+	h.Activity.AddonRemoved(r.Context(), sessionFrom(r.Context()).User, addon.Name(), scope.Owner == nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -745,6 +1139,10 @@ func (h *handler) saveLibraries(w http.ResponseWriter, r *http.Request) {
 			// whole number is refused as a maximum, not as a request.
 			MaxItems    *float64 `json:"maxItems"`
 			HideInMenus bool     `json:"hideInMenus"`
+			SkipLocal   bool     `json:"skipLocal"`
+			// ShowAs is one of the catalog's showAsChoices, null to keep
+			// the one the library has, which may not be chosen yet.
+			ShowAs *string `json:"showAs"`
 		} `json:"libraries"`
 	}
 	if !decode(w, r, &body) {
@@ -758,7 +1156,10 @@ func (h *handler) saveLibraries(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		choice := addons.LibraryChoice{AddonID: id, CatalogType: library.CatalogType, CatalogID: library.CatalogID,
-			Name: library.Name, Genre: library.Genre, HideInMenus: library.HideInMenus}
+			Name: library.Name, Genre: library.Genre, HideInMenus: library.HideInMenus, SkipLocal: library.SkipLocal}
+		if library.ShowAs != nil {
+			choice.ShowAs = *library.ShowAs
+		}
 		if max := library.MaxItems; max != nil {
 			if *max != math.Trunc(*max) || *max < 1 || *max > addons.MaxLibraryItems {
 				writeError(w, http.StatusBadRequest, "invalid_library_max_items")
@@ -768,6 +1169,13 @@ func (h *handler) saveLibraries(w http.ResponseWriter, r *http.Request) {
 		}
 		choices = append(choices, choice)
 	}
+	// The libraries that switch between home videos and movies and shows
+	// give their users' data to the items their titles become.
+	before, err := h.Addons.Libraries(r.Context(), scope)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
 	libraries, err := h.Addons.SetLibraries(r.Context(), scope, choices)
 	if addonError(w, err) {
 		return
@@ -775,6 +1183,20 @@ func (h *handler) saveLibraries(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		h.internalError(w, r, err)
 		return
+	}
+	if h.ShownTitles != nil {
+		if err := h.ShownTitles.FollowTitles(r.Context(), before, libraries); err != nil {
+			h.Logger.Error("Users' data could not follow the titles of libraries shown otherwise", "error", err)
+		}
+		// A library of other videos made now is shown as its first page
+		// tells, unless one chose how.
+		if err := h.ShownTitles.DecideShowAs(r.Context(), scope); err != nil {
+			h.Logger.Error("How libraries show their titles could not be decided", "error", err)
+		}
+		if libraries, err = h.Addons.Libraries(r.Context(), scope); err != nil {
+			h.internalError(w, r, err)
+			return
+		}
 	}
 	h.writeLibraries(w, r, scope, libraries)
 }
@@ -809,7 +1231,7 @@ func (h *handler) saveGuide(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	key, ok := guideTarget(w, body)
-	if !ok || (body.URL != "" && h.personalAddonsRefused(w, r, scope)) {
+	if !ok || (body.URL != "" && h.personalAddonsRefused(w, r, scope)) || serverFileRefused(w, r, body.URL) {
 		return
 	}
 	_, err := h.Addons.SetGuide(r.Context(), scope, key, body.URL)

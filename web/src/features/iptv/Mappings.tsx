@@ -1,4 +1,4 @@
-import { MagnifyingGlassIcon, TelevisionSimpleIcon } from '@phosphor-icons/react'
+import { ArrowRightIcon, MagnifyingGlassIcon, TelevisionSimpleIcon } from '@phosphor-icons/react'
 import { useState } from 'react'
 import { keepPreviousData, useQuery } from '@tanstack/react-query'
 import {
@@ -13,7 +13,7 @@ import {
 } from '@/api'
 import { errorMessage } from '@/format'
 import { useI18n } from '@/i18n'
-import { cx, EmptyState, InlineError, Panel, Segmented, SkeletonRows, TextInput } from '@/ui'
+import { Block, cx, EmptyState, InlineError, Segmented, SkeletonRows, TextInput } from '@/ui'
 import { MappingControls, mappingWords, MappingText } from './MappingControls'
 import { Pager, useDebounced } from './shared'
 
@@ -59,23 +59,21 @@ export default function Mappings({
     onChanged?.()
   }
 
-  const pager = mappings.data !== undefined && (
-    <Pager
-      offset={offset}
-      limit={pageSize}
-      total={mappings.data.total}
-      busy={mappings.isFetching}
-      onOffset={setOffset}
-    />
-  )
+  const paging = mappings.data !== undefined && {
+    offset,
+    limit: pageSize,
+    total: mappings.data.total,
+    busy: mappings.isFetching,
+    onOffset: setOffset,
+  }
 
   return (
-    <Panel title={text.title} description={text.help} flush>
-      <div className="flex flex-wrap items-center gap-3 px-6 pt-5 pb-4 max-sm:px-4">
+    <Block title={text.title} count={mappings.data?.total}>
+      <p className="mb-3 max-w-[66ch] text-small text-ink-2">{text.help}</p>
+      <div className="flex flex-wrap items-center gap-2.5">
         <Segmented
-          className="scrollbar-none max-w-full overflow-x-auto [&>button]:shrink-0 [&>button]:whitespace-nowrap"
           label={text.show}
-          size="sm"
+          size="compact"
           value={state}
           options={[
             { value: 'all', label: text.states.all },
@@ -90,7 +88,7 @@ export default function Mappings({
         />
         <TextInput
           type="search"
-          size="sm"
+          size="compact"
           icon={MagnifyingGlassIcon}
           value={search}
           placeholder={text.search}
@@ -100,63 +98,65 @@ export default function Mappings({
             setSearch(value)
             setOffset(0)
           }}
-          className="min-w-48 flex-1 md:ml-auto md:max-w-72"
+          className="min-w-48 flex-1 md:ml-auto md:max-w-80"
         />
       </div>
-      <p aria-live="polite" className="px-6 pb-3 text-small text-ok empty:hidden max-sm:px-4">
+      <p aria-live="polite" className="mt-4 text-small text-ok empty:hidden">
         {announcement}
       </p>
       {mappings.data !== undefined && mappings.data.total > 0 && (
-        <div className="border-t border-line px-6 py-2.5 max-sm:px-4">{pager}</div>
+        <div className="mt-4 mb-2 pl-5 max-sm:pl-4">{paging && <Pager {...paging} />}</div>
       )}
       {mappings.isPending ? (
-        <div className="border-t border-line">
-          <SkeletonRows rows={6} boxed={false} />
+        <div className="mt-4">
+          <SkeletonRows rows={6} />
         </div>
       ) : mappings.isError ? (
-        <div className="px-6 pb-6 max-sm:px-4">
-          <InlineError onRetry={() => void mappings.refetch()} retrying={mappings.isFetching}>
-            {errorMessage(t, mappings.error)}
-          </InlineError>
-        </div>
+        <InlineError
+          className="mt-4"
+          onRetry={() => void mappings.refetch()}
+          retrying={mappings.isFetching}
+        >
+          {errorMessage(t, mappings.error)}
+        </InlineError>
       ) : mappings.data.items.length === 0 ? (
-        <div className="px-6 pb-6 max-sm:px-4">
-          <EmptyState
-            icon={TelevisionSimpleIcon}
-            title={filtered ? text.empty : t.lineup.channelsEmpty}
-          />
-        </div>
+        <EmptyState
+          className="mt-4"
+          icon={TelevisionSimpleIcon}
+          title={filtered ? text.empty : t.lineup.channelsEmpty}
+        />
       ) : (
         <ul
           aria-label={text.title}
           aria-busy={mappings.isFetching}
           className={cx(
-            'border-t border-line transition-opacity duration-160',
+            'grid grid-cols-[minmax(0,1fr)] gap-1.5 transition-opacity duration-160',
             mappings.isPlaceholderData && 'opacity-60',
           )}
         >
           {mappings.data.items.map((item) => (
             <li
               key={item.channelId}
-              className="grid gap-x-6 gap-y-2 px-6 py-3.5 not-first:border-t not-first:border-line [contain-intrinsic-size:auto_4.5rem] [content-visibility:auto] max-sm:px-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.5fr)]"
+              className="min-w-0 rounded-[0.625rem] bg-s1 py-1 pr-2 pl-3.5 transition-colors duration-300 ease-nuit hover:bg-s2 [contain-intrinsic-size:auto_3rem] [content-visibility:auto] max-sm:pl-3"
             >
-              <div className="flex min-w-0 items-baseline gap-3">
-                <span className="figures w-10 shrink-0 text-right text-[12.5px] text-ink-3">
-                  {item.number ?? '–'}
+              <div className="flex min-h-10 flex-wrap items-center gap-x-2.5 gap-y-1">
+                <span className="figures w-8 shrink-0 text-right text-small text-ink-3">
+                  {item.number}
                 </span>
-                <div className="min-w-0">
-                  <p className="truncate text-[14px] font-medium text-ink" title={item.name}>
+                <div className="min-w-0 flex-1 basis-40">
+                  <p className="truncate text-control font-semibold text-ink" title={item.name}>
                     {item.name}
                   </p>
-                  {item.guideId !== '' && (
-                    <p className="figures text-small break-all text-ink-3">{item.guideId}</p>
-                  )}
+                  <p className="flex min-w-0 flex-wrap items-center gap-x-2 gap-y-0.5 text-micro text-ink-3">
+                    {item.guideId !== '' && item.guideId !== item.mapping?.guideChannelId && (
+                      <>
+                        <span className="figures break-all">{item.guideId}</span>
+                        <ArrowRightIcon size="0.75rem" aria-hidden="true" className="shrink-0" />
+                      </>
+                    )}
+                    <MappingText mapping={item.mapping} />
+                  </p>
                 </div>
-              </div>
-              <div className="flex min-w-0 flex-wrap items-center justify-between gap-2 max-lg:pl-[52px]">
-                <p className="min-w-0 text-control">
-                  <MappingText mapping={item.mapping} />
-                </p>
                 <MappingControls
                   scope={scope}
                   target={target}
@@ -171,8 +171,8 @@ export default function Mappings({
         </ul>
       )}
       {mappings.data !== undefined && mappings.data.total > 0 && (
-        <div className="border-t border-line px-6 py-3 max-sm:px-4">{pager}</div>
+        <div className="mt-4 pl-5 max-sm:pl-4">{paging && <Pager {...paging} end />}</div>
       )}
-    </Panel>
+    </Block>
   )
 }

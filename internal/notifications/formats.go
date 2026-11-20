@@ -34,6 +34,10 @@ var discordColors = map[string]int{
 	NewDevice:         0xf59e0b,
 	SharePlayed:       0x14b8a6,
 	ProgrammeReminder: 0x8b5cf6,
+	TitleAvailable:    0x22c55e,
+	PlaybackFailed:    0xf97316,
+	ServerCrashed:     0xef4444,
+	Grouped:           0x64748b,
 }
 
 // discordWebhook is what a Discord webhook takes: one embed, and no
@@ -115,6 +119,10 @@ var ntfyTags = map[string][]string{
 	NewDevice:         {"key"},
 	SharePlayed:       {"link"},
 	ProgrammeReminder: {"alarm_clock"},
+	TitleAvailable:    {"clapper"},
+	PlaybackFailed:    {"warning"},
+	ServerCrashed:     {"rotating_light"},
+	Grouped:           {"inbox_tray"},
 }
 
 // ntfyMessage formats ev for topic: its title, its message, tags by its
@@ -134,10 +142,11 @@ func ntfyMessage(topic string, ev Event) ntfyPublish {
 	return message
 }
 
-// urgent reports whether ev tells of a failure: a failed recording, or a
-// health problem that is an error.
+// urgent reports whether ev tells of a failure: a failed recording, a
+// crash of the server, or a health problem that is an error.
 func urgent(ev Event) bool {
-	return ev.Type == RecordingFailed || ev.Type == HealthProblem && ev.Problem != nil && ev.Problem.Severity == SeverityError
+	return ev.Type == RecordingFailed || ev.Type == ServerCrashed ||
+		ev.Type == HealthProblem && ev.Problem != nil && ev.Problem.Severity == SeverityError
 }
 
 // Telegram bounds a message's text to 4,096 characters once its markup is

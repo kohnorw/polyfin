@@ -24,6 +24,9 @@ type Sessions interface {
 	StopPlayback(ctx context.Context, by accounts.User, session accounts.ID) error
 	EndPlayback(ctx context.Context, by accounts.User, session accounts.ID) error
 	SendMessage(ctx context.Context, by accounts.User, session accounts.ID, header, text string, timeout time.Duration) error
+	// Bandwidth is what every playback moves now, in bytes per second:
+	// sent to apps, and received from sources.
+	Bandwidth() (sent, received float64)
 }
 
 // How a playback reaches its app, as liveSessionJSON.Delivery tells it.
@@ -69,6 +72,32 @@ type liveSessionJSON struct {
 	// Video and Audio tell what is converted, null when copied.
 	Video *videoConversionJSON `json:"video"`
 	Audio *audioConversionJSON `json:"audio"`
+	// SwitchedVersion names the version the play went on from once its
+	// version's source failed, empty when it did not.
+	SwitchedVersion string `json:"switchedVersion"`
+	// Bandwidth is what the play moves now; Origin, where its version is
+	// read from, null when not known.
+	Bandwidth bandwidthJSON `json:"bandwidth"`
+	Origin    *originJSON   `json:"origin"`
+}
+
+// bandwidthJSON is what a play moves, in bytes per second averaged over
+// the last 10 seconds: Sent to the app, Received from its source; and
+// Redirected, true when the app was sent to read the source itself, none
+// of its bytes passing through Polyfin.
+type bandwidthJSON struct {
+	Sent       float64 `json:"sent"`
+	Received   float64 `json:"received"`
+	Redirected bool    `json:"redirected"`
+}
+
+// originJSON is where a play's version is read from: Kind is addon,
+// torrent, localFolder, networkShare or iptv; Name the addon, folder or
+// IPTV source as installed; Peers, for a torrent, the peers connected.
+type originJSON struct {
+	Kind  string `json:"kind"`
+	Name  string `json:"name"`
+	Peers int    `json:"peers"`
 }
 
 type liveUserJSON struct {
@@ -99,6 +128,10 @@ type liveItemJSON struct {
 	// PosterID is the item whose Primary image is the poster: the series
 	// of an episode.
 	PosterID string `json:"posterId"`
+	// Linked is true when the item's page opens in the web player for the
+	// user reading: the web player is served and the user reaches the
+	// item, as for the titles of Recent activity (see linkTitles).
+	Linked bool `json:"linked"`
 }
 
 // streamJSON describes a video: its size, codecs and bitrate in bits per
@@ -122,13 +155,15 @@ type videoConversionJSON struct {
 	ToneMap  bool   `json:"toneMap"`
 	Burn     bool   `json:"burnSubtitles"`
 	// LimitedBy is what set the size: source when nothing made it smaller
-	// than the source; gpu (4K), processor (1080p) or toneMapping (HDR
-	// converted on the processor), the server's own caps; qualityGroup,
+	// than the source; gpu (4K), processor (1080p), toneMapping (HDR
+	// converted on the processor) or gpuToneMapping (HDR converted on a
+	// GPU only keeping up below), the server's own caps; qualityGroup,
 	// the user's group; serverMax, the settings' maximum quality of
-	// converted video; bitrate, the bitrate limit. Empty when not known.
-	// On a tie the group comes first, then serverMax, then the server's
-	// caps. MaxHeight is the height that capped it, 0 for source and when
-	// not known.
+	// converted video; bitrate, the bitrate limit; app, the frame or the
+	// codec level the app's profile allows. Empty when not known.
+	// On a tie the group comes first, then serverMax, then app, then the
+	// server's caps. MaxHeight is the height that capped it, 0 for source
+	// and when not known.
 	LimitedBy string `json:"limitedBy"`
 	MaxHeight int    `json:"maxHeight"`
 	// BitrateLimit is, for bitrate, the limit in bits per second, and
@@ -151,7 +186,11 @@ type audioConversionJSON struct {
 	Bitrate  int64  `json:"bitrate"`
 }
 
-// liveSessions lists the playbacks under way.
+// liveSessions lists the playbacks under way: every one to an
+// administrator, and to a member only their own. A guest playing through a
+// member's share link shows under the member, but its device is the
+// guest's: it is left out too. Stopping and messaging stay the
+// administrators' (stopSession, messageSession).
 func (h *handler) liveSessions(w http.ResponseWriter, r *http.Request) {
 	result := []liveSessionJSON{}
 	if h.Sessions == nil {
@@ -163,9 +202,14 @@ func (h *handler) liveSessions(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	}
+	user := sessionFrom(r.Context()).User
 	for _, s := range sessions {
+		if !user.IsAdministrator && (s.User.ID != user.ID || s.Shared) {
+			continue
+		}
 		result = append(result, newLiveSessionJSON(s))
 	}
+	h.linkTitles(r.Context(), user, result)
 	writeJSON(w, http.StatusOK, result)
 }
 
@@ -183,6 +227,7 @@ func newLiveSessionJSON(s jellyfin.LiveSession) liveSessionJSON {
 		PlayMethod:   s.Playing.PlayMethod,
 		Reasons:      s.Reasons,
 	}
+	result.SwitchedVersion = s.Switched
 	// A device may download while it plays, and download several titles:
 	// each download is told apart by its version.
 	if s.Download {
@@ -255,6 +300,7 @@ func newLiveSessionJSON(s jellyfin.LiveSession) liveSessionJSON {
 		}
 	}
 	result.Sent = sentStream(result)
+	result.Bandwidth, result.Origin = playBandwidth(s)
 	return result
 }
 
@@ -297,32 +343,16 @@ func sentStream(s liveSessionJSON) *streamJSON {
 		*sent = *s.Source
 	}
 	if s.Video != nil {
-		sent.Width, sent.Height, sent.VideoCodec = s.Video.Width, s.Video.Height, videoCodecOf(s.Video.Encoder)
+		sent.Width, sent.Height, sent.VideoCodec = s.Video.Width, s.Video.Height, hls.VideoCodecOf(s.Video.Encoder)
 		sent.Bitrate = s.Video.Bitrate
 		if s.Audio != nil {
 			sent.Bitrate += s.Audio.Bitrate
 		}
 	}
 	if s.Audio != nil {
-		sent.AudioCodec = audioCodecOf(s.Audio.Codec)
+		sent.AudioCodec = hls.AudioCodecOf(s.Audio.Codec)
 	}
 	return sent
-}
-
-// videoCodecOf names the codec an FFmpeg video encoder makes.
-func videoCodecOf(encoder string) string {
-	switch {
-	case strings.Contains(encoder, "265"), strings.HasPrefix(encoder, "hevc"):
-		return "hevc"
-	case strings.Contains(encoder, "264"), strings.HasPrefix(encoder, "h264"):
-		return "h264"
-	}
-	return encoder
-}
-
-// audioCodecOf names the codec an FFmpeg audio encoder makes.
-func audioCodecOf(encoder string) string {
-	return strings.TrimPrefix(encoder, "lib")
 }
 
 // maxMessageLength bounds the messages administrators send to apps.
@@ -385,4 +415,31 @@ func (h *handler) answerCommand(w http.ResponseWriter, r *http.Request, err erro
 	default:
 		h.internalError(w, r, err)
 	}
+}
+
+// playBandwidth tells what a play moves now, and where its version is read
+// from: null when that is not known.
+func playBandwidth(s jellyfin.LiveSession) (bandwidthJSON, *originJSON) {
+	moved := bandwidthJSON{Sent: s.Sent, Received: s.Received, Redirected: s.Redirected}
+	if s.Origin.Kind == "" {
+		return moved, nil
+	}
+	return moved, &originJSON{Kind: s.Origin.Kind, Name: s.Origin.Name, Peers: s.Origin.Peers}
+}
+
+// totalBandwidthJSON is what every play moves now, in bytes per second
+// averaged over the last 10 seconds: sent to apps, and received from
+// sources.
+type totalBandwidthJSON struct {
+	Sent     float64 `json:"sent"`
+	Received float64 `json:"received"`
+}
+
+// bandwidth answers what every play moves now.
+func (h *handler) bandwidth(w http.ResponseWriter, _ *http.Request) {
+	var total totalBandwidthJSON
+	if h.Sessions != nil {
+		total.Sent, total.Received = h.Sessions.Bandwidth()
+	}
+	writeJSON(w, http.StatusOK, total)
 }

@@ -45,6 +45,12 @@ type fakeSessions struct {
 	err      error
 	stopped  []accounts.ID
 	messages []string
+	// sent and received are what Bandwidth answers.
+	sent, received float64
+}
+
+func (f *fakeSessions) Bandwidth() (sent, received float64) {
+	return f.sent, f.received
 }
 
 func (f *fakeSessions) LiveSessions(context.Context) ([]jellyfin.LiveSession, error) {
@@ -82,15 +88,16 @@ func TestDashboardRoutesAreForAdministratorsOnly(t *testing.T) {
 	anonymous := api.browser()
 	id := randomID().String()
 	for _, route := range []struct{ method, path string }{
-		{http.MethodGet, "/sessions"},
 		{http.MethodPost, "/sessions/" + id + "/stop"},
 		{http.MethodPost, "/sessions/" + id + "/message"},
+		{http.MethodGet, "/bandwidth"},
 		{http.MethodGet, "/tasks"},
 		{http.MethodPost, "/tasks/" + tasks.ID("Any") + "/run"},
 		{http.MethodPost, "/tasks/" + tasks.ID("Any") + "/stop"},
 		{http.MethodGet, "/timers"},
 		{http.MethodGet, "/health"},
 		{http.MethodPost, "/health/addons/" + id + "/check"},
+		{http.MethodGet, "/health/goroutines"},
 		{http.MethodGet, "/logs"},
 		{http.MethodGet, "/logs/download"},
 		{http.MethodGet, "/variables"},
@@ -102,6 +109,82 @@ func TestDashboardRoutesAreForAdministratorsOnly(t *testing.T) {
 		if status := anonymous.raw(route.method, route.path, `{"text":"hi"}`, nil); status != http.StatusUnauthorized {
 			t.Errorf("anonymous %s %s: %d", route.method, route.path, status)
 		}
+	}
+	// Members read their own playbacks (see TestLiveSessionsShowAMemberOnlyTheirOwn).
+	if status := anonymous.raw(http.MethodGet, "/sessions", "", nil); status != http.StatusUnauthorized {
+		t.Errorf("anonymous GET /sessions: %d", status)
+	}
+}
+
+// A member reads their own playbacks only: never another user's, nor a
+// guest's through one of their share links, whose device is the guest's.
+// Stopping and messaging stay the administrators'. An administrator reads
+// every playback, as before.
+func TestLiveSessionsShowAMemberOnlyTheirOwn(t *testing.T) {
+	t.Parallel()
+	sessions := &fakeSessions{}
+	api := newTestAPI(t, 10, func(o *Options, _ testDeps) { o.Sessions = sessions })
+	admin := api.signedIn("root", true)
+	member := api.signedIn("sam", false)
+	users, err := api.store.Users(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := slices.IndexFunc(users, func(u accounts.User) bool { return u.Name == "sam" })
+	if index < 0 {
+		t.Fatal("sam not found")
+	}
+	sam := users[index]
+	played := playback.NowPlaying{PlayState: playback.PlayState{PlayMethod: "DirectPlay"}}
+	others := jellyfin.LiveSession{
+		User:    accounts.User{ID: randomID(), Name: "robin"},
+		Device:  accounts.Device{ID: randomID(), DeviceInfo: accounts.DeviceInfo{DeviceName: "Robin's phone", RemoteAddress: "192.0.2.20"}},
+		Playing: played, Controllable: true,
+	}
+	own := jellyfin.LiveSession{
+		User:    sam,
+		Device:  accounts.Device{ID: randomID(), DeviceInfo: accounts.DeviceInfo{DeviceName: "Living room TV", RemoteAddress: "192.0.2.30"}},
+		Playing: played, Controllable: true,
+	}
+	guest := jellyfin.LiveSession{
+		User:    sam,
+		Device:  accounts.Device{ID: randomID(), DeviceInfo: accounts.DeviceInfo{DeviceName: "Guest's laptop", RemoteAddress: "198.51.100.7"}},
+		Playing: played, Shared: true,
+	}
+	sessions.sessions = []jellyfin.LiveSession{others, own, guest}
+
+	var mine []liveSessionJSON
+	if status := member.raw(http.MethodGet, "/sessions", "", &mine); status != http.StatusOK {
+		t.Fatalf("member's sessions: %d", status)
+	}
+	if len(mine) != 1 || mine[0].ID != own.Device.ID.String() || mine[0].User.ID != sam.ID.String() ||
+		mine[0].Device.Name != "Living room TV" {
+		t.Errorf("member's sessions: %+v", mine)
+	}
+	for _, s := range mine {
+		if s.User.ID != sam.ID.String() || s.Shared || s.Device.Address == others.Device.RemoteAddress || s.Device.Address == guest.Device.RemoteAddress {
+			t.Errorf("a member sees a playback not theirs: %+v", s)
+		}
+	}
+
+	var all []liveSessionJSON
+	if status := admin.raw(http.MethodGet, "/sessions", "", &all); status != http.StatusOK || len(all) != 3 ||
+		all[0].ID != others.Device.ID.String() || all[1].ID != own.Device.ID.String() || all[2].ID != guest.Device.ID.String() ||
+		all[0].Device.Address != "192.0.2.20" || !all[2].Shared {
+		t.Errorf("administrator's sessions: %d %+v", status, all)
+	}
+
+	target := "/sessions/" + own.Device.ID.String()
+	if status := member.raw(http.MethodPost, target+"/stop", "", nil); status != http.StatusForbidden {
+		t.Errorf("member stops their own playback: %d", status)
+	}
+	if status := member.raw(http.MethodPost, target+"/message", `{"text":"hi"}`, nil); status != http.StatusForbidden {
+		t.Errorf("member messages their own playback: %d", status)
+	}
+	sessions.mu.Lock()
+	defer sessions.mu.Unlock()
+	if len(sessions.stopped) != 0 || len(sessions.messages) != 0 {
+		t.Errorf("commands sent for a member: %v %v", sessions.stopped, sessions.messages)
 	}
 }
 
@@ -262,7 +345,7 @@ func TestTasksAreListedRunAndStopped(t *testing.T) {
 	registry.Register(tasks.Task{Key: "Wait", Category: tasks.CategoryMaintenance,
 		Text: map[string]tasks.Text{"en": {Name: "Wait"}, "fr": {Name: "Attendre"}},
 		Run:  func(ctx context.Context) error { <-ctx.Done(); return ctx.Err() }})
-	registry.Register(tasks.Task{Key: "Hourly", Category: tasks.CategoryLibrary, Interval: time.Hour,
+	registry.Register(tasks.Task{Key: "Hourly", Category: tasks.CategoryLibrary, Triggers: []tasks.Trigger{tasks.Every(time.Hour)},
 		Text: map[string]tasks.Text{"en": {Name: "Hourly"}},
 		Run:  func(context.Context) error { return errors.New("addon down") }})
 	registry.Start(t.Context())
@@ -285,7 +368,7 @@ func TestTasksAreListedRunAndStopped(t *testing.T) {
 	if wait := listed["Wait"]; wait.Name != "Attendre" || wait.Category != "Maintenance" || wait.State != "Idle" || wait.Next != nil || wait.Last != nil {
 		t.Errorf("wait: %+v", wait)
 	}
-	if hourly := listed["Hourly"]; hourly.Interval != 3600 || hourly.Next == nil || hourly.Category != "Médiathèque" {
+	if hourly := listed["Hourly"]; len(hourly.Triggers) != 1 || hourly.Triggers[0] != tasks.Every(time.Hour) || hourly.Next == nil || hourly.Category != "Médiathèque" {
 		t.Errorf("hourly: %+v", hourly)
 	}
 
@@ -299,6 +382,56 @@ func TestTasksAreListedRunAndStopped(t *testing.T) {
 	}
 	waitUntil(t, func() bool { last := list()["Wait"].Last; return last != nil && last.Status == "Cancelled" })
 	if status := admin.raw(http.MethodPost, "/tasks/"+tasks.ID("Missing")+"/run", "", nil); status != http.StatusNotFound {
+		t.Errorf("unknown task: %d", status)
+	}
+}
+
+// An administrator replaces a task's triggers within its limits and
+// resets them; a locked task keeps its own, and refused triggers change
+// nothing.
+func TestTaskTriggersAreChangedAndReset(t *testing.T) {
+	t.Parallel()
+	registry := tasks.New(slog.New(slog.NewTextHandler(io.Discard, nil)))
+	registry.Register(tasks.Task{Key: "Read", Category: tasks.CategoryLibrary,
+		Limits: tasks.Limits{Types: []tasks.TriggerType{tasks.DailyTrigger, tasks.IntervalTrigger}, MinInterval: 12 * time.Hour},
+		Text:   map[string]tasks.Text{"en": {Name: "Read"}}, Run: func(context.Context) error { return nil }})
+	registry.Register(tasks.Task{Key: "Poll", Category: tasks.CategoryLibrary, Triggers: []tasks.Trigger{tasks.Every(5 * time.Minute)},
+		Limits: tasks.Limits{Locked: tasks.LockedSettings},
+		Text:   map[string]tasks.Text{"en": {Name: "Poll"}}, Run: func(context.Context) error { return nil }})
+	registry.Start(t.Context())
+	api := newTestAPI(t, 10, func(o *Options, _ testDeps) { o.Tasks = registry })
+	admin := api.signedIn("root", true)
+	read := "/tasks/" + tasks.ID("Read") + "/triggers"
+
+	var task taskJSON
+	if status := admin.raw(http.MethodPut, read, `{"triggers":[{"type":"daily","time":195}]}`, &task); status != http.StatusOK ||
+		!task.Custom || len(task.Triggers) != 1 || task.Triggers[0] != tasks.Daily(3*time.Hour+15*time.Minute) || task.Next == nil ||
+		task.Limits.MinInterval != 720 || task.Limits.MaxTriggers != tasks.MaxTriggers || len(task.Limits.Types) != 2 || len(task.DefaultTriggers) != 0 {
+		t.Fatalf("set: %d %+v", status, task)
+	}
+	for _, refused := range []string{`{"triggers":[{"type":"interval","interval":60}]}`, `{"triggers":[{"type":"startup"}]}`,
+		`{"triggers":[{"type":"weekly","time":0,"day":1}]}`, `{}`} {
+		var answer map[string]string
+		if status := admin.raw(http.MethodPut, read, refused, &answer); status != http.StatusBadRequest || answer["error"] != "invalid_triggers" {
+			t.Errorf("%s: %d %v", refused, status, answer)
+		}
+	}
+	if info, _ := registry.Task(tasks.ID("Read"), "en"); len(info.Triggers) != 1 || info.Triggers[0].Type != tasks.DailyTrigger {
+		t.Errorf("refused triggers changed them: %+v", info.Triggers)
+	}
+	if status := admin.raw(http.MethodDelete, read, "", &task); status != http.StatusOK || task.Custom || len(task.Triggers) != 0 || task.Next != nil {
+		t.Errorf("reset: %d %+v", status, task)
+	}
+	var answer map[string]string
+	if status := admin.raw(http.MethodPut, "/tasks/"+tasks.ID("Poll")+"/triggers", `{"triggers":[]}`, &answer); status != http.StatusBadRequest ||
+		answer["error"] != "task_locked" {
+		t.Errorf("locked: %d %v", status, answer)
+	}
+	if status := admin.raw(http.MethodPut, "/tasks/"+tasks.ID("Poll")+"/triggers", `{"triggers":[{"type":"interval","interval":5}]}`, &task); status != http.StatusOK ||
+		task.Limits.Locked != tasks.LockedSettings || len(task.Limits.Types) != 0 {
+		t.Errorf("a locked task's own triggers: %d %+v", status, task)
+	}
+	if status := admin.raw(http.MethodDelete, "/tasks/"+tasks.ID("Missing")+"/triggers", "", nil); status != http.StatusNotFound {
 		t.Errorf("unknown task: %d", status)
 	}
 }
@@ -410,12 +543,12 @@ func TestHealthDescribesTheServerFromWhatItRecords(t *testing.T) {
 	t.Cleanup(encoder.Close)
 	encoder.LimitConversions(func() int { return 3 })
 	api := newTestAPI(t, 10, func(o *Options, deps testDeps) {
-		sources, err := source.New(cacheDir, func() int64 { return 1 << 30 }, deps.client, logger)
+		sources, err := source.New(cacheDir, func() source.Policy { return source.Policy{Limit: 1 << 30} }, deps.client, logger)
 		if err != nil {
 			t.Fatal(err)
 		}
 		t.Cleanup(func() { _ = sources.Close() })
-		o.Health = HealthSources{Addons: deps.client, Cache: sources, CacheDir: cacheDir, Encoder: encoder,
+		o.Health = HealthSources{Addons: deps.client, Cache: sources, Folders: config.Folders{Conversion: cacheDir, Reading: cacheDir, Cache: cacheDir}, Encoder: encoder,
 			DatabaseSize: func(ctx context.Context) (int64, error) { return database.Size(ctx, deps.pool) }}
 	})
 	admin := api.signedIn("root", true)

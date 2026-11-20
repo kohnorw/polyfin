@@ -3,9 +3,9 @@ package playback
 import (
 	"context"
 	"errors"
-	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -14,14 +14,16 @@ import (
 	"github.com/moodiness/polyfin/internal/hls"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/media"
+	"github.com/moodiness/polyfin/internal/process"
 )
 
 // An analysis that outlasts the settings' timeout is given up, of a file
 // as of a live stream, and the version is not tried again for a while.
 func TestAnalysesStopAtTheSettingsTimeout(t *testing.T) {
+	t.Parallel()
 	skipWithoutShell(t)
 	path := filepath.Join(t.TempDir(), "ffprobe")
-	if err := os.WriteFile(path, []byte("#!/bin/sh\nexec sleep 60\n"), 0o700); err != nil {
+	if err := process.WriteExecutable(path, strings.NewReader("#!/bin/sh\nexec sleep 60\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	// The channel answers with a live playlist: its start is checked
@@ -64,6 +66,7 @@ func TestAnalysesStopAtTheSettingsTimeout(t *testing.T) {
 // keeping its shape, at the bitrate of that height; under the cap, nothing
 // changes.
 func TestConvertedVideoIsScaledDownToTheHeightCap(t *testing.T) {
+	t.Parallel()
 	can := Capabilities{Encoders: []string{"libx264"}, ToneMapping: true}
 	video := func(width, height int) MediaStream {
 		return MediaStream{Codec: "mpeg2video", VideoRange: "SDR", Width: new(width), Height: new(height)}
@@ -86,7 +89,7 @@ func TestConvertedVideoIsScaledDownToTheHeightCap(t *testing.T) {
 		{"a source under the cap", 720, 0, video(640, 360), h264(640, 360, 10_000_000)},
 		{"a source at the cap", 720, 0, video(1280, 720), h264(1280, 720, 10_000_000)},
 		{"a cap above what Polyfin converts to", 2160, 0, video(3840, 2160), h264(1920, 1080, 10_000_000)},
-		{"a limit lower than the cap's bitrate", 720, 2_000_000, video(1920, 1080), h264(960, 540, 2_000_000)},
+		{"a limit lower than the cap's bitrate", 720, 2_000_000, video(1920, 1080), peaking(h264(960, 540, 2_000_000), 2_000_000)},
 	} {
 		if got := sizeless(ConvertVideo("h264", Limits{Bitrate: test.limit, Video: test.limit, Server: test.maxHeight}, test.video, can)); !reflect.DeepEqual(got, test.want) {
 			t.Errorf("%s: %+v, want %+v", test.name, got, test.want)

@@ -21,6 +21,7 @@
 package trackers
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"log/slog"
@@ -34,6 +35,9 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/anime"
+	"github.com/moodiness/polyfin/internal/importlinks"
+	"github.com/moodiness/polyfin/internal/pace"
+	"github.com/moodiness/polyfin/internal/redirect"
 	"github.com/moodiness/polyfin/internal/secrets"
 	"github.com/moodiness/polyfin/internal/userdata"
 	"github.com/moodiness/polyfin/internal/watchlist"
@@ -66,10 +70,13 @@ var publicURLs = map[string]string{
 	ListenBrainz: "https://api.listenbrainz.org",
 }
 
-// authURLs are the base URLs of the OAuth pages and endpoints of the
-// services whose users paste a code: the page users allow Polyfin on is
-// base + "/authorize", tokens are asked of base + "/token".
+// authURLs are the base URLs of the OAuth pages and endpoints of Trakt and
+// of the services whose users paste a code. Trakt's OAuth endpoints are
+// base + "/oauth/...", apart from its API (see traktAuth). For AniList and
+// MyAnimeList, the page users allow Polyfin on is base + "/authorize",
+// and tokens are asked of base + "/token".
 var authURLs = map[string]string{
+	Trakt:       "https://auth.trakt.tv",
 	AniList:     "https://anilist.co/api/v2/oauth",
 	MyAnimeList: "https://myanimelist.net/v1/oauth2",
 }
@@ -124,15 +131,41 @@ func scrobbles(service string) bool {
 	return service != PublicMetaDB && !animeLists(service) && !Music(service)
 }
 
+// numbersByTMDB reports whether service numbers the episodes of a series
+// as TMDB does, which may differ from the numbers the addon gives them.
+func numbersByTMDB(service string) bool {
+	return service == PublicMetaDB || service == Trakt || service == MDBList
+}
+
+// tmdbNumbered returns titles as a service numbering episodes as TMDB does
+// takes them: the episodes TMDB numbers differently get TMDB's season and
+// number, and those not surely among TMDB's are left out. The
+// titles returned hold no TMDB numbers; titles itself is left as it is.
+func tmdbNumbered(titles []Title) []Title {
+	numbered := make([]Title, 0, len(titles))
+	for _, title := range titles {
+		switch {
+		case title.TMDBNumber < 0:
+			continue
+		case title.TMDBNumber > 0:
+			title.Season, title.Number = title.TMDBSeason, title.TMDBNumber
+		}
+		title.TMDBSeason, title.TMDBNumber = 0, 0
+		numbered = append(numbered, title)
+	}
+	return numbered
+}
+
 // imports reports whether Polyfin reads the watch history of service.
 func imports(service string) bool {
 	return known(service) && !Music(service)
 }
 
-// watchlists reports whether Polyfin reads the watchlist of service: Trakt's
-// watchlist, Simkl's, AniList's and MyAnimeList's Plan to Watch.
+// watchlists reports whether Polyfin reads the watchlist of service: Trakt's,
+// MDBList's and PublicMetaDB's watchlist, Simkl's, AniList's and
+// MyAnimeList's Plan to Watch.
 func watchlists(service string) bool {
-	return service == Trakt || service == Simkl || animeLists(service)
+	return service == Trakt || service == Simkl || service == MDBList || service == PublicMetaDB || animeLists(service)
 }
 
 // known reports whether service is one of Services.
@@ -192,6 +225,9 @@ var (
 // Options are the dependencies of the service.
 type Options struct {
 	DB *pgxpool.Pool
+	// Watchlist keeps the watchlists the imports read, and makes their
+	// entries; nil keeps them in DB without making entries.
+	Watchlist *watchlist.Store
 	// Settings returns the server's settings, which hold the apps
 	// registered with Trakt and Simkl.
 	Settings func() accounts.Settings
@@ -209,6 +245,9 @@ type Options struct {
 	// without both, nothing is imported.
 	Titles   Titles
 	UserData *userdata.Store
+	// Links keeps the titles the imports did not find, and applies the
+	// links users made of them (see package importlinks); nil keeps none.
+	Links *importlinks.Store
 	// Anime maps anime between identifiers and numberings: Simkl's anime
 	// history, the titles anime addons name, and what AniList and
 	// MyAnimeList list, are found and sent by it. Nil leaves them out.
@@ -220,18 +259,27 @@ type Options struct {
 	// AuthURLs replaces the base URLs of the services' OAuth pages and
 	// endpoints, as URLs does their APIs'.
 	AuthURLs map[string]string
+	// PublicMetaDBPace spaces every request to PublicMetaDB, shared with
+	// the other parts of the server that ask it; nil makes one of the
+	// service's own, PublicMetaDBGap apart.
+	PublicMetaDBPace *pace.Pace
 }
+
+// The least time between two requests of the server to a service whose
+// limit counts the server's address rather than each user: PublicMetaDB
+// takes 300 requests every 10 seconds, Last.fm about 5 a second, AniList
+// 90 a minute.
+const (
+	PublicMetaDBGap = 40 * time.Millisecond
+	lastFMGap       = 250 * time.Millisecond
+	aniListGap      = time.Second
+)
 
 // timing is how long the service waits for what. Tests shorten it.
 type timing struct {
 	// gaps are the least time between two requests for one user to a
 	// service: Trakt and Simkl take one write a second.
 	gaps map[string]time.Duration
-	// sharedGaps space every request to a service whose limit counts the
-	// server's address rather than each user: PublicMetaDB takes 300
-	// requests every 10 seconds, Last.fm about 5 a second, AniList 90 a
-	// minute.
-	sharedGaps map[string]time.Duration
 	// retryFirst is the first wait after a failed send, doubling up to
 	// retryMax; giveUp is how old a change gets before it is dropped.
 	retryFirst, retryMax, giveUp time.Duration
@@ -266,11 +314,15 @@ type timing struct {
 	importGaps    map[string]time.Duration
 	importMaxWait time.Duration
 	importRetries int
+	// recommendationsEvery is how often Trakt's recommendations are read
+	// again, recommendationsRetry how soon after a failed read, and
+	// recommendationsAsked how lately a row must have asked for them for
+	// the hourly check to read them (see recommendations.go).
+	recommendationsEvery, recommendationsRetry, recommendationsAsked time.Duration
 }
 
 var defaultTiming = timing{
 	gaps:             map[string]time.Duration{Trakt: time.Second, Simkl: time.Second, MDBList: 250 * time.Millisecond, ListenBrainz: 250 * time.Millisecond, MyAnimeList: time.Second},
-	sharedGaps:       map[string]time.Duration{PublicMetaDB: 40 * time.Millisecond, LastFM: 250 * time.Millisecond, AniList: time.Second},
 	retryFirst:       30 * time.Second,
 	retryMax:         30 * time.Minute,
 	giveUp:           48 * time.Hour,
@@ -290,6 +342,10 @@ var defaultTiming = timing{
 	importGaps:    map[string]time.Duration{Trakt: time.Second, Simkl: 500 * time.Millisecond, MDBList: 500 * time.Millisecond, MyAnimeList: time.Second},
 	importMaxWait: 15 * time.Minute,
 	importRetries: 3,
+
+	recommendationsEvery: 12 * time.Hour,
+	recommendationsRetry: time.Hour,
+	recommendationsAsked: 7 * 24 * time.Hour,
 }
 
 // maxIntake bounds the reports and marks waiting to be looked at for one
@@ -329,26 +385,46 @@ type Service struct {
 	// lanes are what waits to be sent, by user and service.
 	lanes map[laneKey]*lane
 	seq   int64
-	// paces space every request to the services of sharedGaps.
-	paces map[string]*pace
+	// paces space every turn to Last.fm and AniList (see PublicMetaDBGap).
+	paces map[string]*pace.Pace
 
 	titles   Titles
 	userData *userdata.Store
 	// importing are the imports running, by user and service.
 	importing map[laneKey]*importRun
+	// recommending are the reads of Trakt's recommendations running, by
+	// user (see recommendations.go).
+	recommending map[laneKey]bool
 	// publicMetaDBIMDb caches the IMDb identifiers PublicMetaDB maps TMDB
-	// identifiers to (see mapPublicMetaDB).
-	publicMetaDBIMDb map[string]string
+	// identifiers to, as decided (see mapPublicMetaDB).
+	publicMetaDBIMDb map[string]imdbDecision
+	// publicMetaDBLists remembers the identifier of the PublicMetaDB
+	// watchlist of each key that sent to it (see publicMetaDBWatchlist).
+	publicMetaDBLists map[string]string
+	// publicMetaDBPace spaces every request to PublicMetaDB, each taking
+	// its own turn (see api).
+	publicMetaDBPace *pace.Pace
+	// writePaces space the writes of each token to Trakt and Simkl, which
+	// take one a second from each user, however many a change makes (see
+	// api).
+	writePaces map[string]*pace.Pace
 	// anime maps anime between identifiers and numberings.
 	anime *anime.Service
 	// stopped is told as a connection stops (see Options.Stopped).
 	stopped func(user accounts.ID, service string)
 	// watchlist keeps the watchlists the imports read.
 	watchlist *watchlist.Store
+	// links keeps the titles the imports do not find and applies the
+	// links made of them; nil keeps none.
+	links *importlinks.Store
 }
 
 // New returns a service keeping connections and queued changes in the
-// database of options. Run sends what an earlier run left.
+// database of options. Run sends what an earlier run left. Its transport
+// is its own, a clone of the default one: whoever closes the idle
+// connections of http.DefaultTransport cannot break its requests (#958).
+// MDBList's key and Last.fm's go in the query: a redirect it follows is
+// not told the address it comes from.
 func New(options Options) *Service {
 	ctx, cancel := context.WithCancel(context.Background())
 	urls := make(map[string]string, len(publicURLs))
@@ -373,7 +449,7 @@ func New(options Options) *Service {
 		logger:      options.Logger,
 		authURLs:    auth,
 		urls:        urls,
-		client:      &http.Client{},
+		client:      &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone(), CheckRedirect: redirect.Follow(redirect.Default)},
 		now:         time.Now,
 		timing:      defaultTiming,
 		ctx:         ctx,
@@ -383,25 +459,33 @@ func New(options Options) *Service {
 		intakes:     map[accounts.ID]*intake{},
 		sessions:    map[sessionKey]*session{},
 		listens:     map[sessionKey]*listen{},
-		paces:       map[string]*pace{PublicMetaDB: {}, LastFM: {}, AniList: {}},
+		paces:       map[string]*pace.Pace{LastFM: pace.New(lastFMGap), AniList: pace.New(aniListGap)},
 		lanes:       map[laneKey]*lane{},
 		titles:      options.Titles,
 		userData:    options.UserData,
 		importing:   map[laneKey]*importRun{},
 
-		publicMetaDBIMDb: map[string]string{},
-		anime:            options.Anime,
-		stopped:          options.Stopped,
-		watchlist:        watchlist.New(options.DB),
+		recommending: map[laneKey]bool{},
+
+		publicMetaDBIMDb:  map[string]imdbDecision{},
+		publicMetaDBLists: map[string]string{},
+		publicMetaDBPace:  cmp.Or(options.PublicMetaDBPace, pace.New(PublicMetaDBGap)),
+		writePaces:        map[string]*pace.Pace{},
+		anime:             options.Anime,
+		stopped:           options.Stopped,
+		watchlist:         cmp.Or(options.Watchlist, watchlist.New(options.DB)),
+		links:             options.Links,
 	}
 }
 
-// Run sends the changes an earlier run left queued, keeps tokens fresh
-// and imports watch histories when due until ctx ends, then stops sending
-// and waits for the sends under way.
+// Run sends the changes an earlier run left queued, keeps tokens fresh,
+// imports watch histories and reads Trakt's recommendations again when
+// due until ctx ends, then stops sending and waits for the sends under
+// way.
 func (s *Service) Run(ctx context.Context) {
 	s.resumeQueued()
 	s.importDue()
+	s.recommendationsDue()
 	ticker := time.NewTicker(s.timing.refreshEvery)
 	defer ticker.Stop()
 	imports := time.NewTicker(s.timing.importCheck)
@@ -413,6 +497,7 @@ func (s *Service) Run(ctx context.Context) {
 			return
 		case <-ticker.C:
 			s.refreshDue()
+			s.recommendationsDue()
 		case <-imports.C:
 			s.importDue()
 		}
@@ -474,6 +559,13 @@ type Title struct {
 	Season   int  `json:"season,omitempty"`
 	Number   int  `json:"number,omitempty"`
 	Absolute int  `json:"absolute,omitempty"`
+	// TMDBSeason and TMDBNumber are how TMDB numbers the episode, for the
+	// services numbering episodes as TMDB does: TMDBNumber is 0 when TMDB
+	// numbers it Number in season Season too, -1 when it is not surely
+	// among TMDB's episodes, which those services are then not sent, and
+	// otherwise TMDB's number, in season TMDBSeason.
+	TMDBSeason int `json:"tmdbSeason,omitempty"`
+	TMDBNumber int `json:"tmdbNumber,omitempty"`
 	// Series is set for a series, which only ratings name.
 	Series bool `json:"series,omitempty"`
 	// Anime names the entry, and its episode, an anime addon gives the
@@ -494,6 +586,23 @@ type AnimeID struct {
 // AniList and MyAnimeList take.
 func (t Title) Identified() bool {
 	return t.IMDb != "" || t.TMDB != 0 || t.TVDB != 0
+}
+
+// SetTMDBNumbers sets how TMDB numbers the episode t is, from TMDB's
+// season and number for it, ok false when it is not surely among TMDB's
+// episodes. Titles other than episodes are left as they are.
+func (t *Title) SetTMDBNumbers(season, number int, ok bool) {
+	if !t.Episode {
+		return
+	}
+	switch {
+	case !ok:
+		t.TMDBSeason, t.TMDBNumber = 0, -1
+	case season != t.Season || number != t.Number:
+		t.TMDBSeason, t.TMDBNumber = season, number
+	default:
+		t.TMDBSeason, t.TMDBNumber = 0, 0
+	}
 }
 
 var imdbPattern = regexp.MustCompile(`^tt\d+$`)

@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/moodiness/polyfin/internal/accounts"
+	"github.com/moodiness/polyfin/internal/i18n"
 	"github.com/moodiness/polyfin/internal/stremio"
 )
 
@@ -39,8 +40,8 @@ const (
 
 // useLanguage sets the view's metadata language from the user's: theirs
 // when one of the view's server addons has it, with those addons as its
-// translators, else none. The names Polyfin generates follow it when it is
-// English or French, else the server's language.
+// translators, else none. The names Polyfin generates follow it when
+// Polyfin speaks it (see i18n.Match), else the server's language.
 func (v *view) useLanguage(metadata, server string) {
 	if metadata != "" {
 		for _, entry := range v.addons {
@@ -56,12 +57,11 @@ func (v *view) useLanguage(metadata, server string) {
 }
 
 // generatedLanguage is the language Polyfin names what it generates in for
-// a metadata language: its own when it is English or French, region aside,
-// else the server's.
+// a metadata language: its own when Polyfin speaks it, region aside, else
+// the server's.
 func generatedLanguage(metadata, server string) string {
-	base, _, _ := strings.Cut(metadata, "-")
-	if _, ok := vocabulary[base]; ok {
-		return base
+	if language := i18n.Match(metadata); language != "" {
+		return language
 	}
 	return server
 }
@@ -102,24 +102,6 @@ func (v view) factual(entry installed, metaType, id string, shared bool) bool {
 	return !translator(entry) || v.standIn(metaType, id, shared)
 }
 
-// standsInForAll reports whether translators stand in for every user for
-// titles of a type and identifier (see standIn): no enabled addon without
-// a language, the server's or a user's own, describes them. Only then are
-// a translator's people the title's: they are recorded for everyone.
-func (s *Service) standsInForAll(ctx context.Context, metaType, id string) bool {
-	list, err := s.addons.All(ctx)
-	if err != nil {
-		return false
-	}
-	var v view
-	for _, addon := range list {
-		if addon.Enabled {
-			v.addons = append(v.addons, installed{addon: addon})
-		}
-	}
-	return v.standIn(metaType, id, false)
-}
-
 // inLanguageOrder orders addons of v the user's language's first, keeping
 // the order of the others.
 func (v view) inLanguageOrder(entries []installed) {
@@ -142,19 +124,20 @@ func (v view) inLanguageOrder(entries []installed) {
 // needs, among the catalogs of kinds. Of the translators' catalogs, those
 // of the user's translators are asked when mine is set, and all of them,
 // for every user, for the kinds no addon without a language offers a
-// catalog of.
+// catalog of, Polyfin's own sources aside, as for describing (see
+// standIn).
 func standInCatalogs(v view, kinds []Kind, mine bool, offers func(installed, stremio.Catalog) (source, bool)) []source {
 	var found []source
 	covered := map[Kind]bool{}
 	for _, entry := range v.addons {
 		for _, catalog := range entry.addon.Manifest.Catalogs {
-			kind, ok := titleKind(catalog.Type)
-			if !ok || !slices.Contains(kinds, kind) {
+			kind, ok := catalogOffers(entry, catalog, kinds)
+			if !ok {
 				continue
 			}
 			if src, ok := offers(entry, catalog); ok {
 				found = append(found, src)
-				covered[kind] = covered[kind] || !translator(entry)
+				covered[kind] = covered[kind] || !translator(entry) && !own(entry.addon)
 			}
 		}
 	}
@@ -210,7 +193,7 @@ func (s *Service) shown(ctx context.Context, v view, metaType, id string, base s
 		if err == nil {
 			return translation(base, kept.value)
 		}
-		s.logger.Debug("An addon could not describe a title in its language", "addon", entry.addon.Manifest.Name, "error", err)
+		s.logger.Debug("An addon could not describe a title in its language", "addon", entry.addon.LogName(), "error", err)
 	}
 	return base
 }
@@ -224,19 +207,23 @@ type untranslated struct {
 
 // readTranslations reads the descriptions of titles in the background,
 // one at a time, unless translationReaders reads are under way already:
-// the next listing asks again.
+// the next listing asks again. Its requests are paced (see Background).
+// The listing ending does not stop them, the server stopping does (see
+// detached).
 func (s *Service) readTranslations(ctx context.Context, titles []untranslated) {
 	select {
 	case s.translations <- struct{}{}:
 	default:
 		return
 	}
-	detached := context.WithoutCancel(ctx)
 	go func() {
 		defer func() { <-s.translations }()
+		detached, done := s.detached(ctx)
+		defer done()
+		reading := Background(detached)
 		for _, t := range titles {
-			if _, err := s.keptMeta(detached, t.entry, t.metaType, t.id); err != nil {
-				s.logger.Debug("An addon could not describe a title in its language", "addon", t.entry.addon.Manifest.Name, "error", err)
+			if _, err := s.keptMeta(reading, t.entry, t.metaType, t.id); err != nil && reading.Err() == nil {
+				s.logger.Debug("An addon could not describe a title in its language", "addon", t.entry.addon.LogName(), "error", err)
 			}
 		}
 	}()
@@ -258,7 +245,10 @@ func translation(base, translated stremio.Meta) stremio.Meta {
 		}
 	}
 	set(&shown.Description, translated.Description)
-	set(&shown.Poster, translated.Poster)
+	// A poster comes with its shape.
+	if translated.Poster != "" {
+		shown.Poster, shown.PosterShape = translated.Poster, translated.PosterShape
+	}
 	set(&shown.Background, translated.Background)
 	set(&shown.Logo, translated.Logo)
 	set(&shown.LandscapePoster, translated.LandscapePoster)
@@ -309,7 +299,7 @@ func (s *Service) translate(ctx context.Context, v view, items []Item) {
 		found := false
 		for _, entry := range translators {
 			if meta, ok := s.keptDescription(ctx, entry, metaKey{entry.addon.ID, item.StremioType, item.StremioID}, inMemory); ok {
-				translateItem(item, meta)
+				s.translateItem(item, meta)
 				found = true
 				break
 			}
@@ -325,16 +315,18 @@ func (s *Service) translate(ctx context.Context, v view, items []Item) {
 
 // translateItem gives a listed title what its description in a user's
 // language gives of its name, overview and images (see translation).
-func translateItem(item *Item, translated stremio.Meta) {
+func (s *Service) translateItem(item *Item, translated stremio.Meta) {
 	var shown Item
-	fromMeta(&shown, translation(stremio.Meta{Name: item.Name, Description: item.Overview, Poster: item.Images.Primary,
-		Background: item.Images.Backdrop, Logo: item.Images.Logo, LandscapePoster: item.Images.Thumb}, translated))
+	// Only names and images are read: no rating needed.
+	s.fromMeta(&shown, translation(stremio.Meta{Name: item.Name, Description: item.Overview, Poster: item.Images.Primary,
+		PosterShape: item.PosterShape, Background: item.Images.Backdrop, Logo: item.Images.Logo, LandscapePoster: item.Images.Thumb}, translated), "")
 	item.Name, item.Overview = shown.Name, shown.Overview
 	if item.Kind == KindMovie || item.Kind == KindSeries {
 		item.OriginalTitle = shown.Name
 	}
 	item.Images.Primary, item.Images.Backdrop, item.Images.Logo, item.Images.Thumb =
 		shown.Images.Primary, shown.Images.Backdrop, shown.Images.Logo, shown.Images.Thumb
+	item.PosterShape = shown.PosterShape
 }
 
 // TaggedArtwork returns the image of an item whose tag is tag (see

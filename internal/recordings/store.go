@@ -65,10 +65,12 @@ type Programme struct {
 	Name     string
 	Overview string
 	Genres   []string
-	Rating   string
-	Image    string
-	Start    time.Time
-	End      time.Time
+	// Rating is the one parental control judges the programme by (see
+	// library.Item.ParentalRating).
+	Rating string
+	Image  string
+	Start  time.Time
+	End    time.Time
 	// Season, Episode and EpisodeTitle are the episode the programme airs,
 	// when its guide numbers or names it; numbers count from 1.
 	Season       int
@@ -80,7 +82,7 @@ type Programme struct {
 func ProgrammeOf(item library.Item) Programme {
 	id := item.ID
 	p := Programme{Program: &id, Name: item.Name, Overview: item.Overview, Genres: slices.Clone(item.Genres),
-		Rating: item.OfficialRating, Image: item.Images.Primary, Season: max(item.ParentIndexNumber, 0), Episode: max(item.IndexNumber, 0),
+		Rating: item.ParentalRating(), Image: item.Images.Primary, Season: max(item.ParentIndexNumber, 0), Episode: max(item.IndexNumber, 0),
 		EpisodeTitle: item.EpisodeTitle}
 	if item.Channel != nil {
 		p.Channel = item.Channel.ID
@@ -491,13 +493,14 @@ func uniqueViolation(err error) bool {
 // Allows reports whether user's parental control and blocked genres let
 // them reach an item of kind (one of accounts.UnratedKinds) rated rating,
 // of genres, as titles are judged: a blocked genre hides it, and a rating
-// above the user's, or none when the kind is hidden unrated.
-func Allows(user accounts.User, kind, rating string, genres []string) bool {
+// above the user's, scored under country, the server's rating country, or
+// none when the kind is hidden unrated.
+func Allows(user accounts.User, country, kind, rating string, genres []string) bool {
 	for _, genre := range genres {
 		genre = strings.TrimSpace(genre)
 		if slices.ContainsFunc(user.BlockedGenres, func(b string) bool { return strings.EqualFold(genre, b) }) {
 			return false
 		}
 	}
-	return !user.Parental.Judges(kind) || user.Parental.Allows(kind, rating)
+	return !user.Parental.Judges(kind) || user.Parental.Allows(kind, rating, country)
 }

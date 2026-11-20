@@ -18,6 +18,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/activity"
 	"github.com/moodiness/polyfin/internal/addons"
+	"github.com/moodiness/polyfin/internal/backup"
 	"github.com/moodiness/polyfin/internal/iptv"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/quickconnect"
@@ -28,6 +29,14 @@ import (
 )
 
 const setupCode = "ABCD-EFGH"
+
+// The tests hash passwords and derive backup keys at a small cost (see
+// accounts.LowerPasswordCostForTests and backup.LowerKeyCostForTests).
+func TestMain(m *testing.M) {
+	accounts.LowerPasswordCostForTests()
+	backup.LowerKeyCostForTests()
+	m.Run()
+}
 
 type pinger struct{}
 
@@ -65,6 +74,8 @@ func newTestAPI(t *testing.T, failures int, configure ...func(*Options, testDeps
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	channels := iptv.New(pool, addonStore, client, logger, store.Settings)
 	lib := library.New(pool, addonStore, client, logger, store.Settings)
+	addonStore.SetCleanup(lib.CleanRemoved)
+	addonStore.SetCarry(lib.CarryRenamed)
 	lib.UseIPTV(channels)
 	channels.OnChange(lib.LineupChanged)
 	options := Options{
@@ -84,12 +95,17 @@ func newTestAPI(t *testing.T, failures int, configure ...func(*Options, testDeps
 			}
 			return time.Now()
 		},
-		Guides:        lib,
-		IPTV:          channels,
-		LibraryImages: lib,
-		SmartLists:    smartlists.New(pool),
-		SmartPreviews: lib,
-		DataDir:       t.TempDir(),
+		Guides:           lib,
+		IPTV:             channels,
+		LibraryImages:    lib,
+		Leftovers:        lib,
+		LibraryRefreshes: lib,
+		ShownTitles:      lib,
+		SmartLists:       smartlists.New(pool),
+		SmartPreviews:    lib,
+		DataDir:          t.TempDir(),
+		ChannelChoices:   lib,
+		AddonCaches:      lib,
 	}
 	for _, c := range configure {
 		c(&options, testDeps{pool: pool, client: client, addons: addonStore})
@@ -99,6 +115,11 @@ func newTestAPI(t *testing.T, failures int, configure ...func(*Options, testDeps
 	return testAPI{t: t, url: server.URL, store: store, quickConnect: quickConnect, clock: clock}
 }
 
+// testTransport is the tests' own: httptest.Server.Close closes the idle
+// connections of http.DefaultTransport, which the connection of a
+// parallel test's answer without a body may have just joined (#958).
+var testTransport = http.DefaultTransport.(*http.Transport).Clone()
+
 // browser is a client with its own cookie jar.
 type browser struct {
 	api    testAPI
@@ -107,7 +128,7 @@ type browser struct {
 
 func (api testAPI) browser() browser {
 	jar, _ := cookiejar.New(nil)
-	return browser{api: api, client: &http.Client{Jar: jar}}
+	return browser{api: api, client: &http.Client{Jar: jar, Transport: testTransport}}
 }
 
 func (b browser) call(method, path string, body any, header ...string) (int, map[string]any, *http.Response) {
@@ -203,12 +224,12 @@ func TestStatusTellsWhetherTheWebClientIsServed(t *testing.T) {
 func TestSetupIgnoresLanguagesTheServerDoesNotSpeak(t *testing.T) {
 	t.Parallel()
 	api := newTestAPI(t, 10)
-	account := map[string]string{"name": "admin", "password": "correct horse", "setupCode": setupCode, "language": "de"}
+	account := map[string]string{"name": "admin", "password": "correct horse", "setupCode": setupCode, "language": "nl"}
 	if status, body, _ := api.browser().call(http.MethodPost, "/setup", account); status != http.StatusCreated {
 		t.Fatalf("setup: %d %v", status, body)
 	}
 	if got := api.store.Settings().Language; got != "en" {
-		t.Errorf("server language after a setup in German: %q", got)
+		t.Errorf("server language after a setup in Dutch: %q", got)
 	}
 }
 
@@ -226,7 +247,7 @@ func TestSettingsLanguage(t *testing.T) {
 	if _, body, _ := administrator.call(http.MethodGet, "/settings", nil); body["language"] != "fr" || body["serverName"] != "Maison" {
 		t.Errorf("settings after saving: %v", body)
 	}
-	for _, language := range []any{"de", "", nil} {
+	for _, language := range []any{"nl", "de-DE", "", nil} {
 		settings["language"] = language
 		if status, body, _ := administrator.call(http.MethodPut, "/settings", settings); status != http.StatusBadRequest || body["error"] != "invalid_language" {
 			t.Errorf("language %v: %d %v", language, status, body)
@@ -476,7 +497,7 @@ func TestQuickConnectApproval(t *testing.T) {
 	t.Parallel()
 	api := newTestAPI(t, 10)
 	member := api.signedIn("member", false)
-	request, err := api.quickConnect.Initiate("tv-id", "Living room TV", "Swiftfin", "1.3")
+	request, err := api.quickConnect.Initiate(fromHome, "tv-id", "Living room TV", "Swiftfin", "1.3")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -487,13 +508,45 @@ func TestQuickConnectApproval(t *testing.T) {
 	if status != http.StatusOK || body["deviceName"] != "Living room TV" || body["appName"] != "Swiftfin" {
 		t.Fatalf("lookup: %d %v", status, body)
 	}
-	if status, _, _ := member.call(http.MethodPost, "/quick-connect", map[string]string{"code": request.Code}); status != http.StatusNoContent {
+	if status, _, _ := member.call(http.MethodPost, "/quick-connect", approval(request.Code)); status != http.StatusNoContent {
 		t.Fatalf("approval: %d", status)
 	}
 	approved, _ := api.quickConnect.BySecret(request.Secret)
 	_, session, _ := member.call(http.MethodGet, "/session", nil)
 	if approved.User == nil || approved.User.String() != session["user"].(map[string]any)["id"] {
 		t.Errorf("request approved for %v, want the signed-in member", approved.User)
+	}
+}
+
+// A Silo TV's 8-digit code is approved on the page as a Jellyfin app's is,
+// written as the TV shows it, and once: another user then finds no device
+// waiting, and cannot take the TV for themselves.
+func TestQuickConnectApprovesASiloCodeOnce(t *testing.T) {
+	t.Parallel()
+	api := newTestAPI(t, 10)
+	member := api.signedIn("member", false)
+	other := api.signedIn("other", false)
+	request, err := api.quickConnect.InitiateSilo(fromHome, "tv-id", "Living room", "tvos", "Silo", "2.0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	shown := request.Code[:4] + "-" + request.Code[4:]
+	if status, body, _ := member.call(http.MethodGet, "/quick-connect/"+request.Code, nil); status != http.StatusOK || body["deviceName"] != "Living room" {
+		t.Fatalf("lookup: %d %v", status, body)
+	}
+	if status, _, _ := member.call(http.MethodPost, "/quick-connect", approval(shown)); status != http.StatusNoContent {
+		t.Fatalf("approval: %d", status)
+	}
+	if status, body, _ := other.call(http.MethodGet, "/quick-connect/"+request.Code, nil); status != http.StatusNotFound || body["error"] != "unknown_code" {
+		t.Errorf("lookup once approved: %d %v", status, body)
+	}
+	if status, body, _ := other.call(http.MethodPost, "/quick-connect", approval(request.Code)); status != http.StatusNotFound || body["error"] != "unknown_code" {
+		t.Errorf("another approval: %d %v", status, body)
+	}
+	approved, _ := api.quickConnect.BySecret(request.Secret)
+	_, session, _ := member.call(http.MethodGet, "/session", nil)
+	if approved.User == nil || approved.User.String() != session["user"].(map[string]any)["id"] {
+		t.Errorf("request approved for %v, want the first user", approved.User)
 	}
 }
 

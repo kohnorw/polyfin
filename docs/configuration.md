@@ -1,77 +1,361 @@
 # Configuration
 
-Polyfin is set in the admin app, under **Settings**. The environment only gives it what it needs before it can read its settings: where its database is, and the key its stored secrets are encrypted with.
+This page is for administrators who run Polyfin and need to know what the environment sets. It covers the environment variables, the data folder, the work folders and how stored secrets are encrypted.
+
+Polyfin is set in the admin app, in the sections of **Settings**, such as **Settings › General**. The environment gives only what Polyfin needs before it can read its settings: where its database is, and the key that encrypts its stored secrets.
 
 ## Environment variables
 
-With the Compose file, `POSTGRES_PASSWORD` in `.env` is the only value to set: Compose builds `POLYFIN_DATABASE_URL` from it. `POLYFIN_SECRET_KEY` is optional but advised. The Docker image sets the others.
+With the Compose file, `POSTGRES_PASSWORD` in `.env` is the only value to set. Compose builds `POLYFIN_DATABASE_URL` from it. `POLYFIN_SECRET_KEY` is optional but advised. The Docker image sets the others.
+
+**Settings › Diagnostics** ends with the `POLYFIN_*` variables in effect, read only (see [Settings](administration.md#settings)). Secrets are hidden there, and the database URL shows its host and database only.
+
+The database and the secret key:
 
 | Variable | Default | What it does |
 | --- | --- | --- |
-| `POLYFIN_DATABASE_URL` | (required) | PostgreSQL URL, for example `postgresql://polyfin:password@postgres:5432/polyfin`. Besides its pool, Polyfin keeps one connection that listens for changes to addons and libraries, so that it answers them from memory; a pooler in transaction mode cannot carry it, and Polyfin then reads them from the database for every request. |
-| `POLYFIN_SECRET_KEY` | (unset) | Key the stored API keys, client secret and tracking tokens are encrypted with: 32 random bytes in base64, made with `openssl rand -base64 32`, or 64 hexadecimal digits. Unset keeps them unencrypted, and **Health** warns about it. A malformed key stops Polyfin from starting. Keep it with your backups: see [Stored keys and tokens](#stored-keys-and-tokens). |
-| `POLYFIN_DATA_DIR` | `polyfin` in the system temporary directory; `/data` in the Docker image, a volume | Folder Polyfin keeps its files in, as an absolute path: in `cache`, the parts of the files being read and the HLS segments being played, emptied when Polyfin starts; in `anime`, the lists that map anime between identifiers (see [Anime](tracking.md#anime)); and, unless their settings name other folders, the Live TV recordings in `recordings` and the database backups in `backups`. |
-| `POLYFIN_LISTEN` | `:8096` | HTTP address. 8096 is the port Jellyfin clients try by default. HTTPS, when served, listens on the same host, on the **HTTPS port** of **Settings › Security**, 8920 by default (see [HTTPS](administration.md#https)). |
-| `POLYFIN_DLNA_PORT` | `1900` | UDP port of SSDP, which DLNA devices search for servers on (see [DLNA](dlna.md)). Devices only use 1900: another port serves tests. |
-| `POLYFIN_DISCOVERY_PORT` | `7359` | UDP port of local network discovery (see [Local network discovery](administration.md#local-network-discovery)). Jellyfin apps only send to 7359: another port serves tests. |
-| `POLYFIN_HDHOMERUN_PORT` | `65001` | UDP port **Find tuners** asks HDHomeRun tuners to answer on (see [HDHomeRun tuners](iptv.md#hdhomerun-tuners)). Tuners only answer on 65001: another port serves tests. A value that is not a port stops Polyfin from starting. |
-| `POLYFIN_HDHOMERUN_ADDRESSES` | (unset) | Addresses **Find tuners** asks, separated by commas, such as `192.168.1.20,192.168.1.21`, instead of broadcasting on the local networks: for a container whose broadcasts do not reach them (see [Find HDHomeRun tuners](installation.md#find-hdhomerun-tuners)). An address without a port is asked on `POLYFIN_HDHOMERUN_PORT`. A value that is not a host or host:port stops Polyfin from starting. |
-| `POLYFIN_FFPROBE` | `ffprobe` | ffprobe executable (FFmpeg 9.0 or later): a path, or a name looked up in `PATH`. The Docker image includes one. |
-| `POLYFIN_FFMPEG` | `ffmpeg` | FFmpeg executable (9.0 or later): a path, or a name looked up in `PATH`. The Docker image includes one. |
-| `POLYFIN_FONTS_DIR` | `/usr/share/fonts`, with DejaVu in the Docker image | Fallback fonts apps load to render subtitles whose own fonts are missing: the `.ttf`, `.otf`, `.woff` and `.woff2` files of this folder and its subfolders. Mount more fonts here for other scripts. A missing folder offers none. See [Subtitles](subtitles.md). The names of [generated images](addons-and-libraries.md#generated-images) are written with its `.ttf`, `.otf` and `.ttc` fonts, else with Go Bold, built into Polyfin. |
-| `POLYFIN_WEB_DIR` | `/usr/share/polyfin/jellyfin-web`, where the Docker image puts jellyfin-web | Folder of jellyfin-web, the web client served at `/web/`. A folder without its `index.html` leaves the web client off, as happens without the Docker image. See [Web client](web-client.md). |
-| `POLYFIN_ACME_DIRECTORY` | Let's Encrypt's, `https://acme-v02.api.letsencrypt.org/directory` | Directory of the ACME server certificates come from when **Serve HTTPS** is **Let's Encrypt** (see [Let's Encrypt](administration.md#let-s-encrypt)): Let's Encrypt's staging environment to try a setup, a private ACME server, or a test server. A value that is not an `http` or `https` address stops Polyfin from starting. |
-| `POLYFIN_ACME_CA_FILE` | (unset) | PEM file of the certificate authorities that sign the HTTPS of the ACME server of `POLYFIN_ACME_DIRECTORY`, trusted besides the system's: for a private or test ACME server. A file that cannot be read is logged, and the system's are trusted alone. |
+| `POLYFIN_DATABASE_URL` | (required, unless `POLYFIN_DATABASE` is `embedded`) | PostgreSQL URL, such as `postgresql://polyfin:password@postgres:5432/polyfin`. Its `pool_max_conns` bounds the pool, 10 connections by default (see [A light PostgreSQL](installation.md#a-light-postgresql)). |
+| `POLYFIN_DATABASE` | (unset) | `embedded`: Polyfin runs its own PostgreSQL 18 in the folder `postgresql` of `POLYFIN_DATA_DIR`, with the server programs it finds in `PATH`, starting it before it serves and stopping it after. The image has these programs; set the variable on its container to run them (see [One container](installation.md#one-container)). Setting `POLYFIN_DATABASE_URL` too is an error. |
+| `POLYFIN_SECRET_KEY` | (unset) | Key that encrypts the stored secrets: API keys, client secrets, tokens and passwords. See [Stored keys and tokens](#stored-keys-and-tokens). |
 
-Polyfin logs at the `info` level, and at the `debug` level while **Detailed log**, under **Settings › Diagnostics**, is on. At the `info` level, it logs each Jellyfin endpoint an app calls that it does not serve, with the app's name and version, at most once an hour per endpoint, without the request's identifiers, query or token.
+- **The database connection:** besides its pool, Polyfin keeps one connection that listens for changes to addons and libraries. It then answers them from memory.
+  - A pooler in transaction mode cannot carry that connection. Polyfin then reads addons and libraries from the database for every request.
+- **The key's form:** 32 random bytes in base64, made with `openssl rand -base64 32`, or 64 hexadecimal digits.
+  - Unset, the secrets stay unencrypted, and **System › Health** warns about it.
+  - A malformed key stops Polyfin from starting.
+
+Network addresses and ports:
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `POLYFIN_LISTEN` | `:8096` | HTTP address, as host:port. 8096 is the port Jellyfin clients try by default. |
+| `POLYFIN_DISCOVERY_PORT` | `7359` | UDP port of [local network discovery](https-and-networking.md#local-network-discovery). |
+| `POLYFIN_DLNA_PORT` | `1900` | UDP port of SSDP, which [DLNA](dlna.md) devices search for servers on. |
+| `POLYFIN_HDHOMERUN_PORT` | `65001` | UDP port **Find tuners** asks [HDHomeRun tuners](iptv.md#hdhomerun-tuners) to answer on. |
+| `POLYFIN_HDHOMERUN_ADDRESSES` | (unset) | Addresses **Find tuners** asks instead of broadcasting on the local networks, separated by commas, such as `192.168.1.20,192.168.1.21`. |
+
+- **HTTPS:** when served, it listens on the same host as `POLYFIN_LISTEN`, on the **HTTPS port** of **Settings › Security**, 8920 by default (see [HTTPS](https-and-networking.md#https)).
+- **The three UDP ports:** Jellyfin apps only send to 7359, devices only use 1900, and tuners only answer on 65001. Another port serves tests.
+- **Tuner addresses:** they suit a container whose broadcasts do not reach the tuners (see [Find HDHomeRun tuners](installation.md#find-hdhomerun-tuners)).
+  - An address without a port is asked on `POLYFIN_HDHOMERUN_PORT`.
+  - A value that is not a host or host:port stops Polyfin from starting.
+- **Values that stop Polyfin from starting:** a `POLYFIN_LISTEN` that is not host:port with a port from 1 to 65535, and a port variable that is not a port from 1 to 65535.
+
+Programs Polyfin runs:
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `POLYFIN_FFPROBE` | `ffprobe` | ffprobe executable (FFmpeg 9.0, see below). |
+| `POLYFIN_FFMPEG` | `ffmpeg` | FFmpeg executable (9.0, see below). |
+| `POLYFIN_TESSERACT` | `tesseract`; `/usr/bin/tesseract` in the Docker image | Tesseract executable (5, see below), which reads picture subtitles into text while **Turn picture subtitles into text** is on. |
+| `POLYFIN_TESSDATA_DIR` | (unset); `/data/tessdata` in the Docker image | Folder of Tesseract `.traineddata` files for languages Tesseract's own data lacks, such as `jpn.traineddata` for Japanese. |
+| `POLYFIN_TESSDATA_URL` | `https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/<commit>/`: Tesseract's own data, at the commit Polyfin pins | Address the `.traineddata` files are downloaded from into `POLYFIN_TESSDATA_DIR`, followed by their name, such as `fin.traineddata`. |
+
+- **Executables:** each is a path, or a name looked up in `PATH`. The Docker image includes all three.
+- **FFmpeg's version:** 9.0 is the version the Docker image and Polyfin Desktop ship, and the one the tests run with. Older versions are not tested, and Polyfin does not check the version (see [GPUs and HDR](gpus-and-hdr.md)).
+- **Tesseract in the image:** version 5.5, with the data of English, French, German, Spanish, Italian, Portuguese and Dutch. Tesseract 5 is the version tested. The data Polyfin downloads, `tessdata_fast`, holds LSTM models, which Tesseract reads from version 4 on.
+- **Without Tesseract:** picture subtitles are not read. While the setting is on, the log says so at start.
+- **The data folder for Tesseract:** it is read besides Tesseract's own data.
+  - **System › Health** names the language and the file a track needs, and offers to download it.
+  - **Download the data of missing languages automatically** downloads it too.
+  - Polyfin creates the folder if missing, and must be able to write it.
+  - In the image, it is the `tessdata` folder of the data volume. Files can also be put there by hand.
+  - Unset, nothing is downloaded.
+- **The download address:** a mirror of the pinned commit, or a test server.
+  - Each file's SHA-256 is checked against the list built into Polyfin all the same. A file that differs is never kept.
+  - A value that is not an `http` or `https` address stops Polyfin from starting.
+- **Picture subtitles:** see [Picture subtitles read into text](subtitles.md#picture-subtitles-read-into-text).
+
+Folders:
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `POLYFIN_DATA_DIR` | `polyfin-server` in the configuration folder of the user Polyfin runs as, such as `~/.config/polyfin-server`; `/data` in the Docker image, a volume | Where Polyfin keeps its files, as an absolute path. See [Data folder](#data-folder). |
+| `POLYFIN_FONTS_DIR` | `/usr/share/fonts`, with DejaVu in the Docker image | Fallback fonts apps load to render subtitles whose own fonts are missing. |
+| `POLYFIN_WEB_DIR` | `/usr/share/polyfin/jellyfin-web`, where the Docker image puts jellyfin-web | Folder of jellyfin-web, the web player served at `/web/`. See [Web player](web-client.md). |
+
+- **Data folder:** a path that is not absolute stops Polyfin from starting, and so does one that is no folder. A folder that another account of the system can change is told in **System › Health** (see [Data folder](#data-folder)).
+- **Fallback fonts:** apps get the `.ttf`, `.otf`, `.woff` and `.woff2` files of the folder and its subfolders (see [Subtitles](subtitles.md)).
+  - Mount more fonts there for other scripts.
+  - A missing folder offers none.
+  - The names on [generated images](artwork-and-editing.md#generated-images) are written with its `.ttf`, `.otf`, `.ttc` and `.otc` fonts, else with Go Bold, built into Polyfin.
+- **Web player:** a folder without its `index.html` leaves the web player off, as happens without the Docker image.
+
+HTTPS certificates from an ACME server:
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `POLYFIN_ACME_DIRECTORY` | Let's Encrypt's, `https://acme-v02.api.letsencrypt.org/directory` | Directory of the ACME server certificates come from when **Serve HTTPS** is **Let’s Encrypt** (see [Let's Encrypt](https-and-networking.md#let-s-encrypt)). |
+| `POLYFIN_ACME_CA_FILE` | (unset) | PEM file of the certificate authorities that sign the HTTPS of that ACME server, trusted besides the system's. |
+
+- **Another directory:** Let's Encrypt's staging environment to try a setup, a private ACME server, or a test server.
+  - A value that is not an `http` or `https` address stops Polyfin from starting.
+- **The CA file:** for a private or test ACME server. A file that cannot be read is logged, and the system's authorities are trusted alone.
+
+Polyfin Desktop and tests:
+
+| Variable | Default | What it does |
+| --- | --- | --- |
+| `POLYFIN_DESKTOP` | (unset) | Set to `1` by Polyfin Desktop for the server it runs. Not for other setups. |
+| `POLYFIN_NVENC13_TOOLS` | (unset) | For tests: a JSON file of the downloads of the FFmpeg for NVIDIA drivers older than 610, such as a local server's, instead of the pinned ones (see [NVIDIA driver](gpus-and-hdr.md#nvidia-driver)). |
+
+With `POLYFIN_DESKTOP` set, the server knows that the app starts it again after a restart. It then offers the app's updates in the admin app (see [Restart and updates](updates-and-restarts.md#restart-and-updates)).
+
+### Detailed log
+
+Polyfin logs at the `info` level. It logs at the `debug` level while **Detailed log (to diagnose a problem)**, in **Settings › Diagnostics**, is on.
+
+- It is off by default.
+- It applies at once, without a restart.
+
+At the `info` level, Polyfin logs each Jellyfin endpoint an app calls that it does not serve:
+
+- with the app's name and version;
+- at most once an hour per endpoint;
+- without the request's identifiers, query or token.
+
+### Data folder
+
+`POLYFIN_DATA_DIR` holds these folders:
+
+| Folder | Holds | Kept after a restart |
+| --- | --- | --- |
+| `cache` | HLS segments being played, guides and picture subtitles being read | No, emptied when Polyfin starts |
+| `cache` | Parts of the files read | Yes, as **Settings › Playback** says (see [Keeping the files read across restarts](reading-the-sources.md#keeping-the-files-read-across-restarts)) |
+| `cache` | Relayed images | Yes |
+| `anime` | Lists that map anime between identifiers (see [Anime](tracking.md#anime)) | Yes |
+| `themes` | The copy of a web player theme's files, when one is kept (see [Keeping a copy of a theme](themes-and-custom-code.md#keeping-a-copy-of-a-theme)) | Yes |
+| `tools` | The FFmpeg for NVIDIA drivers older than 610, when NVENC needs it (see [NVIDIA driver](gpus-and-hdr.md#nvidia-driver)) | Yes |
+| `recordings` | Live TV recordings | Yes |
+| `backups` | Database backups | Yes |
+| `postgresql` | The database, when `POLYFIN_DATABASE` is `embedded` | Yes |
+| `log` | The database's log, `postgresql.log`, when `POLYFIN_DATABASE` is `embedded` | Yes |
+
+- **Parts of `cache`:** the settings can move each to another folder (see [Folders for conversion, files being read and the cache](#folders-for-conversion-files-being-read-and-the-cache)).
+- **Recordings and backups:** they go elsewhere when their settings name other folders.
+
+Without `POLYFIN_DATA_DIR`, the data folder is `polyfin-server` in the configuration folder of the user Polyfin runs as, which the other accounts of the system cannot write into:
+
+| System | Data folder without the variable |
+| --- | --- |
+| Linux | `$XDG_CONFIG_HOME/polyfin-server`, else `~/.config/polyfin-server` |
+| macOS | `~/Library/Application Support/polyfin-server` |
+| Windows | `%AppData%\polyfin-server` |
+| Docker image | `/data`: the image sets the variable |
+
+- **A service started without `HOME`:** the folder is in the home its user has in the system's user database. When neither tells a home, Polyfin does not start: set `POLYFIN_DATA_DIR`.
+- **Created for that user alone:** Polyfin creates a missing data folder with mode 0700, and so its default `recordings` and `backups` folders. A folder that exists keeps its mode.
+  - To keep other accounts from reading an older data folder, run `chmod 700` on it.
+  - To let another account read the recordings or the backups, give them folders of their own in the settings.
+
+Polyfin looks at the data folder each time it starts. What is no folder, and a missing folder it cannot create, stop it. A folder that another account of the system can change does not: the log at each start, and **System › Health**, say what is wrong and give the command that mends it.
+
+| The data folder | What mends it |
+| --- | --- |
+| Belongs to another user than the one Polyfin runs as | `chown`, to give it to that user |
+| Can be written by its group or by others | `chmod go-w` |
+
+- **Why it is told:** an account that can write into the folder can replace the backups Polyfin restores, the programs it runs and the files it serves. On a system with no other account, nobody can.
+- **After the command:** restart Polyfin. It looks at the folder when it starts.
+- **A link:** a data folder that is a symbolic link is followed, and the folder it leads to is the one looked at.
+- **In a container:** nothing is looked for. A volume has the owner and the mode its host gave it. Polyfin tells a container by the file Docker or Podman puts in it.
+- **On Windows:** nothing is looked for. A folder has no owner and no mode of this kind there.
+
+Earlier versions kept these files in `polyfin` in the system's temporary folder when `POLYFIN_DATA_DIR` was not set. A server that still has that folder, and no `polyfin-server` folder yet, keeps using it:
+
+- **A warning:** the log at each start, and **System › Health**, name the folder and the one to move it to. Many systems empty their temporary folder at each boot.
+- **Moving it:** stop Polyfin, move the folder, as with `mv /tmp/polyfin ~/.config/polyfin-server` on Linux, then start Polyfin. To keep the files elsewhere, move them there and set `POLYFIN_DATA_DIR`.
+- **Refused:** nobody chose that folder, and another account can make it before Polyfin does. So Polyfin does not start when it is a link, another user's, or writable by its group or by others, whether `POLYFIN_DATA_DIR` names it or not. Create the new folder, as with `mkdir -p -m 700 ~/.config/polyfin-server`, or name another folder in `POLYFIN_DATA_DIR`: Polyfin then leaves the temporary folder alone.
+- **Once the system emptied it:** Polyfin starts in the new folder, empty, as it started in a new temporary folder before.
 
 ### Polyfin Desktop
 
-[Polyfin Desktop](desktop.md) sets the variables of the server itself, from its own folders: `POLYFIN_DATABASE_URL` names its own database, on `127.0.0.1`; `POLYFIN_DATA_DIR` is its data folder, such as `~/Library/Application Support/Polyfin` on macOS (see [Folders](desktop.md#folders)); `POLYFIN_FFMPEG` and `POLYFIN_FFPROBE` are the FFmpeg and ffprobe it downloads into it; `POLYFIN_WEB_DIR` and `POLYFIN_FONTS_DIR` are the jellyfin-web and fonts of its package; and `POLYFIN_SECRET_KEY` is the key it keeps in the system's key store (see [The secret key](desktop.md#the-secret-key)). `PATH` starts with its PostgreSQL programs, where backups find `pg_dump` and `pg_restore`. Values of these in the environment it starts from are left out; the others, such as `POLYFIN_LISTEN`, reach the server as they are.
+[Polyfin Desktop](desktop.md) sets these variables for the server, from its own folders:
+
+| Variable | Value |
+| --- | --- |
+| `POLYFIN_DATABASE_URL` | Its own database, on `127.0.0.1` |
+| `POLYFIN_DATA_DIR` | Its data folder, such as `~/Library/Application Support/Polyfin` on macOS (see [Folders](desktop.md#folders)) |
+| `POLYFIN_FFMPEG`, `POLYFIN_FFPROBE` | The FFmpeg and ffprobe it downloads into that folder |
+| `POLYFIN_WEB_DIR`, `POLYFIN_FONTS_DIR` | The jellyfin-web and fonts of its package |
+| `POLYFIN_SECRET_KEY` | The key it keeps in the system's key store (see [The secret key](desktop.md#the-secret-key)) |
+| `POLYFIN_DESKTOP` | `1` |
+
+- **`PATH`:** it starts with the app's PostgreSQL programs, where backups find `pg_dump` and `pg_restore`.
+- **Left out:** the values of these variables, and the `PG` variables, in the environment the app starts from.
+- **Passed on as they are:** the other variables, such as `POLYFIN_LISTEN`.
 
 ### On Windows and macOS
 
-`polyfin serve` runs on Windows and macOS as on Linux, outside Docker; the desktop version runs it so. What differs:
+`polyfin serve` runs on Windows and macOS as on Linux, outside Docker. Polyfin Desktop runs it so.
 
-- Paths are the system's, absolute as on Linux: `C:\Users\me\AppData\Local\Polyfin` or `/Users/me/Library/Application Support/Polyfin` for `POLYFIN_DATA_DIR`, and the same for the executables and folders of the other variables. The defaults of `POLYFIN_FONTS_DIR` and `POLYFIN_WEB_DIR`, under `/usr/share`, are the Docker image's and exist on neither system: set them, or apps get no fallback fonts and the web client stays off. The recordings and backup folders of the settings take Windows paths too, `D:\Recordings` or `\\nas\media\Backups`, and so do local folders, `D:\Movies` or `\\nas\media\Movies` (see [Local folders on Windows and macOS](local-folders.md#on-windows-and-macos)).
-- **Stopping:** Polyfin stops cleanly on SIGTERM or SIGINT on macOS, as on Linux. Windows has no signals: Polyfin stops cleanly on Ctrl-C or Ctrl-Break in its console, and when its console closes or the session ends. The programs it runs there, FFmpeg, ffprobe, pg_dump, end with it even when it is killed, as they belong to a job object of Polyfin's. A recording is stopped by FFmpeg's `q` key, sent on its standard input, rather than by an interrupt.
-- **Restoring a backup:** on Linux and macOS Polyfin replaces its process with a new Polyfin once the restore is done. Windows cannot: Polyfin starts a new one, as it was started itself, waits for it and exits as it does, so that whatever watches its process, such as the desktop app, still does.
-- **FFmpeg's outputs:** FFmpeg tells its progress, and gives the subtitles it extracts, on outputs of their own besides its standard output. Windows passes a program no such outputs, so FFmpeg writes them to connections on the loopback, `tcp://127.0.0.1` on a port Polyfin picks for each, which it accepts once.
-- **Disk space:** **System › Health** measures the disks of the data folder, the recordings and the backups on each system: through `statfs` on Linux and macOS, and on Windows through the volume each folder is on, a drive such as `C:\` or a folder a volume is mounted in.
-- **Priority:** FFmpeg reading in the background, to measure loudness or find commercials, runs at the lowest priority on each system: `nice` 19 on Linux and macOS, the idle priority class on Windows.
-- Watching folders for changes goes through inotify on Linux, kqueue on macOS, which keeps a file open for each folder and file watched, and ReadDirectoryChangesW on Windows, which has no limit to raise (see [Watching for changes](local-folders.md#watching-for-changes)).
+Paths are the system's, absolute as on Linux:
+
+- `POLYFIN_DATA_DIR` takes `C:\Users\me\AppData\Local\Polyfin` or `/Users/me/Library/Application Support/Polyfin`. The executables and folders of the other variables take the same form.
+- The defaults of `POLYFIN_FONTS_DIR` and `POLYFIN_WEB_DIR`, under `/usr/share`, are the Docker image's. They exist on neither system: set them, or apps get no fallback fonts and the web player stays off.
+- The recordings, backups, conversion, files being read and cache folders of the settings take Windows paths too, such as `D:\Recordings` or `\\nas\media\Backups`.
+- So do local folders, such as `D:\Movies` or `\\nas\media\Movies` (see [Local folders on Windows and macOS](local-folders.md#on-windows-and-macos)).
+
+What else differs:
+
+| Topic | Linux and macOS | Windows |
+| --- | --- | --- |
+| Stopping cleanly | On SIGTERM or SIGINT | On Ctrl-C or Ctrl-Break in its console, and when its console closes or the session ends |
+| Restoring a backup | Polyfin replaces its process with a new Polyfin once the restore is done | Polyfin starts a new one as it was started itself, waits for it, and exits as it does. Whatever watches its process, such as Polyfin Desktop, still does. |
+| FFmpeg's progress and extracted subtitles | On outputs of their own, besides the standard output | Windows passes a program no such outputs. FFmpeg writes them to `tcp://127.0.0.1`, on a port Polyfin picks for each and accepts once. |
+| Disk space in **System › Health** | Measured through `statfs` | Measured through the volume each folder is on: a drive such as `C:\`, or a folder a volume is mounted in |
+| FFmpeg reading in the background (loudness, commercials) | `nice` 19, the lowest priority | The idle priority class, the lowest priority |
+| Watching folders for changes | inotify on Linux; kqueue on macOS, which keeps a file open for each folder and file watched | ReadDirectoryChangesW, which has no limit to raise |
+
+On Windows only:
+
+- The programs Polyfin runs there, FFmpeg, ffprobe and pg_dump, end with it even when it is killed. They belong to a job object of Polyfin's.
+- A recording is stopped by FFmpeg's `q` key, sent on its standard input, rather than by an interrupt.
+
+**System › Health** measures the disks of the cache, the conversion folder, the folder for files being read, the recordings and the backups on each system. For watching, see [Watching for changes](local-folders.md#watching-for-changes).
 
 ### Variables that became settings
 
-These variables are no longer read at every start: they are settings of the admin app. At its first start with a version that made them settings, Polyfin copies the value of those still set into their setting, once, and never reads them again. Until they are removed, it logs at each start that it no longer reads them. A value it cannot use is not copied, and the log says so: it never stops Polyfin from starting.
+These variables are now settings of the admin app, and are no longer read at every start.
 
-| Variable | Setting |
-| --- | --- |
-| `POLYFIN_CACHE_SIZE` | **Disk space for files being read (GB)**, under **Settings › Playback** |
-| `POLYFIN_HWACCEL` | The GPU choice, under **Settings › Conversion** (see [Transcoding](transcoding.md)) |
-| `POLYFIN_VAAPI_DEVICE` | **Graphics card for VAAPI**, under **Settings › Conversion** |
-| `POLYFIN_SEGMENTS` | The databases turned on, and their order, under **Settings › Content** (see [Skip segments](skip-segments.md)) |
-| `POLYFIN_RECORDINGS_DIR` | **Record Live TV**, turned on, and **Recordings folder**, under **Settings › Recordings** (see [Live TV](live-tv.md)) |
-| `POLYFIN_BACKUP_DIR` | **Back up the database every day**, turned on, and **Backups folder**, under **Settings › Backups** (see [Backups](backups.md)) |
-| `POLYFIN_LOG_LEVEL` | **Detailed log**, under **Settings › Diagnostics**: `debug` turns it on; the other levels are not copied |
-| `POLYFIN_CACHE_DIR` | Not a setting: replaced by `POLYFIN_DATA_DIR`, whose `cache` folder holds the cache |
+- At the first start of a version that made them settings, Polyfin copies the value of those still set into their setting, once. It never reads them again.
+- A value it cannot use is not copied, and the log says so. It never stops Polyfin from starting.
+- Until they are removed, Polyfin logs at each start that it no longer reads five of them, as the table says.
+
+| Variable | Setting | Logged at each start |
+| --- | --- | --- |
+| `POLYFIN_CACHE_SIZE` | **Disk space for files being read (GB)**, in **Settings › Playback** | Yes |
+| `POLYFIN_HWACCEL` | The GPU choice, in **Settings › Conversion (transcoding)** (see [Transcoding](transcoding.md)) | No |
+| `POLYFIN_VAAPI_DEVICE` | **Graphics card for VAAPI**, in **Settings › Conversion (transcoding)** | Yes |
+| `POLYFIN_SEGMENTS` | The databases turned on, and their order, in **Settings › Content** (see [Skip segments](skip-segments.md)) | No |
+| `POLYFIN_RECORDINGS_DIR` | **Record Live TV**, turned on, and **Recordings folder**, in **Settings › Recordings** (see [Live TV](live-tv.md)) | Yes |
+| `POLYFIN_BACKUP_DIR` | **Back up the database**, turned on, and **Backups folder**, in **Settings › Backups** (see [Backups](backups.md)) | Yes |
+| `POLYFIN_LOG_LEVEL` | **Detailed log (to diagnose a problem)**, in **Settings › Diagnostics**. `debug` turns it on; the other levels are not copied. | Yes |
+| `POLYFIN_CACHE_DIR` | None, and never read: `POLYFIN_DATA_DIR` replaced it, and its `cache` folder holds the cache | No |
+
+<a id="work-folders"></a>
+
+## Folders for conversion, files being read and the cache
+
+Polyfin keeps the files it works on in `cache`, in its data folder. Three settings move them, each to a folder of its own:
+
+| Setting | Where | Default | What it holds |
+| --- | --- | --- | --- |
+| **Conversion folder** | **Settings › Conversion (transcoding)** | Empty, for `cache` | In `segments`, the segments of the files converted or repackaged while they play, Live TV's included. These are the busiest writes, which a fast disk or a memory folder suits (see [A memory folder for conversion](installation.md#a-memory-folder-for-conversion)). |
+| **Folder for files being read** | **Settings › Playback**, below **Disk space for files being read (GB)** | Empty, for `cache` | In `sources`, the parts being read of the addons' files and of the files of S3 buckets, SFTP folders and rclone remotes. In `torrents`, the torrents' pieces. Both stay within that disk space (see [Reading the sources](reading-the-sources.md#reading-the-sources)). They often take several GB, which a large disk suits. |
+| **Cache folder** | **Settings › General** | Empty, for `cache` | In `images`, the relayed images, up to 1 GB (see [Clearing the image cache](health.md#clearing-the-image-cache)). In `guides`, the guides being read. In `ocr`, the picture subtitles being read into text. |
+
+**Checks on saving:** they are the same as for the recordings and backups folders. Saving refuses a folder that:
+
+- is not an absolute path;
+- does not exist;
+- Polyfin cannot write a file into.
+
+Polyfin never creates one of these folders. It is where a disk or a memory folder is mounted, and a folder made in its place would fill the disk beneath.
+
+**At the next start:** a new folder applies when Polyfin starts again, and nothing is moved.
+
+- The places above are emptied at each start, except `images` and `sources`.
+  - `images` is kept from one start to the next. In a new cache folder, the images are relayed again as apps ask for them.
+  - `sources` is kept as **Disk space and retention**, under **Settings › Playback**, says (see [Keeping the files read across restarts](reading-the-sources.md#keeping-the-files-read-across-restarts)). In a new folder for files being read, the files are read again from their sources.
+- At that start, Polyfin removes what the data folder's `cache` kept for the folders now chosen elsewhere, the images and the files read included.
+- A folder chosen before is left as it is: delete it by hand.
+
+**Unwritable at start:** a folder that cannot be written into when Polyfin starts, such as a disk not mounted, is a problem in **System › Health**.
+
+- The problem links to its setting.
+- Polyfin keeps those files in the data folder's `cache` meanwhile, until a start finds the folder writable.
+
+**Folders Polyfin did not make:** in a folder chosen, Polyfin empties `segments`, `torrents`, `guides` and `ocr` only when it made them. It writes a file named `.polyfin-work` in each of them when it makes it. At each start, it empties one that holds this file, or nothing.
+
+- A folder chosen that already holds other files under one of these names is left as it is, such as a disk whose `torrents` folder belongs to another program. It is a problem in **System › Health**, which names the setting, the folder and what it holds.
+- Polyfin keeps its files in the data folder's `cache` meanwhile. Choose another folder, or move what the problem names elsewhere, then restart Polyfin.
+- The problem goes once the setting names another folder.
+- After an upgrade from a version that did not write `.polyfin-work`, a folder holding only files and folders with the names that version gave them is emptied as before, and gets the file. One that holds anything else beside them is left as it is.
+- In the data folder's `cache`, the four folders are emptied at each start, whatever they hold.
+
+**Free space:** **System › Health** and the `polyfin_disk_free_bytes` metric give the free space of each folder (see [Metrics](metrics-and-api-keys.md#metrics)). They list `conversion` and `reading` besides `cache` when each is another folder than those before it.
+
+**Polyfin Desktop:** the folders are folders of the computer, as its recordings folder is, such as `D:\Polyfin\Conversion`.
+
+- On Linux, `/dev/shm` is a memory folder already there at every start, which can be chosen as it is.
+- macOS and Windows have no memory folder of their own. A RAM disk made with another program must be there when Polyfin starts. Otherwise the data folder's `cache` takes its place until the next start.
+
+**Compared with Jellyfin**
+
+- Polyfin's conversion folder and cache folder match two Jellyfin settings, with the differences below. Jellyfin's dashboard has a "Transcode path", `TranscodingTempPath` ([EncodingOptions.cs, line 76](https://github.com/jellyfin/jellyfin/blob/v12.4/MediaBrowser.Model/Configuration/EncodingOptions.cs#L76)), empty for `transcodes` in its cache folder ([EncodingConfigurationExtensions.cs, lines 29 to 40](https://github.com/jellyfin/jellyfin/blob/v12.4/MediaBrowser.Common/Configuration/EncodingConfigurationExtensions.cs#L29-L40)). It also has a "Cache path", `CachePath` ([BaseApplicationConfiguration.cs, line 37](https://github.com/jellyfin/jellyfin/blob/v12.4/MediaBrowser.Model/Configuration/BaseApplicationConfiguration.cs#L37)), which holds its image cache in `images` ([BaseApplicationPaths.cs, line 55](https://github.com/jellyfin/jellyfin/blob/v12.4/Emby.Server.Implementations/AppBase/BaseApplicationPaths.cs#L55)).
+- Polyfin refuses its three folders as Jellyfin refuses a Cache path that does not exist or that it cannot write a file into ([BaseConfigurationManager.cs, lines 239 to 258](https://github.com/jellyfin/jellyfin/blob/v12.4/Emby.Server.Implementations/AppBase/BaseConfigurationManager.cs#L239-L258)).
+- Polyfin never creates a folder chosen, and starts with the data folder's `cache` in place of one it cannot write into, which **System › Health** tells. Jellyfin does not check a Transcode path when it is saved. It creates it when missing, at start and at each use, and one it cannot create at start stops it from starting ([Program.cs, lines 195 to 199](https://github.com/jellyfin/jellyfin/blob/v12.4/Jellyfin.Server/Program.cs#L195-L199)).
+- Polyfin applies a new folder at the next start, so that the playbacks under way keep their files where they are. Jellyfin applies a new Cache path as the configuration is saved ([BaseConfigurationManager.cs, lines 179 and 202 to 232](https://github.com/jellyfin/jellyfin/blob/v12.4/Emby.Server.Implementations/AppBase/BaseConfigurationManager.cs#L202-L232)), and the Transcode path at each conversion.
+- Polyfin empties its places at start, but keeps the images and the files read. Jellyfin empties neither folder at start. It deletes the transcoding files older than a day at start and every 24 hours ([DeleteTranscodeFileTask.cs, lines 66 to 89](https://github.com/jellyfin/jellyfin/blob/v12.4/Emby.Server.Implementations/ScheduledTasks/Tasks/DeleteTranscodeFileTask.cs#L66-L89)). It deletes the cache's files older than 30 days every 24 hours (see [Clearing the image cache](health.md#clearing-the-image-cache)).
+- Polyfin keeps the parts of the files it reads from addons and torrents in a folder of its own. Jellyfin has no addons or torrents, and no folder for files being read: it reads files where they are.
 
 ## Compose settings in `.env`
 
-The Compose file reads `POSTGRES_PASSWORD` and `POLYFIN_SECRET_KEY` from `.env`. See [`.env.example`](../.env.example). To publish Polyfin on another port, change the first `8096` of `ports` in `compose.yaml`; to pin a release, replace the image's `latest` tag with its version, such as `0.22.0`.
+The Compose file reads `POSTGRES_PASSWORD` and `POLYFIN_SECRET_KEY` from `.env` (see [`.env.example`](../.env.example)).
+
+- **`POSTGRES_PASSWORD`:** Compose places it inside a PostgreSQL URL, so keep it URL-safe. Make one with `openssl rand -hex 24`.
+- **`RCLONE_RC_PASSWORD`:** only with the optional rclone service, the password of rclone's remote control. Compose gives it to rclone with the user `polyfin`, and the rclone source in Polyfin signs in with that user and password, as entered in **Content › Sources** (see [An rclone container](installation.md#an-rclone-container)). Polyfin itself does not read the variable.
+- **Another port:** to publish Polyfin on another port, change the first `8096` of `ports` in `compose.yaml`.
+- **A pinned release:** replace the image's `latest` tag with the version you run now (see [Pin a version](installation.md#pin-a-version)).
 
 ## Stored keys and tokens
 
-Polyfin stores a few secrets in its database: the server's PublicMetaDB key, TheIntroDB key, Trakt client secret, Last.fm shared secret and SMTP password, each user's tracking tokens and API keys (Trakt, Simkl, MDBList, PublicMetaDB, Last.fm, ListenBrainz), what each user's app connections sign in with (see [Staying connected](users.md#staying-connected)), the addresses, tokens and keys of notification targets (see [Notifications](notifications.md#targets)), the passwords, secret keys, private keys and passphrases of [network shares](local-folders.md#credentials), the passwords, secret keys and private keys of [backup destinations](backups.md#destinations), the account key and private key of the certificate of [Let's Encrypt](administration.md#let-s-encrypt), whose certificate is stored as it is, and the keys of the users' [two-step sign-in](users.md#two-step-sign-in). With `POLYFIN_SECRET_KEY` set, they are encrypted with AES-256-GCM, so that a copy of the database alone does not hand them out:
+Polyfin stores a few secrets in its database. With `POLYFIN_SECRET_KEY` set, they are encrypted with AES-256-GCM, so that a copy of the database alone does not hand them out. Once Polyfin has read the key and `POLYFIN_DATABASE_URL` at startup, it takes them out of its own environment: the programs it runs, such as FFmpeg, do not receive them.
 
-- At startup, the secrets still stored unencrypted are encrypted in place, in one go. Running again changes nothing.
-- New values are written encrypted, and read back decrypted.
-- Without the key, nothing changes from earlier versions: secrets are stored as they are, and **System › Health** shows a warning while any is stored that way.
-
-If the key is missing, changed or wrong while encrypted secrets exist, Polyfin still starts. The secrets it cannot decrypt count as not set: the services they belong to act as not configured or not connected, and a backup destination sends nothing. The log shows one error naming them, never their values, and **System › Health** lists them. Set the key they were encrypted with again, or enter them again: a server key under **Settings**, the keys of the certificate of Let's Encrypt obtained again by themselves, with a new account, a backup destination's password or key under **Settings › Backups**, a user's connection under **My account › Tracking**, an app connection by signing in again under **My account › Import from an app**. Until one is entered again, saving other settings keeps the value the right key can still decrypt. A user whose two-step sign-in key cannot be decrypted signs in with a recovery code, then turns it off and on again under **My account**, or an administrator turns it off with **Turn off two-step sign-in** on their page.
-
-Backups hold these secrets as they are stored: encrypted with the key set when the backup was made. Keep the key with your backups. Before restoring a backup from the admin app, Polyfin counts the secrets of the backup the current key cannot decrypt, and asks before going ahead (see [Restoring a backup from the admin app](backups.md#restoring-a-backup-from-the-admin-app)).
+| Whose | Secrets |
+| --- | --- |
+| The server's | PublicMetaDB key, TheIntroDB key, TMDB API key, MDBList API key for ratings, Trakt client secret, AniList client secret, MyAnimeList client secret, Last.fm shared secret, SMTP password, backup passphrase, metrics token and **Update tool token** (see [Restart and updates](updates-and-restarts.md#restart-and-updates)) |
+| Torrents | The SOCKS5 proxy password and the WireGuard configuration |
+| Each user's | Tracking tokens and API keys (Trakt, Simkl, MDBList, PublicMetaDB, Last.fm, ListenBrainz), what their app connections sign in with (see [Staying connected](moving-to-polyfin.md#staying-connected)), and the keys of their [two-step sign-in](sign-in-and-security.md#two-step-sign-in) |
+| Notification targets | Their addresses, tokens and keys (see [Notifications](notifications.md#targets)) |
+| [Network shares](network-shares.md#credentials) | Passwords, secret keys, private keys and passphrases |
+| [Backup destinations](backups.md#destinations) | Passwords, secret keys and private keys |
+| [Let's Encrypt](https-and-networking.md#let-s-encrypt) | The account key and the certificate's private key. The certificate is stored as it is. |
+| [Identity provider](sign-in-and-security.md#identity-provider-settings) | Its **Client secret** |
 
 Addon addresses, IPTV passwords and guide addresses stay unencrypted.
 
-Administrators can read the server's saved keys again, and each user their own MDBList and PublicMetaDB keys and ListenBrainz token: see [Administration](administration.md#showing-a-saved-key).
+The server's signing secret is not encrypted either. With the key set, a copy of the database alone signs nothing all the same (see [The signing secret](#the-signing-secret)).
+
+How the key applies:
+
+- At startup, the secrets still stored unencrypted are encrypted in place, in one go. Running again changes nothing.
+- New values are written encrypted, and read back decrypted.
+- Without the key, nothing changes from earlier versions. Secrets are stored as they are, and **System › Health** shows a warning while the key is not set, before the first secret is stored too. **Stay connected**, under **Import from an app**, says so as well (see [Staying connected](moving-to-polyfin.md#staying-connected)).
+
+**A missing, changed or wrong key:** Polyfin still starts while encrypted secrets exist.
+
+- The secrets it cannot decrypt count as not set. Their services act as not configured or not connected, and a backup destination sends nothing.
+- The log shows one error naming them, never their values.
+- **System › Health** lists them.
+- What Polyfin signed before stops working, once: apps ask again for what they were playing. The same happens the first time a key is set, and when it is removed (see [The signing secret](#the-signing-secret)).
+
+Set again the key they were encrypted with, or enter them again:
+
+| Secret | Where to enter it again |
+| --- | --- |
+| A server key | Its section of **Settings** |
+| The keys of the Let's Encrypt certificate | None: they are obtained again by themselves, with a new account |
+| A backup destination's password or key | **Settings › Backups** |
+| A user's connection | **My account › Tracking** |
+| An app connection | Sign in again in **My account › Import from an app** |
+| A user's two-step sign-in key | The user signs in with a recovery code, then turns two-step sign-in off and on again in **My account**. Or an administrator turns it off with **Turn off two-step sign-in** on their page. |
+
+Until a secret is entered again, saving other settings keeps the value the right key can still decrypt.
+
+**Backups:** they hold these secrets as they are stored, encrypted with the key set when the backup was made. Keep the key with your backups.
+
+- Before restoring a backup from the admin app, Polyfin counts the backup's secrets that the current key cannot decrypt.
+- It then asks before going ahead (see [Restoring a backup from the admin app](backups.md#restoring-a-backup-from-the-admin-app)).
+
+Administrators can read the server's saved keys again. Each user can read their own MDBList and PublicMetaDB keys and ListenBrainz token. See [Administration](administration.md#showing-a-saved-key).
+
+### The signing secret
+
+Polyfin signs what it gives apps to use without their sign-in: playback addresses and play sessions, the links of live streams, image addresses and **Configure** links. It signs with a secret of 32 random bytes kept in its database, as it is.
+
+- With `POLYFIN_SECRET_KEY` set, Polyfin signs with a value derived from both the key and the stored secret (HMAC-SHA256). A copy of the database alone, or a backup, then signs nothing for the server.
+- Without the key, the stored secret signs by itself. It is as readable as the rest of the database, and every backup holds it.
+- **Make a new signing secret**, under **Signing secret** in **Settings › Security**, replaces it. Use it when a copy of the database or a backup may be in other hands. It asks for your password or a two-step code, then Polyfin restarts, as with **Restart** and with the same warning (see [Restart](updates-and-restarts.md#restart)). Everything signed before stops working: apps stay signed in, and ask again for what they were playing.
+- Restoring a backup from the admin app or the setup page makes a new one too (see [What a restore does](backups.md#what-a-restore-does)).

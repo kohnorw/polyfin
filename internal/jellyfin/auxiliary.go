@@ -23,6 +23,7 @@ import (
 	"github.com/moodiness/polyfin/internal/collections"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/playlists"
+	"github.com/moodiness/polyfin/internal/preferences"
 )
 
 // auxiliaryRoutes registers the endpoints Jellyfin apps call around
@@ -38,8 +39,9 @@ func (h *Handler) auxiliaryRoutes(rt *router) {
 	signedIn(http.MethodGet, "/System/Endpoint", h.endpointInfo)
 	signedIn(http.MethodGet, "/Playback/BitrateTest", h.bitrateTest)
 
-	// Polyfin has no studio list or artists.
-	signedIn(http.MethodGet, "/Studios", h.emptyQueryResult)
+	// Polyfin has no artists; its studios are those of titles (see
+	// studios.go).
+	signedIn(http.MethodGet, "/Studios", h.studios)
 	// Jellyfin answers similar titles under each of these routes.
 	for _, similar := range []string{"/Items/{itemId}/Similar", "/Movies/{itemId}/Similar", "/Shows/{itemId}/Similar", "/Trailers/{itemId}/Similar"} {
 		signedIn(http.MethodGet, similar, h.similarItems)
@@ -480,6 +482,9 @@ func (h *Handler) displayPreferencesRequest(w http.ResponseWriter, r *http.Reque
 	client, _ = queryParam(r, "client")
 	if strings.TrimSpace(client) == "" {
 		errs.add("client", "The client field is required.")
+	} else if len(client) > preferences.MaxClientBytes {
+		// Nothing is kept under such a name, so nothing is read under it.
+		errs.add("client", fmt.Sprintf("The field client must be a string with a maximum length of %d.", preferences.MaxClientBytes))
 	}
 	userID, set := errs.guid(r, "userId")
 	for name, messages := range bodyErrors {
@@ -526,7 +531,8 @@ func (h *Handler) updateDisplayPreferences(w http.ResponseWriter, r *http.Reques
 		unsupportedMediaTypeProblem(w)
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
+	// A body holds little more than the value kept of it.
+	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, preferences.MaxValueBytes))
 	var tooLarge *http.MaxBytesError
 	if errors.As(err, &tooLarge) {
 		processingError(w, http.StatusRequestEntityTooLarge)
@@ -552,7 +558,14 @@ func (h *Handler) updateDisplayPreferences(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	value, _ := json.Marshal(state)
-	if err := h.Preferences.Put(r.Context(), user.ID, id, client, value); err != nil {
+	err = h.Preferences.Put(r.Context(), user.ID, id, client, value)
+	if errors.Is(err, preferences.ErrTooLarge) {
+		// The body was within the bound: its home sections merge into the
+		// ones kept, and the whole is over it.
+		processingError(w, http.StatusBadRequest)
+		return
+	}
+	if err != nil {
 		h.internalError(w, r, err)
 		return
 	}
@@ -1060,10 +1073,11 @@ func (h *Handler) ownItemExists(ctx context.Context, user accounts.User, id acco
 const similarLimit = 50
 
 // similarItems lists titles close to a movie or series (see
-// library.Service.Similar). Like Jellyfin, it leaves out the titles the user
-// played, and describes the titles with their provider identifiers, asked
-// for or not. Other items have none, and so does every item with similar
-// titles turned off in the settings: no addon is asked then.
+// library.Service.Similar), blended with the user's taste (see taste.go).
+// Like Jellyfin, it leaves out the titles the user played, and describes
+// the titles with their provider identifiers, asked for or not. Other
+// items have none, and so does every item with similar titles turned off
+// in the settings: no addon is asked then.
 func (h *Handler) similarItems(w http.ResponseWriter, r *http.Request) {
 	limit, limited := 0, false
 	// Similar items take a limit but no start index: StartIndex is 0.
@@ -1078,7 +1092,7 @@ func (h *Handler) similarItems(w http.ResponseWriter, r *http.Request) {
 	var items []library.Item
 	if id != (accounts.ID{}) && h.Accounts.Settings().SimilarTitles {
 		// Twice the limit leaves room for the played titles left out.
-		found, err := h.Library.Similar(r.Context(), user, id, 2*limit)
+		found, err := h.similarTitles(r.Context(), user, id, 2*limit)
 		if err != nil && !errors.Is(err, library.ErrNotFound) {
 			h.browseError(w, r, err)
 			return

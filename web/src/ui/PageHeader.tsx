@@ -1,12 +1,13 @@
-import { ArrowLeftIcon, ArrowRightIcon } from '@phosphor-icons/react'
-import { useId, type ReactNode } from 'react'
+import { ArrowLeftIcon, CaretRightIcon } from '@phosphor-icons/react'
+import { useId, type ReactNode, type Ref } from 'react'
 import { Link } from 'react-router'
 import { Count } from './Badge'
 import { cx } from './cx'
 
 /**
- * The top of a page: an h1 (30 px, 26 on a phone), a lede of one or two sentences, and the
- * page's main actions on the right. `back` adds a link above the title for detail pages.
+ * The top of a page: the title (34 px, 29 in Compact, 28 on a phone; 40 for a greeting), a lede
+ * of one or two sentences, the page's main actions on the right, and the sub-area words under it
+ * all (`nav`, a Tabs). `back` adds a link above the title for detail pages.
  */
 export function PageHeader({
   title,
@@ -14,6 +15,8 @@ export function PageHeader({
   lede,
   actions,
   back,
+  nav,
+  greeting = false,
   className,
 }: {
   /** The page title: the same words as its tab or menu entry. */
@@ -26,46 +29,62 @@ export function PageHeader({
   actions?: ReactNode
   /** A link back to the list this page belongs to. */
   back?: { to: string; label: string }
+  /** The sub-area words under the title and lede: a Tabs of links. */
+  nav?: ReactNode
+  /** The display size of a greeting ("Good afternoon, Morgan"), for Home. */
+  greeting?: boolean
   className?: string
 }) {
+  const titleClass = cx('min-w-0 hyphenate text-ink', greeting ? 'text-display' : 'text-h1')
   return (
-    <header className={cx('mb-10 max-md:mb-6', className)}>
+    <header className={cx('mb-7 max-md:mb-6', className)}>
       {back && (
         <Link
           to={back.to}
-          className="group mb-3 inline-flex items-center gap-1.5 rounded-md text-small font-medium text-ink-3 transition-colors duration-160 hover:text-ink"
+          className="group focus-lit mb-2 -ml-2.5 inline-flex items-center gap-1.5 rounded-control px-2.5 py-1 text-small font-medium text-ink-2 hover:bg-s1 hover:text-ink"
         >
           <ArrowLeftIcon
-            size={14}
+            size="1rem"
             aria-hidden="true"
-            className="transition-transform duration-160 ease-nuit group-hover:-translate-x-0.5"
+            className="transition-transform duration-300 ease-nuit group-hover:-translate-x-0.5"
           />
           {back.label}
         </Link>
       )}
-      <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-4">
+      <div className="flex flex-wrap items-end justify-between gap-x-6 gap-y-3">
         <div className="min-w-0">
           {titleAside ? (
-            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
-              <h1 className="min-w-0 text-h1 break-words text-ink max-md:text-[26px]">{title}</h1>
+            <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+              <h1 className={titleClass}>{title}</h1>
               {titleAside}
             </div>
           ) : (
-            <h1 className="text-h1 text-ink max-md:text-[26px]">{title}</h1>
+            <h1 className={titleClass}>{title}</h1>
           )}
           {lede !== undefined && (
-            <p className="mt-2 max-w-[62ch] text-lead text-ink-2 max-md:text-body">{lede}</p>
+            <p
+              className={cx(
+                'max-w-[62ch] text-ink-2',
+                greeting ? 'mt-1.5 text-[1.1875rem] max-md:text-[1.0625rem]' : 'mt-1.5 text-lead',
+              )}
+            >
+              {lede}
+            </p>
           )}
         </div>
-        {actions && <div className="flex shrink-0 flex-wrap items-center gap-2">{actions}</div>}
+        {/* No wider than the page, so that a long row of actions wraps on a phone. */}
+        {actions && (
+          <div className="flex max-w-full shrink-0 flex-wrap items-center gap-2">{actions}</div>
+        )}
       </div>
+      {nav !== undefined && <div className="mt-3">{nav}</div>}
     </header>
   )
 }
 
 /**
- * A block of a page: a 16 px heading with an optional Count, an aside on the right (a figure or
- * a TextLink), then the content. Blocks are 52 px apart inside PageLayout.
+ * A shelf of a page: its title (24 px) with an optional Count, an aside on the right (a TextLink
+ * such as "Open the log"), then the content. Shelves are 40 px apart inside PageLayout.
  */
 export function Block({
   title,
@@ -73,25 +92,28 @@ export function Block({
   aside,
   children,
   className,
+  ref,
 }: {
   title: ReactNode
-  /** A number after the heading, in a Count chip. */
+  /** A number after the title, in a Count. */
   count?: number
-  /** On the right of the heading: a TextLink ("Open Health"), a small figure. */
+  /** On the right of the title: a TextLink ("Open Health"), a short figure. */
   aside?: ReactNode
   children: ReactNode
   className?: string
+  /** The section, as for useOnScreen. */
+  ref?: Ref<HTMLElement>
 }) {
   const id = useId()
   return (
-    <section aria-labelledby={id} className={className}>
-      <div className="mb-4 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
-        <h2 id={id} className="flex items-center gap-2.5 text-h3 text-ink">
+    <section ref={ref} aria-labelledby={id} className={className}>
+      <div className="mb-3 flex flex-wrap items-baseline justify-between gap-x-4 gap-y-2">
+        <h2 id={id} className="flex items-center gap-2.5 text-h2 text-ink">
           {title}
           {count !== undefined && <Count>{count}</Count>}
         </h2>
         {aside !== undefined && (
-          <div className="flex items-center gap-2 text-small text-ink-3">{aside}</div>
+          <div className="-mr-3 flex items-center gap-2 text-small text-ink-2">{aside}</div>
         )}
       </div>
       {children}
@@ -100,8 +122,8 @@ export function Block({
 }
 
 /**
- * A link in the link color, with an arrow that moves on hover: "Open Health →". For links inside
- * running text, use `className="text-link underline"` on a plain Link instead.
+ * A quiet link with a chevron, lit on focus: "Open Health ›", beside a shelf title or under a
+ * tile. For links inside running text, use `className="text-link underline"` on a plain Link.
  */
 export function TextLink({
   to,
@@ -111,7 +133,7 @@ export function TextLink({
 }: {
   to: string
   children: ReactNode
-  /** Shows the arrow after the words. */
+  /** Shows the chevron after the words. */
   arrow?: boolean
   className?: string
 }) {
@@ -119,16 +141,16 @@ export function TextLink({
     <Link
       to={to}
       className={cx(
-        'group inline-flex items-center gap-1.5 rounded-md text-control font-medium text-link transition-colors duration-160 hover:text-link-hover',
+        'group focus-lit inline-flex items-center gap-1 rounded-[0.5rem] px-2.5 py-1 text-control font-medium text-ink-2 hover:bg-s1 hover:text-ink',
         className,
       )}
     >
       {children}
       {arrow && (
-        <ArrowRightIcon
-          size={16}
+        <CaretRightIcon
+          size="1rem"
           aria-hidden="true"
-          className="transition-transform duration-160 ease-nuit group-hover:translate-x-0.5"
+          className="transition-transform duration-300 ease-nuit group-hover:translate-x-0.5"
         />
       )}
     </Link>

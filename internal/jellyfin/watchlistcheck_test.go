@@ -1,0 +1,442 @@
+package jellyfin
+
+import (
+	"context"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
+	"slices"
+	"strings"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/moodiness/polyfin/internal/accounts"
+	"github.com/moodiness/polyfin/internal/addons"
+	"github.com/moodiness/polyfin/internal/homerows"
+	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/stremio"
+	"github.com/moodiness/polyfin/internal/watchlist"
+)
+
+// waitingAddon is an addon of movies and a series whose streams the test
+// gives and takes away (see setStreams), counting its stream requests.
+type waitingAddon struct {
+	url     string
+	mu      sync.Mutex
+	streams map[string][]stremio.Stream
+	asked   map[string]int
+}
+
+func (a *waitingAddon) setStreams(id string, streams ...stremio.Stream) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.streams[id] = streams
+}
+
+// requests counts the stream requests for id.
+func (a *waitingAddon) requests(id string) int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.asked[id]
+}
+
+func newWaitingAddon(t *testing.T) *waitingAddon {
+	t.Helper()
+	a := &waitingAddon{streams: map[string][]stremio.Stream{}, asked: map[string]int{}}
+	metas := map[string]stremio.Meta{
+		"tt7001": {Type: "movie", Name: "Open Door", Released: "2001-06-01T00:00:00.000Z", ReleaseInfo: "2001", Extras: &stremio.Extras{Certification: "G"}},
+		"tt7002": {Type: "movie", Name: "Grim Night", Released: "2005-09-01T00:00:00.000Z", ReleaseInfo: "2005", Extras: &stremio.Extras{Certification: "R"}},
+		"tt7003": {Type: "movie", Name: "Tall Tale", Released: "2010-03-01T00:00:00.000Z", ReleaseInfo: "2010", Extras: &stremio.Extras{Certification: "G"}},
+		"tt7004": {Type: "movie", Name: "Far Off", Released: "2099-01-01T00:00:00.000Z", ReleaseInfo: "2099", Extras: &stremio.Extras{Certification: "G"}},
+		"tt7005": {Type: "series", Name: "Slow Show", Released: "2012-01-01T00:00:00.000Z", ReleaseInfo: "2012", Extras: &stremio.Extras{Certification: "TV-G"},
+			Videos: []stremio.Video{{ID: "tt7005:1:1", Title: "Start", Season: 1, Episode: 1, Released: "2012-01-01T00:00:00.000Z"}}},
+	}
+	row := func(id string) stremio.Meta {
+		m := metas[id]
+		m.ID, m.Extras, m.Videos = id, nil, nil
+		return m
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path, _ := url.PathUnescape(strings.TrimSuffix(r.URL.EscapedPath(), ".json"))
+		parts := strings.Split(strings.TrimPrefix(path, "/"), "/")
+		switch {
+		case path == "/manifest":
+			_ = json.NewEncoder(w).Encode(stremio.Manifest{ID: "waiting", Name: "Waiting", Version: "1",
+				Types: []string{"movie", "series"}, IDPrefixes: []string{"tt"},
+				Resources: []stremio.Resource{{Name: "catalog"}, {Name: "meta"}, {Name: "stream"}},
+				Catalogs:  []stremio.Catalog{{Type: "movie", ID: "top", Name: "Top"}, {Type: "series", ID: "shows", Name: "Shows"}}})
+		case strings.HasPrefix(path, "/catalog/movie/top"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"metas": []stremio.Meta{row("tt7001"), row("tt7002"), row("tt7003"), row("tt7004")}})
+		case strings.HasPrefix(path, "/catalog/series/shows"):
+			_ = json.NewEncoder(w).Encode(map[string]any{"metas": []stremio.Meta{row("tt7005")}})
+		case len(parts) == 3 && parts[0] == "meta":
+			m := metas[parts[2]]
+			m.ID = parts[2]
+			_ = json.NewEncoder(w).Encode(map[string]any{"meta": m})
+		case len(parts) == 3 && parts[0] == "stream":
+			a.mu.Lock()
+			a.asked[parts[2]]++
+			streams := append([]stremio.Stream{}, a.streams[parts[2]]...)
+			a.mu.Unlock()
+			_ = json.NewEncoder(w).Encode(map[string]any{"streams": streams})
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	a.url = server.URL + "/manifest.json"
+	return a
+}
+
+// told keeps who the checks told of which title.
+type told struct {
+	mu    sync.Mutex
+	names map[accounts.ID]string
+	list  []string
+}
+
+func (t *told) tell(_ context.Context, user accounts.User, title accounts.ID) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.list = append(t.list, user.Name+" "+t.names[title])
+}
+
+func (t *told) all() []string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return slices.Clone(t.list)
+}
+
+// A title of a watchlist that gains a version moves from Still waiting to
+// Now available, and its user is told once, after a restart too; one that
+// loses its versions moves back, and is not told again when it gains some
+// anew. A movie to come, and a version taller than the user's quality
+// group, leave a title waiting; a title parental control hides is never
+// checked for, listed to or told to the user it hides from.
+func TestWatchlistTitlesMoveToNowAvailableWhenVersionsAreFound(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, 10)
+	addon := newWaitingAddon(t)
+	installed, err := s.addons.Install(t.Context(), addons.Shared(), addon.url, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.addons.SetLibraries(t.Context(), addons.Shared(), []addons.LibraryChoice{
+		{AddonID: installed.ID, CatalogType: "movie", CatalogID: "top"},
+		{AddonID: installed.ID, CatalogType: "series", CatalogID: "shows"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	member := s.user("member", nil)
+	child := s.user("child", func(c *accounts.UserChanges) {
+		c.Parental = &accounts.ParentalControl{MaxRating: new(10)}
+		c.QualityGroup = new(1080)
+	})
+	token, childToken := s.signIn("member", "tv"), s.signIn("child", "tablet")
+	views := s.viewIDs(t, token)
+	ids, names := map[string]accounts.ID{}, map[accounts.ID]string{}
+	for _, view := range []string{views["Top"], views["Shows"]} {
+		var page QueryResult
+		s.get(t, "/Items?ParentId="+view, token, &page)
+		for _, item := range page.Items {
+			id, _ := accounts.ParseID(item.Id)
+			ids[item.Name], names[id] = id, item.Name
+		}
+	}
+	if len(ids) != 5 {
+		t.Fatalf("titles: %v", ids)
+	}
+	lists := s.watchlistStore()
+	save := func(user accounts.ID, titles ...string) {
+		var saved []watchlist.Title
+		for i, name := range titles {
+			saved = append(saved, watchlist.Title{ID: ids[name], AddedAt: new(time.Date(2026, 9, 10-i, 0, 0, 0, 0, time.UTC))})
+		}
+		if _, err := lists.Save(t.Context(), user, watchlist.Import, saved, false); err != nil {
+			t.Fatal(err)
+		}
+	}
+	save(member.ID, "Open Door", "Grim Night", "Tall Tale", "Far Off", "Slow Show")
+	save(child.ID, "Open Door", "Grim Night", "Tall Tale")
+	s.addRow(t, homerows.Row{Name: "Now available", Kind: homerows.KindAvailable, Place: homerows.PlaceTop, Everyone: true, Library: true})
+	s.addRow(t, homerows.Row{Name: "Still waiting", Kind: homerows.KindWaiting, Place: homerows.PlaceBottom, Everyone: true})
+
+	now := time.Now()
+	var clock sync.Mutex
+	at := func() time.Time {
+		clock.Lock()
+		defer clock.Unlock()
+		return now
+	}
+	later := func() {
+		clock.Lock()
+		defer clock.Unlock()
+		now = now.Add(7 * time.Hour)
+	}
+	s.library.SetClock(at)
+	tells := &told{names: names}
+	checker := func(find func(context.Context, accounts.User, accounts.ID) (watchlist.Found, error)) *watchlist.Checker {
+		return watchlist.NewChecker(watchlist.CheckerOptions{Store: lists, Users: s.store.Users, Hours: func() int { return 6 }, Find: find,
+			Tell: tells.tell, Logger: s.handler.Logger, Now: at})
+	}
+	check := func(c *watchlist.Checker) {
+		t.Helper()
+		if err := c.Check(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The rows' titles; those found at the same check, by name.
+	rows := func(s testServer, token string) []string {
+		t.Helper()
+		var result []string
+		for _, row := range s.customRowsOf(t, token) {
+			names := itemNames(row.Items)
+			if row.Kind == "NowAvailable" {
+				slices.Sort(names)
+			}
+			result = append(result, row.Name+": "+strings.Join(names, ", "))
+		}
+		return result
+	}
+	expect := func(what string, got []string, want ...string) {
+		t.Helper()
+		if !slices.Equal(got, want) {
+			t.Errorf("%s: %q, want %q", what, got, want)
+		}
+	}
+
+	// No version yet: every title released waits, the movie to come too.
+	first := checker(s.handler.FindWatchlistVersions)
+	check(first)
+	expect("member's rows before any version", rows(s, token), "Still waiting: Open Door, Grim Night, Tall Tale, Far Off, Slow Show")
+	expect("child's rows before any version", rows(s, childToken), "Still waiting: Open Door, Tall Tale")
+
+	// Versions come; the movie to come lists one too, Tall Tale only one
+	// taller than the child's quality group, and Grim Night only one the
+	// version rules hide.
+	s.setting(t, func(settings *accounts.Settings) { settings.HiddenVersionWords = []string{"sample"} })
+	stream := func(name string) stremio.Stream {
+		return stremio.Stream{Name: "Waiting\n" + name, URL: "http://127.0.0.1:9/" + url.PathEscape(name) + ".mkv"}
+	}
+	addon.setStreams("tt7001", stream("Open.Door.1080p"))
+	addon.setStreams("tt7002", stream("Grim.Night.Sample.1080p"))
+	addon.setStreams("tt7003", stream("Tall.Tale.2160p"))
+	addon.setStreams("tt7004", stream("Far.Off.1080p"))
+	addon.setStreams("tt7005:1:1", stream("Slow.Show.S01E01.720p"))
+	// Within the hours set, nothing is checked again.
+	check(first)
+	expect("told within the hours set", tells.all())
+	later()
+	check(first)
+	toldOnce := tells.all()
+	slices.Sort(toldOnce)
+	expect("told", toldOnce, "child Open Door", "member Open Door", "member Slow Show", "member Tall Tale")
+	expect("member's rows once versions are found", rows(s, token), "Now available: Open Door, Slow Show, Tall Tale",
+		"Still waiting: Grim Night, Far Off")
+	expect("child's rows once versions are found", rows(s, childToken), "Now available: Open Door", "Still waiting: Tall Tale")
+	// Other apps list the row as a library, parental control applying.
+	if listed := s.viewIDs(t, childToken); listed["Now available"] == "" {
+		t.Error("the child's Now available is not a library")
+	} else {
+		var page QueryResult
+		s.get(t, "/Items?ParentId="+listed["Now available"], childToken, &page)
+		expect("the child's Now available library", itemNames(page.Items), "Open Door")
+	}
+
+	// A restart: what was found stays, and only Grim Night, which finds a
+	// version the rules leave, is told of.
+	options := s.handler.Options
+	options.Library = library.New(s.pool, s.addons, options.Stremio, options.Logger, s.store.Settings)
+	options.Library.SetFollowUps()
+	options.Library.SetClock(at)
+	restarted := New(options)
+	server := httptest.NewServer(restarted)
+	t.Cleanup(server.Close)
+	again := s
+	again.url, again.handler, again.library = server.URL, restarted, options.Library
+	expect("member's rows after a restart", rows(again, token), "Now available: Open Door, Slow Show, Tall Tale",
+		"Still waiting: Grim Night, Far Off")
+	addon.setStreams("tt7002", stream("Grim.Night.Sample.1080p"), stream("Grim.Night.720p"))
+	later()
+	check(checker(restarted.FindWatchlistVersions))
+	if got := tells.all(); len(got) != 5 || got[4] != "member Grim Night" {
+		t.Errorf("told after a restart: %q", got)
+	}
+	expect("member's rows after Grim Night found a version", rows(again, token), "Now available: Grim Night, Open Door, Slow Show, Tall Tale",
+		"Still waiting: Far Off")
+
+	// Open Door loses its versions: it waits again, and its next ones
+	// are not told of.
+	addon.setStreams("tt7001")
+	later()
+	check(checker(restarted.FindWatchlistVersions))
+	expect("child's rows once Open Door lost its versions", rows(again, childToken), "Still waiting: Open Door, Tall Tale")
+	expect("member's rows once Open Door lost its versions", rows(again, token), "Now available: Grim Night, Slow Show, Tall Tale",
+		"Still waiting: Open Door, Far Off")
+	addon.setStreams("tt7001", stream("Open.Door.720p"))
+	later()
+	check(checker(restarted.FindWatchlistVersions))
+	expect("child's rows once Open Door found versions again", rows(again, childToken), "Now available: Open Door", "Still waiting: Tall Tale")
+	if got := tells.all(); len(got) != 5 {
+		t.Errorf("told in all: %q", got)
+	}
+}
+
+// A title whose addon answers only notices that refuse nothing, such as
+// its summary of the streams its own filters left out, is recorded as
+// waiting, and asked again only after the hours set. One whose addon
+// refuses the request for its rate is not recorded: the next check asks
+// it again.
+func TestWatchlistTitlesAnsweredOnlyNoticesWait(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, 10)
+	addon := newWaitingAddon(t)
+	installed, err := s.addons.Install(t.Context(), addons.Shared(), addon.url, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.addons.SetLibraries(t.Context(), addons.Shared(), []addons.LibraryChoice{
+		{AddonID: installed.ID, CatalogType: "movie", CatalogID: "top"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	member := s.user("member", nil)
+	token := s.signIn("member", "tv")
+	ids := map[string]accounts.ID{}
+	var page QueryResult
+	s.get(t, "/Items?ParentId="+s.viewIDs(t, token)["Top"], token, &page)
+	for _, item := range page.Items {
+		ids[item.Name], _ = accounts.ParseID(item.Id)
+	}
+	lists := s.watchlistStore()
+	if _, err := lists.Save(t.Context(), member.ID, watchlist.Import, []watchlist.Title{
+		{ID: ids["Open Door"], AddedAt: new(time.Date(2026, 9, 10, 0, 0, 0, 0, time.UTC))},
+		{ID: ids["Grim Night"], AddedAt: new(time.Date(2026, 9, 9, 0, 0, 0, 0, time.UTC))},
+	}, false); err != nil {
+		t.Fatal(err)
+	}
+	s.addRow(t, homerows.Row{Name: "Still waiting", Kind: homerows.KindWaiting, Place: homerows.PlaceBottom, Everyone: true})
+	addon.setStreams("tt7001", stremio.Stream{Name: "Summary", Description: "12 results filtered out"})
+	addon.setStreams("tt7002", stremio.Stream{Name: "Notice", Description: "Rate limit exceeded"})
+
+	now := time.Now()
+	var clock sync.Mutex
+	at := func() time.Time {
+		clock.Lock()
+		defer clock.Unlock()
+		return now
+	}
+	later := func(d time.Duration) {
+		clock.Lock()
+		defer clock.Unlock()
+		now = now.Add(d)
+	}
+	s.library.SetClock(at)
+	checker := watchlist.NewChecker(watchlist.CheckerOptions{Store: lists, Users: s.store.Users, Hours: func() int { return 6 },
+		Find: s.handler.FindWatchlistVersions, Logger: s.handler.Logger, Now: at})
+	check := func(what string, openDoor, grimNight int, waiting string) {
+		t.Helper()
+		if err := checker.Check(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+		if got, want := [2]int{addon.requests("tt7001"), addon.requests("tt7002")}, [2]int{openDoor, grimNight}; got != want {
+			t.Errorf("%s: requests %v, want %v", what, got, want)
+		}
+		var rows []string
+		for _, row := range s.customRowsOf(t, token) {
+			rows = append(rows, row.Name+": "+strings.Join(itemNames(row.Items), ", "))
+		}
+		if want := []string{"Still waiting: " + waiting}; !slices.Equal(rows, want) {
+			t.Errorf("%s: rows %q, want %q", what, rows, want)
+		}
+	}
+	check("the first check", 1, 1, "Open Door")
+	// Past the pause the refusal started, within the hours set.
+	later(time.Hour)
+	check("an hour later", 1, 2, "Open Door")
+	// Grim Night, never recorded, is asked first: a refusal would pause
+	// the requests that follow.
+	addon.setStreams("tt7002", stremio.Stream{Name: "Summary", Description: "3 results filtered out"})
+	later(6 * time.Hour)
+	check("past the hours set", 2, 3, "Open Door, Grim Night")
+}
+
+// An episode put on the watchlist by itself is checked as itself: its own
+// versions are asked for, it is told of under its own identifier, and the
+// rows list it.
+func TestAWatchlistEpisodeIsCheckedAsItself(t *testing.T) {
+	t.Parallel()
+	s := newTestServer(t, 10)
+	addon := newWaitingAddon(t)
+	installed, err := s.addons.Install(t.Context(), addons.Shared(), addon.url, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.addons.SetLibraries(t.Context(), addons.Shared(), []addons.LibraryChoice{
+		{AddonID: installed.ID, CatalogType: "series", CatalogID: "shows"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s.user("member", nil)
+	token := s.signIn("member", "tv")
+	var page QueryResult
+	s.get(t, "/Items?ParentId="+s.viewIDs(t, token)["Shows"], token, &page)
+	if len(page.Items) != 1 {
+		t.Fatalf("shows: %v", itemNames(page.Items))
+	}
+	s.get(t, "/Shows/"+page.Items[0].Id+"/Episodes", token, &page)
+	if len(page.Items) != 1 {
+		t.Fatalf("episodes: %v", itemNames(page.Items))
+	}
+	episode := page.Items[0]
+	if status, body := s.call(http.MethodPost, "/Polyfin/UserItems/"+episode.Id+"/Watchlist", app("tv", token), nil); status != http.StatusNoContent {
+		t.Fatalf("adding the episode: %d %s", status, body)
+	}
+	s.addRow(t, homerows.Row{Name: "Now available", Kind: homerows.KindAvailable, Place: homerows.PlaceTop, Everyone: true})
+	s.addRow(t, homerows.Row{Name: "Still waiting", Kind: homerows.KindWaiting, Place: homerows.PlaceBottom, Everyone: true})
+	now := time.Now()
+	var clock sync.Mutex
+	at := func() time.Time {
+		clock.Lock()
+		defer clock.Unlock()
+		return now
+	}
+	s.library.SetClock(at)
+	id, _ := accounts.ParseID(episode.Id)
+	tells := &told{names: map[accounts.ID]string{id: "the episode"}}
+	checker := watchlist.NewChecker(watchlist.CheckerOptions{Store: s.watchlistStore(), Users: s.store.Users, Hours: func() int { return 6 },
+		Find: s.handler.FindWatchlistVersions, Tell: tells.tell, Logger: s.handler.Logger, Now: at})
+	rows := func() []string {
+		t.Helper()
+		var rows []string
+		for _, row := range s.customRowsOf(t, token) {
+			rows = append(rows, row.Name+": "+strings.Join(itemIDs(row.Items), ", "))
+		}
+		return rows
+	}
+	// No version yet: it waits.
+	if err := checker.Check(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := rows(), []string{"Still waiting: " + episode.Id}; !slices.Equal(got, want) {
+		t.Errorf("rows before any version: %q, want %q", got, want)
+	}
+	addon.setStreams("tt7005:1:1", stremio.Stream{Name: "Waiting\nSlow.Show.S01E01.720p", URL: "http://127.0.0.1:9/Slow.Show.S01E01.720p.mkv"})
+	clock.Lock()
+	now = now.Add(7 * time.Hour)
+	clock.Unlock()
+	if err := checker.Check(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if got := tells.all(); !slices.Equal(got, []string{"member the episode"}) {
+		t.Errorf("told: %q", got)
+	}
+	if addon.requests("tt7005:1:1") != 2 {
+		t.Errorf("the episode's versions were asked for %d times", addon.requests("tt7005:1:1"))
+	}
+	if got, want := rows(), []string{"Now available: " + episode.Id}; !slices.Equal(got, want) {
+		t.Errorf("rows: %q, want %q", got, want)
+	}
+}

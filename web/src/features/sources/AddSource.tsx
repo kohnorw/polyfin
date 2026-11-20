@@ -7,14 +7,15 @@ import {
 } from '@phosphor-icons/react'
 import { useState, type FormEvent } from 'react'
 import { useMutation } from '@tanstack/react-query'
-import { installAddon, queryClient, queryKeys, type Addon, type Scope } from '@/api'
+import { installAddon, queryClient, queryKeys, type Addon, type Scope, type UsedBy } from '@/api'
 import { errorMessage } from '@/format'
-import { useI18n } from '@/i18n'
-import { Button, Modal, Field, Segmented, TextInput, useToast } from '@/ui'
+import { useI18n, type Messages } from '@/i18n'
+import { Button, Modal, Field, Segmented, TextInput, useToast, type ToastOptions } from '@/ui'
 import { addedParts, IptvAddFlow } from './IptvForms'
 import { LocalFolderAddForm } from './LocalFolders'
 import { invalidateScope } from './model'
 import { TunerAddFlow } from './TunerForms'
+import { everyone, UsedByPicker } from './UsedBy'
 
 export type AddKind = 'stremio' | 'music' | 'iptv' | 'tuner' | 'local'
 
@@ -42,6 +43,9 @@ export function AddSourceModal({
   const [kind, setKind] = useState<AddKind>(initialKind)
   // A new key per opening starts the forms empty.
   const [round, setRound] = useState(0)
+  // Who uses a server source, Everyone unless chosen otherwise; it applies to every kind.
+  const [usedBy, setUsedBy] = useState<UsedBy>(everyone)
+  const shared = scope === 'shared' ? usedBy : undefined
 
   /** An IPTV source or a tuner added: its toast tells what it brings. */
   function sourceAdded(source: Addon) {
@@ -53,8 +57,8 @@ export function AddSourceModal({
     )
   }
 
-  function done(added: Addon, message: string) {
-    toast(message)
+  function done(added: Addon, message: string, options?: ToastOptions) {
+    toast(message, options)
     onAdded(added)
     setRound((n) => n + 1)
     onClose()
@@ -62,37 +66,51 @@ export function AddSourceModal({
 
   return (
     <Modal open={open} onClose={onClose} title={text.title} width={720}>
-      <div key={round} className="flex flex-col gap-6 p-5">
-        <Segmented<AddKind>
-          label={text.kind}
-          value={kind}
-          onChange={setKind}
-          options={[
-            { value: 'stremio', label: text.kinds.stremio, icon: PuzzlePieceIcon },
-            { value: 'music', label: text.kinds.music, icon: MusicNotesIcon },
-            { value: 'iptv', label: text.kinds.iptv, icon: BroadcastIcon },
-            // Tuners and local folders are the server's: a member's own sources have none.
-            ...(scope === 'shared'
-              ? [
-                  { value: 'tuner' as const, label: text.kinds.tuner, icon: CellTowerIcon },
-                  { value: 'local' as const, label: text.kinds.local, icon: FolderIcon },
-                ]
-              : []),
-          ]}
-          className="self-start max-sm:self-stretch"
-        />
+      <div key={round} className="flex flex-col gap-5 p-5">
+        <div className="flex flex-col gap-2">
+          <p aria-hidden="true" className="text-h3 text-ink">
+            {text.kind}
+          </p>
+          <Segmented<AddKind>
+            label={text.kind}
+            value={kind}
+            onChange={setKind}
+            options={[
+              { value: 'stremio', label: text.kinds.stremio, icon: PuzzlePieceIcon },
+              { value: 'music', label: text.kinds.music, icon: MusicNotesIcon },
+              { value: 'iptv', label: text.kinds.iptv, icon: BroadcastIcon },
+              // Tuners and local folders are the server's: a member's own sources have none.
+              ...(scope === 'shared'
+                ? [
+                    { value: 'tuner' as const, label: text.kinds.tuner, icon: CellTowerIcon },
+                    { value: 'local' as const, label: text.kinds.local, icon: FolderIcon },
+                  ]
+                : []),
+            ]}
+            className="self-start max-sm:self-stretch"
+          />
+        </div>
+        {scope === 'shared' && <UsedByPicker value={usedBy} onChange={setUsedBy} />}
         {kind === 'local' ? (
-          <LocalFolderAddForm onAdded={(added) => done(added, t.localFolders.added(added.name))} />
+          <LocalFolderAddForm
+            usedBy={usedBy}
+            onAdded={(added) => done(added, t.localFolders.added(added.name))}
+          />
         ) : kind === 'tuner' ? (
-          <TunerAddFlow onAdded={sourceAdded} />
+          <TunerAddFlow usedBy={usedBy} onAdded={sourceAdded} />
         ) : kind === 'iptv' ? (
-          <IptvAddFlow scope={scope} onAdded={sourceAdded} />
+          <IptvAddFlow scope={scope} usedBy={shared} onAdded={sourceAdded} />
         ) : (
           <InstallForm
             key={kind}
             scope={scope}
+            usedBy={shared}
             help={kind === 'music' ? text.musicHelp : text.stremioHelp}
-            onInstalled={(added) => done(added, text.installed(added.name))}
+            onInstalled={(added) => {
+              const note = installedNote(text, scope, added)
+              // A note tells why the apps show nothing yet: it stays long enough to be read.
+              done(added, note ?? text.installed(added.name), note ? noteToast : undefined)
+            }}
           />
         )}
       </div>
@@ -100,12 +118,41 @@ export function AddSourceModal({
   )
 }
 
+/** A note on an added addon is information, and stays long enough to be read. */
+const noteToast: ToastOptions = { tone: 'info', duration: 12000 }
+
+/**
+ * Why adding an addon leaves the apps without anything new, null when it does not. When none of its
+ * catalogs became a library: where to enable them, and why when the libraries made automatically
+ * reached their limit. A music addon without catalogs of its own has My music as its library, which
+ * starts empty: say so, and how it fills.
+ */
+function installedNote(text: Messages['sourceAdd'], scope: Scope, added: Addon): string | null {
+  const shared = scope === 'shared'
+  if (added.enabledLibraries === 0 && added.libraryLimit) {
+    return shared
+      ? text.installedLibraryLimit(added.name, added.libraryLimit)
+      : text.installedLibraryLimitMine(added.name, added.libraryLimit)
+  }
+  if (added.enabledLibraries === 0 && added.catalogCount > 0) {
+    return shared
+      ? text.installedNoLibraries(added.name)
+      : text.installedNoLibrariesMine(added.name)
+  }
+  if (added.music?.rows === 0 && (added.enabledLibraries ?? 0) > 0) {
+    return text.installedMyMusic(added.name)
+  }
+  return null
+}
+
 function InstallForm({
   scope,
+  usedBy,
   help,
   onInstalled,
 }: {
   scope: Scope
+  usedBy?: UsedBy
   help: string
   onInstalled: (added: Addon) => void
 }) {
@@ -113,7 +160,7 @@ function InstallForm({
   const text = t.sourceAdd
   const [manifestUrl, setManifestUrl] = useState('')
   const mutation = useMutation({
-    mutationFn: (url: string) => installAddon(scope, url),
+    mutationFn: (url: string) => installAddon(scope, url, usedBy),
     onSuccess: (installed) => {
       queryClient.setQueryData<Addon[]>(queryKeys.addons(scope), (old) =>
         old === undefined ? old : [...old, installed],
@@ -129,7 +176,7 @@ function InstallForm({
   }
 
   return (
-    <form onSubmit={submit} noValidate className="flex flex-col gap-5">
+    <form onSubmit={submit} noValidate className="flex flex-col gap-4">
       <p className="text-small text-ink-3">{help}</p>
       <Field
         label={text.manifestUrl}

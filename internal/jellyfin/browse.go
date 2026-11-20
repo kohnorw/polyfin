@@ -9,6 +9,8 @@ import (
 	"sync"
 	"time"
 
+	"golang.org/x/sync/errgroup"
+
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/iptv"
 	"github.com/moodiness/polyfin/internal/library"
@@ -36,10 +38,14 @@ func (h *Handler) browseRoutes(rt *router) {
 	signedIn(http.MethodGet, "/Users/{userId}/Items/{itemId}", h.item)
 	signedIn(http.MethodGet, "/Items/{itemId}/Ancestors", h.ancestors)
 	signedIn(http.MethodGet, "/Polyfin/Items/{itemId}/Versions", h.versionProgress)
+	signedIn(http.MethodGet, "/Polyfin/Items/{itemId}/Badges", h.itemBadges)
 	signedIn(http.MethodGet, "/Polyfin/UserViews", h.menuViews)
 	signedIn(http.MethodGet, "/Polyfin/HomeRows", h.customRowsAnswer)
+	signedIn(http.MethodGet, "/Polyfin/NameOrder", h.nameOrderPage)
+	signedIn(http.MethodGet, "/Polyfin/NameOrder/Letters", h.nameOrderLetters)
 	signedIn(http.MethodPost, "/Polyfin/Items/{itemId}/Versions/Search", h.searchVersions)
 	signedIn(http.MethodGet, "/Polyfin/Items/{itemId}/Ratings", h.titleRatings)
+	signedIn(http.MethodGet, "/Polyfin/Items/Ratings", h.posterRatings)
 	signedIn(http.MethodGet, "/Shows/{seriesId}/Seasons", h.seasons)
 	signedIn(http.MethodGet, "/Shows/{seriesId}/Episodes", h.episodes)
 	signedIn(http.MethodGet, "/Items/Filters", h.filters)
@@ -92,14 +98,22 @@ func (b bindErrors) userID(r *http.Request) (accounts.ID, bool) {
 }
 
 // browseError answers a library failure: a missing item, or an addon that
-// could not answer. A request the app abandoned failed for no one.
+// could not answer, which the log names with its catalog. A request the app
+// abandoned failed for no one.
 func (h *Handler) browseError(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
 	case errors.Is(err, library.ErrNotFound):
 		notFoundProblem(w)
 	case r.Context().Err() != nil:
 	default:
-		h.Logger.Warn("Browsing failed", "method", r.Method, "path", r.URL.Path, "error", err)
+		attrs := []any{"method", r.Method, "path", r.URL.Path}
+		if failed, ok := errors.AsType[*library.AddonError](err); ok {
+			attrs = append(attrs, "addon", failed.Addon)
+			if failed.Catalog != "" {
+				attrs = append(attrs, "catalog", failed.Catalog)
+			}
+		}
+		h.Logger.Warn("Browsing failed", append(attrs, "error", err)...)
 		processingError(w, http.StatusBadGateway)
 	}
 }
@@ -118,12 +132,61 @@ func (h *Handler) dtos(r *http.Request, user accounts.User, items []library.Item
 	return h.listDtos(r, user, items, fields, state), nil
 }
 
+// listingAtOnce bounds the items of a listing described at once when
+// their versions are read (see versionFields). Each reads what is known
+// of its versions in a few statements, one after the other: the home
+// page's Next Up, 24 episodes, waited for them one item at a time. The
+// bound leaves most of the database pool (10 connections) to the other
+// rows of the same page, which run beside it.
+const listingAtOnce = 4
+
+// versionFields reports whether fields ask for what a movie's or an
+// episode's known versions tell (see listDto): then each item reads them.
+func versionFields(fields fieldSet) bool {
+	for _, field := range []string{"MediaSources", "MediaStreams", "Chapters", "Path", "CanDownload", "Trickplay"} {
+		if fields.has(field) {
+			return true
+		}
+	}
+	return false
+}
+
 // listDtos describes listed items, with what the user did with them in
-// state.
+// state, in their order. Items whose versions are read are described
+// listingAtOnce at a time. A panic while describing one is raised again
+// here, in the request, as it was when they were described one by one.
 func (h *Handler) listDtos(r *http.Request, user accounts.User, items []library.Item, fields fieldSet, state userState) []BaseItemDto {
-	result := make([]BaseItemDto, 0, len(items))
-	for _, item := range items {
-		result = append(result, h.listDto(r, user, item, fields, state))
+	result := make([]BaseItemDto, len(items))
+	if len(items) < 2 || !versionFields(fields) {
+		for i, item := range items {
+			result[i] = h.listDto(r, user, item, fields, state)
+		}
+		return result
+	}
+	var (
+		group    errgroup.Group
+		mu       sync.Mutex
+		panicked any
+	)
+	group.SetLimit(listingAtOnce)
+	for i, item := range items {
+		group.Go(func() error {
+			defer func() {
+				if p := recover(); p != nil {
+					mu.Lock()
+					if panicked == nil {
+						panicked = p
+					}
+					mu.Unlock()
+				}
+			}()
+			result[i] = h.listDto(r, user, item, fields, state)
+			return nil
+		})
+	}
+	_ = group.Wait()
+	if panicked != nil {
+		panic(panicked)
 	}
 	return result
 }
@@ -225,9 +288,10 @@ func titlesThrough(r *http.Request) bool {
 // a library or a collection reads, so that its pages and its total count
 // only what the listing keeps: a listing of collections within an addon's
 // collection, which lists titles, lists none, out of none (see
-// library.WithKinds).
+// library.WithKinds). The app opens the folder it lists (see
+// library.WithOpening).
 func listingContext(r *http.Request, keep func(library.Item) bool) context.Context {
-	ctx := library.WithKinds(r.Context(), func(kind library.Kind) bool { return keep(library.Item{Kind: kind}) })
+	ctx := library.WithKinds(library.WithOpening(r.Context()), func(kind library.Kind) bool { return keep(library.Item{Kind: kind}) })
 	if titlesThrough(r) {
 		ctx = library.WithTitlesThrough(ctx)
 	}
@@ -250,9 +314,24 @@ func (h *Handler) views(w http.ResponseWriter, r *http.Request) {
 }
 
 // userViews describes the views user sees, in the order apps list them:
-// their libraries and Polyfin's Live TV, Replay, Playlists, Collections
-// and Watchlist views, those they hide included when includeHidden is set.
+// their libraries and Polyfin's Live TV, Replay, Playlists and Collections
+// views, those they hide included when includeHidden is set.
 func (h *Handler) userViews(r *http.Request, user accounts.User, includeHidden bool) ([]BaseItemDto, error) {
+	items, err := h.serverOrderedViews(r, user)
+	if err != nil {
+		return nil, err
+	}
+	configuration, err := h.userConfiguration(r.Context(), user.ID)
+	if err != nil {
+		return nil, err
+	}
+	return arrangeViews(items, configuration, includeHidden), nil
+}
+
+// serverOrderedViews describes every view user sees, hidden ones included,
+// in the server's order, before their own (see arrangeViews): their
+// libraries in the order of Content › Libraries, then Polyfin's views.
+func (h *Handler) serverOrderedViews(r *http.Request, user accounts.User) ([]BaseItemDto, error) {
 	items, err := h.libraryViews(r, user)
 	if err == nil {
 		items, err = h.addLiveCategoriesView(r, user, items)
@@ -264,19 +343,9 @@ func (h *Handler) userViews(r *http.Request, user accounts.User, includeHidden b
 		items, err = h.addCollectionsView(r, user, items)
 	}
 	if err == nil {
-		items, err = h.addWatchlistView(r, user, items)
-	}
-	if err == nil {
 		items, err = h.addCustomRowViews(r, user, items)
 	}
-	if err != nil {
-		return nil, err
-	}
-	configuration, err := h.userConfiguration(r.Context(), user.ID)
-	if err != nil {
-		return nil, err
-	}
-	return arrangeViews(items, configuration, includeHidden), nil
+	return items, err
 }
 
 // MenuView is one of the views /UserViews lists, by its Id there, with
@@ -291,8 +360,8 @@ type MenuView struct {
 
 // menuViews answers /Polyfin/UserViews: the views /UserViews lists the
 // caller, in the same order, each with whether the web player's menus
-// leave it out. Polyfin's own Live TV, Replay, Playlists, Collections and
-// Watchlist views never are.
+// leave it out. Polyfin's own Live TV, Replay, Playlists and Collections
+// views never are.
 func (h *Handler) menuViews(w http.ResponseWriter, r *http.Request) {
 	user := callerFrom(r.Context()).User
 	views, err := h.userViews(r, user, false)
@@ -328,7 +397,9 @@ func (h *Handler) libraryViews(r *http.Request, user accounts.User) ([]BaseItemD
 // else with an empty 403, as it does for every endpoint it restricts by
 // policy. Libraries are addon catalogs: they have no paths, and nothing
 // scans them, so they are always idle. A music library tells whether its
-// songs' loudness is measured (see loudness.Measures).
+// songs' loudness is measured (see loudness.Measures); a local folder's
+// library, whether its files get scrubbing thumbnails (Settings.Trickplay),
+// as the task Make thumbnails makes them.
 func (h *Handler) virtualFolders(w http.ResponseWriter, r *http.Request) {
 	user := callerFrom(r.Context()).User
 	if !user.IsAdministrator {
@@ -359,6 +430,9 @@ func (h *Handler) virtualFolders(w http.ResponseWriter, r *http.Request) {
 		if view.CollectionType == "music" {
 			folder.LibraryOptions.EnableLUFSScan = loudness.Measures(settings, !libraries[i].LocalFolder)
 		}
+		if libraries[i].LocalFolder && view.CollectionType != "music" && view.CollectionType != "books" {
+			folder.LibraryOptions.EnableTrickplayImageExtraction = settings.Trickplay
+		}
 		// Jellyfin names the library itself as the holder of its image,
 		// and nothing when it has none.
 		if view.ImageTags["Primary"] != "" {
@@ -378,6 +452,7 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 	parent, hasParent := b.guid(r, "parentId")
 	var categories programQuery
 	readCategories(b, r, &categories)
+	r = r.WithContext(library.WithRatingFilter(r.Context(), ratingFilterOf(b, r)))
 	user, ok := h.viewer(w, r, b, unknownListingUser)
 	if !ok {
 		return
@@ -401,6 +476,9 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		found, err := h.Library.Items(r.Context(), user, wanted)
+		if err == nil {
+			found, err = h.Library.RatingFiltered(r.Context(), user, found)
+		}
 		if err != nil {
 			h.internalError(w, r, err)
 			return
@@ -425,9 +503,15 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 		var musicErr, liveErr error
 		var searches sync.WaitGroup
 		if kinds := musicSearchKinds(keep); len(kinds) > 0 {
-			searches.Go(func() { music, musicErr = h.Library.SearchMusic(r.Context(), user, term, kinds, max(start, 0)+limit) })
+			searches.Go(func() {
+				defer recoverInto(h.Logger, &musicErr, "A music search ended on a panic")
+				music, musicErr = h.Library.SearchMusic(r.Context(), user, term, kinds, max(start, 0)+limit)
+			})
 		}
-		searches.Go(func() { live, liveErr = h.searchLiveTv(r, user, term, keep, categories, max(start, 0)+limit) })
+		searches.Go(func() {
+			defer recoverInto(h.Logger, &liveErr, "A Live TV search ended on a panic")
+			live, liveErr = h.searchLiveTv(r, user, term, keep, categories, max(start, 0)+limit)
+		})
 		found, err := h.Library.Search(r.Context(), user, term, searchKinds(keep), max(start, 0)+limit)
 		searches.Wait()
 		if err == nil {
@@ -435,6 +519,18 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 		}
 		if err == nil {
 			found, err = append(found, live...), liveErr
+		}
+		// A search in plain words comes first as the collection it stands
+		// for, across the user's libraries.
+		if err == nil && !hasParent && keep(library.Item{Kind: library.KindCollection}) {
+			var plain library.Item
+			var understood bool
+			if plain, understood, err = h.Library.PlainSearch(r.Context(), user, term); understood {
+				found = append([]library.Item{plain}, found...)
+			}
+		}
+		if err == nil {
+			found, err = h.Library.RatingFiltered(r.Context(), user, found)
 		}
 		if err != nil {
 			h.browseError(w, r, err)
@@ -447,6 +543,12 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 		}
 		h.addCurrentPrograms(r, user, items, fields)
 		h.addTimers(r.Context(), items)
+		lists, err := h.searchPlaylists(r, user, term, parent, hasParent)
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		items = append(items, lists...)
 		writeJSON(w, http.StatusOK, pageOf(items, start, limit, len(items)))
 		return
 	}
@@ -500,7 +602,11 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 			h.narrowedListing(w, r, user, names, start, limit)
 			return
 		}
-		// Without a folder, Jellyfin apps ask for whole-server listings,
+		if randomTitles(r) {
+			h.randomListing(w, r, user, start, limit)
+			return
+		}
+		// Other listings without a folder are whole-server listings,
 		// which remote catalogs cannot answer.
 		writeJSON(w, http.StatusOK, QueryResult{Items: []BaseItemDto{}, StartIndex: start})
 		return
@@ -510,6 +616,14 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 		// The library cannot be narrowed to the requested genre, studio or
 		// year.
 		writeJSON(w, http.StatusOK, QueryResult{Items: []BaseItemDto{}, StartIndex: start})
+		return
+	}
+	// A library's series by their episodes, and its titles at random, are
+	// sorted among more than a page.
+	if key, ok := episodeOrder(r); ok && h.episodeOrderListing(w, r, user, parent, key, genre, fields, keep, start, limit) {
+		return
+	}
+	if randomOrder(r) && h.randomLibraryListing(w, r, user, parent, genre, fields, keep, start, limit) {
 		return
 	}
 	asked := time.Now()
@@ -522,6 +636,12 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 		page, err = h.Library.Children(ctx, user, parent, max(start, 0), limit, genre)
 	}
 	read := time.Since(asked)
+	// A collection the user may see none of the titles of is missing to
+	// them (see library.ErrHidden), as one made by users is.
+	if errors.Is(err, library.ErrHidden) {
+		notFoundProblem(w)
+		return
+	}
 	if errors.Is(err, library.ErrNotFound) && h.customRowListing(w, r, user, parent, start, limit) {
 		return
 	}
@@ -536,10 +656,9 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 	}
 	// Titles listed whole are sorted as asked, as Jellyfin sorts them: a
 	// saga's movies by premiere date. A listing in pages keeps its catalogs'
-	// order, which pages sorted one by one would mix up, the Watchlist view
-	// its own, the latest added first, and a smart list the sort it was
-	// given, whatever the app asks.
-	if titlesThrough(r) && parent != library.WatchlistViewID && start <= 0 && !page.More && len(page.Items) == page.Total &&
+	// order, which pages sorted one by one would mix up, and a smart list
+	// the sort it was given, whatever the app asks.
+	if titlesThrough(r) && start <= 0 && !page.More && len(page.Items) == page.Total &&
 		len(listQuery(r, "sortBy")) > 0 && !h.smartList(r, user, parent) {
 		state, err := h.userState(r.Context(), user, page.Items)
 		if err != nil {
@@ -563,8 +682,18 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 			"checked", asked.Sub(begun).Round(time.Millisecond), "read", read.Round(time.Millisecond),
 			"described", (took - read - asked.Sub(begun)).Round(time.Millisecond))
 	}
+	if page.Partial {
+		// For Silo's apps, which show a library's count only when it is
+		// exact (see package silo): Jellyfin apps ignore the header.
+		w.Header().Set(partialTotalHeader, "true")
+	}
 	writeJSON(w, http.StatusOK, QueryResult{Items: items, TotalRecordCount: page.Total, StartIndex: start})
 }
+
+// partialTotalHeader marks a listing whose TotalRecordCount counts only
+// the titles read so far of a catalog that may list more (see
+// library.Page.Partial).
+const partialTotalHeader = "X-Polyfin-Partial-Total"
 
 // hiddenLibrary answers a listing of one of the server's libraries the
 // user does not see as Jellyfin answers one of a folder the user may not
@@ -627,7 +756,7 @@ func pageOf(items []BaseItemDto, start, limit, total int) QueryResult {
 // type filters.
 func searchKinds(keep func(library.Item) bool) []library.Kind {
 	var kinds []library.Kind
-	for _, kind := range []library.Kind{library.KindMovie, library.KindSeries, library.KindVideo} {
+	for _, kind := range []library.Kind{library.KindMovie, library.KindSeries, library.KindVideo, library.KindFolder} {
 		if keep(library.Item{Kind: kind}) {
 			kinds = append(kinds, kind)
 		}
@@ -716,6 +845,27 @@ func (h *Handler) item(w http.ResponseWriter, r *http.Request) {
 	// iptv.Opening): listings never do.
 	item, err := h.Library.Item(iptv.Opening(r.Context()), user, id)
 	if errors.Is(err, library.ErrNotFound) {
+		// A plain video matched since, as by Identify, is reopened by its
+		// identifier: it answers the title it became, as Jellyfin keeps an
+		// item identified again (see library.MatchedPlain).
+		if matched, matchErr := h.Library.MatchedPlain(r.Context(), user, id); matchErr == nil {
+			item, err, id = matched, nil, matched.ID
+		} else if !errors.Is(matchErr, library.ErrNotFound) {
+			err = matchErr
+		}
+	}
+	if err == nil && (item.Kind == library.KindMovie || item.Kind == library.KindSeries || item.Kind == library.KindSeason ||
+		item.Kind == library.KindEpisode) {
+		// So is a title a local folder's files were matched to before
+		// Identify relinked them, while the folder holds it no more (see
+		// library.RelinkedTitle).
+		if relinked, relinkErr := h.Library.RelinkedTitle(r.Context(), user, id); relinkErr == nil {
+			item, id = relinked, relinked.ID
+		} else if !errors.Is(relinkErr, library.ErrNotFound) {
+			err = relinkErr
+		}
+	}
+	if errors.Is(err, library.ErrNotFound) {
 		// Apps open a version as an item by its media source id.
 		item, err = h.title(r.Context(), user, id)
 	}
@@ -738,6 +888,10 @@ func (h *Handler) item(w http.ResponseWriter, r *http.Request) {
 	if errors.Is(err, library.ErrNotFound) && h.describeCustomRow(w, r, user, id) {
 		return
 	}
+	// A genre or studio a title links to (see names.go).
+	if errors.Is(err, library.ErrNotFound) && h.describeNamed(w, r, user, id) {
+		return
+	}
 	if err != nil {
 		h.browseError(w, r, err)
 		return
@@ -754,12 +908,28 @@ func (h *Handler) item(w http.ResponseWriter, r *http.Request) {
 		// a button for: a song never looked up is, for a moment at most.
 		_, _ = h.Lyrics.Lyrics(r.Context(), track, detailsWait)
 	}
+	// A movie's or series' page waits a moment for its credits from TMDB,
+	// which then make its people and a movie's length when its addon
+	// gives none.
+	if h.Library.AwaitTitleCredits(r.Context(), item) {
+		if again, err := h.Library.Item(r.Context(), user, item.ID); err == nil {
+			item = again
+		}
+	}
+	// A series' or season's page waits a moment for the lengths TMDB
+	// gives its episodes whose addon gives none, which the episodes listed
+	// next show.
+	h.Library.AwaitEpisodeLengths(r.Context(), user, item)
 	state, err := h.userState(r.Context(), user, []library.Item{item})
 	if err != nil {
 		h.internalError(w, r, err)
 		return
 	}
+	// The cast shows the photos Polyfin keeps of the people the title
+	// gives none of, and has those without one looked up on TMDB.
+	item.People = h.Library.CastPhotos(r.Context(), user, item.People)
 	dto := h.newItemDto(item, requestedFields(r), true, state)
+	h.addTasteTagline(r.Context(), user, &dto, item)
 	h.addMediaSources(r, user, &dto, item, id, true)
 	if item.Kind == library.KindChannel {
 		h.addSchedule(r, user, &dto, item.ID)
@@ -856,7 +1026,7 @@ func (h *Handler) episodes(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if hasNumber && !hasSeasonID {
-		episodes = slices.DeleteFunc(episodes, func(item library.Item) bool { return item.ParentIndexNumber != number })
+		episodes = slices.DeleteFunc(episodes, func(item library.Item) bool { return item.ShownPlace().Season != number })
 	}
 	// Filtered after the fact as in Jellyfin: an episode is missing when
 	// it has no file, which jellyfin-web leaves out of what it plays next.
@@ -965,61 +1135,111 @@ func (h *Handler) adjacentListing(w http.ResponseWriter, r *http.Request, user a
 	return true
 }
 
-// libraryGenres returns the genres a library's catalog offers. Other
-// folders have none, Polyfin's own among them; a folder that does not
-// exist is refused, as Jellyfin does.
-func (h *Handler) libraryGenres(w http.ResponseWriter, r *http.Request, pooled bool) ([]string, bool) {
+// libraryGenres returns the genres a library's catalog offers, with the
+// user and the folder asked, zero for none. Other folders have none,
+// Polyfin's own among them; a folder that does not exist is refused, as
+// Jellyfin does.
+func (h *Handler) libraryGenres(w http.ResponseWriter, r *http.Request, pooled bool) ([]string, accounts.User, accounts.ID, bool) {
 	b := bindErrors{}
 	id, hasParent := b.guid(r, "parentId")
 	user, ok := h.viewer(w, r, b, unknownListingUser)
-	if !ok {
-		return nil, ok
-	}
-	if !hasParent {
+	if ok && !hasParent && pooled {
 		// Live-TV style apps ask for the server's genres to make channels
 		// of; those of the TV libraries' series are the ones their
-		// episode listings can be narrowed to (see episodepool.go).
-		if pooled {
-			if genres, found := h.poolGenres(r.Context(), user); found {
-				return genres, true
-			}
+		// episode listings can be narrowed to (see episodepool.go, this
+		// fork).
+		if genres, found := h.poolGenres(r.Context(), user); found {
+			return genres, user, accounts.ID{}, true
 		}
-		return nil, true
+	}
+	if !ok || !hasParent {
+		return nil, user, accounts.ID{}, ok
 	}
 	genres, err := h.Library.Genres(r.Context(), user, id)
 	if errors.Is(err, library.ErrNotFound) {
 		if _, err := h.Library.Item(r.Context(), user, id); err == nil {
-			return nil, true
+			return nil, user, id, true
 		}
 		exists, err := h.ownItemExists(r.Context(), user, id)
 		if err != nil {
 			h.internalError(w, r, err)
-			return nil, false
+			return nil, user, id, false
 		}
 		if exists {
-			return nil, true
+			return nil, user, id, true
 		}
 		processingError(w, http.StatusBadRequest)
-		return nil, false
+		return nil, user, id, false
 	}
 	if err != nil {
 		h.internalError(w, r, err)
-		return nil, false
+		return nil, user, id, false
 	}
-	return genres, true
+	return genres, user, id, true
 }
 
+// CatalogGenres returns the genres a library's catalog offers, as
+// /Items/Filters lists them, and none for another folder: what Silo's
+// filter sheet offers, without reading the library's titles.
+func (h *Handler) CatalogGenres(ctx context.Context, user accounts.User, libraryID accounts.ID) ([]string, error) {
+	genres, err := h.Library.Genres(ctx, user, libraryID)
+	if errors.Is(err, library.ErrNotFound) {
+		return nil, nil
+	}
+	return genres, err
+}
+
+// filters lists the genres a library's catalog offers, and the official
+// ratings of the titles the user sees in the folder, among the first ones
+// listed (scanLimit), as the rating filter judges them (see
+// library.Service.OfficialRatings).
 func (h *Handler) filters(w http.ResponseWriter, r *http.Request) {
-	genres, ok := h.libraryGenres(w, r, false)
+	genres, user, parent, ok := h.libraryGenres(w, r, false)
 	if !ok {
+		return
+	}
+	ratings, err := h.officialRatings(r, user, parent)
+	if err != nil {
+		h.browseError(w, r, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string][]any{
 		"Genres":          toAny(nonNil(genres)),
 		"Tags":            {},
-		"OfficialRatings": {},
+		"OfficialRatings": toAny(ratings),
 		"Years":           {},
 	})
+}
+
+// officialRatings lists the official ratings of the children of parent
+// the request's item types keep, among the first scanLimit, as the user
+// sees them. A folder that is not one of the library's has none.
+func (h *Handler) officialRatings(r *http.Request, user accounts.User, parent accounts.ID) ([]string, error) {
+	if parent == (accounts.ID{}) {
+		return []string{}, nil
+	}
+	keep := itemTypeFilter(r)
+	ctx := listingContext(r, keep)
+	var titles []library.Item
+	for offset := 0; offset < scanLimit; {
+		page, err := h.Library.Children(ctx, user, parent, offset, defaultPageSize, "")
+		if errors.Is(err, library.ErrNotFound) {
+			return []string{}, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+		for _, item := range page.Items {
+			if keep(item) {
+				titles = append(titles, item)
+			}
+		}
+		offset += len(page.Items)
+		if !page.More || len(page.Items) == 0 {
+			break
+		}
+	}
+	return h.Library.OfficialRatings(r.Context(), user, titles)
 }
 
 func toAny(values []string) []any {
@@ -1031,12 +1251,12 @@ func toAny(values []string) []any {
 }
 
 func (h *Handler) filters2(w http.ResponseWriter, r *http.Request) {
-	genres, ok := h.libraryGenres(w, r, false)
+	genres, user, _, ok := h.libraryGenres(w, r, false)
 	if !ok {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"Genres":            genreItems(genres),
+		"Genres":            h.namedPairs(user.ID, genreNamed, genres),
 		"Tags":              []string{},
 		"AudioLanguages":    []NameValuePair{},
 		"SubtitleLanguages": []NameValuePair{},
@@ -1044,24 +1264,24 @@ func (h *Handler) filters2(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) genres(w http.ResponseWriter, r *http.Request) {
-	genres, ok := h.libraryGenres(w, r, true)
+	genres, user, _, ok := h.libraryGenres(w, r, true)
 	if !ok {
 		return
 	}
 	items := make([]BaseItemDto, 0, len(genres))
-	for _, genre := range genres {
+	for _, genre := range h.namedPairs(user.ID, genreNamed, genres) {
 		items = append(items, BaseItemDto{
-			Name:              genre,
+			Name:              genre.Name,
 			ServerId:          h.ServerID,
-			Id:                nameID("genre", genre),
-			Type:              "Genre",
+			Id:                genre.Id,
+			Type:              genreNamed.itemType,
 			IsFolder:          false,
 			ImageTags:         map[string]string{},
 			BackdropImageTags: []string{},
 			ImageBlurHashes:   map[string]map[string]string{},
 			LocationType:      "FileSystem",
 			MediaType:         "Unknown",
-			UserData:          UserItemData{Key: genre, ItemId: nameID("genre", genre)},
+			UserData:          UserItemData{Key: genre.Name, ItemId: genre.Id},
 		})
 	}
 	writeJSON(w, http.StatusOK, QueryResult{Items: items, TotalRecordCount: len(items), StartIndex: 0})

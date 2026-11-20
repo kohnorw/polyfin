@@ -79,9 +79,12 @@ func twoSecondKeyframes(t *testing.T, ffmpeg string) (string, Plan) {
 
 // A segment whose FFmpeg makes no progress, its source answering nothing
 // more, is answered ErrStalled once the stall timeout passed, rather than
-// waited for until the player gives up; a slow source that keeps FFmpeg
-// going is waited for past it.
+// waited for until the player gives up, and that FFmpeg is stopped: the
+// request asking again starts another, rather than waiting on one that may
+// never go on. A slow source that keeps FFmpeg going is waited for past
+// it.
 func TestStalledSegmentsAreAnsweredWithinTheTimeout(t *testing.T) {
+	t.Parallel()
 	ffmpeg, _ := tools(t)
 	path, plan := twoSecondKeyframes(t, ffmpeg)
 	info, err := os.Stat(path)
@@ -101,13 +104,27 @@ func TestStalledSegmentsAreAnsweredWithinTheTimeout(t *testing.T) {
 		return Remux{Input: stalled.URL + "/steady.mkv", Video: 0, Audio: -1, Format: FMP4, Plan: plan}, func() {}, nil
 	}
 	started := time.Now()
-	_, err = m.Segment(t.Context(), Key{Session: "stalled", Audio: -1, Format: FMP4}, open, 0)
+	stalledKey := Key{Session: "stalled", Audio: -1, Format: FMP4}
+	_, err = m.Segment(t.Context(), stalledKey, open, 0)
 	if waited := time.Since(started); !errors.Is(err, ErrStalled) || waited < m.stall || waited > m.stall+3*time.Second {
 		t.Errorf("a stalled source: %v after %v", err, waited)
 	}
+	_, err = m.Segment(t.Context(), stalledKey, open, 0)
+	m.mu.Lock()
+	e := m.encodings[stalledKey]
+	m.mu.Unlock()
+	e.mu.Lock()
+	runs := e.runs
+	e.mu.Unlock()
+	if !errors.Is(err, ErrStalled) || runs != 2 {
+		t.Errorf("asked again: %v, %d FFmpeg started, want 2", err, runs)
+	}
 
 	// Paced at twice the video's own rate: segment 3, which ends at 14 s,
-	// takes about 7 s to come.
+	// takes about 6 s to come, FFmpeg telling progress every 0.7 s at
+	// most. The stall timeout is longer here, 4 s: still shorter than that
+	// wait, but not one a slow runner pausing FFmpeg for 1.5 s reaches.
+	m.stall = 4 * time.Second
 	slow := pacedSource(t, path, int(info.Size()/15), 0)
 	open = func(context.Context) (Remux, func(), error) {
 		return Remux{Input: slow.URL + "/steady.mkv", Video: 0, Audio: -1, Format: FMP4, Plan: plan}, func() {}, nil
@@ -132,6 +149,7 @@ func TestStalledSegmentsAreAnsweredWithinTheTimeout(t *testing.T) {
 // An input that failed for good ends its encoding at once: the requests
 // waiting get the failure, and the next one opens the encoding again.
 func TestAFailedInputEndsItsEncoding(t *testing.T) {
+	t.Parallel()
 	ffmpeg, _ := tools(t)
 	path, plan := twoSecondKeyframes(t, ffmpeg)
 	m, err := NewManager(ffmpeg, t.TempDir(), slog.New(slog.DiscardHandler))
@@ -176,6 +194,7 @@ func TestAFailedInputEndsItsEncoding(t *testing.T) {
 // FFmpeg's progress counts when what it wrote, its frames or its output
 // time move, not when it reports the same again.
 func TestProgressCountsWhatMoves(t *testing.T) {
+	t.Parallel()
 	report := func(frame, size, at string) string {
 		return "frame=" + frame + "\nfps=0.0\nbitrate=N/A\ntotal_size=" + size + "\nout_time_us=" + at + "\nspeed=N/A\nprogress=continue\n"
 	}
@@ -193,6 +212,7 @@ func TestProgressCountsWhatMoves(t *testing.T) {
 // left in the cache, rather than 5; burned subtitles, MPEG-TS files, cut
 // on a grid, and discs, searched, probe as usual.
 func TestLaterJobsProbeLess(t *testing.T) {
+	t.Parallel()
 	plan := NewPlan(seconds(0, 2, 6, 10), 14*time.Second)
 	burned := 3
 	probes := func(r Remux, n int) bool {
@@ -227,8 +247,10 @@ func TestLaterJobsProbeLess(t *testing.T) {
 // on the first keyframe after the time asked in, is asked for the
 // previous segment's start, whether it is cut on keyframes or on a grid,
 // or as far before the segment as a job that landed past it taught, and
-// read from its start, without seeking, when that is before it.
+// read from its start, without seeking, when that is before it or when
+// the previous segment is the first.
 func TestSearchedVersionsSeekToThePreviousSegment(t *testing.T) {
+	t.Parallel()
 	plan := NewPlan(seconds(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13), 14*time.Second)
 	grid := NewGridPlan(30 * time.Second).Searched()
 	seek := func(plan Plan, n int, lookback time.Duration) string {
@@ -247,7 +269,7 @@ func TestSearchedVersionsSeekToThePreviousSegment(t *testing.T) {
 		{plan, 1, 0, "2.132000"},
 		{plan, 2, 0, "6.132000"},
 		{plan, 2, 9 * time.Second, "6.132000"},
-		{plan.Searched(), 1, 0, "0.132000"},
+		{plan.Searched(), 1, 0, "none"},
 		{plan.Searched(), 3, 0, "6.132000"},
 		{grid, 2, 0, "2.132000"},
 		{grid, 4, time.Second, "10.132000"},
@@ -266,6 +288,7 @@ func TestSearchedVersionsSeekToThePreviousSegment(t *testing.T) {
 // a 29.97 fps source 8 ms before does. A copied segment's keyframe is the
 // source's, within the rounding of the index.
 func TestForcedKeyframesStartTheirSegment(t *testing.T) {
+	t.Parallel()
 	plan := NewGridPlan(30 * time.Second)
 	converted := Remux{Plan: plan, Encode: &VideoEncoding{Encoder: "libx264", FrameRate: 30000.0 / 1001}}
 	copied := Remux{Plan: plan}

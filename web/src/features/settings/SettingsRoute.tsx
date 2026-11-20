@@ -64,7 +64,9 @@ function SettingsPage({ section }: { section: SettingsSectionId }) {
     const still = window.matchMedia('(prefers-reduced-motion: reduce)').matches
     target.scrollIntoView({ block: 'center', behavior: still ? 'auto' : 'smooth' })
     target
-      .querySelector<HTMLElement>('input, textarea, [role="combobox"], button[role="switch"]')
+      .querySelector<HTMLElement>(
+        '[data-setting-head], input, textarea, [role="combobox"], button[role="switch"]',
+      )
       ?.focus({ preventScroll: true })
     target.dataset.flash = ''
     const timer = setTimeout(() => delete target.dataset.flash, flashFor)
@@ -87,7 +89,6 @@ function SettingsPage({ section }: { section: SettingsSectionId }) {
           items={settingsSections.map((item) => ({
             id: item.id,
             label: t.nav.settingsSections[item.key],
-            icon: item.icon,
             to: settingsPath(item.id),
           }))}
           search={{
@@ -103,20 +104,15 @@ function SettingsPage({ section }: { section: SettingsSectionId }) {
         <SearchResults query={search.trim()} bounds={settings.data?.bounds} />
       )}
       <div hidden={search.trim() !== ''}>
-        <header className="max-md:pt-6">
+        <header className="max-md:pt-4">
           <h2 className="text-h2 text-ink">{t.nav.settingsSections[current.key]}</h2>
-          {lede !== undefined && (
-            <p className="mt-1.5 max-w-[68ch] text-[14.5px] text-ink-2">{lede}</p>
-          )}
+          {lede !== undefined && <p className="mt-1 max-w-[72ch] text-lead text-ink-2">{lede}</p>}
         </header>
         {settings.isPending ? (
-          <div aria-busy="true" aria-label={t.common.loading} className="mt-8 space-y-8">
-            {[0, 1, 2].map((index) => (
-              <div key={index} className="space-y-3">
-                <Skeleton className="h-4 w-56" />
-                <SkeletonText lines={2} />
-                <Skeleton className="h-10 w-full max-w-sm" />
-              </div>
+          <div aria-busy="true" aria-label={t.common.loading} className="mt-5 space-y-1.5">
+            <SkeletonText lines={1} className="mb-3 w-56" />
+            {[0, 1, 2, 3].map((index) => (
+              <Skeleton key={index} className="h-[3.375rem] w-full rounded-row" />
             ))}
           </div>
         ) : settings.isError ? (
@@ -190,8 +186,6 @@ function sectionLede(
       return ledes.notifications
     case 'web-player':
       return s.webPlayerHelp
-    case 'branding':
-      return s.brandingHelp
     case 'diagnostics':
       return ledes.diagnostics
   }

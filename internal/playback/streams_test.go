@@ -39,6 +39,7 @@ var fixtureExternals = map[string][]ExternalSubtitle{
 }
 
 func TestMediaStreamsMatchJellyfin(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile(playbackFixtures + "decisions.json")
 	if err != nil {
 		t.Fatal(err)
@@ -59,6 +60,7 @@ func TestMediaStreamsMatchJellyfin(t *testing.T) {
 	for _, probe := range probes {
 		clip := strings.TrimSuffix(filepath.Base(probe), ".json")
 		t.Run(clip, func(t *testing.T) {
+			t.Parallel()
 			got := MediaStreams(parseFixtureProbe(t, clip), fixtureExternals[clip], "en")
 			compared := 0
 			for _, entry := range entries {
@@ -105,6 +107,7 @@ func compareStreams(t *testing.T, context string, got []MediaStream, want []map[
 }
 
 func TestContainers(t *testing.T) {
+	t.Parallel()
 	// Oracle §3.4 for the fixture clips, then clips made for the purpose.
 	for _, c := range []struct {
 		clip, filename, container, display string
@@ -165,6 +168,7 @@ func remoteProbe(t *testing.T, streams ...string) media.Analysis {
 }
 
 func TestDynamicRanges(t *testing.T) {
+	t.Parallel()
 	dovi := func(profile, compatibility, el, bl int) string {
 		return `{"side_data_type":"DOVI configuration record","dv_version_major":1,"dv_version_minor":0,"dv_profile":` +
 			strconv.Itoa(profile) + `,"dv_level":6,"rpu_present_flag":1,"el_present_flag":` + strconv.Itoa(el) +
@@ -219,6 +223,7 @@ func TestDynamicRanges(t *testing.T) {
 }
 
 func TestAudioFormats(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		codec, profile, layout string
 		channels               int
@@ -246,6 +251,7 @@ func TestAudioFormats(t *testing.T) {
 }
 
 func TestBitrates(t *testing.T) {
+	t.Parallel()
 	// Matroska tracks muxed by ffmpeg state no bitrate: Jellyfin assumes
 	// one per codec and channel count, and gives the video what is left.
 	analysis := media.Analysis{Format: "matroska,webm", Bitrate: 10_000_000, Streams: []media.Stream{
@@ -273,6 +279,7 @@ func TestBitrates(t *testing.T) {
 }
 
 func TestVideoSizes(t *testing.T) {
+	t.Parallel()
 	// Observed on Jellyfin 12.2 with clips of each size.
 	for _, c := range []struct {
 		width, height int
@@ -320,7 +327,36 @@ func TestVideoSizes(t *testing.T) {
 	}
 }
 
+// A video track ffprobe gives no frame size, as a live stream probed early
+// (Jellyfin 12.4's test data video_ts_no_dimensions*.json), takes its aspect
+// ratio from the display aspect ratio alone: none without one, and none for
+// an unknown one, which Jellyfin 12.4 reports as "0:1". Its pixels are not
+// anamorphic when their shape is unknown.
+func TestVideoWithoutFrameSize(t *testing.T) {
+	t.Parallel()
+	for _, c := range []struct {
+		dar, sar    string
+		aspectRatio string
+		anamorphic  bool
+	}{
+		{"", "", "", false},
+		{"0:1", "0:1", "", false},
+		{"16:9", "1:1", "16:9", false},
+		{"16:9", "4:3", "16:9", true},
+	} {
+		analysis := media.Analysis{Format: "mpegts", Streams: []media.Stream{{
+			Type: "video", Codec: "mpeg2video", AspectRatio: c.dar, SampleAspect: c.sar,
+		}, {Type: "audio", Codec: "mp2", Channels: 2, Language: "eng"}}}
+		stream := MediaStreams(analysis, nil, "en")[0]
+		if stream.AspectRatio != c.aspectRatio || *stream.IsAnamorphic != c.anamorphic || stream.Width != nil || stream.Height != nil {
+			t.Errorf("DAR %q SAR %q: %q anamorphic %v, size %v×%v, want %q %v", c.dar, c.sar, stream.AspectRatio, *stream.IsAnamorphic,
+				stream.Width, stream.Height, c.aspectRatio, c.anamorphic)
+		}
+	}
+}
+
 func TestFrenchStrings(t *testing.T) {
+	t.Parallel()
 	// Observed with UICulture=fr: the words are French, the language and
 	// channel layout names stay English.
 	clip := "h264-ac3-srt-mkv"
@@ -365,6 +401,7 @@ func TestFrenchStrings(t *testing.T) {
 }
 
 func TestAddonLanguages(t *testing.T) {
+	t.Parallel()
 	for _, c := range []struct {
 		given, language, name, displayTitle string
 	}{
@@ -398,6 +435,7 @@ func TestAddonLanguages(t *testing.T) {
 }
 
 func TestEmbeddedLanguages(t *testing.T) {
+	t.Parallel()
 	// Observed: only ISO 639-2/B codes are rewritten; other tags are kept
 	// and named when Jellyfin's list knows them by code or full name.
 	for _, c := range []struct {

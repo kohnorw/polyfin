@@ -1,0 +1,57 @@
+/*
+ * This fork's look (kohnorw/polyfin): the admin app in the palette of AIOStreams, near-black
+ * surfaces, a violet accent and Inter, laid over upstream's design tokens. It sets the same
+ * variables upstream's `@theme` does, outside any layer, so they win whatever upstream changes
+ * in its own tokens; a token upstream adds keeps its own value until set here.
+ */
+@import '@fontsource-variable/inter';
+
+:root {
+  /* The brand night, then the surfaces over it. */
+  --color-bg: #070707;
+  --color-room: #0b0b0b;
+  --color-s1: rgb(255 255 255 / 0.04);
+  --color-s1-solid: #121212;
+  --color-s2: rgb(255 255 255 / 0.07);
+  --color-s3: rgb(255 255 255 / 0.1);
+  --color-s4: rgb(255 255 255 / 0.16);
+  --color-raised: rgb(18 18 18 / 0.96);
+
+  /* Hairlines: white at 7, 10 and 16 %. */
+  --color-line: rgb(255 255 255 / 0.07);
+  --color-line-2: rgb(255 255 255 / 0.1);
+  --color-line-3: rgb(255 255 255 / 0.16);
+
+  /* Text, strongest first. */
+  --color-ink: #e6e6e6;
+  --color-ink-2: #a9a9a9;
+  --color-ink-3: #8f8f8f;
+
+  /* The violet accent (white text on it), its states, links and the edge of a lit row. */
+  --color-accent: #6152df;
+  --color-accent-hover: #7062ea;
+  --color-accent-press: #5243cb;
+  --color-on-accent: #fff;
+  --color-link: #9f92ff;
+  --color-link-hover: #c7c2ff;
+  --color-link-lit: #4a3cc4;
+  --color-lit-edge: #7a6cf0;
+  --color-scrim: rgb(0 0 0 / 0.66);
+
+  /* States. */
+  --color-ok: #5cc79d;
+  --color-warn: #e9b86c;
+  --color-danger: #f27d74;
+
+  --font-sans: 'Inter Variable', ui-sans-serif, system-ui, -apple-system, 'Segoe UI', sans-serif;
+}
+
+/* The room: a faint violet glow over the near-black, no grain. */
+body::before {
+  background:
+    radial-gradient(1100px 620px at 8% -12%, rgb(97 82 223 / 0.14), transparent 62%),
+    linear-gradient(180deg, var(--color-room) 0%, var(--color-bg) 100%);
+}
+body::after {
+  display: none;
+}

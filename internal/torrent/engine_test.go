@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -34,10 +35,10 @@ func (t *testSettings) set(change func(*Settings)) {
 	change(&t.s)
 }
 
-func newEngine(t *testing.T, settings *testSettings, budget int64) *Engine {
+func newEngine(t testing.TB, settings *testSettings, budget int64) *Engine {
 	t.Helper()
 	e, err := New(Config{Settings: settings.get, Dir: t.TempDir(), Budget: func() int64 { return budget },
-		Linger: 50 * time.Millisecond, Logger: slog.New(slog.DiscardHandler)})
+		Linger: 50 * time.Millisecond, Public: torrenttest.OnLoopback, Logger: slog.New(slog.DiscardHandler)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -67,7 +68,7 @@ func readAll(t *testing.T, e *Engine, spec Spec) []byte {
 	return data
 }
 
-func waitFor(t *testing.T, what string, done func() bool) {
+func waitFor(t testing.TB, what string, done func() bool) {
 	t.Helper()
 	deadline := time.Now().Add(time.Minute)
 	for !done() {
@@ -129,6 +130,38 @@ func countPrefix(list []string, value string) int {
 		}
 	}
 	return n
+}
+
+// A check, a dial or a UDP association through the proxy cut short by its
+// context, as when the torrent that made it stops or another connection to
+// the peer won, tells nothing of the proxy: the next check, with time to
+// answer, does not read its failure, which would stop the torrents.
+func TestProxyRequestsCutShortAreNotKept(t *testing.T) {
+	t.Parallel()
+	proxy := torrenttest.StartProxy(t, true, "", "")
+	route := ProxyRoute(proxy.Address(), "", "")
+	stopped, stop := context.WithCancel(context.Background())
+	stop()
+	if err := route.Check(stopped); err == nil {
+		t.Fatal("a check whose context was done passed")
+	}
+	if err := route.Check(context.Background()); err != nil {
+		t.Fatalf("the check after a check cut short: %v", err)
+	}
+	if conn, err := route.Dial(stopped, "192.0.2.1:6881"); err == nil {
+		conn.Close()
+		t.Fatal("a dial whose context was done passed")
+	}
+	if err := route.Check(context.Background()); err != nil {
+		t.Fatalf("the check after a dial cut short: %v", err)
+	}
+	if conn, err := route.ListenPacket(stopped); err == nil {
+		conn.Close()
+		t.Fatal("an association whose context was done passed")
+	}
+	if err := route.Check(context.Background()); err != nil {
+		t.Errorf("the check after an association cut short: %v", err)
+	}
 }
 
 func TestProxyWithoutUDPAssociatePlaysOverTCP(t *testing.T) {
@@ -227,6 +260,29 @@ func TestDHTStartsFromNodesPeersTell(t *testing.T) {
 	waitFor(t, "the second seeder to be found on the DHT", func() bool { return len(second.Remotes()) > 0 })
 }
 
+// A DHT lookup that found no peer, its node's answer lost, is made again
+// soon rather than after dhtEvery: a torrent the DHT alone lists still
+// starts within its StartTimeout.
+func TestADHTLookupThatFoundNoPeerIsMadeAgainSoon(t *testing.T) {
+	t.Parallel()
+	tor, _, large := twoFiles()
+	seeder := torrenttest.Seed(t, tor, "127.0.0.1")
+	node := torrenttest.StartDHTNode(t, seeder.Address())
+	node.Drop(1)
+	e := newEngine(t, proxied(torrenttest.StartProxy(t, true, "", "")), 64<<20)
+	spec, err := NewSpec(tor.HashHex(), nil, []string{"dht:" + node.Address()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer e.Play(spec)()
+	if got := readAll(t, e, spec); len(got) != len(large) {
+		t.Fatalf("read %d bytes", len(got))
+	}
+	if queries := node.Queries(); queries < 2 {
+		t.Fatalf("the node was asked %d times", queries)
+	}
+}
+
 func TestKillSwitch(t *testing.T) {
 	t.Parallel()
 	tor, _, _ := twoFiles()
@@ -241,6 +297,7 @@ func TestKillSwitch(t *testing.T) {
 	}
 
 	t.Run("no route", func(t *testing.T) {
+		t.Parallel()
 		e := newEngine(t, &testSettings{s: Settings{Enabled: true}}, 64<<20)
 		defer e.Play(spec)()
 		if _, err := e.Open(context.Background(), spec); !errors.Is(err, ErrNoRoute) {
@@ -248,26 +305,32 @@ func TestKillSwitch(t *testing.T) {
 		}
 	})
 
+	// Its own proxy, which answers: the test stops the other below, while
+	// this subtest waits to run.
 	t.Run("switch off", func(t *testing.T) {
-		e := newEngine(t, &testSettings{s: Settings{Proxy: proxy.Address()}}, 64<<20)
+		t.Parallel()
+		up := torrenttest.StartProxy(t, true, "", "")
+		e := newEngine(t, &testSettings{s: Settings{Proxy: up.Address()}}, 64<<20)
 		defer e.Play(spec)()
 		if _, err := e.Open(context.Background(), spec); !errors.Is(err, ErrDisabled) {
 			t.Fatalf("got %v, want ErrDisabled", err)
 		}
 	})
 
-	// The proxy drops during a playback: the torrent stops, and nothing is
-	// sent another way.
+	// The proxy drops during a playback: the torrent stops once it gave no
+	// answer, and the peer no byte, for the grace, shortened here, and
+	// nothing is sent another way.
+	e.routeGrace = time.Second
 	settings.set(func(s *Settings) { s.DownloadMbps = 1 })
 	stop := e.Play(spec)
-	defer stop()
+	t.Cleanup(stop)
 	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
-	defer cancel()
+	t.Cleanup(cancel)
 	r, err := e.Open(ctx, spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer r.Close()
+	t.Cleanup(func() { r.Close() })
 	if _, err := r.ReadAt(make([]byte, 1000), 0); err != nil {
 		t.Fatal(err)
 	}
@@ -279,7 +342,7 @@ func TestKillSwitch(t *testing.T) {
 		t.Fatal("the torrent opened with the proxy down")
 	}
 	status := e.Status(ctx)
-	if status.RouteError == nil || status.Failure == nil || status.Playing != 0 {
+	if status.RouteError == nil || status.Failure == nil || status.Stopped == nil || status.Playing != 0 {
 		t.Fatalf("Health does not tell the proxy is down: %+v", status)
 	}
 	// The torrent stopped: its peers all came through the proxy.
@@ -434,10 +497,203 @@ func TestPiecesAtTheReadComeFirst(t *testing.T) {
 	tor := newTorrent(e, Spec{}, nil, false)
 	tor.info, tor.have, tor.files = &info, make([]bool, 100), []File{file}
 	reader := &Reader{t: tor, file: file}
-	tor.reads[reader] = 50*length + 10
+	tor.reads[reader] = readSpan{at: 50*length + 10, end: 50*length + 10}
 	tor.have[51] = true
 	got := tor.wanted()
 	if want := []int{50, 52, 53, 0, 99, 1, 98}; !slices.Equal(got, want) {
 		t.Fatalf("wanted %v, want %v", got, want)
+	}
+}
+
+// Ending a torrent's linger stops it at once when no playback reads it,
+// its pieces removed and its readers told; one still read stops as its
+// last playback ends, unless another playback joined it meanwhile.
+func TestEndStopsATorrentAtOnceOrAsItsPlaybacksEnd(t *testing.T) {
+	t.Parallel()
+	tor, _, _ := twoFiles()
+	seeder := torrenttest.Seed(t, tor, "127.0.0.1")
+	tracker := torrenttest.HTTPTracker(t, "127.0.0.1", seeder.Address())
+	proxy := torrenttest.StartProxy(t, true, "", "")
+	e := newEngine(t, proxied(proxy), 64<<20)
+	// The linger never passes during the test.
+	e.config.Linger = time.Hour
+	spec, err := NewSpec(tor.HashHex(), nil, []string{"tracker:" + tracker.URL()})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stop := e.Play(spec)
+	readAll(t, e, spec)
+	e.End(spec.Hash)
+	if !e.Running(spec.Hash) {
+		t.Fatal("the torrent stopped while a playback reads it")
+	}
+	stop()
+	if e.Running(spec.Hash) || e.Usage() != 0 {
+		t.Fatalf("the torrent runs on once its last playback ended, %d bytes kept", e.Usage())
+	}
+
+	// A playback joining it after the end was asked keeps the linger.
+	first := e.Play(spec)
+	readAll(t, e, spec)
+	e.End(spec.Hash)
+	second := e.Play(spec)
+	first()
+	second()
+	if !e.Running(spec.Hash) || e.Usage() == 0 {
+		t.Fatal("the torrent stopped without its linger, though a playback joined it again")
+	}
+	// Lingering, it stops at once, a read under way told why.
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	r, err := e.Open(ctx, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.End(spec.Hash)
+	if e.Running(spec.Hash) || e.Usage() != 0 {
+		t.Fatalf("the lingering torrent runs on, %d bytes kept", e.Usage())
+	}
+	if _, err := r.ReadAt(make([]byte, 1), 0); !errors.Is(err, errStopped) {
+		t.Fatalf("a read of the stopped torrent got %v", err)
+	}
+	waitFor(t, "the seeder's connections to close", func() bool { return seeder.Open() == 0 })
+}
+
+// With AtOnce set, no torrent more starts once as many run, those
+// lingering after their playbacks included: of two starting at once for
+// the last place, one runs and the other's reads tell it may not start; a
+// torrent running takes more playbacks. Its place frees as it stops.
+func TestNoTorrentMoreStartsThanAtOnceAllows(t *testing.T) {
+	t.Parallel()
+	one := torrenttest.Build("One", 64<<10, torrenttest.File{Name: "one.mkv", Data: torrenttest.Bytes(200 << 10)})
+	two := torrenttest.Build("Two", 64<<10, torrenttest.File{Name: "two.mkv", Data: torrenttest.Bytes(210 << 10)})
+	tracker := torrenttest.HTTPTracker(t, "127.0.0.1", torrenttest.Seed(t, one, "127.0.0.1").Address(),
+		torrenttest.Seed(t, two, "127.0.0.1").Address())
+	proxy := torrenttest.StartProxy(t, true, "", "")
+	settings := proxied(proxy)
+	settings.set(func(s *Settings) { s.AtOnce = 1 })
+	e := newEngine(t, settings, 64<<20)
+	e.config.Linger = time.Hour
+	specs := make([]Spec, 2)
+	for i, tor := range []*torrenttest.Torrent{one, two} {
+		spec, err := NewSpec(tor.HashHex(), nil, []string{"tracker:" + tracker.URL()})
+		if err != nil {
+			t.Fatal(err)
+		}
+		specs[i] = spec
+	}
+
+	stops := make([]func(), 2)
+	var wg sync.WaitGroup
+	for i := range specs {
+		wg.Go(func() { stops[i] = e.Play(specs[i]) })
+	}
+	wg.Wait()
+	running, refused := -1, -1
+	for i, spec := range specs {
+		if e.Running(spec.Hash) {
+			running = i
+		} else {
+			refused = i
+		}
+	}
+	if running < 0 || refused < 0 {
+		t.Fatalf("running %v %v, want one of the two", e.Running(specs[0].Hash), e.Running(specs[1].Hash))
+	}
+	if _, err := e.Open(context.Background(), specs[refused]); !errors.Is(err, ErrAtCap) {
+		t.Fatalf("the torrent past the cap opened: %v", err)
+	}
+	if status := e.Status(context.Background()); status.Playing != 1 || status.AtOnce != 1 {
+		t.Fatalf("Health tells %d of %d", status.Playing, status.AtOnce)
+	}
+	// The torrent running takes another playback.
+	stop := e.Play(specs[running])
+	stop()
+
+	// Lingering, it keeps its place; once it stops, the other starts.
+	stops[running]()
+	stops[refused]()
+	if e.Admits(specs[refused].Hash) == nil {
+		t.Fatal("a lingering torrent gave its place")
+	}
+	e.End(specs[running].Hash)
+	defer e.Play(specs[refused])()
+	if !e.Running(specs[refused].Hash) {
+		t.Fatal("the torrent did not start once a place freed")
+	}
+	if got := readAll(t, e, specs[refused]); len(got) == 0 {
+		t.Fatal("the torrent started once a place freed is not read")
+	}
+}
+
+// A read waiting for a piece tells, as each of its blocks arrives, that
+// bytes are coming, long before the piece is whole and the read returns:
+// a block that arrives while the last one is being told is told too.
+func TestAReadTellsTheBytesComingBeforeItsPiece(t *testing.T) {
+	t.Parallel()
+	tor := torrenttest.Build("A Movie", 256<<10, torrenttest.File{Name: "a-movie.mkv", Data: torrenttest.Bytes(600 << 10)})
+	seeder := torrenttest.Seed(t, tor, "127.0.0.1")
+	tracker := torrenttest.HTTPTracker(t, "127.0.0.1", seeder.Address())
+	e := newEngine(t, proxied(torrenttest.StartProxy(t, true, "", "")), 64<<20)
+	spec, err := NewSpec(tor.HashHex(), nil, []string{"tracker:" + tracker.URL()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The seeder sends a block only once the test lets it through.
+	seeder.Hold()
+	defer seeder.Release()
+	defer e.Play(spec)()
+	ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+	defer cancel()
+	r, err := e.Open(ctx, spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	// The second block's telling lasts until proceed is closed.
+	proceed := make(chan struct{})
+	var once sync.Once
+	goOn := func() { once.Do(func() { close(proceed) }) }
+	defer goOn()
+	var told atomic.Int32
+	got := make([]byte, 256<<10)
+	read := make(chan error, 1)
+	go func() {
+		_, err := r.ReadAtProgress(got, 0, func() {
+			if told.Add(1) == 2 {
+				<-proceed
+			}
+		})
+		read <- err
+	}()
+	tr := torrentOf(e, spec.Hash)
+	waitFor(t, "the read to wait for its piece", func() bool {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		span := tr.reads[r]
+		return span.end > span.at
+	})
+	// Blocks come one at a time, fewer than any piece holds.
+	seeder.Pass(1)
+	waitFor(t, "the first block to be told", func() bool { return told.Load() >= 1 })
+	seeder.Pass(1)
+	waitFor(t, "the second block to be told", func() bool { return told.Load() >= 2 })
+	seeder.Pass(1)
+	waitFor(t, "the third block to arrive", func() bool {
+		tr.mu.Lock()
+		defer tr.mu.Unlock()
+		return tr.downBytes >= 3*blockSize
+	})
+	goOn()
+	waitFor(t, "the third block to be told", func() bool { return told.Load() >= 3 })
+	select {
+	case err := <-read:
+		t.Fatalf("the read returned before its piece was whole: %v", err)
+	default:
+	}
+	seeder.Release()
+	if err := <-read; err != nil || !bytes.Equal(got, tor.Data[:len(got)]) {
+		t.Fatalf("the piece was not read: %v", err)
 	}
 }

@@ -1,6 +1,12 @@
-import { FunnelSimpleIcon, PlusIcon, TrashIcon, XIcon } from '@phosphor-icons/react'
+import {
+  FunnelSimpleIcon,
+  MagnifyingGlassIcon,
+  PlusIcon,
+  TrashIcon,
+  XIcon,
+} from '@phosphor-icons/react'
 import { keepPreviousData, useMutation, useQuery } from '@tanstack/react-query'
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useId, useMemo, useState } from 'react'
 import { useNavigate, useParams } from 'react-router'
 import {
   ApiError,
@@ -23,7 +29,7 @@ import {
   type SmartSort,
 } from '@/api'
 import { PageLayout } from '@/app/PageLayout'
-import { errorMessage, stremioLabel } from '@/format'
+import { catalogTypeLabel, errorMessage } from '@/format'
 import { useI18n } from '@/i18n'
 import {
   Badge,
@@ -41,10 +47,10 @@ import {
   Notice,
   NumberInput,
   Panel,
-  PanelFooter,
-  PanelSection,
+  SaveBar,
   Segmented,
   Select,
+  SettingRow,
   SkeletonRows,
   SuggestInput,
   Table,
@@ -56,14 +62,32 @@ import { smartListPath } from './SmartLists'
 const fields: Exclude<SmartField, 'group'>[] = [
   'genre',
   'year',
+  'released',
+  'homeRelease',
   'rating',
+  'votes',
   'language',
+  'runtime',
+  'contentRating',
+  'person',
+  'studio',
   'type',
   'rank',
   'state',
 ]
-const sorts: SmartSort[] = ['catalog', 'premiere', 'rating', 'name', 'random']
+const sorts: SmartSort[] = [
+  'catalog',
+  'premiere',
+  'latestEpisode',
+  'seasonPremiere',
+  'rating',
+  'name',
+  'random',
+]
 const states = ['unplayed', 'played', 'started', 'favorite']
+
+/** The fields a title's description may have to tell, when its catalog does not. */
+const describedFields: SmartField[] = ['language', 'runtime', 'contentRating', 'person', 'released']
 
 /** Groups go this deep: the list's own, and groups within it. */
 const maxDepth = 2
@@ -73,8 +97,14 @@ const emptyDraft: SmartListDraft = {
   shownAs: 'library',
   catalogs: [],
   rules: { field: 'group', match: 'all', rules: [] },
+  exclude: noExclusions(),
   sort: 'catalog',
   maxItems: null,
+}
+
+/** The exclusions of a list that leaves no title out. */
+function noExclusions(): SmartRule {
+  return { field: 'group', match: 'any', rules: [] }
 }
 
 /** A new rule of a field, with the value it starts with. */
@@ -88,8 +118,22 @@ function newRule(field: Exclude<SmartField, 'group'>): SmartRule {
       return { field, value: 'fr' }
     case 'rank':
       return { field, max: 100 }
+    case 'runtime':
+      return { field, min: 90 }
+    case 'votes':
+      return { field, min: 1000 }
+    case 'contentRating':
+      return { field, value: 'PG-13' }
+    case 'released':
+      return { field, min: -30, max: 0 }
+    case 'homeRelease':
+      return { field, value: 'upcoming', max: 30 }
+    case 'genre':
+    case 'person':
+    case 'studio':
+      return { field, value: '' }
     default:
-      return { field, value: field === 'genre' ? '' : undefined }
+      return { field }
   }
 }
 
@@ -102,9 +146,17 @@ function complete(rule: SmartRule, depth = 1): boolean {
         (rule.rules ?? []).every((r) => complete(r, depth + 1))
       )
     case 'genre':
+    case 'person':
+    case 'studio':
       return (rule.value ?? '').trim() !== ''
+    case 'released':
+      return rule.min !== undefined && rule.max !== undefined && rule.min <= rule.max
+    case 'homeRelease':
+      return Boolean(rule.value) && rule.max !== undefined && rule.max >= 1
     case 'year':
     case 'rating':
+    case 'runtime':
+    case 'votes':
       return (
         (rule.min !== undefined || rule.max !== undefined) &&
         (rule.min === undefined || rule.max === undefined || rule.min <= rule.max)
@@ -118,6 +170,11 @@ function complete(rule: SmartRule, depth = 1): boolean {
 
 function usesField(rule: SmartRule, field: SmartField): boolean {
   return rule.field === field || (rule.rules ?? []).some((r) => usesField(r, field))
+}
+
+/** Whether a list's rules or exclusions look at one of fields. */
+function listUses(draft: SmartListDraft, ...fields: SmartField[]): boolean {
+  return fields.some((field) => usesField(draft.rules, field) || usesField(draft.exclude, field))
 }
 
 function catalogKey(c: { addonId: string; type: string; id: string }): string {
@@ -185,6 +242,30 @@ export default function SmartListRoute({ scope }: { scope: Scope }) {
   )
 }
 
+/** The draft of a saved list, as the editor starts from it. */
+function draftOf(list: SmartList): SmartListDraft {
+  return {
+    name: list.name,
+    shownAs: list.shownAs,
+    catalogs: list.catalogs,
+    rules: list.rules,
+    exclude: list.exclude ?? noExclusions(),
+    sort: list.sort,
+    maxItems: list.maxItems,
+  }
+}
+
+/** The parts of a draft the dock counts, each as one change. */
+const draftParts = [
+  'name',
+  'shownAs',
+  'catalogs',
+  'rules',
+  'exclude',
+  'sort',
+  'maxItems',
+] as const satisfies readonly (keyof SmartListDraft)[]
+
 function Editor({
   scope,
   saved,
@@ -199,20 +280,14 @@ function Editor({
   const { t, language } = useI18n()
   const toast = useToast()
   const navigate = useNavigate()
-  const [draft, setDraft] = useState<SmartListDraft>(() =>
-    saved
-      ? {
-          name: saved.name,
-          shownAs: saved.shownAs,
-          catalogs: saved.catalogs,
-          rules: saved.rules,
-          sort: saved.sort,
-          maxItems: saved.maxItems,
-        }
-      : emptyDraft,
-  )
+  const maxId = useId()
+  const [draft, setDraft] = useState<SmartListDraft>(() => (saved ? draftOf(saved) : emptyDraft))
   const [deleting, setDeleting] = useState(false)
   const change = (patch: Partial<SmartListDraft>) => setDraft((d) => ({ ...d, ...patch }))
+  const base = saved ? draftOf(saved) : emptyDraft
+  const changes = draftParts.filter(
+    (part) => JSON.stringify(draft[part]) !== JSON.stringify(base[part]),
+  ).length
 
   const save = useMutation({
     mutationFn: () =>
@@ -221,7 +296,9 @@ function Editor({
       void queryClient.invalidateQueries({ queryKey: queryKeys.smartLists(scope) })
       queryClient.setQueryData(queryKeys.smartList(scope, list.id), list)
       toast(saved ? t.smartLists.saved : t.smartLists.created)
-      if (!saved) void navigate(smartListPath(scope, list.id), { replace: true })
+      // The list as the server keeps it, so the dock closes.
+      if (saved) setDraft(draftOf(list))
+      else void navigate(smartListPath(scope, list.id), { replace: true })
     },
   })
   const remove = useMutation({
@@ -265,120 +342,162 @@ function Editor({
     draft.maxItems === null ||
     (Number.isInteger(draft.maxItems) && draft.maxItems >= 1 && draft.maxItems <= MAX_LIBRARY_ITEMS)
   const max = MAX_LIBRARY_ITEMS.toLocaleString(language)
+  const catalogsError = errorFor(['invalid_smart_list_catalogs'])
+  const rulesError = errorFor(['invalid_smart_list_rules'])
 
   return (
     <PageLayout
       title={saved ? saved.name : t.smartLists.newTitle}
       lede={t.smartLists.lede}
       back={back}
+      actions={
+        saved && (
+          <Button variant="danger" icon={TrashIcon} onClick={() => setDeleting(true)}>
+            {t.smartLists.delete}
+          </Button>
+        )
+      }
     >
       <form
+        className="[&>*+*]:mt-block"
         onSubmit={(event) => {
           event.preventDefault()
+          if (!maxValid) {
+            document
+              .getElementById(maxId)
+              ?.querySelector<HTMLElement>('[data-setting-head]')
+              ?.focus()
+            return
+          }
           save.mutate()
         }}
       >
-        <Panel flush>
-          <PanelSection>
-            <div className="grid gap-6 md:grid-cols-2">
-              <Field
-                label={t.smartLists.name}
-                help={t.smartLists.nameHelp}
-                error={errorFor(['invalid_smart_list_name'])}
-              >
-                <TextInput value={draft.name} maxLength={64} onValue={(name) => change({ name })} />
-              </Field>
-              <div className="flex flex-col gap-2">
-                <span className="text-control font-medium text-ink">{t.smartLists.shownAs}</span>
-                <Segmented
-                  label={t.smartLists.shownAs}
-                  value={draft.shownAs}
-                  onChange={(shownAs) => change({ shownAs })}
-                  options={(['library', 'collection'] as const).map((value) => ({
-                    value,
-                    label: t.smartLists.shownAsChoices[value],
-                  }))}
-                />
-                <p className="max-w-[60ch] text-small text-ink-3">
-                  {t.smartLists.shownAsHelp[draft.shownAs]}
-                </p>
-              </div>
-            </div>
-          </PanelSection>
-          <PanelSection title={t.smartLists.catalogs} description={t.smartLists.catalogsHelp}>
+        <div className="grid grid-cols-[minmax(0,1fr)] gap-1.5">
+          <SettingRow
+            kind="text"
+            label={t.smartLists.name}
+            help={t.smartLists.nameHelp}
+            error={errorFor(['invalid_smart_list_name'])}
+            value={draft.name}
+            saved={saved?.name}
+            maxLength={64}
+            onChange={(name) => change({ name })}
+          />
+          <SettingRow
+            kind="choice"
+            label={t.smartLists.shownAs}
+            help={t.smartLists.shownAsHelp[draft.shownAs]}
+            value={draft.shownAs}
+            saved={saved?.shownAs}
+            options={(['library', 'collection'] as const).map((value) => ({
+              value,
+              label: t.smartLists.shownAsChoices[value],
+            }))}
+            onChange={(shownAs) => change({ shownAs })}
+          />
+          <SettingRow
+            kind="choice"
+            label={t.smartLists.sort}
+            help={
+              draft.sort === 'latestEpisode' || draft.sort === 'seasonPremiere'
+                ? t.smartLists.episodeSortHelp
+                : undefined
+            }
+            value={draft.sort}
+            saved={saved?.sort}
+            options={sorts.map((value) => ({ value, label: t.smartLists.sorts[value] }))}
+            onChange={(sort) => change({ sort })}
+          />
+          <SettingRow
+            anchor={maxId}
+            kind="number"
+            label={t.smartLists.maxItems}
+            help={t.smartLists.maxHelp(max)}
+            error={
+              !maxValid
+                ? t.libraries.narrow.maxRange(max)
+                : errorFor(['invalid_smart_list_max_items'])
+            }
+            value={draft.maxItems}
+            saved={saved ? saved.maxItems : undefined}
+            min={1}
+            max={MAX_LIBRARY_ITEMS}
+            step={1}
+            format={(value) => value.toLocaleString(language)}
+            onChange={(maxItems) => change({ maxItems })}
+          />
+        </div>
+        <Block title={t.smartLists.catalogs} count={draft.catalogs.length}>
+          <p className="mb-3 max-w-[66ch] text-small text-ink-2">{t.smartLists.catalogsHelp}</p>
+          {saved !== null && saved.catalogs.length === 0 && (
+            <Notice tone="warn" className="mb-3">
+              {t.smartLists.catalogsGone}
+            </Notice>
+          )}
+          <Panel as="div">
             <CatalogPicker
               choices={choices.catalogs}
               chosen={draft.catalogs}
               mine={scope === 'me'}
               onChange={(catalogs) => change({ catalogs })}
             />
-            {errorFor(['invalid_smart_list_catalogs']) && (
-              <div className="mt-3">
-                <FieldError>{errorFor(['invalid_smart_list_catalogs'])}</FieldError>
-              </div>
-            )}
-          </PanelSection>
-          <PanelSection title={t.smartLists.rules} description={t.smartLists.rulesHelp}>
+          </Panel>
+          {catalogsError && (
+            <div className="mt-3">
+              <FieldError>{catalogsError}</FieldError>
+            </div>
+          )}
+        </Block>
+        <Block title={t.smartLists.rules}>
+          <p className="mb-3 max-w-[66ch] text-small text-ink-2">{t.smartLists.rulesHelp}</p>
+          <Panel as="div">
             <GroupEditor
               group={draft.rules}
               depth={1}
               genres={genres}
               languages={languages}
+              contentRatings={choices.contentRatings}
               onChange={(rules) => change({ rules })}
             />
-            {usesField(draft.rules, 'language') && (
-              <Notice className="mt-4">{t.smartLists.languageHelp}</Notice>
-            )}
-            {usesField(draft.rules, 'state') && (
-              <Notice className="mt-4">{t.smartLists.stateHelp}</Notice>
-            )}
-            {errorFor(['invalid_smart_list_rules']) && (
-              <div className="mt-3">
-                <FieldError>{errorFor(['invalid_smart_list_rules'])}</FieldError>
-              </div>
-            )}
-          </PanelSection>
-          <PanelSection>
-            <div className="grid gap-6 md:grid-cols-2">
-              <Field label={t.smartLists.sort}>
-                <Select
-                  value={draft.sort}
-                  onValue={(sort) => change({ sort })}
-                  options={sorts.map((value) => ({ value, label: t.smartLists.sorts[value] }))}
-                />
-              </Field>
-              <Field
-                label={t.smartLists.maxItems}
-                help={t.smartLists.maxHelp(max)}
-                error={
-                  !maxValid
-                    ? t.libraries.narrow.maxRange(max)
-                    : errorFor(['invalid_smart_list_max_items'])
-                }
-              >
-                <NumberInput
-                  value={draft.maxItems}
-                  min={1}
-                  max={MAX_LIBRARY_ITEMS}
-                  step={1}
-                  placeholder={t.smartLists.noMax}
-                  className="w-[160px]"
-                  onValue={(maxItems) => change({ maxItems })}
-                />
-              </Field>
+          </Panel>
+          {rulesError && (
+            <div className="mt-3">
+              <FieldError>{rulesError}</FieldError>
             </div>
-          </PanelSection>
-          <PanelFooter note={generalError && <FieldError>{generalError}</FieldError>}>
-            {saved && (
-              <Button variant="danger" icon={TrashIcon} onClick={() => setDeleting(true)}>
-                {t.smartLists.delete}
-              </Button>
-            )}
-            <Button type="submit" variant="primary" loading={save.isPending} disabled={!maxValid}>
-              {saved ? t.smartLists.save : t.smartLists.create}
-            </Button>
-          </PanelFooter>
-        </Panel>
+          )}
+        </Block>
+        <Block title={t.smartLists.exclude}>
+          <p className="mb-3 max-w-[66ch] text-small text-ink-2">{t.smartLists.excludeHelp}</p>
+          <Panel as="div">
+            <GroupEditor
+              group={draft.exclude}
+              depth={1}
+              label={t.smartLists.excludeMatch}
+              genres={genres}
+              languages={languages}
+              contentRatings={choices.contentRatings}
+              onChange={(exclude) => change({ exclude })}
+            />
+          </Panel>
+          <div className="mt-4 flex flex-col gap-3 empty:hidden">
+            {listUses(draft, ...describedFields) && <Notice>{t.smartLists.describedHelp}</Notice>}
+            {listUses(draft, 'votes') && <Notice>{t.smartLists.votesHelp}</Notice>}
+            {listUses(draft, 'studio') && <Notice>{t.smartLists.studioHelp}</Notice>}
+            {listUses(draft, 'homeRelease') && <Notice>{t.smartLists.homeReleaseHelp}</Notice>}
+            {listUses(draft, 'state') && <Notice>{t.smartLists.stateHelp}</Notice>}
+          </div>
+        </Block>
+        <SaveBar
+          dirty={changes > 0}
+          changes={changes}
+          saving={save.isPending}
+          onDiscard={() => {
+            save.reset()
+            setDraft(base)
+          }}
+          error={generalError}
+          saveLabel={saved ? undefined : t.smartLists.create}
+        />
       </form>
       <Preview scope={scope} draft={draft} />
       <ConfirmDialog
@@ -428,18 +547,22 @@ function CatalogPicker({
   const toggle = (ref: SmartListDraft['catalogs'][number], on: boolean) =>
     onChange(on ? [...chosen, ref] : chosen.filter((c) => catalogKey(c) !== catalogKey(ref)))
   return (
-    <div className="flex flex-col gap-3">
+    <div className="flex flex-col gap-2.5">
       {choices.length > 8 && (
         <Field label={t.smartLists.catalogFilter} hideLabel>
           <TextInput
+            type="search"
+            size="sm"
+            icon={MagnifyingGlassIcon}
             value={filter}
             placeholder={t.smartLists.catalogFilterPlaceholder}
             onValue={setFilter}
-            className="max-w-[360px]"
+            autoComplete="off"
+            className="max-w-[22rem]"
           />
         </Field>
       )}
-      <div className="grid max-h-[360px] gap-x-6 gap-y-3 overflow-y-auto sm:grid-cols-2">
+      <div className="grid max-h-[24rem] gap-x-6 overflow-y-auto overscroll-contain [scrollbar-color:var(--color-line-3)_transparent] [scrollbar-width:thin] sm:grid-cols-2">
         {missing.map((c) => (
           <Checkbox
             key={catalogKey(c)}
@@ -457,13 +580,17 @@ function CatalogPicker({
               checked={keys.has(catalogKey(ref))}
               onChange={(on) => toggle(ref, on)}
               label={c.catalogName || c.catalogId}
-              help={`${c.addonName} · ${stremioLabel(t.stremioTypes, c.catalogType)}`}
+              help={`${c.addonName} · ${catalogTypeLabel(t, c.catalogType)}`}
               aside={mine && c.shared ? <Badge>{t.smartLists.serverBadge}</Badge> : undefined}
             />
           )
         })}
       </div>
-      {shown.length === 0 && <p className="text-small text-ink-3">{t.smartLists.noCatalogMatch}</p>}
+      {shown.length === 0 && (
+        <p role="status" className="text-small text-ink-2">
+          {t.smartLists.noCatalogMatch}
+        </p>
+      )}
     </div>
   )
 }
@@ -474,19 +601,25 @@ type Option = { value: string; label: string }
 function GroupEditor({
   group,
   depth,
+  label,
   genres,
   languages,
+  contentRatings,
   onChange,
   onRemove,
 }: {
   group: SmartRule
   depth: number
+  /** What the list's own group is called; groups within it are this group. */
+  label?: string
   genres: string[]
   languages: Option[]
+  contentRatings: string[]
   onChange: (group: SmartRule) => void
   onRemove?: () => void
 }) {
   const { t } = useI18n()
+  const title = depth === 1 ? (label ?? t.smartLists.match) : t.smartLists.groupMatch
   const rules = group.rules ?? []
   const set = (index: number, rule: SmartRule) =>
     onChange({ ...group, rules: rules.map((r, i) => (i === index ? rule : r)) })
@@ -494,16 +627,14 @@ function GroupEditor({
   return (
     <div
       className={cx(
-        'flex flex-col gap-3',
-        depth > 1 && 'rounded-panel border border-line-2 bg-s2/40 p-4',
+        'flex min-w-0 flex-col gap-4',
+        depth > 1 && 'rounded-row bg-s2/60 p-5 max-md:p-4',
       )}
     >
       <div className="flex flex-wrap items-center gap-3">
-        <span className="text-control font-medium text-ink">
-          {depth === 1 ? t.smartLists.match : t.smartLists.groupMatch}
-        </span>
+        <span className="text-h3 text-ink">{title}</span>
         <Segmented
-          label={depth === 1 ? t.smartLists.match : t.smartLists.groupMatch}
+          label={title}
           size="sm"
           value={group.match ?? 'all'}
           onChange={(match) => onChange({ ...group, match })}
@@ -515,7 +646,8 @@ function GroupEditor({
         {depth > 1 && (
           <Select
             aria-label={t.smartLists.negation}
-            className="w-[140px]"
+            size="sm"
+            className="w-[8.75rem]"
             value={group.not ? 'not' : 'is'}
             onValue={(value) => onChange({ ...group, not: value === 'not' })}
             options={[
@@ -528,6 +660,7 @@ function GroupEditor({
           <IconButton
             label={t.smartLists.removeGroup}
             icon={XIcon}
+            danger
             onClick={onRemove}
             className="ml-auto"
           />
@@ -541,6 +674,7 @@ function GroupEditor({
             depth={depth + 1}
             genres={genres}
             languages={languages}
+            contentRatings={contentRatings}
             onChange={(next) => set(index, next)}
             onRemove={() => drop(index)}
           />
@@ -550,6 +684,7 @@ function GroupEditor({
             rule={rule}
             genres={genres}
             languages={languages}
+            contentRatings={contentRatings}
             onChange={(next) => set(index, next)}
             onRemove={() => drop(index)}
           />
@@ -591,12 +726,14 @@ function RuleEditor({
   rule,
   genres,
   languages,
+  contentRatings,
   onChange,
   onRemove,
 }: {
   rule: SmartRule
   genres: string[]
   languages: Option[]
+  contentRatings: string[]
   onChange: (rule: SmartRule) => void
   onRemove: () => void
 }) {
@@ -608,43 +745,149 @@ function RuleEditor({
     case 'genre':
       value = (
         <SuggestInput
+          size="sm"
           aria-label={t.smartLists.genre}
           value={rule.value ?? ''}
           suggestions={genres}
           onValue={(text) => onChange({ ...rule, value: text })}
           onPick={(text) => onChange({ ...rule, value: text })}
-          className="w-[220px]"
+          className="w-[13.75rem]"
         />
       )
       break
     case 'year':
-    case 'rating': {
-      const step = rule.field === 'year' ? 1 : 0.1
+    case 'rating':
+    case 'runtime':
+    case 'votes': {
+      const step = rule.field === 'rating' ? 0.1 : 1
       value = (
-        <span className="flex items-center gap-2">
+        <span className="flex flex-wrap items-center gap-2 text-control text-ink-2">
           <NumberInput
+            size="sm"
             aria-label={t.smartLists.from}
             placeholder={t.smartLists.from}
             value={rule.min ?? null}
+            min={0}
             step={step}
+            className="w-[7.5rem]"
             onValue={(n) => bound('min', n)}
           />
           <NumberInput
+            size="sm"
             aria-label={t.smartLists.to}
             placeholder={t.smartLists.to}
             value={rule.max ?? null}
+            min={0}
             step={step}
+            className="w-[7.5rem]"
             onValue={(n) => bound('max', n)}
           />
+          {rule.field === 'runtime' && t.smartLists.minutes}
         </span>
       )
       break
     }
+    case 'released': {
+      // The rules the editor makes: the last days up to today, or the next days from today.
+      const next = (rule.min ?? 0) >= 0 && (rule.max ?? 0) > 0
+      const days = next ? (rule.max ?? 0) : -(rule.min ?? 0)
+      const set = (toNext: boolean, count: number | null) =>
+        onChange({
+          ...rule,
+          min: count === null ? undefined : toNext ? 0 : -count,
+          max: count === null ? undefined : toNext ? count : 0,
+        })
+      value = (
+        <span className="flex flex-wrap items-center gap-2 text-control text-ink-2">
+          <Select
+            size="sm"
+            aria-label={t.smartLists.releasedWhen}
+            className="w-[10rem]"
+            value={next ? 'next' : 'last'}
+            onValue={(when) => set(when === 'next', days)}
+            options={(['last', 'next'] as const).map((v) => ({
+              value: v,
+              label: t.smartLists.releasedWithin[v],
+            }))}
+          />
+          <NumberInput
+            size="sm"
+            aria-label={t.smartLists.days}
+            value={days}
+            min={1}
+            max={36500}
+            step={1}
+            className="w-[7.5rem]"
+            onValue={(n) => set(next, n)}
+          />
+          {t.smartLists.days}
+        </span>
+      )
+      break
+    }
+    case 'homeRelease':
+      value = (
+        <span className="flex flex-wrap items-center gap-2 text-control text-ink-2">
+          <Select
+            size="sm"
+            aria-label={t.smartLists.releasedWhen}
+            className="w-[12.5rem]"
+            value={rule.value ?? 'upcoming'}
+            onValue={(when) => onChange({ ...rule, value: when })}
+            options={(['released', 'upcoming', 'both'] as const).map((v) => ({
+              value: v,
+              label: t.smartLists.homeReleaseWithin[v],
+            }))}
+          />
+          <NumberInput
+            size="sm"
+            aria-label={t.smartLists.days}
+            value={rule.max ?? null}
+            min={1}
+            max={36500}
+            step={1}
+            className="w-[7.5rem]"
+            onValue={(n) => bound('max', n)}
+          />
+          {t.smartLists.days}
+        </span>
+      )
+      break
+    case 'contentRating':
+      value = (
+        <span className="flex flex-wrap items-center gap-2 text-control text-ink-2">
+          {t.smartLists.atMost}
+          <Select
+            size="sm"
+            aria-label={t.smartLists.fields.contentRating}
+            className="w-[10rem]"
+            value={rule.value ?? 'PG-13'}
+            onValue={(rating) => onChange({ ...rule, value: rating })}
+            options={contentRatings.map((v) => ({ value: v, label: v }))}
+          />
+        </span>
+      )
+      break
+    case 'person':
+    case 'studio':
+      value = (
+        <TextInput
+          size="sm"
+          aria-label={t.smartLists.fields[rule.field]}
+          placeholder={t.smartLists.namePlaceholder[rule.field]}
+          value={rule.value ?? ''}
+          maxLength={100}
+          onValue={(text) => onChange({ ...rule, value: text })}
+          className="w-[13.75rem]"
+        />
+      )
+      break
     case 'language':
       value = (
         <Select
+          size="sm"
           aria-label={t.smartLists.language}
-          className="w-[220px]"
+          className="w-[13.75rem]"
           value={rule.value ?? ''}
           onValue={(code) => onChange({ ...rule, value: code })}
           options={languages}
@@ -654,8 +897,9 @@ function RuleEditor({
     case 'type':
       value = (
         <Select
+          size="sm"
           aria-label={t.smartLists.fields.type}
-          className="w-[160px]"
+          className="w-[10rem]"
           value={rule.value ?? 'movie'}
           onValue={(kind) => onChange({ ...rule, value: kind })}
           options={['movie', 'series'].map((v) => ({ value: v, label: t.smartLists.types[v] }))}
@@ -664,14 +908,16 @@ function RuleEditor({
       break
     case 'rank':
       value = (
-        <span className="flex items-center gap-2 text-small text-ink-2">
+        <span className="flex flex-wrap items-center gap-2 text-control text-ink-2">
           {t.smartLists.rankMax}
           <NumberInput
+            size="sm"
             aria-label={t.smartLists.rankMax}
             value={rule.max ?? null}
             min={1}
             max={MAX_LIBRARY_ITEMS}
             step={1}
+            className="w-[7.5rem]"
             onValue={(n) => bound('max', n)}
           />
         </span>
@@ -680,8 +926,9 @@ function RuleEditor({
     case 'state':
       value = (
         <Select
+          size="sm"
           aria-label={t.smartLists.fields.state}
-          className="w-[200px]"
+          className="w-[12.5rem]"
           value={rule.value ?? 'unplayed'}
           onValue={(state) => onChange({ ...rule, value: state })}
           options={states.map((v) => ({ value: v, label: t.smartLists.states[v] }))}
@@ -689,10 +936,11 @@ function RuleEditor({
       )
   }
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="flex min-w-0 flex-wrap items-center gap-2">
       <Select
+        size="sm"
         aria-label={t.smartLists.field}
-        className="w-[200px]"
+        className="w-[12.5rem]"
         value={rule.field}
         onValue={(field) =>
           onChange({ ...newRule(field as (typeof fields)[number]), not: rule.not })
@@ -700,8 +948,9 @@ function RuleEditor({
         options={fields.map((f) => ({ value: f, label: t.smartLists.fields[f] }))}
       />
       <Select
+        size="sm"
         aria-label={t.smartLists.negation}
-        className="w-[120px]"
+        className="w-[7.5rem]"
         value={rule.not ? 'not' : 'is'}
         onValue={(v) => onChange({ ...rule, not: v === 'not' })}
         options={[
@@ -710,7 +959,7 @@ function RuleEditor({
         ]}
       />
       {value}
-      <IconButton label={t.smartLists.removeRule} icon={XIcon} onClick={onRemove} />
+      <IconButton label={t.smartLists.removeRule} icon={XIcon} danger onClick={onRemove} />
     </div>
   )
 }
@@ -726,6 +975,7 @@ function Preview({ scope, draft }: { scope: Scope; draft: SmartListDraft }) {
   const ready =
     settled.catalogs.length > 0 &&
     complete(settled.rules) &&
+    complete(settled.exclude) &&
     (settled.maxItems === null ||
       (Number.isInteger(settled.maxItems) &&
         settled.maxItems >= 1 &&
@@ -770,7 +1020,7 @@ function Preview({ scope, draft }: { scope: Scope; draft: SmartListDraft }) {
         {data.titles.length === 0 ? (
           <EmptyState icon={FunnelSimpleIcon} title={t.smartLists.previewEmpty} />
         ) : (
-          <Table label={t.smartLists.previewLabel} minWidth={640}>
+          <Table compact label={t.smartLists.previewLabel} minWidth={720}>
             <thead>
               <tr>
                 <th scope="col">{t.smartLists.columns.title}</th>
@@ -788,7 +1038,7 @@ function Preview({ scope, draft }: { scope: Scope; draft: SmartListDraft }) {
             <tbody>
               {data.titles.map((title) => (
                 <tr key={title.id}>
-                  <td className="font-medium !text-ink">{title.name}</td>
+                  <td>{title.name}</td>
                   <td>{t.smartLists.types[title.type]}</td>
                   <td className="figures text-right">{title.year ?? '–'}</td>
                   <td className="figures text-right">
@@ -820,7 +1070,7 @@ function Preview({ scope, draft }: { scope: Scope; draft: SmartListDraft }) {
         )
       }
     >
-      <p className="mb-4 max-w-[70ch] text-small text-ink-3">{t.smartLists.previewHelp}</p>
+      <p className="mb-3 max-w-[66ch] text-small text-ink-2">{t.smartLists.previewHelp}</p>
       {body}
     </Block>
   )

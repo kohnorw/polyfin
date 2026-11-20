@@ -27,7 +27,8 @@ import (
 // server's secret: images are relayed as all artwork is, so apps never
 // talk to TMDB or to an addon's artwork server, and Polyfin relays nothing
 // but what it listed, an addon's artwork under its addon's confinement.
-// Downloading one, for administrators, keeps it as an upload is (see
+// Listing and downloading are for administrators, as the rest of Edit
+// images is. Downloading one keeps it as an upload is (see
 // uploadItemImage), and refuses an address Polyfin did not list for the
 // item and image type.
 
@@ -362,14 +363,8 @@ func (h *Handler) remoteImage(w http.ResponseWriter, r *http.Request) {
 			found = h.resized(r.Context(), image.URL, found, image.Width)
 		}
 	}
-	header := w.Header()
-	header.Set("Content-Type", found.contentType)
-	header.Set("Content-Length", strconv.Itoa(len(found.body)))
-	header.Set("Cache-Control", taggedImage)
-	w.WriteHeader(http.StatusOK)
-	if r.Method != http.MethodHead {
-		_, _ = w.Write(found.body)
-	}
+	w.Header().Set("Cache-Control", taggedImage)
+	answerPicture(w, r, found)
 }
 
 // downloadRemoteImage keeps an image listed for an item as its artwork of

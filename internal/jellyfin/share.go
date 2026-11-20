@@ -3,11 +3,13 @@ package jellyfin
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"html/template"
+	"io"
 	"io/fs"
 	"net/http"
 	"net/url"
@@ -19,6 +21,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/forwarded"
 	"github.com/moodiness/polyfin/internal/hls"
+	"github.com/moodiness/polyfin/internal/i18n"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/playback"
 	"github.com/moodiness/polyfin/internal/plays"
@@ -26,20 +29,23 @@ import (
 
 // A share link (see accounts.ShareLink) lets a guest without an account
 // watch one movie or one episode of the user who made it, its sharer, at
-// /share/{token}: a page of Polyfin's own, in English or French, with the
+// /share/{token}: a page of Polyfin's own, in one of i18n.Languages, with the
 // title, its artwork, its overview and a player. The token opens nothing
 // else: the page's routes below are the only ones that read it, and every
 // other route refuses it as any unknown token.
 //
 //	GET  /share/{token}                    the page;
 //	GET  /share/{token}/image/{kind}       its artwork, primary or backdrop;
-//	POST /share/{token}/play               starts a guest's playback;
+//	POST /share/{token}/play               starts a guest's playback, from
+//	                                       the position its body may give;
 //	GET  /share/{token}/play/{session}/…   its HLS playlists, segments and
 //	                                       text subtitles;
 //	POST /share/{token}/play/{session}/progress, …/stop
 //	                                       its position, and its end;
-//	GET  /share/assets/{file}              the page's script, style and
-//	                                       hls.js, the same for every link.
+//	GET  /share/assets/{file}              the page's script, style, logo,
+//	                                       font and hls.js, the same for
+//	                                       every link, which package server
+//	                                       serves from ShareAssets.
 //
 // A guest plays through Polyfin, never from the source, as stream
 // addresses can hold keys, and over HLS only, nothing to download. The
@@ -48,9 +54,11 @@ import (
 // their Playbacks at once, which guests count toward, their Allowed hours,
 // their permissions to have video and audio converted, and the server's
 // Video conversions at once. A guest changes nothing in the sharer's watch
-// state: no report reaches the user data. The playbacks show on the admin
-// app's Home under the sharer's name, with guestApp as the app, and count
-// in the sharer's statistics, marked as shared.
+// state: no report reaches the user data. Where the guest stopped is kept
+// by the page, in the guest's browser, under the link's ID: the server
+// keeps nothing of it once the playback ends. The playbacks show on the
+// admin app's Home under the sharer's name, with guestApp as the app, and
+// count in the sharer's statistics, marked as shared.
 
 const (
 	// guestApp and guestDevice name a guest's playback where an app's
@@ -79,15 +87,40 @@ var shareFiles embed.FS
 
 var sharePage = template.Must(template.ParseFS(shareFiles, "share/page.html"))
 
-// shareAssets are the files of /share/assets/: the page's script and
-// style, and hls.js, vendored (see third_party/hls.js).
-var shareAssets = func() fs.FS {
+// ShareAssets are the files of /share/assets/: the page's script, style
+// and logo, and, vendored, hls.js (see third_party/hls.js) and the
+// Figtree font (see third_party/figtree).
+var ShareAssets = func() fs.FS {
 	sub, err := fs.Sub(shareFiles, "share/assets")
 	if err != nil {
 		panic(err)
 	}
 	return sub
 }()
+
+// shareLinks are the addresses the page links its files at.
+var shareLinks = shareAssetLinks{Style: shareAssetLink("share.css"), Script: shareAssetLink("share.js"),
+	Logo: shareAssetLink("polyfin.svg"), Hls: shareAssetLink("hls.min.js")}
+
+// shareAssetLinks are the addresses of the page's files, each with its
+// version, which lets the browser keep it for good.
+type shareAssetLinks struct {
+	Style, Script, Logo string
+	// Hls is hls.js, which the page loads once Play is pressed.
+	Hls string
+}
+
+// shareAssetLink is the address of the file name of ShareAssets, with its
+// version in v: the first 8 bytes of its SHA-256, in hex, as package
+// server tags it (its ETag without quotes), which it caches for good.
+func shareAssetLink(name string) string {
+	data, err := fs.ReadFile(ShareAssets, name)
+	if err != nil {
+		panic(err)
+	}
+	sum := sha256.Sum256(data)
+	return "/share/assets/" + name + "?v=" + hex.EncodeToString(sum[:8])
+}
 
 // guestProfile is what a guest's browser is sent: H.264 video and AAC or
 // MP3 audio, in fragmented MP4 over HLS, which every browser plays, with
@@ -108,11 +141,12 @@ var guestProfile = playback.DeviceProfile{
 }
 
 // shareUser is the sharer as a guest plays for them: their quality group,
-// lowered to 1080p.
+// lowered to 1080p, without their own sound, which is not the guest's.
 func shareUser(user accounts.User) accounts.User {
 	if user.QualityGroup == 0 || user.QualityGroup > shareMaxHeight {
 		user.QualityGroup = shareMaxHeight
 	}
+	user.ConvertSound = false
 	return user
 }
 
@@ -258,40 +292,24 @@ func (h *Handler) followGuest(play guestPlay, kind int) {
 	}
 	h.Plays.Report(plays.Report{Kind: kind, Device: play.device, User: play.user, UserName: play.link.User.Name, App: guestApp,
 		DeviceName: guestDevice, Title: playedTitle(play.item), Position: play.position, PositionKnown: true, Paused: play.paused,
-		Method: h.playMethod(playback.PlayState{PlayMethod: play.method, PlaySessionID: play.id}), Shared: true})
+		Method: h.playMethod(playback.PlayState{PlayMethod: play.method, PlaySessionID: play.id}), Shared: true, Sent: h.sentSoFar(play.id)})
 }
 
 // Share serves the share links' routes, under /share/.
 func (h *Handler) Share() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle("GET /share/assets/{file}", http.StripPrefix("/share/assets/", shareAssetsHandler()))
 	mux.HandleFunc("GET /share/{token}", h.sharePage)
 	mux.HandleFunc("GET /share/{token}/image/{kind}", h.shareImage)
 	mux.HandleFunc("POST /share/{token}/play", h.startGuest)
 	mux.HandleFunc("POST /share/{token}/play/{session}/progress", h.guestProgress)
 	mux.HandleFunc("POST /share/{token}/play/{session}/stop", h.stopGuest)
-	mux.HandleFunc("GET /share/{token}/play/{session}/{file}", h.guestPlaylist)
-	mux.HandleFunc("GET /share/{token}/play/{session}/hls1/{playlistId}/{file}", h.guestSegment)
+	mux.HandleFunc("GET /share/{token}/play/{session}/{file}", h.meteredStream(h.guestPlaylist))
+	mux.HandleFunc("GET /share/{token}/play/{session}/hls1/{playlistId}/{file}", h.meteredStream(h.guestSegment))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		header := w.Header()
 		header.Set("X-Robots-Tag", "noindex, nofollow")
 		header.Set("X-Frame-Options", "DENY")
 		mux.ServeHTTP(w, r)
-	})
-}
-
-// shareAssetsHandler serves the files of /share/assets/: hls.js, which
-// never changes under its name, kept for a day, the page's own files
-// checked again at each load.
-func shareAssetsHandler() http.Handler {
-	files := http.FileServerFS(shareAssets)
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "hls") {
-			w.Header().Set("Cache-Control", "public, max-age=86400")
-		} else {
-			w.Header().Set("Cache-Control", "no-cache")
-		}
-		files.ServeHTTP(w, r)
 	})
 }
 
@@ -301,12 +319,27 @@ type shareError struct {
 	code   string
 }
 
+// sentByAnotherSite reports whether a page of another site had the
+// browser send r as one of its resources, an image for example, as the
+// browser itself tells: the person asked for nothing. A link opened
+// from another site is a document of its own, and is theirs. The admin
+// API's invite route has the same rule.
+func sentByAnotherSite(r *http.Request) bool {
+	return r.Header.Get("Sec-Fetch-Site") == "cross-site" && r.Header.Get("Sec-Fetch-Dest") != "document"
+}
+
 // openShare reads the link of the request's token, while it opens its
-// title, with its sharer as they are now. A client that failed too many
-// sign-ins is refused first; a token that is no link's counts as a failed
-// sign-in of the client.
+// title, with its sharer as they are now. A client that asked for too
+// many links that do not exist is refused first; a token that is no
+// link's counts as one more, in a count of the share links' own: it
+// never refuses a sign-in, nor do wrong passwords refuse a link. Text
+// that is no token at all is refused without counting, and what a page
+// of another site has the browser ask for counts nothing either.
 func (h *Handler) openShare(r *http.Request) (accounts.ShareLink, accounts.User, *shareError) {
-	attempt, _ := h.SignIns.Reserve(forwarded.Client(r))
+	if !accounts.WellFormedShareToken(r.PathValue("token")) {
+		return accounts.ShareLink{}, accounts.User{}, &shareError{http.StatusNotFound, "unknown"}
+	}
+	attempt, _ := h.ShareLinks.Reserve(forwarded.Client(r))
 	if attempt == nil {
 		return accounts.ShareLink{}, accounts.User{}, &shareError{http.StatusTooManyRequests, "too_many_attempts"}
 	}
@@ -316,7 +349,9 @@ func (h *Handler) openShare(r *http.Request) (accounts.ShareLink, accounts.User,
 	link, user, err := h.Accounts.ShareLinkByToken(r.Context(), r.PathValue("token"))
 	switch {
 	case errors.Is(err, accounts.ErrShareLinkUnknown):
-		attempt.Fail()
+		if !sentByAnotherSite(r) {
+			attempt.Fail()
+		}
 		return link, user, &shareError{http.StatusNotFound, "unknown"}
 	case errors.Is(err, accounts.ErrShareLinkExpired):
 		return link, user, &shareError{http.StatusGone, "expired"}
@@ -354,21 +389,16 @@ func writeShareError(w http.ResponseWriter, failed shareError) {
 	writeJSON(w, failed.status, map[string]string{"error": failed.code})
 }
 
-// shareLanguage is the language of the page: French or English as the
-// browser prefers, else the server's.
+// shareLanguage is the language of the page: the first Polyfin speaks
+// among those the browser prefers, else the server's.
 func (h *Handler) shareLanguage(r *http.Request) string {
 	for part := range strings.SplitSeq(r.Header.Get("Accept-Language"), ",") {
 		tag, _, _ := strings.Cut(strings.TrimSpace(part), ";")
-		base, _, _ := strings.Cut(strings.ToLower(tag), "-")
-		switch base {
-		case "fr", "en":
-			return base
+		if language := i18n.Match(tag); language != "" {
+			return language
 		}
 	}
-	if h.Accounts.Settings().Language == "fr" {
-		return "fr"
-	}
-	return "en"
+	return h.Accounts.Settings().Language
 }
 
 // sharePageData is what the page shows.
@@ -376,11 +406,18 @@ type sharePageData struct {
 	Language string
 	Text     shareText
 	Server   string
+	// Link is the link's ID, which the page keeps the guest's position
+	// under, never its token; empty for a token that is no link's. Gone
+	// tells the page of a link expired or revoked, whose position it
+	// forgets.
+	Link string
+	Gone bool
 	// Title is unset for a link that does not open its title, Message
 	// then saying why.
 	Title    *shareTitleData
 	Message  string
 	Messages map[string]string
+	Assets   shareAssetLinks
 }
 
 type shareTitleData struct {
@@ -389,7 +426,10 @@ type shareTitleData struct {
 	Overview string
 	Year     int
 	Minutes  int
-	Expires  time.Time
+	// Seconds is the runtime, which tells the page a position near the
+	// end, before the video says its own.
+	Seconds int
+	Expires time.Time
 }
 
 // sharePage serves the page of a link, or says why the link opens
@@ -397,15 +437,20 @@ type shareTitleData struct {
 func (h *Handler) sharePage(w http.ResponseWriter, r *http.Request) {
 	language := h.shareLanguage(r)
 	text := shareTexts[language]
-	data := sharePageData{Language: language, Text: text, Server: h.Accounts.Settings().ServerName, Messages: text.messages()}
+	data := sharePageData{Language: language, Text: text, Server: h.Accounts.Settings().ServerName, Messages: text.messages(),
+		Assets: shareLinks}
 	link, _, item, failed := h.openTitle(r)
+	if link.ID != (accounts.ID{}) {
+		data.Link = link.ID.String()
+	}
 	status := http.StatusOK
 	if failed != nil {
 		status = failed.status
 		data.Message = text.refusal(failed.code)
+		data.Gone = failed.code == "expired" || failed.code == "revoked"
 	} else {
 		title := &shareTitleData{Name: item.Name, Overview: item.Overview, Year: item.ProductionYear, Minutes: int(item.Runtime.Minutes()),
-			Expires: link.ExpiresAt}
+			Seconds: int(item.Runtime.Seconds()), Expires: link.ExpiresAt}
 		if item.Kind == library.KindEpisode {
 			title.Name = item.SeriesName
 			title.Subtitle = text.episode(item)
@@ -417,8 +462,9 @@ func (h *Handler) sharePage(w http.ResponseWriter, r *http.Request) {
 	header.Set("Content-Type", "text/html; charset=utf-8")
 	header.Set("Cache-Control", "no-store")
 	// hls.js runs its worker from a blob: address, and plays from blob:
-	// addresses through Media Source Extensions.
-	header.Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; media-src 'self' blob:; "+
+	// addresses through Media Source Extensions. The page's font is its
+	// own, among its assets.
+	header.Set("Content-Security-Policy", "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self'; media-src 'self' blob:; "+
 		"connect-src 'self'; worker-src 'self' blob:; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
 	w.WriteHeader(status)
 	if err := sharePage.Execute(w, data); err != nil && r.Context().Err() == nil {
@@ -455,14 +501,22 @@ func (h *Handler) shareImage(w http.ResponseWriter, r *http.Request) {
 	image.SetPathValue("itemId", item.ID.String())
 	image.SetPathValue("imageType", imageType)
 	image.SetPathValue("imageIndex", "")
-	h.taggedArtwork(w, image, tag, false)
+	h.taggedArtwork(w, image, tag, false, true)
 }
 
 // startGuest starts a guest's playback of the link's title, unless the
 // link has as many guests as it allows, the sharer plays on as many
 // devices as they may, it is outside their allowed hours, or nothing can
-// play: the answer says which.
+// play: the answer says which. The body may give the position the guest
+// resumes at, which the source is read ahead from.
 func (h *Handler) startGuest(w http.ResponseWriter, r *http.Request) {
+	var asked struct {
+		Position float64 `json:"position"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, maxGuestReport)).Decode(&asked); err != nil && !errors.Is(err, io.EOF) {
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
 	link, sharer, item, failed := h.openTitle(r)
 	if failed != nil {
 		writeShareError(w, *failed)
@@ -479,14 +533,14 @@ func (h *Handler) startGuest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	play := &guestPlay{id: "share" + randomHex(16), device: randomID(), link: link, user: sharer.ID, item: item,
-		address: forwarded.Client(r), started: h.now(), seen: h.now()}
+		address: forwarded.Client(r), started: h.now(), seen: h.now(), position: guestStart(asked.Position, item.Runtime)}
 	// The limits are checked before choosing what plays, which may read
 	// the sources, and again as the playback is admitted.
 	if most := sharer.MaxPlaybacks; most > 0 && playing+h.guests.ofUser(sharer.ID) >= most {
 		writeShareError(w, shareError{http.StatusTooManyRequests, shareRefusedLimit})
 		return
 	}
-	plan, refused := h.planGuest(r, shareUser(sharer), item, play.id)
+	plan, refused := h.planGuest(r, shareUser(sharer), item, play.id, play.position)
 	if refused != "" {
 		status := http.StatusServiceUnavailable
 		if refused == shareRefusedUnavailable {
@@ -516,25 +570,40 @@ func (h *Handler) startGuest(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"session": play.id})
 }
 
-// devicesPlaying counts the devices of user playing, or making a converted
-// download, but except, DLNA devices included. A download whose device is
-// not known counts as one more.
-func (h *Handler) devicesPlaying(ctx context.Context, user accounts.User, except accounts.ID) (int, error) {
+// guestStart is where a guest's playback starts, from the position in
+// seconds the page asks for: the start for a position that is not within
+// the title's runtime, or within a week when the runtime is not known.
+func guestStart(seconds float64, runtime time.Duration) time.Duration {
+	if runtime <= 0 {
+		runtime = 7 * 24 * time.Hour
+	}
+	if seconds <= 0 || seconds >= runtime.Seconds() {
+		return 0
+	}
+	return time.Duration(seconds * float64(time.Second))
+}
+
+// reportedPlaying lists the devices of user their apps report playing, or
+// that make a converted download, but except; more counts the downloads
+// whose device is not known, each as one more, and the DLNA playbacks.
+// devicesPlaying adds the devices that are sent a playback and report
+// nothing.
+func (h *Handler) reportedPlaying(ctx context.Context, user accounts.User, except accounts.ID) (counted []accounts.ID, more int, err error) {
 	devices, err := h.Accounts.Devices(ctx, user.ID)
 	if err != nil {
-		return 0, err
+		return nil, 0, err
 	}
-	playing := 0
+	counted = make([]accounts.ID, 0, len(devices))
 	for _, device := range devices {
 		if device.ID == except {
 			continue
 		}
 		if _, ok := h.sessions.Playing(device.ID); ok || h.downloads.onDevice(device.ID) {
-			playing++
+			counted = append(counted, device.ID)
 		}
 	}
 	h.endStaleDLNA(accounts.ID{}, "")
-	return playing + h.downloads.withoutDevice(user.ID) + h.dlna.ofUser(user.ID), nil
+	return counted, h.downloads.withoutDevice(user.ID) + h.dlna.ofUser(user.ID), nil
 }
 
 // guestPlan is what a guest plays: a version, and the parameters of its
@@ -549,9 +618,10 @@ type guestPlan struct {
 // planGuest chooses the version a guest plays and how, as PlaybackInfo
 // chooses for an app, for guestProfile: the sharer's version rules, quality
 // group (at most 1080p), Maximum quality and permissions apply. No
-// subtitle is chosen: the page offers the text ones. It returns why
-// nothing plays, empty when something does.
-func (h *Handler) planGuest(r *http.Request, user accounts.User, item library.Item, session string) (guestPlan, string) {
+// subtitle is chosen: the page offers the text ones. The source is read
+// ahead from start, where the guest resumes. It returns why nothing plays,
+// empty when something does.
+func (h *Handler) planGuest(r *http.Request, user accounts.User, item library.Item, session string, start time.Duration) (guestPlan, string) {
 	ctx := r.Context()
 	request := playbackInfoRequest{DeviceProfile: &guestProfile, EnableDirectPlay: new(false)}
 	limitBitrate(&request, user)
@@ -575,7 +645,7 @@ func (h *Handler) planGuest(r *http.Request, user accounts.User, item library.It
 		if err != nil {
 			return guestPlan{}, shareRefusedUnavailable
 		}
-		p.versions = h.offered(ctx, user, versions)
+		h.offer(ctx, user, &p, versions)
 		choice = h.choose(r, user, p, item.ID, request, candidatesOf(p.versions), settings.PreferDirectPlay)
 	}
 	chosen := choice.decided
@@ -592,7 +662,7 @@ func (h *Handler) planGuest(r *http.Request, user accounts.User, item library.It
 	if !found {
 		return guestPlan{}, shareRefusedUnavailable
 	}
-	h.Playback.Warm(chosen.version, 0)
+	h.Playback.Warm(chosen.version, start)
 	method := "DirectStream"
 	if chosen.decision.Video != nil || chosen.decision.Audio != nil {
 		method = "Transcode"
@@ -628,8 +698,7 @@ func (h *Handler) guestRemuxer(play guestPlay, sharer accounts.User) remuxer {
 		params := r.Clone(r.Context())
 		params.URL = &url.URL{Path: r.URL.Path, RawQuery: play.params}
 		req, ok := h.remuxFor(w, params, shareUser(sharer), play.item.ID, play.version, play.id)
-		// Guests reach no subtitle controller: no subtitle is listed.
-		req.uris, req.renditions = "", false
+		req.uris, req.renditions = "", true
 		return req, ok
 	}
 }

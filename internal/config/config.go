@@ -15,21 +15,32 @@ import (
 	"strings"
 
 	"github.com/moodiness/polyfin/internal/accounts"
+	"github.com/moodiness/polyfin/internal/desktop"
 	"github.com/moodiness/polyfin/internal/discovery"
 	"github.com/moodiness/polyfin/internal/dlna"
 	"github.com/moodiness/polyfin/internal/https"
 	"github.com/moodiness/polyfin/internal/iptv"
+	"github.com/moodiness/polyfin/internal/ocr"
 	"github.com/moodiness/polyfin/internal/secrets"
 )
 
 // DefaultListen is the port Jellyfin clients try first when no port is given.
 const DefaultListen = ":8096"
 
+// EmbeddedDatabase is the value of POLYFIN_DATABASE that makes the server
+// run its own PostgreSQL cluster, in the folder postgresql of the data
+// folder.
+const EmbeddedDatabase = "embedded"
+
 // Config holds the settings needed to start the server.
 type Config struct {
 	// DatabaseURL is a PostgreSQL connection string. It contains credentials:
 	// never log it.
 	DatabaseURL string
+	// Embedded tells that the server runs its own PostgreSQL cluster, in
+	// the data folder (POLYFIN_DATABASE set to embedded): DatabaseURL is
+	// then empty until the cluster starts.
+	Embedded bool
 	// Listen is the TCP address of the HTTP server, as host:port.
 	Listen string
 	// DiscoveryPort is the UDP port local network discovery listens on,
@@ -48,12 +59,25 @@ type Config struct {
 	// PATH.
 	FFprobe string
 	FFmpeg  string
+	// Tesseract is the executable picture subtitles are read into text
+	// with; TessdataDir a folder of .traineddata files for the languages
+	// Tesseract's own data lacks, empty for none. TessdataURL is the
+	// address those files are downloaded from into it, followed by their
+	// name: Tesseract's own data at a pinned commit (ocr.DataURL), unless
+	// a mirror or tests choose another.
+	Tesseract   string
+	TessdataDir string
+	TessdataURL string
 	// DataDir is the folder Polyfin keeps its files in, an absolute path:
-	// the cache, and the default recordings and backups folders.
+	// the cache, unless the settings choose other folders for what it holds
+	// (see ChooseFolders), and the default recordings and backups folders.
 	DataDir string
-	// CacheDir, <data>/cache, keeps the blocks of the sources being played,
-	// their remuxes and the guides being read; it is emptied at start.
-	CacheDir string
+	// MoveDataDirTo is set when DataDir is the default data folder of
+	// earlier versions, in the system's temporary folder, kept as it is
+	// there and POLYFIN_DATA_DIR is not set (see EarlierDataDir): the
+	// default one, where its files are to be moved. System › Health tells
+	// both.
+	MoveDataDirTo string
 	// FontsDir holds the fallback fonts apps load to render subtitles, read
 	// with the folders within, which also write the names of generated
 	// images.
@@ -80,6 +104,10 @@ type Config struct {
 	// Retired are the variables set that the settings hold now, which
 	// Polyfin no longer reads.
 	Retired []Retired
+	// Desktop tells that Polyfin Desktop runs Polyfin, as it says with
+	// desktop.ServerVariable set to 1: it starts Polyfin again when it
+	// exits, and offers its updates.
+	Desktop bool
 }
 
 // Retired is a variable Polyfin no longer reads, and the section of the
@@ -94,7 +122,7 @@ type Retired struct {
 var retiredVariables = []Retired{
 	{"POLYFIN_CACHE_SIZE", "Settings › Playback"},
 	{"POLYFIN_LOG_LEVEL", "Settings › Diagnostics"},
-	{"POLYFIN_VAAPI_DEVICE", "Settings › Conversion"},
+	{"POLYFIN_VAAPI_DEVICE", "Settings › Conversion (transcoding)"},
 	{"POLYFIN_RECORDINGS_DIR", "Settings › Recordings"},
 	{"POLYFIN_BACKUP_DIR", "Settings › Backups"},
 }
@@ -106,13 +134,6 @@ const defaultFontsDir = "/usr/share/fonts"
 // DefaultWebDir is the folder the Docker image puts jellyfin-web in.
 const DefaultWebDir = "/usr/share/polyfin/jellyfin-web"
 
-// DefaultDataDir is the folder Polyfin keeps its files in when
-// POLYFIN_DATA_DIR is not set: a polyfin folder in the system's temporary
-// folder.
-func DefaultDataDir() string {
-	return filepath.Join(os.TempDir(), "polyfin")
-}
-
 // Load reads the configuration through getenv, normally os.Getenv. Only
 // the variables still read can make it fail; those copied into the
 // settings give warnings instead (see Config.Warnings).
@@ -122,6 +143,9 @@ func Load(getenv func(string) string) (Config, error) {
 		Listen:        strings.TrimSpace(getenv("POLYFIN_LISTEN")),
 		FFprobe:       strings.TrimSpace(getenv("POLYFIN_FFPROBE")),
 		FFmpeg:        strings.TrimSpace(getenv("POLYFIN_FFMPEG")),
+		Tesseract:     strings.TrimSpace(getenv("POLYFIN_TESSERACT")),
+		TessdataDir:   strings.TrimSpace(getenv("POLYFIN_TESSDATA_DIR")),
+		TessdataURL:   strings.TrimSpace(getenv("POLYFIN_TESSDATA_URL")),
 		DataDir:       strings.TrimSpace(getenv("POLYFIN_DATA_DIR")),
 		FontsDir:      strings.TrimSpace(getenv("POLYFIN_FONTS_DIR")),
 		WebDir:        strings.TrimSpace(getenv("POLYFIN_WEB_DIR")),
@@ -140,9 +164,19 @@ func Load(getenv func(string) string) (Config, error) {
 	if cfg.FFmpeg == "" {
 		cfg.FFmpeg = "ffmpeg"
 	}
+	if cfg.Tesseract == "" {
+		cfg.Tesseract = "tesseract"
+	}
 	var errs []error
-	if cfg.DatabaseURL == "" {
-		errs = append(errs, errors.New("POLYFIN_DATABASE_URL is required"))
+	switch database := strings.TrimSpace(getenv("POLYFIN_DATABASE")); {
+	case database == EmbeddedDatabase && cfg.DatabaseURL != "":
+		errs = append(errs, errors.New("POLYFIN_DATABASE is embedded and POLYFIN_DATABASE_URL is set: set only one of them"))
+	case database == EmbeddedDatabase:
+		cfg.Embedded = true
+	case database != "":
+		errs = append(errs, fmt.Errorf("POLYFIN_DATABASE: %q is not embedded, the only value it takes", database))
+	case cfg.DatabaseURL == "":
+		errs = append(errs, errors.New("POLYFIN_DATABASE_URL is required, unless POLYFIN_DATABASE is embedded"))
 	}
 	if cfg.Listen == "" {
 		cfg.Listen = DefaultListen
@@ -194,15 +228,23 @@ func Load(getenv func(string) string) (Config, error) {
 	} else if address, err := url.Parse(cfg.ACMEDirectory); err != nil || address.Scheme != "https" && address.Scheme != "http" || address.Host == "" {
 		errs = append(errs, fmt.Errorf("POLYFIN_ACME_DIRECTORY: %q is not an http or https address", cfg.ACMEDirectory))
 	}
+	if cfg.TessdataURL == "" {
+		cfg.TessdataURL = ocr.DataURL
+	} else if address, err := url.Parse(cfg.TessdataURL); err != nil || address.Scheme != "https" && address.Scheme != "http" || address.Host == "" {
+		errs = append(errs, fmt.Errorf("POLYFIN_TESSDATA_URL: %q is not an http or https address", cfg.TessdataURL))
+	}
 	switch {
 	case cfg.DataDir == "":
-		cfg.DataDir = DefaultDataDir()
+		dir, moveTo, err := chooseDataDir(DefaultDataDir, EarlierDataDir())
+		if err != nil {
+			errs = append(errs, err)
+		}
+		cfg.DataDir, cfg.MoveDataDirTo = dir, moveTo
 	case !filepath.IsAbs(cfg.DataDir):
 		errs = append(errs, fmt.Errorf("POLYFIN_DATA_DIR: %q is not an absolute path", cfg.DataDir))
 	default:
 		cfg.DataDir = filepath.Clean(cfg.DataDir)
 	}
-	cfg.CacheDir = filepath.Join(cfg.DataDir, "cache")
 	if raw := strings.TrimSpace(getenv("POLYFIN_SECRET_KEY")); raw != "" {
 		key, err := secrets.ParseKey(raw)
 		if err != nil {
@@ -210,6 +252,7 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		cfg.SecretKey = key
 	}
+	cfg.Desktop = strings.TrimSpace(getenv(desktop.ServerVariable)) == "1"
 	cfg.readEnvironment(getenv)
 	return cfg, errors.Join(errs...)
 }
@@ -280,7 +323,8 @@ func PrepareFolder(dir string, create bool) error {
 		return fmt.Errorf("%q is not an absolute path", dir)
 	}
 	if create {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		// For Polyfin's user alone: the backups hold the whole database.
+		if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err
 		}
 	}
@@ -301,7 +345,7 @@ func PrepareFolder(dir string, create bool) error {
 
 // segmentDatabases are the segment databases POLYFIN_SEGMENTS names, in the
 // default order of preference.
-var segmentDatabases = []string{"theintrodb", "introdb", "publicmetadb"}
+var segmentDatabases = []string{"theintrodb", "introdb", "publicmetadb", "skipdb"}
 
 // parseSegments reads the segment databases, in order of preference: nil
 // when text is empty, an empty list for none.
@@ -317,7 +361,7 @@ func parseSegments(text string) ([]string, error) {
 	for name := range strings.SplitSeq(text, ",") {
 		name = strings.TrimSpace(name)
 		if !slices.Contains(segmentDatabases, name) {
-			return nil, fmt.Errorf("%q is not a list of theintrodb, introdb and publicmetadb, or none", text)
+			return nil, fmt.Errorf("%q is not a list of theintrodb, introdb, publicmetadb and skipdb, or none", text)
 		}
 		if !slices.Contains(names, name) {
 			names = append(names, name)

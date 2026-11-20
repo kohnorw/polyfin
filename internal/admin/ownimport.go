@@ -6,12 +6,15 @@ import (
 	"strings"
 
 	"github.com/moodiness/polyfin/internal/jellyfinimport"
+	"github.com/moodiness/polyfin/internal/stremio"
 )
 
 // Under My account, a user imports their own watch history from another
 // Jellyfin or Emby server, signing in there as themselves, or from their
 // Letterboxd export file (see letterboxd.go). The password is used for that
-// import only: never stored, never answered back.
+// import only: never stored, never answered back. A member's server is on
+// a public address, as their addons are; an administrator's may be on the
+// local network.
 
 // ownImport answers whether the user may import their own watch history,
 // whether they may import a Letterboxd export and the server's metadata
@@ -38,12 +41,15 @@ func (h *handler) ownImport(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
+	// Collections tells whether the user's own import may bring the
+	// server's collections: only a user who may manage collections does.
 	writeJSON(w, http.StatusOK, struct {
-		Enabled    bool `json:"enabled"`
-		Letterboxd bool `json:"letterboxd"`
-		Searchable bool `json:"searchable"`
-		Import     any  `json:"import"`
-	}{enabled, enabled && h.Letterboxd != nil, searchable, current})
+		Enabled     bool `json:"enabled"`
+		Letterboxd  bool `json:"letterboxd"`
+		Searchable  bool `json:"searchable"`
+		Collections bool `json:"collections"`
+		Import      any  `json:"import"`
+	}{enabled, enabled && h.Letterboxd != nil, searchable, user.CollectionManagement, current})
 }
 
 // startOwnImport imports into the caller's account, in the background,
@@ -51,7 +57,9 @@ func (h *handler) ownImport(w http.ResponseWriter, r *http.Request) {
 // (see startLetterboxd), or that of the user signing in to a Jellyfin or
 // Emby server with the name and password given. One import from a server
 // runs at a time on the whole server, and one import into an account:
-// while either runs, it answers 409 server_import_running.
+// while either runs, it answers 409 server_import_running. A member's
+// server on a local network, or leading there, answers 403
+// private_network, as their addons do.
 func (h *handler) startOwnImport(w http.ResponseWriter, r *http.Request) {
 	if !h.Accounts.Settings().ServerImports {
 		writeError(w, http.StatusForbidden, "server_imports_disabled")
@@ -75,13 +83,19 @@ func (h *handler) startOwnImport(w http.ResponseWriter, r *http.Request) {
 		Address  string `json:"address"`
 		Name     string `json:"name"`
 		Password string `json:"password"`
+		// Server and Watchlist are Plex's: the server chosen among those
+		// the caller's sign-in to Plex reaches, and whether its Watchlist
+		// comes too, by default.
+		Server    string `json:"server"`
+		Watchlist *bool  `json:"watchlist"`
+		extrasJSON
 	}
 	if !decode(w, r, &body) {
 		return
 	}
 	kind, ok := importKind(body.Kind)
 	name := strings.TrimSpace(body.Name)
-	if !ok || kind == jellyfinimport.Plex || name == "" {
+	if !ok || kind != jellyfinimport.Plex && name == "" || kind == jellyfinimport.Plex && body.Server == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -89,12 +103,27 @@ func (h *handler) startOwnImport(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusConflict, "server_import_running")
 		return
 	}
-	connection := jellyfinimport.Connection{Kind: kind, Address: body.Address,
-		Credentials: jellyfinimport.Credentials{Name: name, Password: body.Password}}
-	status, err := h.JellyfinImport.ImportOwn(r.Context(), connection, user)
+	var status *jellyfinimport.Status
+	var err error
+	extras := body.extras()
+	if kind == jellyfinimport.Plex {
+		extras.Watchlist = body.Watchlist == nil || *body.Watchlist
+		status, err = h.JellyfinImport.ImportOwnPlex(r.Context(), user, body.Server, extras)
+		if plexSignInError(w, err) {
+			return
+		}
+	} else {
+		connection := jellyfinimport.Connection{Kind: kind, Address: body.Address,
+			Credentials: jellyfinimport.Credentials{Name: name, Password: body.Password}, Extras: extras}
+		status, err = h.JellyfinImport.ImportOwn(r.Context(), connection, user)
+	}
 	if errors.Is(err, jellyfinimport.ErrRunning) {
 		// Another user's, or the administrator's: the caller waits for it.
 		writeError(w, http.StatusConflict, "server_import_running")
+		return
+	}
+	if errors.Is(err, stremio.ErrPrivateNetwork) {
+		writeError(w, http.StatusForbidden, "private_network")
 		return
 	}
 	if jellyfinError(w, err) {

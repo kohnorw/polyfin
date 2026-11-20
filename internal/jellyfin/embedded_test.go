@@ -93,12 +93,10 @@ func playingFile(t *testing.T, file string) (s testServer, user accounts.User, t
 }
 
 // TestBrowsersGetTheTracksInsideFilesWithTheirFonts plays the file as
-// jellyfin-web does: its tracks go out as files, extracted by FFmpeg from
-// the addon's link into the subtitle cache, as Jellyfin's SubtitleEncoder
-// extracts them, the ASS one as its script, with the font it uses.
+// jellyfin-web does: its tracks go out as files, read whole through the
+// file's index, the ASS one as its script, with the font it uses.
 func TestBrowsersGetTheTracksInsideFilesWithTheirFonts(t *testing.T) {
 	t.Parallel()
-	needFFmpeg(t)
 	s, user, token, id := playingFile(t, subtitledFile)
 	movie := id.String()
 
@@ -136,27 +134,16 @@ func TestBrowsersGetTheTracksInsideFilesWithTheirFonts(t *testing.T) {
 	// jellyfin-web downloads a text track as JSON, by swapping .vtt for .js.
 	status, _, events := fetchText(t, s.url+strings.Replace(srt.DeliveryUrl, ".vtt", ".js", 1))
 	original, _ := os.ReadFile(filepath.Join("..", "container", "testdata", "subtitles.srt"))
-	parsed, err := subtitles.Parser{}.Parse(strings.NewReader(string(original)), "srt")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status != http.StatusOK || events != (subtitles.JSONWriter{}).ToText(parsed, "") {
+	cues, _ := subtitles.Parse(original)
+	if status != http.StatusOK || events != string(subtitles.TrackEvents(cues)) {
 		t.Errorf("SRT track as JSON: %d %s", status, events)
 	}
 	// The ASS track comes as its script, which libass renders.
 	status, header, script := fetchText(t, s.url+ass.DeliveryUrl)
 	want, _ := os.ReadFile(filepath.Join("..", "container", "testdata", "subtitles.ass"))
-	wanted, err := subtitles.Parser{}.Parse(strings.NewReader(string(want)), "ass")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if status != http.StatusOK || header.Get("Content-Type") != "text/x-ssa" || !strings.Contains(script, "[V4+ Styles]") {
-		t.Errorf("ASS track: %d %s\n%s", status, header.Get("Content-Type"), script)
-	}
-	for _, p := range wanted.Paragraphs {
-		if !strings.Contains(script, strings.ReplaceAll(p.Text, "\n", "\\N")) {
-			t.Errorf("ASS track lacks %q:\n%s", p.Text, script)
-		}
+	wantScript, _ := subtitles.ParseScript(want)
+	if status != http.StatusOK || header.Get("Content-Type") != "text/x-ssa" || script != string(wantScript.Bytes()) {
+		t.Errorf("ASS track: %d %s\n%s\nwant\n%s", status, header.Get("Content-Type"), script, wantScript.Bytes())
 	}
 	// Apps that cannot render ASS get its text.
 	if status, _, text := fetchText(t, s.url+strings.Replace(ass.DeliveryUrl, ".ass", ".vtt", 1)); status != http.StatusOK || strings.Contains(text, `{\`) {
@@ -199,10 +186,10 @@ func TestBrowsersGetTheTracksInsideFilesWithTheirFonts(t *testing.T) {
 
 // TestBrowsersDrawingPGSGetItsRawFile plays a file with a PGS track as
 // jellyfin-web does when it draws PGS itself: the track goes out as a SUP
-// file, extracted by FFmpeg, served by ranges as Jellyfin 12.4 serves it.
+// file, read whole through the file's index, served by ranges as Jellyfin
+// 12.2 serves its raw file.
 func TestBrowsersDrawingPGSGetItsRawFile(t *testing.T) {
 	t.Parallel()
-	needFFmpeg(t)
 	file := filepath.Join("..", "container", "testdata", "pgs.mkv")
 	s, user, token, id := playingFile(t, file)
 	raw, err := os.ReadFile(filepath.Join(playbackFixtures, "profiles", "jellyfin-web-chrome.json"))
@@ -236,7 +223,7 @@ func TestBrowsersDrawingPGSGetItsRawFile(t *testing.T) {
 	}
 	request, _ := http.NewRequest(http.MethodGet, s.url+pgs.DeliveryUrl, nil)
 	request.Header.Set("Range", "bytes=13-24")
-	response2, err := http.DefaultClient.Do(request)
+	response2, err := testClient.Do(request)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,47 +263,5 @@ func TestAttachedFilesOtherThanFontsAreDownloads(t *testing.T) {
 	_ = json.Unmarshal([]byte(served), &message)
 	if status != recorded.Status || !strings.HasPrefix(message, "Attachment with stream index 5 can't be extracted for MediaSource ") {
 		t.Errorf("cover art: %d %q, want %d", status, message, recorded.Status)
-	}
-}
-
-// needFFmpeg skips a test that has FFmpeg extract subtitles without one.
-func needFFmpeg(t *testing.T) {
-	t.Helper()
-	if os.Getenv("POLYFIN_TEST_FFMPEG") == "" {
-		t.Skip("POLYFIN_TEST_FFMPEG is not set: FFmpeg extracts the tracks inside files")
-	}
-}
-
-// The tracks inside a Matroska file are read through its index, without
-// FFmpeg and without reading the whole file: as soon as the play is
-// decided, so that a track picked later loads at once.
-func TestTracksInsideMatroskaFilesAreReadThroughTheIndex(t *testing.T) {
-	t.Parallel()
-	s, user, token, id := playingFile(t, subtitledFile)
-	if s.handler.subtitleEncoder.FFmpeg != "" {
-		s.handler.subtitleEncoder.FFmpeg = "ffmpeg-not-installed"
-	}
-	profile, err := os.ReadFile(filepath.Join(playbackFixtures, "profiles", "jellyfin-web-chrome.json"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	status, body := s.call(http.MethodPost, "/Items/"+id.String()+"/PlaybackInfo", app("tv", token),
-		map[string]any{"UserId": user.ID.String(), "DeviceProfile": json.RawMessage(profile), "SubtitleStreamIndex": -1})
-	var response playbackInfoResponse
-	if err := json.Unmarshal(body, &response); status != http.StatusOK || err != nil || len(response.MediaSources) != 1 {
-		t.Fatalf("PlaybackInfo: %d %s", status, body)
-	}
-	tracks := map[int]playback.MediaStream{}
-	for _, stream := range response.MediaSources[0].MediaStreams {
-		tracks[stream.Index] = stream
-	}
-	srt, ass := tracks[1], tracks[2]
-	status, _, text := fetchText(t, s.url+srt.DeliveryUrl)
-	if status != http.StatusOK || !strings.HasPrefix(text, "WEBVTT") || !strings.Contains(text, "-->") {
-		t.Errorf("SRT track: %d %s", status, text)
-	}
-	status, _, script := fetchText(t, s.url+ass.DeliveryUrl)
-	if status != http.StatusOK || !strings.Contains(script, "[V4+ Styles]") || !strings.Contains(script, "Dialogue:") {
-		t.Errorf("ASS track: %d %s", status, script)
 	}
 }

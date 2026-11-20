@@ -1,12 +1,14 @@
 package eclipse
 
 import (
+	"encoding/json"
 	"errors"
 	"slices"
 	"testing"
 )
 
 func TestManifestsAreToldApartFromStremioOnes(t *testing.T) {
+	t.Parallel()
 	for manifest, want := range map[string]bool{
 		`{"id":"a","name":"A","version":"1","resources":["search","stream"]}`:                                    true,
 		`{"id":"a","name":"A","version":"1","resources":["stream"],"types":["track","album"]}`:                   true,
@@ -22,6 +24,7 @@ func TestManifestsAreToldApartFromStremioOnes(t *testing.T) {
 }
 
 func TestAddonsWithASearchOfferMyMusic(t *testing.T) {
+	t.Parallel()
 	catalogs := func(manifest string) []string {
 		t.Helper()
 		m, err := ParseManifest([]byte(manifest))
@@ -46,6 +49,7 @@ func TestAddonsWithASearchOfferMyMusic(t *testing.T) {
 }
 
 func TestSettingsReduceToOneValueAndTravelAsQuery(t *testing.T) {
+	t.Parallel()
 	m, err := ParseManifest([]byte(`{"id":"a","name":"A","version":"1.0.0","resources":["search","stream","settings"],
 		"settings":[
 			{"key":"quality","type":"select","label":"Quality","perNetwork":true,"default":{"wifi":"high","cellular":"low"},
@@ -74,6 +78,32 @@ func TestSettingsReduceToOneValueAndTravelAsQuery(t *testing.T) {
 		{"preferOpus": "maybe"}, {"unknown": "x"}} {
 		if _, err := m.CheckSettings(bad); !errors.Is(err, ErrInvalidSettings) {
 			t.Errorf("%v accepted", bad)
+		}
+	}
+}
+
+// An addon declaring itself configurable keeps it as it is stored, and
+// tells the libraries' view of it.
+func TestTheConfigurableHintIsKept(t *testing.T) {
+	t.Parallel()
+	for manifest, want := range map[string]bool{
+		`{"id":"a","name":"A","version":"1","resources":["search","stream"],"behaviorHints":{"configurable":true}}`: true,
+		`{"id":"a","name":"A","version":"1","resources":["search","stream"]}`:                                       false,
+	} {
+		parsed, err := ParseManifest([]byte(manifest))
+		if err != nil {
+			t.Fatal(err)
+		}
+		encoded, err := json.Marshal(parsed)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var stored Manifest
+		if err := json.Unmarshal(encoded, &stored); err != nil {
+			t.Fatal(err)
+		}
+		if stored.BehaviorHints.Configurable != want || stored.Stremio().BehaviorHints.Configurable != want {
+			t.Errorf("%s: stored %s", manifest, encoded)
 		}
 	}
 }

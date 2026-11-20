@@ -10,9 +10,10 @@ import (
 
 // playbackLimitReached reports whether the caller's user already plays on
 // as many of their other devices as they may play on at once: the devices
-// /Sessions shows playing, and the guests playing through their share
-// links. The caller's own device does not count, so that it can go on to
-// another title.
+// /Sessions shows playing, those the media routes send a playback to
+// whether or not their apps report it (see servedPlays), and the guests
+// playing through their share links. The caller's own device does not
+// count, so that it can go on to another title.
 //
 // Jellyfin's MaxActiveSessions counts the user's signed-in sessions and
 // refuses signing in once they are reached; Polyfin counts playbacks
@@ -29,13 +30,6 @@ func (h *Handler) playbackLimitReached(ctx context.Context, c caller) (bool, err
 	}
 	h.endStaleGuests()
 	return playing+h.guests.ofUser(c.User.ID) >= most, nil
-}
-
-// rateLimitExceeded answers a PlaybackInfo refused for the user's limit of
-// playbacks at once, with the code jellyfin-web explains as media that
-// cannot be played at this time.
-func rateLimitExceeded(w http.ResponseWriter) {
-	writeJSON(w, http.StatusOK, noCompatibleStream{MediaSources: []MediaSourceInfo{}, ErrorCode: "RateLimitExceeded"})
 }
 
 // limitBitrate lowers the bitrate limit a PlaybackInfo plays under, the

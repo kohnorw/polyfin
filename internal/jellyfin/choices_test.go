@@ -17,6 +17,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/playback"
+	"github.com/moodiness/polyfin/internal/process"
 	"github.com/moodiness/polyfin/internal/stremio"
 )
 
@@ -27,7 +28,7 @@ func scriptedProbe(t *testing.T, body string) fakeProbe {
 	t.Helper()
 	f := newFakeProbe(t, true)
 	script := "#!/bin/sh\necho run >> \"$0.runs\"\nn=$(wc -l < \"$0.runs\")\n" + body
-	if err := os.WriteFile(f.path, []byte(script), 0o700); err != nil {
+	if err := process.WriteExecutable(f.path, strings.NewReader(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return f
@@ -194,52 +195,23 @@ func TestPreferDirectPlayChoosesAVersionThatNeedsNoConversion(t *testing.T) {
 		t.Errorf("by default, the first version plays, converted: %+v", source)
 	}
 	p.setting(t, func(settings *accounts.Settings) { settings.PreferDirectPlay = true })
-	// The first version, passed over, is left out rather than listed after
-	// the second: the versions keep their order.
+	// The device's profile is known: the version it plays as it is comes
+	// first, under the title's identifier, and the other follows it.
 	answer := p.ask(t, p.token, p.movie, minimal, nil)
-	if source := firstSource(t, answer); source.Id != p.versions[1].ID.String() || !source.SupportsDirectPlay || source.TranscodingUrl != "" ||
-		len(answer.MediaSources) != 1 {
+	if source := firstSource(t, answer); source.Id != p.movie || source.ETag != p.versions[1].ID.String() || !source.SupportsDirectPlay ||
+		source.TranscodingUrl != "" || len(answer.MediaSources) != 2 || answer.MediaSources[1].ETag != p.versions[0].ID.String() {
 		t.Errorf("preferring direct play: %+v", answer)
 	}
 	// Repackaged with its tracks copied, a version needs no conversion
 	// either.
-	if source := firstSource(t, p.ask(t, p.token, p.movie, minimal, map[string]any{"EnableDirectPlay": false})); source.Id != p.versions[1].ID.String() ||
+	if source := firstSource(t, p.ask(t, p.token, p.movie, minimal, map[string]any{"EnableDirectPlay": false})); source.ETag != p.versions[1].ID.String() ||
 		source.TranscodingUrl == "" || strings.Contains(source.TranscodingUrl, "StreamCopy=false") {
 		t.Errorf("preferring a copy: %+v", source)
 	}
 	// The version the app asks for plays, converted as it needs.
-	if source := firstSource(t, p.ask(t, p.token, p.movie, minimal, map[string]any{"MediaSourceId": p.versions[0].ID.String()})); source.Id != p.movie ||
+	if source := firstSource(t, p.ask(t, p.token, p.movie, minimal, map[string]any{"MediaSourceId": p.versions[0].ID.String()})); source.ETag != p.versions[0].ID.String() ||
 		!strings.HasSuffix(source.TranscodingUrl, "&allowAudioStreamCopy=false") {
 		t.Errorf("the version asked for: %+v", source)
-	}
-	// So does the version the app opened, as Jellyfin for Android TV opens
-	// the version picked in its menu, naming the title or nothing as the
-	// source.
-	picked := p.versions[0].ID.String()
-	for _, named := range []map[string]any{nil, {"MediaSourceId": p.movie}} {
-		if source := firstSource(t, p.ask(t, p.token, picked, minimal, named)); source.Id != picked ||
-			!strings.HasSuffix(source.TranscodingUrl, "&allowAudioStreamCopy=false") {
-			t.Errorf("the version opened, naming %v: %+v", named, source)
-		}
-	}
-	// An app playing the first version that asks again for the title, as
-	// Jellyfin for Android TV does to have a subtitle burned in, keeps that
-	// version: its play session tells it.
-	first := p.ask(t, p.token, p.movie, minimal, map[string]any{"MediaSourceId": p.versions[0].ID.String()})
-	if status, data := p.call(http.MethodPost, "/Sessions/Playing", app("tv", p.token),
-		map[string]any{"ItemId": p.movie, "MediaSourceId": p.movie, "PlaySessionId": first.PlaySessionId}); status != http.StatusNoContent {
-		t.Fatalf("Sessions/Playing: %d %s", status, data)
-	}
-	if source := firstSource(t, p.ask(t, p.token, p.movie, minimal, map[string]any{"MediaSourceId": p.movie, "SubtitleStreamIndex": -1})); source.Id != p.movie {
-		t.Errorf("asked again while playing the first version: %+v", source)
-	}
-	// Once it stopped, the version preferred plays again.
-	if status, data := p.call(http.MethodPost, "/Sessions/Playing/Stopped", app("tv", p.token),
-		map[string]any{"ItemId": p.movie, "MediaSourceId": p.movie, "PlaySessionId": first.PlaySessionId}); status != http.StatusNoContent {
-		t.Fatalf("Sessions/Playing/Stopped: %d %s", status, data)
-	}
-	if source := firstSource(t, p.ask(t, p.token, p.movie, minimal, map[string]any{"MediaSourceId": p.movie})); source.Id != p.versions[1].ID.String() {
-		t.Errorf("asked again once stopped: %+v", source)
 	}
 	// When every version needs a conversion, the first plays, as without
 	// the setting.
@@ -255,7 +227,7 @@ func TestPreferDirectPlaySkipsRemuxesThatCannotStart(t *testing.T) {
 	p := playing(t)
 	p.remuxable(t)
 	p.setting(t, func(settings *accounts.Settings) { settings.PreferDirectPlay = true })
-	if source := firstSource(t, p.ask(t, p.token, p.movie, p.profile(t, "minimal"), map[string]any{"EnableDirectPlay": false})); source.Id != p.movie ||
+	if source := firstSource(t, p.ask(t, p.token, p.movie, p.profile(t, "minimal"), map[string]any{"EnableDirectPlay": false})); source.ETag != p.versions[0].ID.String() ||
 		!strings.HasSuffix(source.TranscodingUrl, "&allowAudioStreamCopy=false") {
 		t.Errorf("chosen: %+v", source)
 	}
@@ -271,7 +243,7 @@ func TestPreferDirectPlayKeepsUnderTheUsersBitrateLimit(t *testing.T) {
 	p.withBitrate(t, p.versions[1], "h264-aac-mp4", 3_000_000)
 	minimal := p.profile(t, "minimal")
 	p.setting(t, func(settings *accounts.Settings) { settings.PreferDirectPlay = true })
-	if source := firstSource(t, p.ask(t, p.token, p.movie, minimal, nil)); source.Id != p.versions[1].ID.String() || !source.SupportsDirectPlay {
+	if source := firstSource(t, p.ask(t, p.token, p.movie, minimal, nil)); source.ETag != p.versions[1].ID.String() || !source.SupportsDirectPlay {
 		t.Fatalf("without a limit: %+v", source)
 	}
 	p.limit(t, p.user, func(c *accounts.UserChanges) { c.MaxBitrate = new(2_000_000) })
@@ -419,10 +391,10 @@ func TestConvertedVideoKeepsUnderTheHeightCap(t *testing.T) {
 		t.Errorf("converted without a cap, %+v:\n%s", sizeOf(target), playlist)
 	}
 	p.setting(t, func(settings *accounts.Settings) { settings.MaxConversionHeight = 480 })
-	// 854 × 480 at most, at the bitrate of 480p, 2 Mb/s, at most 3 Mb/s
-	// with the audio's allowance.
+	// 854 × 480 at most, at the bitrate of 480p, 2 Mb/s, at most 3 Mb/s,
+	// with the 128 kb/s of the Opus track copied.
 	target, playlist := master(video)
-	if !strings.Contains(playlist, "BANDWIDTH=3640000,") || !strings.Contains(playlist, "RESOLUTION=854x354") {
+	if !strings.Contains(playlist, "BANDWIDTH=3128000,AVERAGE-BANDWIDTH=2128000,") || !strings.Contains(playlist, "RESOLUTION=854x354") {
 		t.Errorf("converted under 480 lines:\n%s", playlist)
 	}
 	if size := sizeOf(target); size != (playback.ConversionSize{Reason: playback.SizeServerMax, MaxHeight: 480}) {

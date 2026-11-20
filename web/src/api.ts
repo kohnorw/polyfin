@@ -1,6 +1,11 @@
 import { MutationCache, QueryCache, QueryClient } from '@tanstack/react-query'
 import type { Language } from '@/i18n'
-import { takeWebClientToken } from '@/webClientSession'
+import type { InterfaceSize } from '@/interfaceSize'
+import {
+  arrivedAsAnotherUser,
+  takeWebClientToken,
+  webClientCredentialsKey,
+} from '@/webClientSession'
 
 export type Status = {
   name: string
@@ -12,6 +17,11 @@ export type Status = {
   webClient?: boolean
   /** Where the server runs, which names its local folders; absent from servers without it. */
   system?: ServerSystem
+  /**
+   * The identity provider the sign-in pages offer: the name its button shows, and the address, at
+   * the server's public address, that starts its sign-in, ?app=admin added. Null without one.
+   */
+  provider?: { name: string; start: string } | null
 }
 
 /** Where the server runs: in a container, as the Docker image does, else on its computer's system. */
@@ -23,6 +33,8 @@ export type SessionUser = {
   isAdministrator: boolean
   /** Identifies the user's profile picture, served at /UserImage; null without one. */
   imageTag: string | null
+  /** The size the admin app shows in, kept on the browser too (see interfaceSize.ts). */
+  interfaceSize: InterfaceSize
 }
 
 /** The address of a user's profile picture, undefined without one. */
@@ -31,6 +43,9 @@ export const userImageUrl = (user: { id: string; imageTag: string | null }) =>
     ? undefined
     : `/UserImage?userId=${encodeURIComponent(user.id)}&tag=${encodeURIComponent(user.imageTag)}`
 
+/** The app of a user's last activity in the admin app (see `User.lastActivityApp`). */
+export const ADMIN_APP = 'Polyfin admin'
+
 export type User = {
   id: string
   name: string
@@ -38,11 +53,17 @@ export type User = {
   isHidden: boolean
   isDisabled: boolean
   createdAt: string
-  lastLoginAt: string | null
   lastActivityAt: string | null
+  /**
+   * The app of the last activity, written with its time: the name a Jellyfin or Silo app sends,
+   * or `ADMIN_APP`. Empty when unknown.
+   */
+  lastActivityApp: string
   parentalControl: ParentalControl
-  /** Whether the user may have video and audio converted (transcoded). */
-  transcoding: boolean
+  /** Whether the user may have their video converted (transcoded). */
+  videoTranscoding: boolean
+  /** Whether the user may have their audio converted (transcoded). */
+  audioTranscoding: boolean
   /** Whether the user may download titles. */
   downloads: boolean
   /** Whether the user may add and use their own addons. */
@@ -63,7 +84,7 @@ export type User = {
   liveTvManagement: boolean
   /** IDs of the server's libraries this user's apps do not show; libraries added later show. */
   hiddenLibraries: string[]
-  /** IDs of the IPTV sources and categories this user does not reach; new ones of a source they keep show. */
+  /** IDs of the IPTV sources and categories this user does not reach (this fork). */
   hiddenLiveTv: string[]
   /** Titles of any of these genres are hidden from the user, like parental control. */
   blockedGenres: string[]
@@ -85,41 +106,87 @@ export type User = {
    * (Settings.torrentStreams). Off for every user, administrators included, until given.
    */
   torrentStreams: boolean
+  /**
+   * Whether the user may sign in and use the server from outside the local network, Jellyfin's
+   * EnableRemoteAccess; without it, only from the local network, as Known proxies tells it.
+   */
+  remoteAccess: boolean
+  /** The Live TV channels of the server's line-ups the user sees. */
+  liveTvChannels: ChannelRule
   /** Identifies the user's profile picture, served at /UserImage; null without one. */
   imageTag: string | null
   /** The tallest video the user is offered, in lines (480 to 2160); 0 for Original, no limit. */
   qualityGroup: QualityGroup
+  /**
+   * Whether the user is offered the versions of local folders and network shares before the
+   * others, whatever the version order's criteria.
+   */
+  localFirst: boolean
+  /** Whether the user's web player boosts the volume of videos, in the browser. */
+  boostVolume: boolean
+  /**
+   * Whether the server converts the audio of the user's videos and channels, evened at -16 LUFS,
+   * their video copied: louder in every app, without direct play.
+   */
+  convertSound: boolean
   /** The date the account ends, YYYY-MM-DD in the server's time zone; null for never. */
   endsOn: string | null
-  /** Whether the end date has come: the account is refused as a disabled one is. */
+  /**
+   * The exact time the account ends, as an invite link sets it, instead of a date; null for none.
+   * At most one of endsOn and endsAt is set.
+   */
+  endsAt: string | null
+  /** Whether the end has come: the account is refused as a disabled one is. */
   ended: boolean
   /** The group the user belongs to; null for none. Administrators never belong to one. */
   groupId: string | null
   groupName: string | null
   /**
-   * Whether the user follows their group: its values apply and their page shows them read only.
-   * False once detached (Own settings); true when the user has no group.
+   * The sections in which the user keeps their own values, in page order; they follow their group
+   * in the others, whose values apply and their page shows read only. Empty without a group.
    */
-  followGroup: boolean
+  ownSections: GroupSection[]
   /** The language the user's titles are described in; '' for the server's. */
   metadataLanguage: string
+  /** The user's web player theme; '' for the server's. */
+  webTheme: UserWebTheme
+  /** Whether the user is kept from changing their web player theme under My account. */
+  webThemeLocked: boolean
+  /** The regional variant of audio the user prefers, one of audioRegions; '' for none. */
+  audioRegion: string
+  /** The regional variants offered, BCP 47 tags such as 'fr-CA'. */
+  audioRegions: string[]
   /** Whether the user signs in with a code from an authenticator app after their password. */
   twoStep: boolean
+  /** Whether the user signs in through the identity provider only, their password refused. */
+  providerOnly: boolean
+  /** Whether the account is linked to someone at the identity provider, who signs in as it there. */
+  providerLinked: boolean
+  /**
+   * Whether an administrator allowed the account to be linked at the next sign-in through the
+   * provider of the person it is named after; the link turns it off.
+   */
+  providerLinkAllowed: boolean
 }
 
 /** The fields of a user a group holds, in its sections: Access, Playback and access, and the rest. */
 export type GroupLimits = Pick<
   User,
-  | 'transcoding'
+  | 'videoTranscoding'
+  | 'audioTranscoding'
   | 'downloads'
   | 'personalAddons'
   | 'collectionManagement'
   | 'subtitleManagement'
   | 'canShare'
   | 'torrentStreams'
+  | 'remoteAccess'
   | 'maxPlaybacks'
   | 'maxBitrate'
   | 'qualityGroup'
+  | 'localFirst'
+  | 'boostVolume'
+  | 'convertSound'
   | 'syncPlay'
   | 'liveTv'
   | 'remoteControl'
@@ -129,7 +196,21 @@ export type GroupLimits = Pick<
   | 'hiddenLiveTv'
   | 'blockedGenres'
   | 'accessSchedules'
+  | 'liveTvChannels'
 >
+
+/** The sections of a user's page a group holds, in page order. */
+export const groupSections = [
+  'access',
+  'playback',
+  'parental',
+  'libraries',
+  'genres',
+  'hours',
+  'channels',
+] as const
+
+export type GroupSection = (typeof groupSections)[number]
 
 /** A group as Users › Groups lists it. */
 export type GroupSummary = { id: string; name: string; memberCount: number }
@@ -148,6 +229,57 @@ export type QualityGroup = (typeof qualityGroups)[number]
 
 /** The range the server accepts for User.maxPlaybacks. */
 export const maxPlaybacksRange = { min: 0, max: 20 }
+
+/**
+ * Which Live TV channels of the server's line-ups a user, or a group's members, see: all of them,
+ * only the groups and channels listed, or all but those. Groups and channels are the keys
+ * fetchLineupChannelChoices gives. With hideNewGroups, 'except' also hides the groups not among
+ * knownGroups, which saving sets to the groups the server's line-ups have then.
+ */
+export type ChannelRule = {
+  mode: 'all' | 'only' | 'except'
+  groups: string[]
+  channels: string[]
+  hideNewGroups: boolean
+  knownGroups: string[]
+}
+
+/** A channel group of the server's line-ups: an IPTV category, or a TV catalog's genre. */
+type ChannelGroupChoice = { key: string; name: string; source: string; channels: number }
+
+/** A channel of the server's line-ups, with the key of its group. */
+type LineupChannelChoice = { key: string; name: string; number: string; group: string }
+
+/** Every channel group of the server's line-ups, and a page of their channels. */
+export type LineupChannelChoices = {
+  groups: ChannelGroupChoice[]
+  channels: LineupChannelChoice[]
+  total: number
+  offset: number
+  limit: number
+}
+
+/**
+ * The channel groups of the server's line-ups and a page of their channels: those whose name or
+ * number holds q, of group, or with the keys listed.
+ */
+export const fetchLineupChannelChoices = (
+  query: { q?: string; group?: string; keys?: string[]; offset?: number; limit?: number },
+  signal?: AbortSignal,
+) => {
+  const params = new URLSearchParams()
+  if (query.q) params.set('q', query.q)
+  if (query.group) params.set('group', query.group)
+  for (const key of query.keys ?? []) params.append('key', key)
+  if (query.offset !== undefined) params.set('offset', String(query.offset))
+  if (query.limit !== undefined) params.set('limit', String(query.limit))
+  return request<LineupChannelChoices>(
+    'GET',
+    `/live-tv/channel-choices?${params}`,
+    undefined,
+    signal,
+  )
+}
 
 /** Jellyfin's DynamicDayOfWeek names, in its order. */
 export const scheduleDays = [
@@ -172,6 +304,7 @@ export type AccessSchedule = { day: ScheduleDay; startHour: number; endHour: num
 export type UserContentChoices = {
   libraries: { id: string; name: string }[]
   genres: string[]
+  /** The server's IPTV sources, which a user can be kept from whole or by category (this fork). */
   liveTv: { id: string; name: string; categories: { id: string; name: string }[] }[]
 }
 
@@ -195,15 +328,24 @@ export type Device = {
   lastActivityAt: string
 }
 
+/**
+ * The device waiting behind a Quick Connect code. Its names are its own words; `address` is where
+ * the server saw it ask from, and `network` tells that place from the approver's: their own
+ * address, the local network with them, or another network. `identity`: the approval asks who
+ * they are, as their account has two-step sign-in.
+ */
 export type QuickConnectRequest = {
   deviceName: string
   appName: string
   appVersion: string
   requestedAt: string
+  address: string
+  network: 'own' | 'local' | 'other'
+  identity: boolean
 }
 
 /** The skip marker sources, by the names the server gives them. */
-export type SegmentSource = 'theintrodb' | 'introdb' | 'publicmetadb'
+export type SegmentSource = 'theintrodb' | 'introdb' | 'publicmetadb' | 'skipdb'
 
 /** What the server accepts for a setting, and its default. */
 export type SettingBounds = {
@@ -223,12 +365,59 @@ export type HttpsMode = 'off' | 'files' | 'letsencrypt'
 /** The challenges Let's Encrypt checks host names with (see Settings.acmeChallenge). */
 export type AcmeChallenge = 'http-01' | 'tls-alpn-01'
 
-export type Settings = {
+/** What a saved WireGuard configuration says, without its keys (see Settings.torrentWireGuardSaved). */
+type WireGuardSaved = {
+  /** The server, host:port. */
+  endpoint: string
+  /** The tunnel's addresses, with their prefix length. */
+  addresses: string[]
+  /** The DNS servers tracker names are looked up by, through the tunnel; empty for none. */
+  dns: string[]
+}
+
+/**
+ * Why a WireGuard configuration was refused (invalid_wireguard_config): the line, from 1, 0 for
+ * the configuration as a whole, the key or section it is about, and the reason.
+ */
+export type WireGuardConfigProblem = {
+  line: number
+  key: string
+  reason:
+    | 'too_long'
+    | 'syntax'
+    | 'outside'
+    | 'unknown'
+    | 'repeated'
+    | 'missing'
+    | 'invalid'
+    | 'no_ipv4'
+    | 'not_all'
+}
+
+/** The presets of the source cache, as `sourceCachePreset` takes them. */
+export const sourceCachePresets = ['off', 'small', 'everyday', 'large', 'custom'] as const
+export type SourceCachePreset = (typeof sourceCachePresets)[number]
+
+/** What a source cache preset sets. */
+type SourceCacheLimits = {
+  cacheSizeGb: number
+  sourceCacheDays: number
+  sourceCacheCreditDays: number
+  preloadWholeFiles: boolean
+}
+
+export type Settings = ForkSettings & {
   serverName: string
   quickConnectEnabled: boolean
   legacyAuthorization: boolean
+  /**
+   * Country whose ratings titles show and are judged by (Jellyfin's MetadataCountryCode), an
+   * upper-case ISO 3166-1 alpha-2 code among `bounds.ratingCountry.choices`; "US" by default.
+   */
+  ratingCountry: string
   /** Asks GitHub once a day for Polyfin's latest release, to tell administrators of a new version. */
   updateCheck: boolean
+  includePrereleases: boolean
   /** Answers the discovery messages Jellyfin apps broadcast on the local network (UDP port 7359). */
   localDiscovery: boolean
   /**
@@ -256,7 +445,7 @@ export type Settings = {
   channelLimit: number
   /** Whether apps get skip intro, recap and credits buttons, from the segment databases. */
   skipButtons: boolean
-  /** Whether a PublicMetaDB key is saved; it adds a third source of skip markers. */
+  /** Whether a PublicMetaDB key is saved; it adds PublicMetaDB as a source of skip markers. */
   publicMetaDbKeySet: boolean
   /** Sent only to change the key: a new key, checked before it is saved, or "" to remove it. */
   publicMetaDbKey?: string
@@ -264,7 +453,7 @@ export type Settings = {
   theIntroDbKeySet: boolean
   /** Sent only to change the key: a new key, checked before it is saved, or "" to remove it. */
   theIntroDbKey?: string
-  /** The order of preference of the skip marker sources, all three. */
+  /** The order of preference of the skip marker sources, all four. */
   segmentOrder: SegmentSource[]
   /** The skip marker sources never asked, wherever they are in the order. */
   segmentSourcesOff: SegmentSource[]
@@ -284,6 +473,8 @@ export type Settings = {
   tmdbKeySet: boolean
   /** Sent only to change the key: a new key, checked with TMDB before it is saved, or "" to remove it. */
   tmdbKey?: string
+  /** Whether movies are hidden until TMDB tells they are out at home; needs the TMDB key. */
+  waitDigitalRelease: boolean
   /** Whether songs get lyrics from LRCLIB, which is sent their artist, title, album and length. */
   lyrics: boolean
   /** Whether apps get the gains of songs and albums known, which even the volume between songs. */
@@ -302,14 +493,6 @@ export type Settings = {
   personalAddons: boolean
   /** Whether users may import their own watch history from another server, under My account. */
   serverImports: boolean
-  /** Lets anyone who opens /register create a member account. */
-  registration: boolean
-  /** Asks /register for an unused registration code before its form. */
-  registrationCodes: boolean
-  /** ISO 639-2 audio language played for users who chose none, '' for none. */
-  defaultAudioLanguage: string
-  /** ISO 639-2 subtitle language shown for users who chose none, '' for none. */
-  defaultSubtitleLanguage: string
   /** Whether users with the permission may share a movie or an episode through a link that expires. */
   shareLinks: boolean
   /** Wrong passwords in a row that block an account for 15 minutes; 0 never blocks. */
@@ -355,7 +538,13 @@ export type Settings = {
   /** Prefers the first version an app plays without conversion over the first that plays at all. */
   preferDirectPlay: boolean
   /**
-   * Up to four criteria ordering a title's versions, each grouping them and the next sorting within
+   * Sends every app to the source of the version it plays as it is, when it can reach it: users who
+   * play then see the source's address. Off, versions of IPTV sources are relayed, and those of the
+   * server's addons are to users who are not administrators.
+   */
+  sendAppsToSource: boolean
+  /**
+   * Up to six criteria ordering a title's versions, each grouping them and the next sorting within
    * them; none keeps the addons' order.
    */
   versionOrder: VersionCriterion[]
@@ -374,25 +563,46 @@ export type Settings = {
   hiddenVersionCodecs: VersionCodec[]
   /** Hides the versions whose labels hold one of these words, in any letter case. */
   hiddenVersionWords: string[]
-  /** Excludes the versions tagged as these pre-release rips, even when none is left. */
-  hiddenRipTypes: RipType[]
-  /** Leaves series' specials (season 0) out of seasons, episode lists and Next Up. */
-  hideSpecials: boolean
-  /** Leaves out the versions whose file name names another title. */
-  exactTitleMatch: boolean
-  /** Reads the subtitles inside the version played, and the next episode's, ahead in the background. */
-  /** Extracts the subtitles inside a file while an app waits; off, only those kept already go out as files. */
-  subtitleExtraction: boolean
+  /**
+   * Hides the versions whose labels tag them as low-quality releases of these kinds, by whole
+   * words after the title's own.
+   */
+  hiddenReleases: ReleaseKind[]
+  /** The order of the editions for the edition criterion, every edition once. */
+  versionEditionOrder: VersionEdition[]
+  /** The MB a minute the size-per-minute criterion puts the closest to first; 0 the largest. */
+  versionMbPerMinute: number
+  /** Rules scoring or hiding versions by a word or a regular expression in their labels. */
+  versionLabelRules: VersionLabelRule[]
   /** Ends version names with how the app asking plays each, as its last playback decides it. */
   nameHowVersionsPlay: boolean
+  /** How version names are written: as the addon writes them, or short names written by Polyfin. */
+  versionNames: 'addon' | 'short'
+  /** Times the addons' subtitles to the version played, against when it has speech. */
+  syncAddonSubtitles: boolean
   /** Playbacks whose video the server converts at once, 0 for no limit. */
   maxConversions: number
   /** Height converted video is scaled down to at most, 0 to keep the original's. */
   maxConversionHeight: number
   /** Streams a title as one file, copied or converted within the user's quality, to apps saving it offline. */
-  /** Offers the web player no HEVC, Dolby Vision or AV1 video, which browsers often show black. */
-  webSafeVideo: boolean
   convertedDownloads: boolean
+  /**
+   * Reads picture subtitles (PGS, VobSub) into text tracks with Tesseract: never, when an app that
+   * cannot draw them plays a version, or also after the scans of local folders.
+   */
+  subtitleOcr: SubtitleOcr
+  /** Picture subtitle tracks read at once. */
+  subtitleOcrTracks: number
+  /** Downloads the Tesseract data of a language the first time a track needs it. */
+  subtitleOcrDownload: boolean
+  /**
+   * The audio and subtitle languages of the users who chose none, ISO 639-2/B codes as their own
+   * preferences take them, or '' for none.
+   */
+  defaultAudioLanguage: string
+  defaultSubtitleLanguage: string
+  /** The languages they offer, those of users' own preferences, by English name (read-only). */
+  trackLanguages: TrackLanguage[]
   /** Encoder speed against quality: auto (Polyfin's choice), then veryslow to ultrafast. */
   encoderPreset: EncoderPreset
   /** Quality factor of H.264 and HEVC conversions (CRF, CQ or QVBR's), 0 aiming for the bitrate alone. */
@@ -410,6 +620,26 @@ export type Settings = {
   renderNodes: string[]
   /** Disk space, in GB, kept for the parts of the files being read. */
   cacheSizeGb: number
+  /** The source cache's preset, which sets the size, the days kept, their credit and whole-file preloading, but custom. */
+  sourceCachePreset: SourceCachePreset
+  /** Days a part read is kept, restarts included; 0 empties the cache at each start. */
+  sourceCacheDays: number
+  /** Extra days a title played again keeps its parts, for each play after the first. */
+  sourceCacheCreditDays: number
+  /** Whether the next episodes of the series users watch are read ahead while nothing plays. */
+  preloadNextEpisodes: boolean
+  /** Episodes preloaded per series. */
+  preloadEpisodes: number
+  /** Average speed of preloading, in megabits a second. */
+  preloadMbps: number
+  /** Free space, in GB, preloading leaves on the disk of the folder for files being read. */
+  preloadReserveGb: number
+  /** Whether preloading reads whole files rather than their opening and end. */
+  preloadWholeFiles: boolean
+  /** What each preset but custom sets (read-only). */
+  sourceCachePresetLimits: Record<Exclude<SourceCachePreset, 'custom'>, SourceCacheLimits>
+  /** Bytes free on the disk of the folder for files being read, null when unknown (read-only). */
+  readingFree: number | null
   /** Codecs the GPU decodes. */
   hardwareDecodingCodecs: HardwareDecodingCodec[]
   /** Converts HDR to SDR with toneMappingAlgorithm; peak (nits, 0 the video's) and desaturation on the processor only. */
@@ -419,7 +649,7 @@ export type Settings = {
   toneMappingDesat: number
   /** Tone maps HDR on a GPU that can (NVIDIA, Intel through VAAPI or QSV, VideoToolbox); off, the processor does. */
   gpuToneMapping: boolean
-  /** Most height of HDR the processor tone maps: 720 to 2160, 0 for Automatic (measured at startup). */
+  /** Most height of HDR the processor tone maps: 720 to 2160, 0 for Automatic (measured). */
   processorToneMappingHeight: number
   /** Deinterlacer, and whether it makes a frame of each field. */
   deinterlaceMethod: DeinterlaceMethod
@@ -427,6 +657,10 @@ export type Settings = {
   /** Stereo downmix, and the volume it is multiplied by. */
   downmixAlgorithm: DownmixAlgorithm
   downmixBoost: number
+  /** Evens the loudness of converted video audio at -16 LUFS; direct play, copied audio and music keep theirs. */
+  normalizeConvertedAudio: boolean
+  /** How converted AC-3 and E-AC-3 apply their tracks' dynamic range compression. */
+  dynamicRangeCompression: DynamicRangeCompression
   /** Most channels of converted audio, 0 for no limit but the app's. */
   maxAudioChannels: number
   /** Bitrate of converted audio per channel, in kb/s; 0 keeps Polyfin's. */
@@ -437,6 +671,8 @@ export type Settings = {
   aheadSeconds: number
   /** Converts video apart from its audio, and keeps it when an app changes the audio track. */
   keepConvertedVideo: boolean
+  /** Starts remote plays whose first segment is long with 2-second segments converted quickly at 720p at most. */
+  fastStart: boolean
   /** What conversions run on (read-only). */
   conversionHardware: ConversionHardware
   /** Makes scrubbing thumbnails of the versions played, from their keyframes, in the background. */
@@ -474,18 +710,41 @@ export type Settings = {
   liveTvRefreshHours: number
   /** Hours after its last scan a local folder is scanned again; 0 for never on a schedule. */
   localScanHours: number
+  /** Hours after its last check a watchlist title is checked again for versions; 0 for never. */
+  watchlistCheckHours: number
   /** Whether the local folders, in the container and network shares, are watched for changes. */
   watchLocalFolders: boolean
-  /** CSS jellyfin-web applies to every page, unless a user turns it off (Jellyfin's branding). */
+  /**
+   * The web player's look: the bundled LumaaGlaass theme, jellyfin-web's own look, or the
+   * Custom texts below.
+   */
+  webTheme: WebTheme
+  /**
+   * Custom CSS jellyfin-web applies to every page while the theme is Custom, unless a user turns
+   * it off (Jellyfin's branding); kept while another theme is chosen.
+   */
   customCss: string
-  /** Script Polyfin adds to jellyfin-web's page; it runs in every user's browser. */
+  /**
+   * Custom script Polyfin adds to jellyfin-web's page while the theme is Custom; it runs in every
+   * user's browser. Kept while another theme is chosen.
+   */
   customJs: string
+  /** The CSS and script Polyfin serves for the LumaaGlaass theme (read-only). */
+  lumaaGlaass: { css: string; js: string }
   /** Text, Markdown or HTML jellyfin-web shows under its sign-in form (Jellyfin's branding). */
   loginDisclaimer: string
-  /** The web player's logo in place of Jellyfin's, as a data URL; empty for Jellyfin's. */
-  brandLogo: string
   /** Whether the web player adds the versions that come to a title's page while it is open. */
   addVersionsToOpenPage: boolean
+  /** Whether the web player shows badges for the version picked and the version playing. */
+  versionBadges: boolean
+  /** Whether the web player shows titles' ratings on their posters, as the pointer or focus comes. */
+  posterRatings: boolean
+  /** Whether movies' and series' posters carry their ratings and new episode or season, in every app. */
+  posterBadges: boolean
+  /** The size preset of the badges over posters. */
+  posterBadgeSize: PosterBadgeSize
+  /** The address of movies' and series' posters, with {imdb_id}, {tmdb_id}, {type} and {tmdb_type}; empty for the addons'. */
+  posterTemplate: string
   /** Trakt app users connect through; both its client ID and secret are needed. */
   traktClientId: string
   /** Whether the Trakt client secret is saved. */
@@ -512,8 +771,6 @@ export type Settings = {
   myAnimeListClientSecretSet: boolean
   /** Sent only to change the secret: a new secret, or "" to remove it. */
   myAnimeListClientSecret?: string
-  /** Hour of the server's time zone the database is backed up at every day, 0 to 23. */
-  backupHour: number
   /** How many of the newest database backups are kept. */
   backupsKept: number
   /** Whether the database is backed up every day. */
@@ -522,8 +779,10 @@ export type Settings = {
   backupFolder: string
   /** Folder backups are written to when backupFolder is empty (read-only). */
   backupFolderDefault: string
-  /** Hour of the server's time zone every collection of the server's collection libraries is read at each day, 0 to 23; -1 never. */
-  collectionReadHour: number
+  /** Whether a passphrase encrypts the backups. */
+  backupPassphraseSet: boolean
+  /** Sent only to change the backup passphrase: a new one, or "" to stop encrypting. */
+  backupPassphrase?: string
   /** Apps, by the name they sign in with, told an addon's collection library holds collections (boxsets) rather than mixed content; none by default. */
   collectionLibraryApps: string[]
   /** Describes the versions not analyzed yet from RemuxDB, which the titles' IMDb ids are sent to. */
@@ -565,8 +824,20 @@ export type Settings = {
   /** Whether Polyfin made the metrics token (read-only): never sent, revealed on demand. */
   metricsTokenSet: boolean
   /**
+   * Whether an administrator confirmed that Polyfin is started again when it exits, by its
+   * container's restart policy or its service manager: Restart then warns no more.
+   */
+  restartConfirmed: boolean
+  /** The update API of an update tool run beside Polyfin, which Update now asks; '' for none. */
+  updateToolUrl: string
+  /** Whether the update tool's token is saved (read-only): never sent, revealed on demand. */
+  updateToolTokenSet: boolean
+  /** The update tool's token, sent only to change it: '' removes it. */
+  updateToolToken?: string
+  /**
    * Whether torrent streams play, over one route alone: the network interface every torrent
-   * socket is bound to (Linux only), or a SOCKS5 proxy, host:port; '' for none.
+   * socket is bound to (Linux only), a SOCKS5 proxy, host:port, or a WireGuard tunnel Polyfin runs;
+   * '' for none.
    */
   torrentStreams: boolean
   torrentInterface: string
@@ -576,11 +847,50 @@ export type Settings = {
   torrentProxyPasswordSet: boolean
   /** Sent only to change the proxy's password: a new one, or "" to remove it. */
   torrentProxyPassword?: string
+  /** What the saved WireGuard configuration says, without its keys (read-only); null for none. */
+  torrentWireGuardSaved: WireGuardSaved | null
+  /** Sent only to change the WireGuard configuration: a provider's .conf, or "" to remove it. */
+  torrentWireGuard?: string
   /** Download limit in Mbps, 0 for none; upload limit, 0 for no sharing. */
   torrentDownloadMbps: number
   torrentUploadMbps: number
+  /** How many torrents may run at once, server-wide, 0 for no limit. */
+  torrentsAtOnce: number
+  /** Announce URLs of trackers asked for every torrent besides those its addon names. */
+  torrentTrackers: string[]
+  /**
+   * Folders of the segments of conversions, of the files being read, and of the cache; empty uses
+   * cacheFolderDefault, the cache in the data folder. Each applies at the next start.
+   */
+  conversionFolder: string
+  readingFolder: string
+  cacheFolder: string
+  /** The cache in the data folder, where the three folders above are when empty (read-only). */
+  cacheFolderDefault: string
   /** Whether this system binds sockets to a network interface, Linux alone (read-only). */
   interfaceRoutes: boolean
+  /** Whether Silo's apps may sign in and play through Silo's API under /api/v2. */
+  siloApps: boolean
+  /**
+   * The OpenID Connect provider people may sign in with: its issuer, the name its button shows
+   * (empty for the issuer's host), and the server's client at it. The client secret is never sent
+   * back: providerClientSecretSet tells whether one is saved; providerClientSecret, sent only to
+   * replace it, empty to remove it. providerUserClaim names the claim compared with account names,
+   * the verified email after it; providerCreateAccounts creates an account for someone none
+   * matches; providerAdminClaim and providerAdminValue, both set, make administrators.
+   * providerRedirectUri is the address to register at the provider, empty without a public
+   * address (read-only).
+   */
+  providerIssuer: string
+  providerName: string
+  providerClientId: string
+  providerClientSecretSet: boolean
+  providerClientSecret?: string
+  providerUserClaim: string
+  providerCreateAccounts: boolean
+  providerAdminClaim: string
+  providerAdminValue: string
+  providerRedirectUri: string
   /** What each setting accepts, and its default, by its name here (read-only). */
   bounds: Record<string, SettingBounds>
 }
@@ -608,22 +918,40 @@ export type VersionCriterion =
   | 'resolution-low'
   | 'size-large'
   | 'size-small'
+  | 'size-per-minute'
   | 'codec'
   | 'hdr-first'
   | 'hdr-last'
   | 'source'
+  | 'tier'
+  | 'audio'
+  | 'edition'
+  | 'labels'
+/** A movie's editions: the theatrical cut, an extended cut, the director's cut, an IMAX cut. */
+export type VersionEdition = 'theatrical' | 'extended' | 'directors' | 'imax'
+/**
+ * A label rule: a word, or with `regex` a regular expression, matched in any letter case in a
+ * version's name, description and file name; it hides the versions it matches, or adds `score`
+ * (other than 0) to theirs.
+ */
+export type VersionLabelRule = { text: string; regex: boolean; score: number; hide: boolean }
 export type VersionCodec = 'av1' | 'hevc' | 'vp9' | 'h264' | 'vc1' | 'mpeg4' | 'mpeg2video'
-export type RipType = 'cam' | 'telesync' | 'telecine' | 'screener' | 'workprint'
+/** Kinds of low-quality releases: camera copies, telesyncs, telecines, screeners, early copies. */
+export type ReleaseKind = 'cam' | 'telesync' | 'telecine' | 'screener' | 'early'
 /** A source of the server listing versions of movies and episodes, in Content › Sources order. */
 export type VersionSource = { id: string; name: string }
+/** A language of the default track languages: its ISO 639-2/B code and its English name. */
+export type TrackLanguage = { code: string; name: string }
 export type ToneMappingAlgorithm =
   'auto' | 'bt2390' | 'hable' | 'reinhard' | 'mobius' | 'clip' | 'linear'
 export type DeinterlaceMethod = 'yadif' | 'bwdif'
 export type AdaptiveQuality = 'off' | 'remote' | 'always'
 export type DownmixAlgorithm = 'None' | 'Dave750' | 'NightmodeDialogue' | 'Rfc7845' | 'Ac4'
+export type DynamicRangeCompression = 'encoded' | 'none' | 'night'
+export type SubtitleOcr = 'off' | 'played' | 'scans'
 
 /** A GPU conversions run on. */
-export type ConversionGPU = {
+type ConversionGPU = {
   /** cuda for NVIDIA, vaapi for AMD and Intel on Linux, videotoolbox on macOS, qsv for Intel and amf for AMD on Windows. */
   method: string
   device: string
@@ -631,20 +959,50 @@ export type ConversionGPU = {
   toneMapping: boolean
   /** Whether a VAAPI GPU takes a quality factor. */
   qvbr: boolean
+  /** Whether it encodes with the FFmpeg for NVIDIA drivers older than 610. */
+  olderDrivers: boolean
+  /** Where HDR titles are tone mapped and why, null when the card does not tone map. */
+  hdr: HDRPath | null
+}
+
+/**
+ * Where the HDR titles a graphics card tone maps are tone mapped, as the timings, at startup and
+ * again when quiet, chose it: on the card (`gpu`), up to `height` when it is not 0, or on the
+ * processor. The speeds are in times real time, 0 when not measured: the card's to 1080p, to
+ * 720p (`lowSpeed`, measured when the first is under 1), and the processor's to 1080p.
+ */
+export type HDRPath = {
+  path: 'gpu' | 'processor'
+  height: number
+  reason: 'notTimed' | 'keepsUp' | 'processorFaster' | 'lowerHeight' | 'noneKeepsUp' | 'turnedOff'
+  gpuSpeed: number
+  lowSpeed: number
+  processorSpeed: number
+}
+
+/**
+ * The FFmpeg for NVIDIA drivers older than 610 while NVENC waits for it, or when it could not
+ * download it (`failed`) or NVENC failed with it too (`unusable`), `error` telling why.
+ */
+export type OlderDriverFFmpeg = {
+  state: 'downloading' | 'failed' | 'unusable'
+  error?: string
 }
 
 /** What conversions run on. */
-export type ConversionHardware = {
+type ConversionHardware = {
   /** The GPU chosen, null for none. */
   gpu: ConversionGPU | null
   /** Software video encoders FFmpeg has. */
   encoders: string[]
   /** Whether FFmpeg tone maps HDR on the processor. */
   toneMapping: boolean
-  /** Height Automatic caps HDR tone mapped on the processor at, as measured at startup (720 until then); 0 when it cannot. */
+  /** Height Automatic caps HDR tone mapped on the processor at, as the timings, at startup and again when quiet, measured it (720 until the first ends); 0 when it cannot. */
   toneMappingHeight: number
   /** Whether FFmpeg has the bwdif deinterlacer. */
   bwdif: boolean
+  /** The FFmpeg for older NVIDIA drivers, null when it is used or not needed. */
+  olderDriverFFmpeg: OlderDriverFFmpeg | null
 }
 
 export type NewUser = {
@@ -654,6 +1012,8 @@ export type NewUser = {
   isHidden: boolean
   /** The group the account joins and follows; absent or null for none. */
   groupId?: string | null
+  /** Whether the account signs in through the identity provider only; it then needs no password. */
+  providerOnly?: boolean
 }
 
 export type UserPatch = Partial<{
@@ -663,7 +1023,8 @@ export type UserPatch = Partial<{
   isHidden: boolean
   isDisabled: boolean
   parentalControl: ParentalControl
-  transcoding: boolean
+  videoTranscoding: boolean
+  audioTranscoding: boolean
   downloads: boolean
   personalAddons: boolean
   maxPlaybacks: number
@@ -680,15 +1041,33 @@ export type UserPatch = Partial<{
   subtitleManagement: boolean
   canShare: boolean
   torrentStreams: boolean
+  remoteAccess: boolean
+  liveTvChannels: ChannelRule
   qualityGroup: QualityGroup
-  /** YYYY-MM-DD, or null for never. */
+  localFirst: boolean
+  boostVolume: boolean
+  convertSound: boolean
+  /** YYYY-MM-DD, or null for never; either clears endsAt. */
   endsOn: string | null
   /** Joins this group and takes its values; '' leaves the group, keeping them as own settings. */
   groupId: string
-  /** False detaches the member, keeping the group's values; true takes them back. */
-  followGroup: boolean
+  /**
+   * The sections in which the member keeps their own values, all of them. A section left out
+   * follows the group again, taking its values; one added keeps the group's current values.
+   */
+  ownSections: GroupSection[]
   /** One of the languages the server's addons were given, or '' for the server's. */
   metadataLanguage: string
+  /** One of the user's audioRegions, or '' for none. */
+  audioRegion: string
+  /** Whether the user signs in through the identity provider only, their password refused. */
+  providerOnly: boolean
+  /** See User; refused for an administrator and for an account with two-step sign-in. */
+  providerLinkAllowed: boolean
+  /** One of the themes offered (see WebThemes), or '' for the server's. */
+  webTheme: UserWebTheme
+  /** True keeps the user from changing their web player theme under My account. */
+  webThemeLocked: boolean
 }>
 
 /** Who owns addons and libraries: the server (administrators only) or the signed-in user. */
@@ -696,7 +1075,15 @@ export type Scope = 'shared' | 'me'
 
 export type Addon = {
   id: string
+  /** The name shown: the one given to it, else its manifest's. */
   name: string
+  /**
+   * The name an administrator, or its owner, gave a Stremio or Eclipse addon; null while it follows
+   * its manifest's.
+   */
+  chosenName: string | null
+  /** The name its manifest gives it. */
+  manifestName: string
   version: string
   description: string
   logo: string | null
@@ -706,7 +1093,30 @@ export type Addon = {
   resources: string[]
   types: string[]
   catalogCount: number
+  /** In the answer to adding the addon only: how many of its catalogs became libraries. */
+  enabledLibraries?: number
+  /**
+   * In the answer to adding the addon only: the number of libraries the server, or the user, gets
+   * automatically, when none of its catalogs became a library because there were that many already.
+   */
+  libraryLimit?: number
+  /**
+   * In the answer to Refresh, Refresh everything or a new manifest address only: the libraries
+   * that followed their catalog's new identifier, and those removed with their catalog.
+   */
+  libraries?: LibraryChanges
   refreshedAt: string
+  /**
+   * A Stremio or Eclipse addon with a configure page. Its address holds the addon's settings and
+   * keys: no answer carries it.
+   */
+  configurable: boolean
+  /**
+   * The link Configure opens, `/admin/configure/<token>`: signed for the user and this addon, it
+   * opens the configure page from any browser or app, without a session, for 10 minutes. Absent
+   * unless the addon is configurable and the user may replace its address.
+   */
+  configureLink?: string
   /**
    * 'stremio' for a Stremio addon; 'eclipse' for an Eclipse music addon, which `music` describes;
    * 'm3u', 'xtream' or 'hdhomerun' (an HDHomeRun tuner, the server's only) for an IPTV source,
@@ -721,7 +1131,41 @@ export type Addon = {
    * Users who chose that metadata language see its descriptions.
    */
   language: string
+  /** Who uses a server source; a user's own source is used by everyone, its owner alone seeing it. */
+  usedBy: UsedBy
+  /**
+   * Where the source is, as Polyfin last read it: 'local' for one on the local network, whose
+   * answers may name addresses there when it is the server's or an administrator's own, and for
+   * a local folder; 'public' for one on the internet, whose answers may only name public
+   * addresses; '' while it is not told.
+   */
+  network: 'local' | 'public' | ''
 }
+
+/**
+ * What a manifest downloaded again did to an addon's libraries: a catalog whose identifier changed,
+ * its type, name and options kept, keeps its library, which follows the new identifier; the library
+ * of a catalog gone is removed.
+ */
+export type LibraryChanges = {
+  followed: ChangedLibrary[]
+  removed: ChangedLibrary[]
+}
+
+/** A library of a catalog renamed (`newId`, its new identifier) or gone. */
+export type ChangedLibrary = {
+  name: string
+  catalogType: string
+  catalogId: string
+  newId?: string
+}
+
+/**
+ * Who uses a server source: everyone, or only the groups and users listed by id ('listed'), which
+ * may be none and may leave the administrators out. A user who does not use a source gets nothing
+ * from it.
+ */
+export type UsedBy = { mode: 'everyone' | 'listed'; groups: string[]; users: string[] }
 
 /** What a local folder holds. */
 export type FolderKind = 'movies' | 'shows' | 'music' | 'homevideos'
@@ -732,8 +1176,17 @@ export type FolderKind = 'movies' | 'shows' | 'music' | 'homevideos'
  */
 export type FolderShare = '' | 'smb' | 'webdav' | 's3' | 'sftp' | 'rclone'
 
-/** How a local file was matched to its title. */
-export type MatchMethod = 'name' | 'nfo' | 'search' | 'link'
+/**
+ * How a local file was matched to its title. A search keeps a title by a looser rule when none
+ * matches exactly: 'year' for a title of the year before or after the name's, 'numerals' for one
+ * named alike once numerals are read, 'yearNumerals' for both. 'tmdb' is a title TMDB's search
+ * found when every metadata addon's search failed.
+ */
+export type MatchMethod =
+  'name' | 'nfo' | 'search' | 'year' | 'numerals' | 'yearNumerals' | 'link' | 'tmdb'
+
+/** The looser rule a search kept a title by, as a looser match tells it. */
+type LooserRule = 'year' | 'numerals' | 'year_numerals'
 
 /**
  * A local folder: a folder mounted in the container, or a network share Polyfin reads itself,
@@ -752,7 +1205,10 @@ export type LocalFolder = {
   scannedAt: string | null
   /**
    * Why the last scan could not read the folder: 'missing', 'unreadable', 'not_folder', or for a
-   * share 'unreachable', 'refused', and for an SFTP folder 'host_key_changed'; else empty.
+   * share 'unreachable', 'refused', for an SFTP folder 'host_key_changed', for a share that
+   * holds more than one scan reads 'too_deep', 'too_many_folders', 'too_many_files' or
+   * 'listing_too_large', and for a share whose scan lasted longer than one scan may 'too_slow';
+   * else empty.
    */
   error: string
   /** Whether a scan is under way. */
@@ -762,7 +1218,7 @@ export type LocalFolder = {
   matched: number
   /**
    * The matched files by how they were matched: an identifier in their name, their NFO file, a
-   * search, or a link made by hand.
+   * search, a search by a looser rule, or a link made by hand.
    */
   matchedBy: Record<MatchMethod, number>
   unmatched: number
@@ -778,7 +1234,11 @@ export type LocalFolder = {
    */
   datedBy: { nfo: number; created: number; file: number }
   /** The files, or shows' folders, linked to an IMDb identifier by hand. */
-  links: { unit: string; imdbId: string }[]
+  /**
+   * The units linked by hand, and whether a metadata addon of the server described the title, as
+   * the folder's kind, when their files were last matched to it.
+   */
+  links: { unit: string; imdbId: string; described: boolean }[]
   /** The episodes given by hand to the titles of shows' discs. */
   episodes: GivenEpisode[]
   /** Whether its titles show the artwork beside their files rather than the addons'. */
@@ -798,14 +1258,48 @@ export type LocalFolder = {
   /**
    * The SHA-256 fingerprint of the SFTP server's host key saved at the first connection, and of
    * another one it offers since, which Polyfin refuses until it is accepted; '' for none.
+   * `hostKeyForgotten` tells a folder moved to another server since: the key it offers is shown
+   * as `offeredHostKey`, to accept, not saved.
    */
   hostKey: string
   offeredHostKey: string
+  hostKeyForgotten: boolean
   /**
    * How often an S3 bucket, an SFTP folder or an rclone remote is listed again for changes, in
    * minutes, 0 only at its scans; null for the other folders.
    */
   pollMinutes: number | null
+  /**
+   * The files left unmatched as their titles' searches failed, the addon that failed most of them
+   * and why (null when none did), and when the folder is scanned again to search them again (null
+   * when it is not to be).
+   */
+  searchFailed: number
+  searchFailure: SearchFailure | null
+  searchRetryAt: string | null
+  /** The files left unmatched as no addon of the server describes and searches titles of its kind. */
+  noSearch: number
+  /**
+   * The episodes its files hold that their series' metadata addon does not list, as the series were
+   * last described; they are listed all the same, named after their files.
+   */
+  unlistedEpisodes: number
+  /**
+   * Its files named by an absolute number, as "Show - 41", that are versions of the catalog's episodes
+   * of their places.
+   */
+  absoluteEpisodes: number
+  /** Its shows' files their numbering could not place, each an episode of its own. */
+  unmappedEpisodes: number
+}
+
+/**
+ * A failed search of a title: the name of the addon that failed it, '' for another failure, and
+ * why, as System › Health names an addon's failures, or 'failed'.
+ */
+type SearchFailure = {
+  addon: string
+  failure: string
 }
 
 /** The kind of a disc: a Blu-ray disc's or a DVD's folder, or a disc image. */
@@ -816,7 +1310,7 @@ export type DiscKind = 'bluray' | 'dvd' | 'bluray_image' | 'dvd_image'
  * when the disc is gone), folder or image, and number, and its episodes, such as `S01E05` or
  * `S01E05-E06`.
  */
-export type GivenEpisode = {
+type GivenEpisode = {
   path: string
   disc: DiscKind | ''
   discPath: string
@@ -841,9 +1335,13 @@ export type UnmatchedFile = {
     | 'ambiguous'
     | 'other_year'
     | 'search_failed'
+    | 'no_search'
     | 'disc_title'
     | 'disc_episode'
     | 'lone_extra'
+    | EpisodeNameReason
+  /** For a failed search, the addon that failed it and why; null for another reason. */
+  search: SearchFailure | null
   /**
    * The kind of disc the file is read as, its unit the disc's folder, or the image itself for a
    * disc image; null for another file.
@@ -861,6 +1359,69 @@ export type UnmatchedFile = {
     episode: string | null
     suggested: string | null
   } | null
+}
+
+/**
+ * Why the name of a matched show's file tells no episode: an episode's number outside a season's
+ * folder, an air date, or no number at all.
+ */
+type EpisodeNameReason = 'no_season' | 'air_date' | 'no_episode_number'
+
+/** Episodes as ranges of numbers that follow one another, `[first, last]`. */
+export type EpisodeRanges = [number, number][]
+
+/**
+ * A show of a local folder whose files hold episodes its metadata addon does not list: by season,
+ * the numbers its files hold that the addon does not list, and those the addon lists in the
+ * season, empty when it has no such season. `described` is false while the addon's numbers are not
+ * known yet; `catalogFirst` and `catalogLast` are the addon's first and last episodes, specials
+ * left out unless it lists only specials, null when it lists none.
+ */
+export type UnlistedShow = {
+  imdbId: string
+  name: string
+  unit: string
+  described: boolean
+  catalogFirst: { season: number; episode: number } | null
+  catalogLast: { season: number; episode: number } | null
+  seasons: { season: number; files: EpisodeRanges; catalog: EpisodeRanges }[]
+  numbering: ShowNumbering
+  group: string
+}
+
+/**
+ * How a show's files are numbered: as its catalog, per season, continuing from season 1, by
+ * absolute number, or in one of the series' TMDB episode groups.
+ */
+export type ShowNumbering = 'catalog' | 'per_season' | 'continuing' | 'absolute' | 'order'
+
+/** Why a show's numbering could not place a file, which is then an episode of its own. */
+type UnmappedReason =
+  'no_catalog' | 'outside_season' | 'beyond_catalog' | 'not_in_order' | 'not_listed' | 'no_order'
+
+/**
+ * A show a shows folder holds: how its files are numbered (`group` the TMDB episode group of
+ * `order`), how many its numbering mapped to the catalog's episodes, and those it could not place,
+ * each with the season and episodes it tells, its absolute number when its name tells one alone,
+ * the episode of its own it is listed as, and why.
+ */
+export type FolderShow = {
+  imdbId: string
+  name: string
+  unit: string
+  files: number
+  numbering: ShowNumbering
+  group: string
+  mapped: number
+  unmapped: {
+    path: string
+    season: number
+    episode: number
+    lastEpisode: number
+    absolute: number | null
+    listed: { season: number; episode: number }
+    reason: UnmappedReason
+  }[]
 }
 
 export type NewLocalFolder = {
@@ -883,12 +1444,15 @@ export type NewLocalFolder = {
   rcloneRemote?: string
   /** Minutes between the listings for changes, 0 only at scans; the kind's default when left out. */
   pollMinutes?: number
+  /** Who uses the folder; everyone when left out. */
+  usedBy?: UsedBy
 }
 
 /**
  * A change of a folder; a password, private key or passphrase left out keeps the stored one, an
  * empty one removes it. A new kind scans the folder again as that kind. `acceptHostKey` accepts
- * the host key an SFTP server offers in place of the one saved.
+ * the host key an SFTP server offers in place of the one saved, named by the fingerprint shown,
+ * the folder's `offeredHostKey`; when the server offers another one by then, nothing is accepted.
  */
 export type LocalFolderPatch = Partial<{
   name: string
@@ -904,7 +1468,7 @@ export type LocalFolderPatch = Partial<{
   passphrase: string
   rcloneRemote: string
   pollMinutes: number
-  acceptHostKey: boolean
+  acceptHostKey: string
 }>
 
 /** What an Eclipse addon's tracks are; its catalog rows become music or books libraries. */
@@ -926,9 +1490,13 @@ export type AddonSetting = {
   step: number | null
 }
 
-/** An Eclipse addon's content, settings, and the values chosen (a setting left out uses its default). */
+/**
+ * An Eclipse addon's content, how many catalog rows of its own it lists (none leaves My music as its
+ * library), settings, and the values chosen (a setting left out uses its default).
+ */
 export type AddonMusic = {
   contentType: MusicContent
+  rows: number
   settings: AddonSetting[]
   values: Record<string, string>
 }
@@ -948,6 +1516,8 @@ export type IptvSource = {
   nextAt: string | null
   /** Code of the last failure; empty after a success. */
   error: string
+  /** The user agent its administrator set for its list and streams; empty for the default. */
+  userAgent: string
   /** An HDHomeRun tuner; null for another source. */
   tuner: IptvTuner | null
 }
@@ -1005,7 +1575,7 @@ export type IptvOptions = {
   favoritesOnly: boolean
 }
 
-export type VodCounts = {
+type VodCounts = {
   /** Titles in the provider's lists, before exclusions. */
   movies: number
   series: number
@@ -1036,7 +1606,7 @@ export const defaultIptvOptions: IptvOptions = {
 /** The limits the server accepts for IptvOptions.excluded. */
 export const excludedKeysLimit = 5000
 
-export type LineupCounts = {
+type LineupCounts = {
   categories: number
   enabledCategories: number
   channels: number
@@ -1053,7 +1623,7 @@ export type LineupCounts = {
 export type PreviewBy = 'group' | 'country' | 'movie' | 'series'
 
 /** A category of a source's list, before import: a group, a country, or a VOD category. */
-export type PreviewCategory = { key: string; name: string; channels: number; excluded: boolean }
+type PreviewCategory = { key: string; name: string; channels: number; excluded: boolean }
 
 export type Preview = { total: number; categories: PreviewCategory[] }
 
@@ -1064,13 +1634,11 @@ export type IptvAccount = {
   server?: string
   username?: string
   password?: string
+  userAgent?: string
 }
 
 /** A paged answer: `total` counts every row matching the filters. */
 export type Page<T> = { total: number; offset: number; limit: number; items: T[] }
-
-/** The most rows one page of the API returns. */
-export const pageLimit = 500
 
 export type LineupCategory = {
   id: string
@@ -1088,17 +1656,17 @@ export type LineupCategory = {
 }
 
 /** How a stream last answered when its channel was opened. */
-export type StreamHealth = {
+type StreamHealth = {
   okAt: string | null
-  /** dead (no live stream), refused (not served now), timeout (nothing came), or empty. */
-  failure: '' | 'dead' | 'refused' | 'timeout'
+  /** dead (no live stream), refused (not served now), timeout (nothing came), drm (needs a DRM Polyfin does not support), keys (the list's keys do not decrypt it), or empty. */
+  failure: '' | 'dead' | 'refused' | 'timeout' | 'drm' | 'keys'
   failedAt: string | null
   failures: number
   /** Set while the stream is left out of its channel. */
   hiddenUntil: string | null
 }
 
-export type ChannelStream = {
+type ChannelStream = {
   id: string
   label: string
   enabled: boolean
@@ -1130,8 +1698,9 @@ export type LineupChannel = {
   moved: boolean
   enabled: boolean
   shown: boolean
-  number: number | null
-  providerNumber: number | null
+  /** The number the channel shows, and the provider's, as written (`104.5`). */
+  number: string | null
+  providerNumber: string | null
   fixedNumber: number | null
   /** The provider's tvg-id, empty without. */
   guideId: string
@@ -1202,7 +1771,7 @@ export type MappingState = 'all' | 'mapped' | 'unmapped' | 'manual'
 export type MappingItem = {
   channelId: string
   name: string
-  number: number | null
+  number: string
   guideId: string
   mapping: GuideMapping | null
 }
@@ -1215,10 +1784,14 @@ export type NewIptvSource = {
   server?: string
   username?: string
   password?: string
+  /** M3U and Xtream only: the user agent of its list and streams; empty for the default. */
+  userAgent?: string
   guideUrl?: string
   /** Xtream only: use the guide the server publishes for the account. */
   providerGuide?: boolean
   options?: Partial<IptvOptions>
+  /** Who uses a server source; everyone when left out. */
+  usedBy?: UsedBy
 }
 
 /** What changes of an IPTV source; a password left empty keeps the current one. */
@@ -1228,10 +1801,18 @@ export type IptvSourcePatch = Partial<{
   server: string
   username: string
   password: string
+  userAgent: string
   options: Partial<IptvOptions>
 }>
 
-export type AddonPatch = Partial<{ enabled: boolean; manifestUrl: string; language: string }>
+export type AddonPatch = Partial<{
+  enabled: boolean
+  manifestUrl: string
+  language: string
+  usedBy: UsedBy
+  /** A Stremio or Eclipse addon's own name, 1 to 64 characters; '' gives back its manifest's. */
+  name: string
+}>
 
 export type Library = {
   addonId: string
@@ -1269,10 +1850,134 @@ export type Library = {
    * enabled library.
    */
   hideInMenus: boolean
+  /**
+   * Whether the library leaves out the movies and series a local folder's library lists, for the
+   * users who see that library. False for a catalog that is not an enabled library.
+   */
+  skipLocal: boolean
+  /**
+   * Whether the library takes `skipLocal`: a catalog of movies or series of an addon, not of a
+   * local folder, an IPTV source or a music addon.
+   */
+  skippable: boolean
+  /**
+   * How the library shows its catalog's titles, one of `showAsChoices`; null while none is chosen:
+   * a catalog of other videos is then shown as home videos until the server decides from its first
+   * page (movies and shows when its titles are all movies and series), an anime catalog as movies
+   * and shows, the others as listed.
+   */
+  showAs: LibraryShowAs | null
+  /**
+   * The ways the library may show its titles, the default first: `home_videos` or
+   * `movies_and_shows` for a catalog of other videos, `listed` or `movies_and_shows` for a catalog of
+   * movies or series of an addon, `movies_and_shows`, `shows` or `movies` for an anime catalog of an
+   * addon. Empty for any other catalog.
+   */
+  showAsChoices: LibraryShowAs[]
+  /**
+   * Whether an enabled library of the server's has its descriptions read again on request: a movie
+   * or series library of a Stremio addon or a local folder, or a collection library of a Stremio
+   * addon. False in the users' own scopes.
+   */
+  refreshable: boolean
+  /** How the last refresh of its descriptions since the server started stands; null for none. */
+  refresh: LibraryRefresh | null
 }
 
+/**
+ * The refresh of a library's descriptions: `titles` to describe again, `done` described,
+ * `failed` that no addon described; `startedAt` and `endedAt` null until it starts and ends.
+ */
+export type LibraryRefresh = {
+  state: 'queued' | 'running' | 'done' | 'stopped' | 'failed'
+  titles: number
+  done: number
+  failed: number
+  startedAt: string | null
+  endedAt: string | null
+}
+
+/** A library of the server's, by its addon and catalog. */
+export type LibraryKey = { addonId: string; catalogType: string; catalogId: string }
+
+/** Has the descriptions of one of the server's libraries read again, paced, in the background. */
+export const refreshLibrary = (library: LibraryKey) =>
+  request<LibraryRefresh>('POST', '/scopes/shared/libraries/refresh', library)
+
+/** Stops the refresh of one of the server's libraries, running or waiting. */
+export const stopLibraryRefresh = (library: LibraryKey) =>
+  request<void>('POST', '/scopes/shared/libraries/refresh/stop', library)
+
+/** How many users keep an order of libraries of their own, saved from a Jellyfin app. */
+export type LibraryOrders = { users: number }
+
+/** Counts the users who keep an order of libraries of their own. */
+export const libraryOrders = () =>
+  request<LibraryOrders>('GET', '/scopes/shared/libraries/user-orders')
+
+/** Apply this order to every user: forgets the orders of libraries users saved. */
+export const applyLibraryOrder = () =>
+  request<LibraryOrders>('DELETE', '/scopes/shared/libraries/user-orders')
+
+/** A series as Episode orders lists and finds it; `posterId` as `AccountTitle`'s. */
+export type OrderedSeries = { id: string; name: string; year: number; posterId: string }
+
+/** The name Jellyfin gives a TMDB episode group's type, a series' DisplayOrder. */
+type EpisodeGroupType =
+  'originalAirDate' | 'absolute' | 'dvd' | 'digital' | 'storyArc' | 'production' | 'tv'
+
+/** Where a series' specials show. */
+export type SpecialsPlacement = 'first' | 'last' | 'hidden'
+
+/** One of a series' TMDB episode groups. */
+export type EpisodeGroup = {
+  id: string
+  name: string
+  type: EpisodeGroupType
+  episodes: number
+  seasons: number
+}
+
+/**
+ * A series' order of episodes: `order` is its DisplayOrder, empty as aired (another value than a
+ * group type is set from a Jellyfin app, and shows as aired); `group` the group chosen here, empty
+ * for the first of its type. `lookup` tells why `groups` is empty when TMDB could not tell.
+ */
+export type EpisodeOrder = {
+  series: OrderedSeries
+  order: string
+  group: string
+  specials: SpecialsPlacement
+  groups: EpisodeGroup[]
+  lookup: '' | 'no_key' | 'unknown' | 'failed'
+}
+
+/** The series shown in an order of their own, or with their specials elsewhere than first. */
+export const fetchEpisodeOrders = (signal?: AbortSignal) =>
+  request<EpisodeOrder[]>('GET', '/episode-orders', undefined, signal)
+
+/** Searches the series to choose an order for. */
+export const searchOrderedSeries = (search: string, signal?: AbortSignal) =>
+  request<OrderedSeries[]>(
+    'GET',
+    `/episode-orders/series?${new URLSearchParams({ search })}`,
+    undefined,
+    signal,
+  )
+
+/** A series' order of episodes, with the TMDB episode groups it may show in. */
+export const fetchEpisodeOrder = (id: string, signal?: AbortSignal) =>
+  request<EpisodeOrder>('GET', `/titles/${encodeURIComponent(id)}/episode-order`, undefined, signal)
+
+/** Shows a series in a TMDB episode group, as aired when `group` is empty. */
+export const saveEpisodeOrder = (id: string, group: string, specials: SpecialsPlacement) =>
+  request<EpisodeOrder>('PUT', `/titles/${encodeURIComponent(id)}/episode-order`, {
+    group,
+    specials,
+  })
+
 /** The XMLTV guide of a TV catalog and how its last fetch went. */
-export type Guide = {
+type Guide = {
   /** Redacted address: the credentials it may embed are never returned. Empty: no guide. */
   url: string
   checkedAt: string | null
@@ -1292,7 +1997,16 @@ export const MAX_LIBRARY_ITEMS = 20000
 
 /** One enabled library in the list sent to PUT /scopes/{scope}/libraries. */
 export type LibrarySelection = Pick<Library, 'addonId' | 'catalogType' | 'catalogId' | 'name'> &
-  Partial<Pick<Library, 'genre' | 'maxItems' | 'hideInMenus'>>
+  Partial<Pick<Library, 'genre' | 'maxItems' | 'hideInMenus' | 'skipLocal' | 'showAs'>>
+
+/**
+ * How a library shows its titles: as home videos (folders of videos, and videos); as its catalog
+ * lists them (a movie or series library); or as movies and shows, in a library without a type:
+ * the titles of other videos made movies and shows, or a movie or series catalog's titles each as
+ * its own type; or, for an anime catalog, as shows or as movies, in a library of that type whose
+ * tabs list that kind only.
+ */
+export type LibraryShowAs = 'home_videos' | 'listed' | 'movies_and_shows' | 'shows' | 'movies'
 
 export type LibraryImageChoice = 'none' | 'automatic' | 'generated' | 'custom'
 
@@ -1309,18 +2023,34 @@ export type LibraryImageRequest = Pick<Library, 'addonId' | 'catalogType' | 'cat
 
 /** What a rule of a smart list looks at; `group` holds rules of its own. */
 export type SmartField =
-  'group' | 'genre' | 'year' | 'rating' | 'language' | 'type' | 'rank' | 'state'
-
-/** What a `state` rule matches, for the user who opens the list. */
-export type SmartState = 'played' | 'unplayed' | 'started' | 'favorite'
+  | 'group'
+  | 'genre'
+  | 'year'
+  | 'rating'
+  | 'votes'
+  | 'language'
+  | 'runtime'
+  | 'contentRating'
+  | 'person'
+  | 'studio'
+  | 'released'
+  | 'homeRelease'
+  | 'type'
+  | 'rank'
+  | 'state'
 
 /** How a smart list orders its titles. */
-export type SmartSort = 'catalog' | 'premiere' | 'rating' | 'name' | 'random'
+export type SmartSort =
+  'catalog' | 'premiere' | 'latestEpisode' | 'seasonPremiere' | 'rating' | 'name' | 'random'
 
 /**
  * A rule of a smart list, or a group of them. `not` negates it. `value` is a genre, an ISO 639
- * language code, `movie` or `series`, or a SmartState; `min` and `max` bound a year or a rating,
- * and `max` is the place in its catalog. A group matches `all` or `any` of its `rules`.
+ * language code, the highest content rating, a person's or a studio's name, `movie` or `series`,
+ * for a `state` rule `played`, `unplayed`, `started` or `favorite` (for the user who opens the
+ * list), or for a `homeRelease` rule `released`, `upcoming` or `both` (titles out at home in the
+ * last days, in the next, or either); `min` and `max` bound a year, a rating, its votes, a
+ * runtime in minutes, or a release in days from today (negative: past), and `max` is the place in
+ * its catalog or a home release's days. A group matches `all` or `any` of its `rules`.
  */
 export type SmartRule = {
   field: SmartField
@@ -1333,7 +2063,7 @@ export type SmartRule = {
 }
 
 /** A catalog a smart list draws from. */
-export type SmartCatalogRef = { addonId: string; type: string; id: string }
+type SmartCatalogRef = { addonId: string; type: string; id: string }
 
 /** A smart list as it is saved: `itemId` is its library or collection in Jellyfin apps. */
 export type SmartList = {
@@ -1343,6 +2073,8 @@ export type SmartList = {
   shownAs: 'library' | 'collection'
   catalogs: SmartCatalogRef[]
   rules: SmartRule
+  /** The group of rules whose titles it leaves out; one without rules leaves none out. */
+  exclude: SmartRule
   sort: SmartSort
   /** Most titles it lists; null for no maximum. */
   maxItems: number | null
@@ -1367,14 +2099,21 @@ export type SmartCatalogChoice = {
   genres: string[]
 }
 
-/** What a smart list may draw from, and the ISO 639-1 codes of the languages its rules may name. */
-export type SmartChoices = { catalogs: SmartCatalogChoice[]; languages: string[] }
+/**
+ * What a smart list may draw from, the ISO 639-1 codes of the languages its rules may name, and the
+ * content ratings a rule may set as the highest, from the youngest.
+ */
+export type SmartChoices = {
+  catalogs: SmartCatalogChoice[]
+  languages: string[]
+  contentRatings: string[]
+}
 
 /**
  * A title of a smart list's preview. `languages`: those its description gives, by their ISO 639-1
  * code when they have one; empty while it was not described.
  */
-export type SmartTitle = {
+type SmartTitle = {
   id: string
   name: string
   type: 'movie' | 'series'
@@ -1407,7 +2146,7 @@ export type AddonPreferences = {
 }
 
 /** Signing in with `pin` as the password, before `expiresAt`, makes it the user's new password. */
-export type PasswordResetPin = { pin: string; expiresAt: string }
+type PasswordResetPin = { pin: string; expiresAt: string }
 
 /** A key tools and apps use to call the Jellyfin API with administrator rights. */
 export type ApiKey = { id: string; app: string; createdAt: string; lastUsedAt: string | null }
@@ -1425,6 +2164,12 @@ export type ActivityEntry = {
   shortOverview: string | null
   severity: 'Information' | 'Warning' | 'Error'
   userId: string | null
+  /**
+   * Where `name` holds the title of an item the administrator can open in the web player, from
+   * `start` to `end` in the string; null when it names none, one removed or out of their view, one
+   * written before the server kept where titles are, or when the server serves no web player.
+   */
+  title: { id: string; start: number; end: number } | null
 }
 
 export type ActivityPage = { items: ActivityEntry[]; total: number }
@@ -1439,12 +2184,18 @@ export class ApiError extends Error {
   readonly jellyfinId: string | null
   /** What a remote server or a tool answered, as the server tells it, when it tells it. */
   readonly detail: string | null
+  /** Why a WireGuard configuration was refused, for invalid_wireguard_config. */
+  readonly wireGuard: WireGuardConfigProblem | null
+  /** The addresses no copy of the theme could save, for theme_copy_failed. */
+  readonly unsaved: ThemeCopyUnsaved[] | null
 
   constructor(
     status: number,
     code: string,
     jellyfinId: string | null = null,
     detail: string | null = null,
+    wireGuard: WireGuardConfigProblem | null = null,
+    unsaved: ThemeCopyUnsaved[] | null = null,
   ) {
     super(`Admin API error ${status}: ${code}`)
     this.name = 'ApiError'
@@ -1452,6 +2203,8 @@ export class ApiError extends Error {
     this.code = code
     this.jellyfinId = jellyfinId
     this.detail = detail
+    this.wireGuard = wireGuard
+    this.unsaved = unsaved
   }
 }
 
@@ -1459,7 +2212,7 @@ type Method = 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'
 
 const apiBase = `${import.meta.env.BASE_URL}api`
 
-export async function request<T>(
+async function request<T>(
   method: Method,
   path: string,
   body?: unknown,
@@ -1484,19 +2237,40 @@ async function apiError(response: Response): Promise<ApiError> {
   let code = 'unknown'
   let jellyfinId: string | null = null
   let detail: string | null = null
+  let wireGuard: WireGuardConfigProblem | null = null
+  let unsaved: ThemeCopyUnsaved[] | null = null
   try {
     const payload = (await response.json()) as {
       error?: unknown
       jellyfinId?: unknown
       message?: unknown
+      line?: unknown
+      key?: unknown
+      reason?: unknown
+      unsaved?: unknown
     }
     if (typeof payload.error === 'string') code = payload.error
     if (typeof payload.jellyfinId === 'string') jellyfinId = payload.jellyfinId
     if (typeof payload.message === 'string') detail = payload.message
+    if (
+      code === 'invalid_wireguard_config' &&
+      typeof payload.line === 'number' &&
+      typeof payload.key === 'string' &&
+      typeof payload.reason === 'string'
+    ) {
+      wireGuard = {
+        line: payload.line,
+        key: payload.key,
+        reason: payload.reason as WireGuardConfigProblem['reason'],
+      }
+    }
+    if (code === 'theme_copy_failed' && Array.isArray(payload.unsaved)) {
+      unsaved = payload.unsaved as ThemeCopyUnsaved[]
+    }
   } catch {
     // Non-JSON error body (proxy page, empty response): keep the generic code.
   }
-  return new ApiError(response.status, code, jellyfinId, detail)
+  return new ApiError(response.status, code, jellyfinId, detail, wireGuard, unsaved)
 }
 
 const seg = encodeURIComponent
@@ -1565,17 +2339,40 @@ export const newOwnRecoveryCodes = (confirmation: TwoStepConfirmation) =>
 export const turnOffOwnTwoStep = (confirmation: TwoStepConfirmation) =>
   request<void>('POST', '/account/two-step/off', confirmation)
 
+/** Whether the signed-in user's account is linked to them at the identity provider. */
+export const fetchOwnProvider = (signal?: AbortSignal) =>
+  request<{ linked: boolean }>('GET', '/account/provider', undefined, signal)
+
+/**
+ * Starts the link of the signed-in user's account at the identity provider, and answers the
+ * address of the provider's page: the browser opens it, and comes back to My account with
+ * ?providerLink=, `linked` or what went wrong.
+ */
+export const startOwnProviderLink = () =>
+  request<{ address: string }>('POST', '/account/provider/link')
+
 /**
  * Returns the signed-in user, or null when there is no valid session. Without one, the web client's
  * sign-in on this server is tried first: it opens a session for its user, administrator or member.
+ * Opened from the web client signed in as someone else, the admin app signs its session out and
+ * takes the web client's, so that it never shows another user's pages than the web client's. It is
+ * asked together with the status, whose server ID it waits for only once the session answered.
  */
 export async function fetchSession(signal?: AbortSignal): Promise<SessionUser | null> {
+  const status = queryClient
+    .ensureQueryData({ queryKey: queryKeys.status, queryFn: ({ signal }) => fetchStatus(signal) })
+    .then(
+      (answer) => answer.serverId,
+      () => undefined,
+    )
   try {
-    return (await request<{ user: SessionUser }>('GET', '/session', undefined, signal)).user
+    const user = (await request<{ user: SessionUser }>('GET', '/session', undefined, signal)).user
+    if (!arrivedAsAnotherUser(await status, user.id)) return user
+    await request<void>('DELETE', '/session', undefined, signal)
   } catch (error) {
     if (!(error instanceof ApiError && error.status === 401)) throw error
   }
-  const token = takeWebClientToken(queryClient.getQueryData<Status>(queryKeys.status)?.serverId)
+  const token = takeWebClientToken(await status)
   if (token === null) return null
   try {
     const authorization = { Authorization: `MediaBrowser Token="${token}"` }
@@ -1599,6 +2396,9 @@ export const signOut = () => request<void>('DELETE', '/session')
 export const changePassword = (body: { currentPassword: string; newPassword: string }) =>
   request<void>('PUT', '/account/password', body)
 
+export const saveOwnInterfaceSize = (interfaceSize: InterfaceSize) =>
+  request<{ interfaceSize: InterfaceSize }>('PUT', '/account/interface-size', { interfaceSize })
+
 /** The signed-in user's metadata language ('' for the server's) and the ones they may choose. */
 export type MetadataLanguage = { language: string; languages: string[] }
 
@@ -1607,6 +2407,53 @@ export const fetchOwnMetadataLanguage = (signal?: AbortSignal) =>
 
 export const saveOwnMetadataLanguage = (language: string) =>
   request<MetadataLanguage>('PUT', '/account/metadata-language', { language })
+
+/** The signed-in user's web player theme ('' for the server's), whether the administrator keeps them from changing it, and the themes they choose among. */
+export type OwnWebTheme = WebThemes & { webTheme: UserWebTheme; locked: boolean }
+
+export const fetchOwnWebTheme = (signal?: AbortSignal) =>
+  request<OwnWebTheme>('GET', '/account/web-theme', undefined, signal)
+
+export const saveOwnWebTheme = (webTheme: UserWebTheme) =>
+  request<OwnWebTheme>('PUT', '/account/web-theme', { webTheme })
+
+/** The signed-in user's preferred audio region ('' for none) and the ones they may choose. */
+export type AudioRegion = { region: string; regions: string[] }
+
+export const fetchOwnAudioRegion = (signal?: AbortSignal) =>
+  request<AudioRegion>('GET', '/account/audio-region', undefined, signal)
+
+export const saveOwnAudioRegion = (region: string) =>
+  request<AudioRegion>('PUT', '/account/audio-region', { region })
+
+/**
+ * The signed-in user's sound options (see User), and whether their group holds them, which they
+ * then cannot change.
+ */
+export type OwnSound = { boostVolume: boolean; convertSound: boolean; followsGroup: boolean }
+
+export const fetchOwnSound = (signal?: AbortSignal) =>
+  request<OwnSound>('GET', '/account/sound', undefined, signal)
+
+export const saveOwnSound = (change: Partial<Pick<OwnSound, 'boostVolume' | 'convertSound'>>) =>
+  request<OwnSound>('PUT', '/account/sound', change)
+
+/**
+ * Puts back the server's defaults for what the signed-in user chose: their metadata language, their
+ * audio region, the home rows they turned off, the tracks they chose on titles, the preferences
+ * Jellyfin apps saved in their account, and their web player theme unless the administrator chose
+ * it.
+ */
+export const resetOwnPreferences = () => request<void>('POST', '/account/preferences/reset')
+
+/** How many series and movies the signed-in user chose audio or subtitle tracks on. */
+export type TrackChoices = { titles: number }
+
+export const fetchOwnTrackChoices = (signal?: AbortSignal) =>
+  request<TrackChoices>('GET', '/account/track-choices', undefined, signal)
+
+/** Forgets the tracks the signed-in user chose on every series and movie. */
+export const forgetOwnTrackChoices = () => request<void>('DELETE', '/account/track-choices')
 
 export const fetchMyDevices = (signal?: AbortSignal) =>
   request<Device[]>('GET', '/account/devices', undefined, signal)
@@ -1630,16 +2477,42 @@ export type AccountTitle = {
 }
 
 /** What a home row of the web player lists. */
-export type HomeRowKind = 'catalog' | 'collection' | 'because' | 'new'
+export type HomeRowKind =
+  | 'catalog'
+  | 'collection'
+  | 'because'
+  | 'new'
+  | 'available'
+  | 'waiting'
+  | 'trakt'
+  | 'picks'
+  | 'watchlist'
+  | 'playlists'
+  | 'playlist'
 
 /** Where the web player shows a home row: at the top, after Continue Watching, after Next Up, at the bottom. */
 export type HomeRowPlace = 'top' | 'resume' | 'nextup' | 'bottom'
 
 /**
+ * When a home row shows, in the server's time zone: from `startDate` to `endDate` (YYYY-MM-DD, empty
+ * for no bound), on `days` (0 for Sunday to 6, none for every day), from `startHour` (0 to 23) to
+ * `endHour` (1 to 24, before `startHour` past midnight), both null for all day. A row that is also a
+ * library follows its dates only.
+ */
+export type HomeRowSchedule = {
+  startDate: string
+  endDate: string
+  days: number[]
+  startHour: number | null
+  endHour: number | null
+}
+
+/**
  * A row of the web player's home page (Settings › Web player › Home rows). A catalog row names its
- * catalog, a collection row its collection; `count` is how many rows Because you watched makes;
- * `users` are those a row not shown to everyone is shown to; `library` also makes it a library in
- * other apps.
+ * catalog, a collection row its collection, a playlist row its playlist (`playlistId`); `count` is
+ * how many rows Because you watched or My playlists makes; `users` are those a row not shown to
+ * everyone is shown to; `library` also makes it a library in other apps, never for My playlists;
+ * `shownNow` tells whether its schedule shows it now.
  */
 export type HomeRow = {
   id: string
@@ -1650,13 +2523,16 @@ export type HomeRow = {
   catalogType: string
   catalogId: string
   collectionId: string
+  playlistId: string
   count: number
   everyone: boolean
   users: string[]
   library: boolean
+  schedule: HomeRowSchedule
+  shownNow: boolean
 }
 
-export type HomeRowDraft = Omit<HomeRow, 'id'>
+export type HomeRowDraft = Omit<HomeRow, 'id' | 'shownNow'>
 
 /** A catalog of the server's addons a home row may list. */
 export type HomeRowCatalog = {
@@ -1670,16 +2546,26 @@ export type HomeRowCatalog = {
 /** A collection a home row may list: made by users, a smart list or an addon's. */
 export type HomeRowCollection = { id: string; name: string; source: 'users' | 'smart' | 'addon' }
 
+/**
+ * A playlist a home row may list, any but the Watchlists: its owner's name, and who may see it:
+ * everyone (`public`), the users it is shared with too (`shared`) or its owner only (`private`).
+ */
+export type HomeRowPlaylist = {
+  id: string
+  name: string
+  ownerName: string
+  access: 'public' | 'shared' | 'private'
+}
+
 export const fetchHomeRows = (signal?: AbortSignal) =>
   request<{ rows: HomeRow[] }>('GET', '/home-rows', undefined, signal)
 
 export const fetchHomeRowChoices = (signal?: AbortSignal) =>
-  request<{ catalogs: HomeRowCatalog[]; collections: HomeRowCollection[] }>(
-    'GET',
-    '/home-rows/choices',
-    undefined,
-    signal,
-  )
+  request<{
+    catalogs: HomeRowCatalog[]
+    collections: HomeRowCollection[]
+    playlists: HomeRowPlaylist[]
+  }>('GET', '/home-rows/choices', undefined, signal)
 
 export const createHomeRow = (draft: HomeRowDraft) => request<HomeRow>('POST', '/home-rows', draft)
 
@@ -1691,6 +2577,31 @@ export const deleteHomeRow = (id: string) => request<void>('DELETE', `/home-rows
 /** Puts the rows in this order, and answers them. */
 export const orderHomeRows = (ids: string[]) =>
   request<{ rows: HomeRow[] }>('PUT', '/home-rows/order', { ids })
+
+/** A title of a home row's preview; `posterId` is the item whose Primary image is its poster. */
+export type HomeRowPreviewTitle = {
+  id: string
+  kind: string
+  name: string
+  year: number
+  posterId: string
+}
+
+/**
+ * A row of a user's home page as the web player shows it to them now: its folder `id`, the row it
+ * comes from (`rowId`), its name there and its first titles.
+ */
+export type HomeRowPreview = {
+  id: string
+  rowId: string
+  name: string
+  kind: HomeRowKind
+  place: HomeRowPlace
+  titles: HomeRowPreviewTitle[]
+}
+
+export const fetchHomeRowPreview = (userId: string, signal?: AbortSignal) =>
+  request<{ rows: HomeRowPreview[] }>('GET', `/home-rows/preview/${seg(userId)}`, undefined, signal)
 
 /** A home row shown to the signed-in user, and whether they turned it off. */
 export type OwnHomeRow = {
@@ -1706,6 +2617,32 @@ export const fetchOwnHomeRows = (signal?: AbortSignal) =>
 
 export const setOwnHomeRow = (id: string, off: boolean) =>
   request<void>('PUT', `/account/home-rows/${seg(id)}`, { off })
+
+/** What a taste profile weighs titles by. */
+type TasteFacet = 'genre' | 'director' | 'cast' | 'decade' | 'language'
+
+/** A value of a facet and its weight; `vetoed` tells a genre whose titles leave Top picks for you. */
+export type TasteLeaning = { name: string; weight: number; vetoed?: boolean }
+
+/**
+ * The signed-in user's taste profile: when it was built (null while never), how many titles it
+ * weighed, how sure it is from 0 to 1 and whether it passed the confidence gate, what they like and
+ * dislike of each facet, and whether their titles' details tell why a title is for them.
+ */
+export type OwnTaste = {
+  built: string | null
+  titles: number
+  certainty: number
+  confident: boolean
+  facets: { facet: TasteFacet; liked: TasteLeaning[]; disliked: TasteLeaning[] }[]
+  taglines: boolean
+}
+
+export const fetchOwnTaste = (signal?: AbortSignal) =>
+  request<OwnTaste>('GET', '/account/taste', undefined, signal)
+
+export const saveOwnTaste = (taglines: boolean) =>
+  request<OwnTaste>('PUT', '/account/taste', { taglines })
 
 /** A title of Continue Watching: its resume point and runtime in seconds, 0 when unknown. */
 export type ResumeTitle = {
@@ -1729,8 +2666,40 @@ export const fetchOwnHidden = (signal?: AbortSignal) =>
 
 export const showOwnHidden = (id: string) => request<void>('DELETE', `/account/hidden/${seg(id)}`)
 
+/** A series taken off Next Up and still off it, and when. */
+type NextUpRemoval = { item: AccountTitle; removedAt: string }
+
+/**
+ * A series dropped on tracking services, which keeps it out of Next Up: the services in the
+ * Tracking page's order, and the latest of their drop dates.
+ */
+type NextUpDropped = { item: AccountTitle; services: TrackingServiceName[]; droppedAt: string }
+
+/**
+ * The user's Next Up: its episodes, the series taken off it, those dropped on a tracking service,
+ * and whether Remove from Continue Watching also takes a series off Next Up.
+ */
+export type OwnNextUp = {
+  items: AccountTitle[]
+  removed: NextUpRemoval[]
+  dropped: NextUpDropped[]
+  withResume: boolean
+}
+
+export const fetchOwnNextUp = (signal?: AbortSignal) =>
+  request<OwnNextUp>('GET', '/account/next-up', undefined, signal)
+
+export const removeOwnNextUp = (id: string) =>
+  request<void>('DELETE', `/account/next-up/${seg(id)}`)
+
+export const putBackOwnNextUp = (id: string) =>
+  request<void>('DELETE', `/account/next-up/removed/${seg(id)}`)
+
+export const setOwnNextUpWithResume = (withResume: boolean) =>
+  request<{ withResume: boolean }>('PUT', '/account/next-up/settings', { withResume })
+
 /** A reminder of one programme, set from the web player. */
-export type ProgrammeReminder = {
+type ProgrammeReminder = {
   id: string
   programId: string
   name: string
@@ -1741,7 +2710,7 @@ export type ProgrammeReminder = {
 }
 
 /** A reminder of every airing of a title on a channel, at the time of day of `start`. */
-export type SeriesReminder = {
+type SeriesReminder = {
   id: string
   name: string
   channelId: string
@@ -1837,12 +2806,16 @@ export type TrackingService = {
   /** When the next import runs; null while none is planned. */
   nextImportAt: string | null
   /**
-   * The service has a watchlist Polyfin can import: Trakt's watchlist, Simkl's, AniList's and
-   * MyAnimeList's Plan to Watch.
+   * The service has a watchlist Polyfin can import: Trakt's, MDBList's and PublicMetaDB's
+   * watchlist, Simkl's, AniList's and MyAnimeList's Plan to Watch.
    */
   watchlist: boolean
-  /** Whether that watchlist is imported, with the history's imports, into the Watchlist view. */
+  /** Whether that watchlist is imported, with the history's imports, into the Watchlist playlist. */
   importWatchlist: boolean
+  /** The user's own changes of their Watchlist are sent to that watchlist while it is imported. */
+  watchlistSent: boolean
+  /** The service refused the last title sent as its watchlist is full; cleared once a change goes through. */
+  watchlistFull: boolean
   /** The service keeps ratings (AniList, MyAnimeList). */
   ratings: boolean
   /** Whether the user's ratings are sent there, and its scores imported. */
@@ -1850,13 +2823,13 @@ export type TrackingService = {
 }
 
 /** How an import of a watch history, and of a watchlist, went. */
-export type TrackingImport = {
+type TrackingImport = {
   at: string
   /** Titles it newly marked played. */
   played: number
   /** Resume points it set. */
   resumed: number
-  /** Titles it added to the Watchlist view. */
+  /** Titles it added to the Watchlist playlist. */
   watchlist: number
   /** Titles of the history and the watchlist Polyfin could not identify. */
   unmapped: number
@@ -1921,12 +2894,14 @@ export type NotificationEvent =
   | 'recording_failed'
   | 'health_problem'
   | 'health_solved'
+  | 'server_crashed'
   | 'user_joined'
   | 'new_version'
   | 'playback_started'
   | 'playback_paused'
   | 'playback_resumed'
   | 'playback_stopped'
+  | 'playback_failed'
   | 'weekly_summary'
   | 'monthly_summary'
   | 'yearly_summary'
@@ -1935,6 +2910,7 @@ export type NotificationEvent =
   | 'new_device'
   | 'share_played'
   | 'programme_reminder'
+  | 'title_available'
 
 /**
  * Where notifications go. Its secret address, tokens and keys are never sent back: `address` is
@@ -1966,6 +2942,10 @@ export type NotificationTarget = {
   /** The HTTP status, or an email target's SMTP code, answered with its problem, when it answered. */
   problemStatus: number | null
   problemAt: string | null
+  /** At most this many messages a minute, null for no cap. */
+  perMinute: number | null
+  /** Plays and new episodes grouped into one message every this many minutes, null for none. */
+  groupMinutes: number | null
 }
 
 /** The targets of the server, or of the signed-in user, and what they may choose. */
@@ -1999,6 +2979,10 @@ export type NotificationDraft = {
   userKey?: string
   events?: NotificationEvent[]
   enabled?: boolean
+  /** 1 to 60 messages a minute, 0 for no cap. */
+  perMinute?: number
+  /** 1 to 1440 minutes, 0 to send each message at once. */
+  groupMinutes?: number
 }
 
 /** Whose targets: the server's (Settings › Notifications) or the signed-in user's own. */
@@ -2024,16 +3008,82 @@ export const deleteNotificationTarget = (scope: NotificationScope, id: string) =
 
 /** Sends a test message at once: whether the target accepted it, and how it stands after. */
 export const testNotificationTarget = (scope: NotificationScope, id: string) =>
-  request<{ delivered: boolean; status: number | null; target: NotificationTarget }>(
-    'POST',
-    `${notificationsPath(scope)}/targets/${seg(id)}/test`,
+  request<{
+    delivered: boolean
+    status: number | null
+    /** Why it did not accept it: the start of its answer, without its address or tokens. */
+    answer: string | null
+    target: NotificationTarget
+  }>('POST', `${notificationsPath(scope)}/targets/${seg(id)}/test`)
+
+/** What came of a message sent to a target, as Recent deliveries lists it. */
+export type NotificationDelivery = {
+  id: number
+  eventId: string
+  /** The event's type, `test` for Send a test, `grouped` for a grouped message. */
+  type: NotificationEvent | 'test' | 'grouped'
+  title: string
+  /** How many events it held: more than one for a grouped message. */
+  events: number
+  outcome: 'delivered' | 'refused' | 'rejected' | 'failed' | 'dropped' | 'unreadable'
+  /** The HTTP status, or SMTP code, the target answered, when it answered. */
+  status: number | null
+  /** Why it did not accept the message, without its address or tokens. */
+  error: string | null
+  attempts: number
+  queuedAt: string
+  at: string
+}
+
+/** The last 100 deliveries of a target, newest first, kept 30 days. */
+export const fetchNotificationDeliveries = (
+  scope: NotificationScope,
+  id: string,
+  signal?: AbortSignal,
+) =>
+  request<NotificationDelivery[]>(
+    'GET',
+    `${notificationsPath(scope)}/targets/${seg(id)}/deliveries`,
+    undefined,
+    signal,
+  )
+
+/** The summaries a preview may show. */
+export type SummaryEvent = 'weekly_summary' | 'monthly_summary' | 'yearly_summary'
+
+/** A summary as an email target would receive it now. */
+export type SummaryPreview = {
+  subject: string
+  text: string
+  html: string
+  start: string
+  end: string
+  /** Nothing to tell: no summary is sent. */
+  empty: boolean
+}
+
+/** The summary of the server (`user` omitted), or of a user, as it would be sent now. */
+export const fetchSummaryPreview = (event: SummaryEvent, user?: string, signal?: AbortSignal) =>
+  request<SummaryPreview>(
+    'GET',
+    `/notifications/preview?${new URLSearchParams(user ? { event, user } : { event })}`,
+    undefined,
+    signal,
   )
 
 export const lookupQuickConnect = (code: string, signal?: AbortSignal) =>
   request<QuickConnectRequest>('GET', `/quick-connect/${seg(code)}`, undefined, signal)
 
-export const approveQuickConnect = (code: string) =>
-  request<void>('POST', '/quick-connect', { code })
+/**
+ * Approves a device's code. The code alone approves nothing, as a link carries one: `confirmation`
+ * is the code as the person typed it from the device's screen. `identity` is what an account with
+ * two-step sign-in confirms the approval with.
+ */
+export const approveQuickConnect = (body: {
+  code: string
+  confirmation: string
+  identity?: TwoStepConfirmation
+}) => request<void>('POST', '/quick-connect', body)
 
 export const fetchUsers = (signal?: AbortSignal) =>
   request<User[]>('GET', '/users', undefined, signal)
@@ -2082,6 +3132,26 @@ export const deleteGroup = (id: string) => request<void>('DELETE', `/groups/${se
 export const addGroupMembers = (id: string, userIds: string[]) =>
   request<unknown>('POST', `/groups/${seg(id)}/members`, { userIds })
 
+/**
+ * Gives a group a server source (`uses`), or takes it: the group joins or leaves the source's Used
+ * by, the rest of it unchanged. Answers the source; 409 `used_by_everyone` for one used by everyone.
+ */
+export const setGroupSource = (groupId: string, sourceId: string, uses: boolean) =>
+  request<Addon>(uses ? 'PUT' : 'DELETE', `/groups/${seg(groupId)}/sources/${seg(sourceId)}`)
+
+/** The limits Reset to defaults would give a user or a group: a new user's. */
+export const fetchUserDefaults = (id: string, signal?: AbortSignal) =>
+  request<GroupLimits>('GET', `/users/${seg(id)}/defaults`, undefined, signal)
+
+export const fetchGroupDefaults = (id: string, signal?: AbortSignal) =>
+  request<GroupLimits>('GET', `/groups/${seg(id)}/defaults`, undefined, signal)
+
+/** Puts a user's limits back to a new user's; the rest of the account stays. */
+export const resetUser = (id: string) => request<User>('POST', `/users/${seg(id)}/reset`)
+
+/** Puts a group's limits back to a new user's; its following members take them at once. */
+export const resetGroup = (id: string) => request<Group>('POST', `/groups/${seg(id)}/reset`)
+
 export type InviteState = 'active' | 'used_up' | 'expired' | 'revoked'
 
 /**
@@ -2109,29 +3179,6 @@ export type Invite = {
  * server's public address is set.
  */
 export type NewInvite = Invite & { token: string; url: string | null }
-
-export type RegistrationCode = {
-  code: string
-  createdAt: string
-  usedAt: string | null
-  usedBy: string | null
-  /** Accounts created with it. */
-  uses: number
-  /** Accounts it may create, 0 for no limit. */
-  maxUses: number
-}
-
-export const fetchRegistrationCodes = (signal?: AbortSignal) =>
-  request<RegistrationCode[]>('GET', '/registration-codes', undefined, signal)
-
-export const createRegistrationCodes = (count: number, maxUses = 1) =>
-  request<RegistrationCode[]>('POST', '/registration-codes', { count, maxUses })
-
-export const updateRegistrationCode = (code: string, maxUses: number) =>
-  request<void>('PATCH', `/registration-codes/${seg(code)}`, { maxUses })
-
-export const deleteRegistrationCode = (code: string) =>
-  request<void>('DELETE', `/registration-codes/${seg(code)}`)
 
 export const fetchInvites = (signal?: AbortSignal) =>
   request<Invite[]>('GET', '/invites', undefined, signal)
@@ -2224,6 +3271,233 @@ export const fetchShareEpisodes = (seriesId: string, signal?: AbortSignal) =>
     signal,
   )
 
+/** What became of a stream an addon listed for a title (docs/playback.md, Which streams become versions). */
+type VersionStep =
+  | 'offered'
+  | 'nothing'
+  | 'torrents'
+  | 'blocked'
+  | 'duplicate'
+  | 'mirror'
+  | 'failed'
+  | 'hidden'
+  | 'group'
+
+/** A video's range as labels or the analysis tell it; empty when unknown. */
+type VersionRange = 'sdr' | 'hdr' | ''
+
+export type VersionBlock = {
+  id: string
+  /** The title it blocks the file for; empty for every title. */
+  item: string
+  everywhere: boolean
+  name: string
+  filename: string
+  size: number
+  reason: string
+  /** The administrator who blocked it; empty once their account is gone. */
+  by: string
+  at: string
+}
+
+export type VersionStream = {
+  name: string
+  filename: string
+  /** Bytes, 0 when the addon gives none. */
+  size: number
+  torrent: boolean
+  /** The version it makes; for a duplicate or a mirror, the one listed before; empty for nothing to play. */
+  version: string
+  step: VersionStep
+  /** For `hidden`, the rule; for `hidden` and `failed`, what it read or why. */
+  rule: string
+  detail: string
+  /** Its place among the versions offered, from 1; 0 when not offered. */
+  place: number
+  pinned: boolean
+  /** A torrent that did not start lately: listed, but passed over by plays that pick none. */
+  unstarted: boolean
+  block: VersionBlock | null
+  /** The error file its host answers instead of the videos now, by the host's name only; null when none. */
+  hostErrorFile: { host: string; since: string } | null
+  labels: {
+    height: number
+    codec: string
+    range: VersionRange
+    languages: string[]
+    multi: boolean
+    releases: string[]
+    elsewhere: string
+    /** Its source tier (disc, bluray, web, dvd or tv), empty when they name none. */
+    tier: string
+    audio: VersionAudio
+    /** Its edition (theatrical, extended, directors or imax), empty when they name none. */
+    edition: string
+  }
+  /** What the version rules know of it: its analysis, else RemuxDB, else its labels. */
+  facts: {
+    height: number
+    size: number
+    codec: string
+    range: VersionRange
+    languages: string[]
+    multi: boolean
+    tier: string
+    audio: VersionAudio
+    edition: string
+    /** Bytes a minute of its runtime, 0 when unknown. */
+    perMinute: number
+    /** Its score under the label rules, and the text of each rule matching it. */
+    score: number
+    labelRules: string[]
+  }
+  analyzed: boolean
+  /** Its scrubbing thumbnails, for a local folder's version only; null for any other. */
+  thumbnails: VersionThumbnails | null
+}
+
+/**
+ * How a local folder's version stands for its scrubbing thumbnails: `waiting` and `working` come
+ * from the queue, `none` is no result yet; `reason` tells why it `cannot` have them, and `count`
+ * how many were `made`, at `at`.
+ */
+export type VersionThumbnails = {
+  state: 'none' | 'waiting' | 'working' | 'made' | 'cannot' | 'failed'
+  reason: '' | 'no_index' | 'unreadable' | 'no_video' | 'error'
+  count: number
+  at: string | null
+}
+
+/** A version's best audio format; channels is 0 when unknown. */
+type VersionAudio = { lossless: boolean; object: boolean; channels: number }
+
+export type TitleVersionSource = {
+  id: string
+  name: string
+  /** The streams the title's description embeds for the video. */
+  embedded: boolean
+  /** Whether its list is known, stale and asked again, being asked, or failed lately (not asked again for a few minutes). */
+  state: 'known' | 'stale' | 'asked' | 'failed'
+  streams: VersionStream[]
+}
+
+/** What came of a version a play tried. */
+type PlayTryOutcome =
+  | 'plays'
+  | 'unreadable'
+  | 'unstarted'
+  | 'torrentCap'
+  | 'conversionCap'
+  | 'unplayable'
+  | 'notAnalyzed'
+  | 'passed'
+
+export type PlayDecision = {
+  at: string
+  user: string
+  device: string
+  app: string
+  /** Whether the app picked the version in its version menu. */
+  picked: boolean
+  tries: { version: string; name: string; outcome: PlayTryOutcome; reason: string }[]
+  /** The version chosen; empty when none played. */
+  chosen: string
+  delivery: 'directPlay' | 'directStream' | 'converted' | ''
+}
+
+/** A title's versions explained for a user, on Content › Versions. */
+export type TitleVersions = {
+  sources: TitleVersionSource[]
+  /** How many addons are still asked. */
+  pending: number
+  /** The criteria of Order versions by, in order. */
+  criteria: string[]
+  /** The user's quality group, a height; 0 for none. */
+  qualityGroup: number
+  /** The hide rules would hide every version, so none is hidden. */
+  keptAll: boolean
+  /** No version fits the quality group: the closest heights come first. */
+  closest: boolean
+  pin: {
+    version: string
+    name: string
+    filename: string
+    size: number
+    by: string
+    at: string
+    /** No addon lists the file now: the order stays as it is. */
+    missing: boolean
+  } | null
+  /** The blocks of the title's own files. */
+  blocks: VersionBlock[]
+  /** The title's last plays, the latest first, kept until a restart. */
+  decisions: PlayDecision[]
+}
+
+const asUser = (user: string) => (user === '' ? '' : `?${new URLSearchParams({ user })}`)
+
+/** Movies and series a user sees, for Content › Versions; the administrator signed in when user is empty. */
+export const searchVersionTitles = (user: string, term: string, signal?: AbortSignal) =>
+  request<AccountTitle[]>(
+    'GET',
+    `/titles?${new URLSearchParams(user === '' ? { search: term } : { search: term, user })}`,
+    undefined,
+    signal,
+  )
+
+export const fetchVersionTitle = (user: string, id: string, signal?: AbortSignal) =>
+  request<AccountTitle>('GET', `/titles/${seg(id)}${asUser(user)}`, undefined, signal)
+
+export const fetchVersionEpisodes = (user: string, seriesId: string, signal?: AbortSignal) =>
+  request<AccountTitle[]>(
+    'GET',
+    `/titles/${seg(seriesId)}/episodes${asUser(user)}`,
+    undefined,
+    signal,
+  )
+
+export const fetchTitleVersions = (id: string, user: string, signal?: AbortSignal) =>
+  request<TitleVersions>('GET', `/titles/${seg(id)}/versions${asUser(user)}`, undefined, signal)
+
+/** Asks the user's addons again for the title's streams; 429 asked_lately when asked within 20 seconds. */
+export const askVersionsAgain = (id: string, user: string) =>
+  request<void>('POST', `/titles/${seg(id)}/versions/search${asUser(user)}`)
+
+export const pinVersion = (id: string, version: string, user: string) =>
+  request<void>('PUT', `/titles/${seg(id)}/versions/pin`, { version, user })
+
+export const unpinVersion = (id: string) =>
+  request<void>('DELETE', `/titles/${seg(id)}/versions/pin`)
+
+export const blockVersion = (
+  id: string,
+  body: { version: string; user: string; everywhere: boolean; reason: string },
+) => request<VersionBlock>('POST', `/titles/${seg(id)}/versions/blocks`, body)
+
+export const unblockVersion = (id: string) => request<void>('DELETE', `/version-blocks/${seg(id)}`)
+
+/** The blocks of every title, the latest first. */
+export const fetchVersionBlocks = (signal?: AbortSignal) =>
+  request<VersionBlock[]>('GET', '/version-blocks', undefined, signal)
+
+/** Analyzes a version now; `failure` says what kept it from being analyzed, empty when it was. */
+export const analyzeVersion = (id: string, version: string, user: string) =>
+  request<{ failure: string }>(
+    'POST',
+    `/titles/${seg(id)}/versions/${seg(version)}/analyze${asUser(user)}`,
+  )
+
+/**
+ * Makes a local folder's version's thumbnails and chapter images again, dropping those it has;
+ * answers its thumbnails, waiting in the queue. 400 not_local for any other version, 409
+ * thumbnails_off while both settings are off.
+ */
+export const makeThumbnailsAgain = (id: string, version: string) =>
+  request<VersionThumbnails>('POST', `/titles/${seg(id)}/versions/${seg(version)}/thumbnails`)
+
+/** Longest block reason, in characters, as the server allows. */
+export const maxBlockReason = 200
+
 /** A user's share links, for an administrator. */
 export const fetchUserShareLinks = (userId: string, signal?: AbortSignal) =>
   request<ShareLink[]>('GET', `/users/${seg(userId)}/share-links`, undefined, signal)
@@ -2247,7 +3521,7 @@ export const acceptInvite = (token: string, body: { name: string; password: stri
 export type ServerKind = 'jellyfin' | 'emby' | 'plex'
 
 /** A server as the import reads it; `address` is the normalized one to send back. */
-export type JellyfinServer = { kind: ServerKind; name: string; version: string; address: string }
+type JellyfinServer = { kind: ServerKind; name: string; version: string; address: string }
 
 /** A user of the Jellyfin server, with the Polyfin user of the same name as a suggestion. */
 export type JellyfinUser = {
@@ -2273,31 +3547,20 @@ export type JellyfinImportEntry = {
   create?: NewUser
   watchData: boolean
   jellyfinPassword?: string
+  /** A Plex Home profile's PIN, for an import the server's owner signed in to Plex for. */
+  plexPin?: string
 }
 
 /**
  * Why an import, or one of its users, failed. `jellyfin_user_forbidden` fails that user only: the
  * server does not let the key read their data.
  */
-export type JellyfinImportProblem =
+type JellyfinImportProblem =
   | 'jellyfin_unreachable'
   | 'jellyfin_key_refused'
   | 'not_jellyfin'
   | 'internal'
   | 'jellyfin_user_forbidden'
-
-/** A title of a Jellyfin user's watch data that no Polyfin title matches. */
-export type JellyfinUnmatched = {
-  name: string
-  type: 'movie' | 'episode' | 'series'
-  year: number | null
-  /** For an episode: its series, season and number, when Jellyfin knows them. */
-  series: string | null
-  season: number | null
-  episode: number | null
-  /** `no_identifier`: no IMDb, TMDB or TVDB identifier; `not_found`: no Polyfin title has it. */
-  reason: 'no_identifier' | 'not_found'
-}
 
 /** How the import of one Jellyfin user's watch data goes. */
 export type JellyfinUserImport = {
@@ -2307,17 +3570,66 @@ export type JellyfinUserImport = {
   userName: string
   /** A finished import's `waiting` users were not reached: it stopped or failed first. */
   state: 'waiting' | 'reading' | 'saving' | 'done' | 'failed'
-  /** Items read from Jellyfin so far. */
+  /** Items read from Jellyfin so far, with watch data. */
   read: number
-  /** Titles newly marked played, resume points set, titles newly marked favorite. */
+  /**
+   * What was read of a Plex server: its library sections of movies and shows, the items they list,
+   * and the rows of the account's playback history; null for Jellyfin and Emby.
+   */
+  sections: number | null
+  listed: number | null
+  history: number | null
+  /** Items read that a Polyfin title matched. */
+  matched: number
+  /**
+   * Titles newly marked played, resume points set, titles newly marked favorite, titles rated,
+   * titles a Plex Watchlist added to the user's Watchlist playlist, and the collections and playlists created.
+   */
   played: number
   resumed: number
   favorites: number
-  /** Every title not matched; `unmatched` lists the first 500 only. */
+  ratings: number
+  watchlist: number
+  collections: number
+  playlists: number
+  /** Titles added to collections and playlists an earlier import brought. */
+  listTitles: number
+  /** The collections and playlists of the server that no title of matched, which were not created. */
+  skipped: { kind: 'collection' | 'playlist'; name: string }[]
+  /**
+   * Marks, resume points and favorites Polyfin already had, and collections and playlists an
+   * earlier import brought that already held every title found.
+   */
+  upToDate: number
+  /** Resume points without a date, which are not added. */
+  undated: number
+  /** The titles not matched, which the user's list of titles not found keeps. */
   unmatchedCount: number
-  unmatched: JellyfinUnmatched[]
   problem: JellyfinImportProblem | null
+  /** Why a user's import that ended without a problem added nothing; null otherwise. */
+  nothingAdded: JellyfinNothingAdded | null
 }
+
+/**
+ * Why a user's import added nothing: everything read was already in Polyfin; Jellyfin or Emby
+ * lists nothing played, in progress or favorite for the user; the Plex server has no movie or show
+ * library; the Plex owner, or the account signed in to Plex, has nothing played, in progress or
+ * rated; Plex lists no play of the account.
+ */
+type JellyfinNothingAdded =
+  | 'up_to_date'
+  | 'nothing_played'
+  | 'no_sections'
+  | 'plex_owner_nothing_watched'
+  | 'plex_nothing_watched'
+  | 'plex_no_history'
+
+/**
+ * What an import brings besides the titles played, the resume points and the favorites: the
+ * ratings, the server's collections, and each user's video playlists. A user's own import brings
+ * no collections unless the user may manage collections.
+ */
+export type ImportExtras = { ratings: boolean; collections: boolean; playlists: boolean }
 
 /**
  * The running import, else the last one since Polyfin started: a restart forgets it. `startedBy`
@@ -2329,6 +3641,7 @@ export type JellyfinImportStatus = {
   server: { kind: ServerKind; name: string; address: string }
   startedBy: { id: string; name: string }
   own: boolean
+  extras: ImportExtras
   state: 'running' | 'done' | 'stopped' | 'failed'
   problem: JellyfinImportProblem | null
   startedAt: string
@@ -2361,10 +3674,18 @@ export const connectJellyfin = (
 
 /**
  * Creates the new users (all or none), then starts importing the watch data in the background;
- * `import` is null when no entry asked for watch data.
+ * `import` is null when no entry asked for watch data. `plexOwner` reads each account of a Plex
+ * server with the token Plex gives its owner, whom the administrator signed in to Plex as. Each
+ * extra left out is brought.
  */
 export const startJellyfinImport = (
-  body: { kind: ServerKind; address: string; users: JellyfinImportEntry[] } & JellyfinCredentials,
+  body: {
+    kind: ServerKind
+    address: string
+    plexOwner?: boolean
+    users: JellyfinImportEntry[]
+  } & JellyfinCredentials &
+    Partial<ImportExtras>,
 ) =>
   request<{ created: User[]; import: JellyfinImportStatus | null }>(
     'POST',
@@ -2386,13 +3707,15 @@ export const stopJellyfinImport = async () =>
 /**
  * Whether the signed-in user may import their own watch history from another server, whether they
  * may import a Letterboxd export and the server's metadata addons search movies (without one, no
- * movie of an export is found), and their latest import, from a server or Letterboxd, running or
- * ended, else null.
+ * movie of an export is found), whether their import from a server may bring its collections (only
+ * for a user who may manage collections), and their latest import, from a server or Letterboxd,
+ * running or ended, else null.
  */
 export type OwnImport = {
   enabled: boolean
   letterboxd: boolean
   searchable: boolean
+  collections: boolean
   import: JellyfinImportStatus | LetterboxdImportStatus | null
 }
 
@@ -2400,32 +3723,84 @@ export const fetchOwnImport = (signal?: AbortSignal) =>
   request<OwnImport>('GET', '/account/server-import', undefined, signal)
 
 /**
- * Signs in to a Jellyfin or Emby server as `name`, and imports that user's watch data into the
- * signed-in user's account, in the background. The password is used for this import only.
+ * Imports the signed-in user's own watch data in the background: from a Jellyfin or Emby server,
+ * signing in there as `name`, with a password used for this import only; or from the Plex server
+ * `server` their sign-in to Plex reaches, with its Watchlist unless `watchlist` is false. Each
+ * extra left out is brought.
  */
-export const startOwnImport = async (body: {
-  kind: Exclude<ServerKind, 'plex'>
-  address: string
-  name: string
-  password: string
-}) =>
+export const startOwnImport = async (
+  body: (
+    | { kind: Exclude<ServerKind, 'plex'>; address: string; name: string; password: string }
+    | { kind: 'plex'; server: string; watchlist: boolean }
+  ) &
+    Partial<ImportExtras>,
+) =>
   (await request<{ import: JellyfinImportStatus }>('POST', '/account/server-import', body)).import
 
-/** Why a movie of a Letterboxd export was not found. */
-export type LetterboxdReason = 'not_found' | 'ambiguous' | 'search_failed'
+/** Where the user signs in to Plex: Plex's own sign-in page, until `expiresAt`. */
+export type PlexSignIn = { link: string; expiresAt: string }
 
-/** A movie of a Letterboxd export no title matched, with its Letterboxd link when it has one. */
-export type LetterboxdUnmatched = {
+/**
+ * A Plex account signed in: its name, its Plex Home's profiles (empty outside one), the profile
+ * read, and the servers that profile reaches, by machine identifier; `preselected` is the server
+ * administrators import from.
+ */
+export type PlexAccount = {
   name: string
-  year: number | null
-  link: string | null
-  reason: LetterboxdReason
+  profiles: { id: string; name: string; managed: boolean; protected: boolean }[]
+  profile: string
+  servers: { id: string; name: string; owned: boolean; preselected: boolean }[]
 }
+
+/**
+ * Whose sign-in to Plex: a user's own, under My account, or the server owner's, in the
+ * administrators' import.
+ */
+export type PlexSignInFor = 'own' | 'owner'
+
+const plexBases: Record<PlexSignInFor, string> = {
+  own: '/account/server-import/plex',
+  owner: '/jellyfin-import/plex',
+}
+
+/** Starts the user's sign-in to Plex, dropping the one held before. */
+export const startPlexSignIn = (of: PlexSignInFor) =>
+  request<PlexSignIn>('POST', `${plexBases[of]}/sign-in`)
+
+/** The account once Plex signed the user in, else pending. */
+export const pollPlexSignIn = (of: PlexSignInFor) =>
+  request<PlexAccount | { pending: true }>('POST', `${plexBases[of]}/sign-in/poll`)
+
+/** Reads the profile of the Plex Home chosen, with its PIN when it has one. */
+export const choosePlexProfile = (profile: string, pin: string) =>
+  request<PlexAccount>('POST', `${plexBases.own}/profile`, { profile, pin })
+
+/** Drops the user's sign-in to Plex, signing it out. */
+export const dropPlexSignIn = (of: PlexSignInFor) =>
+  request<void>('DELETE', `${plexBases[of]}/sign-in`)
+
+/**
+ * What an administrator's import reads of a Plex account once the owner signed in to Plex: all its
+ * watch data, all of it once its Plex Home profile's PIN is given, or its plays on the server only.
+ */
+export type PlexAccess = 'all' | 'pin' | 'plays'
+
+/** What the import reads of each account of the Plex server but the owner, by its identifier. */
+export const fetchPlexOwnerAccess = async (
+  body: { kind: 'plex'; address: string } & JellyfinCredentials,
+) =>
+  (
+    await request<{ accounts: Record<string, PlexAccess> }>(
+      'POST',
+      `${plexBases.owner}/owner`,
+      body,
+    )
+  ).accounts
 
 /**
  * An import of a Letterboxd export into a user's account, running or the last one since Polyfin
  * started: the switches it was started with, how many of its movies were looked up, then what it
- * added, and the movies not found (the first 500 in `unmatched`).
+ * added, and how many movies it did not find, which the user's list of titles not found keeps.
  */
 export type LetterboxdImportStatus = {
   id: string
@@ -2443,7 +3818,6 @@ export type LetterboxdImportStatus = {
   searched: number
   added: { played: number; watchlist: number; ratings: number; favorites: number }
   unmatchedCount: number
-  unmatched: LetterboxdUnmatched[]
 }
 
 /** Whether an import of the user's account is one of a Letterboxd export. */
@@ -2503,15 +3877,17 @@ export const startUserLetterboxdImport = (id: string, upload: LetterboxdUpload) 
 export type AppKind = 'nuvio' | 'stremio'
 
 /** An addon a profile of an app offers to install, by its index; its address is redacted. */
-export type AppAddon = { index: number; name: string; address: string }
+type AppAddon = { index: number; name: string; address: string }
 
 /**
  * A profile of an app account: the titles it holds, how many it played, resumed and keeps in its
  * library, and its addons. `name` is empty when the app gives none.
  */
-export type AppProfile = {
+type AppProfile = {
   id: string
   name: string
+  /** Asks for its PIN before it is read (`AppReaders.stremio.unlock`): it holds nothing until then. */
+  locked: boolean
   entries: number
   played: number
   resumes: number
@@ -2530,21 +3906,8 @@ export type AppAccount = {
   profiles: AppProfile[]
 }
 
-/**
- * A title of the app no Polyfin title matched, by its identifier in the app, or a series whose
- * episodes played could not be read (`episode_list`).
- */
-export type AppUnmatched = {
-  id: string
-  name: string
-  type: 'movie' | 'series' | 'episode'
-  season: number | null
-  episode: number | null
-  reason: 'other_identifier' | 'not_found' | 'episode_list'
-}
-
 /** An addon an import installs as the user's own, and why it was not. */
-export type AppAddonInstalled = {
+type AppAddonInstalled = {
   name: string
   address: string
   installed: boolean
@@ -2572,15 +3935,14 @@ export type AppImportStatus = {
   endedAt: string | null
   /**
    * Titles of the profile; then titles newly marked played, resume points set, and titles of the
-   * app's library newly added to the Watchlist view.
+   * app's library newly added to the Watchlist playlist.
    */
   read: number
   played: number
   resumed: number
   watchlist: number
-  /** Every title not matched; `unmatched` lists the first 500 only. */
+  /** The titles not matched, which the user's list of titles not found keeps. */
   unmatchedCount: number
-  unmatched: AppUnmatched[]
   addons: AppAddonInstalled[]
 }
 
@@ -2599,13 +3961,16 @@ export type NuvioSignIn = {
 export type StremioLink = { code: string; link: string }
 
 /** A Stremio link code polled: the account read once the code is approved, else pending. */
-export type StremioLinkPoll = AppAccount | { pending: true }
+type StremioLinkPoll = AppAccount | { pending: true }
 
 /**
  * What signs in to a Stremio account; the password is used for this sign-in only. With
  * `stayConnected`, the server keeps the auth key the sign-in gives, never the password.
  */
-export type StremioSignIn = { email: string; password: string; stayConnected: boolean }
+type StremioSignIn = { email: string; password: string; stayConnected: boolean }
+
+/** A profile of a Stremio account held under `key`, and the PIN that opens it. */
+export type StremioUnlock = { key: string; profile: string; pin: string }
 
 /**
  * How each app's account is read, for the Polyfin account it is imported into. Passwords are used
@@ -2619,6 +3984,11 @@ export type AppReaders = {
     pollLink: (stayConnected: boolean) => Promise<StremioLinkPoll>
     password: (body: StremioSignIn) => Promise<AppAccount>
     key: (key: string, stayConnected: boolean) => Promise<AppAccount>
+    /**
+     * Opens, with its PIN, a profile of the account held under `key` that asks for it, and answers
+     * the account with that profile read. The PIN goes to Stremio only, and is never kept.
+     */
+    unlock: (body: StremioUnlock) => Promise<AppAccount>
   }
 }
 
@@ -2632,6 +4002,7 @@ const appReaders = (base: string): AppReaders => ({
     password: (body) => request<AppAccount>('POST', `${base}/stremio/password`, body),
     key: (key, stayConnected) =>
       request<AppAccount>('POST', `${base}/stremio/key`, { key, stayConnected }),
+    unlock: (body) => request<AppAccount>('POST', `${base}/stremio/unlock`, body),
   },
 })
 
@@ -2639,7 +4010,7 @@ const appReaders = (base: string): AppReaders => ({
  * How an import of a connection went: when it ended, what it read and added, the titles it did not
  * find, and what kept it from reading the account.
  */
-export type AppConnectionImport = {
+type AppConnectionImport = {
   at: string
   read: number
   played: number
@@ -2651,6 +4022,7 @@ export type AppConnectionImport = {
     | 'rate_limited'
     | 'unexpected'
     | 'profile_missing'
+    | 'profile_locked'
     | 'sign_in_refused'
     | 'internal'
     | null
@@ -2695,16 +4067,20 @@ const appConnectionActions = (base: string): AppConnectionActions => ({
 export type AppImportChoice = { key: string; profile: string; addons: number[] }
 
 /**
- * Whether the signed-in user may import from an app, whether they may add their own addons, the
- * import into their account running, else their last one, else null, their connections, and how
- * often connections are imported, in minutes.
+ * Whether the signed-in user may import from an app, whether they may add their own addons, and
+ * whether parental control keeps them from it, the import into their account running, else their
+ * last one, else null, their connections, and how often connections are imported, in minutes.
  */
 export type OwnAppImport = {
   enabled: boolean
   addonsAllowed: boolean
+  /** Parental control or blocked genres keep the user to the server's addons: none is offered. */
+  parentalControl: boolean
   import: AppImportStatus | null
   connections: AppConnection[]
   importEveryMinutes: number
+  /** The server has POLYFIN_SECRET_KEY: a sign-in kept to stay connected is stored encrypted. */
+  secretKey: boolean
 }
 
 export const fetchOwnAppImport = (signal?: AbortSignal) =>
@@ -2726,9 +4102,13 @@ export const startOwnAppImport = async (body: AppImportChoice) =>
  */
 export type UserAppImport = {
   addonsAllowed: boolean
+  /** Parental control or blocked genres keep the user to the server's addons: none is offered. */
+  parentalControl: boolean
   import: AppImportStatus | null
   connections: AppConnection[]
   importEveryMinutes: number
+  /** The server has POLYFIN_SECRET_KEY: a sign-in kept to stay connected is stored encrypted. */
+  secretKey: boolean
 }
 
 export const fetchUserAppImport = (id: string, signal?: AbortSignal) =>
@@ -2742,6 +4122,106 @@ export const userAppConnections = (id: string) => appConnectionActions(`/users/$
 
 export const startUserAppImport = async (id: string, body: AppImportChoice) =>
   (await request<{ import: AppImportStatus }>('POST', `/users/${seg(id)}/app-import`, body)).import
+
+/**
+ * Whose titles not found: the signed-in user's, under My account, or a user's, for an
+ * administrator.
+ */
+export type ImportTitlesScope = 'own' | { userId: string }
+
+const importTitlesBase = (scope: ImportTitlesScope) =>
+  `${scope === 'own' ? '/account' : `/users/${seg(scope.userId)}`}/import-titles`
+
+/** The key of a scope in the query keys. */
+const importTitlesScopeKey = (scope: ImportTitlesScope) => (scope === 'own' ? 'own' : scope.userId)
+
+/**
+ * How many titles an import kept as not found, by source (`nuvio`, `stremio`, a tracking
+ * service, `letterboxd`, `jellyfin`, `emby`, `plex`): those not linked, and those linked.
+ */
+export type ImportTitleCount = { source: string; notFound: number; linked: number }
+
+/** The title a title not found is linked to, and who linked it, when. */
+export type ImportTitleLink = {
+  kind: 'movie' | 'series'
+  /** Its IMDb identifier, else empty; its TMDB identifier, else 0. */
+  imdb: string
+  tmdb: number
+  /** Empty when the title has no name Polyfin knows. */
+  name: string
+  year: number | null
+  linkedAt: string
+  linkedBy: { id: string; name: string } | null
+}
+
+/**
+ * A title an import did not find. `key` names it across imports: an episode has its series' key,
+ * so that one link covers all of a series' episodes. `name` is the series' for an episode, and may
+ * be empty; `ids` is what the source names it by, readable. `season` and `episode` are 0 for
+ * movies and series. `reason` is the source's own: for an app `other_identifier`, `not_found` or
+ * `episode_list`; for a tracking service `not_found` (no title has its identifiers) or
+ * `not_mapped` (Polyfin could not identify it); for the import by name and year `not_found`,
+ * `ambiguous` or `search_failed`; for a server `no_identifier`, `not_found`, `not_in_library`,
+ * `other_episode_order` or `episode_not_placed`.
+ */
+export type ImportTitle = {
+  key: string
+  kind: 'movie' | 'series' | 'episode'
+  name: string
+  year: number | null
+  ids: string
+  season: number
+  episode: number
+  reason: string
+  link: ImportTitleLink | null
+}
+
+export const fetchImportTitleCounts = async (scope: ImportTitlesScope, signal?: AbortSignal) =>
+  (
+    await request<{ sources: ImportTitleCount[] }>(
+      'GET',
+      importTitlesBase(scope),
+      undefined,
+      signal,
+    )
+  ).sources
+
+export const fetchImportTitles = async (
+  scope: ImportTitlesScope,
+  source: string,
+  signal?: AbortSignal,
+) =>
+  (
+    await request<{ titles: ImportTitle[] }>(
+      'GET',
+      `${importTitlesBase(scope)}/${seg(source)}`,
+      undefined,
+      signal,
+    )
+  ).titles
+
+/**
+ * Links the titles under `key` to `target`: an IMDb identifier, a TMDB one, or an IMDb or TMDB
+ * address. What they would import is added at once, and again at each later import. Fails with
+ * `invalid_target`, `kind_mismatch` or `target_not_found`.
+ */
+export const linkImportTitle = async (
+  scope: ImportTitlesScope,
+  source: string,
+  key: string,
+  target: string,
+) =>
+  (
+    await request<{ link: ImportTitleLink }>(
+      'PUT',
+      `${importTitlesBase(scope)}/${seg(source)}/links`,
+      { key, target },
+    )
+  ).link
+
+/** Removes the link of the titles under `key`: later imports skip them again; marks set stay. */
+export const unlinkImportTitle = (scope: ImportTitlesScope, source: string, key: string) =>
+  request<void>('DELETE', `${importTitlesBase(scope)}/${seg(source)}/links`, { key })
 
 export const fetchParentalRatings = (signal?: AbortSignal) =>
   request<ParentalRating[]>('GET', '/parental-ratings', undefined, signal)
@@ -2767,6 +4247,7 @@ export type ServerSecretName =
   | 'aniListClientSecret'
   | 'myAnimeListClientSecret'
   | 'metricsToken'
+  | 'updateToolToken'
 
 /** Reads one of the server's saved secrets again, for an administrator; never cached. */
 export const revealServerSecret = async (name: ServerSecretName) =>
@@ -2775,28 +4256,116 @@ export const revealServerSecret = async (name: ServerSecretName) =>
 /** Makes a new metrics token, which ends the former one; answers the settings. */
 export const newMetricsToken = () => request<Settings>('POST', '/settings/metrics-token')
 
+/** The web player's looks: the bundled LumaaGlaass, jellyfin-web's own, or the Custom texts. */
+export const webThemes = ['aiostreams', 'lumaaglaass', 'none', 'custom'] as const
+export type WebTheme = (typeof webThemes)[number]
+/** A user's web player theme: one of the server's themes, or '' for the server's own. */
+export type UserWebTheme = WebTheme | ''
+
+/** The server's theme, which users without their own get, and the themes a user may be given. */
+export type WebThemes = { serverTheme: WebTheme; themes: WebTheme[] }
+
+/** A file of the copy Polyfin keeps of a theme's files. */
+type ThemeCopyFile = {
+  /** The address it came from. */
+  address: string
+  /** How the Custom texts named it, for the files they name. */
+  text?: string
+  name: string
+  kind: 'stylesheet' | 'script' | 'font' | 'image'
+  /** Size in bytes. */
+  size: number
+}
+
+/** Why an address could not be saved in the copy. */
+type ThemeCopyReason =
+  | 'private_address'
+  | 'not_http'
+  | 'unavailable'
+  | 'timeout'
+  | 'wrong_type'
+  | 'too_large'
+  | 'total_too_large'
+  | 'too_many_files'
+  | 'too_deep'
+  | 'built_at_run_time'
+
+/** An address the copy could not save; `detail` is an HTTP status or the type a file came as. */
+export type ThemeCopyUnsaved = { address: string; reason: ThemeCopyReason; detail?: string }
+
+/** The copy Polyfin keeps of the files the Custom texts load from elsewhere. */
+export type ThemeCopy = {
+  /** The copy kept, null for none. */
+  copy: {
+    savedAt: string
+    /** Size of its files, in bytes. */
+    size: number
+    files: ThemeCopyFile[]
+    unsaved: ThemeCopyUnsaved[]
+  } | null
+  /** Names of the copy's files missing from its folder, such as after a restore elsewhere. */
+  missing: string[]
+  /** Addresses the Custom texts still load from elsewhere. */
+  outside: string[]
+  /** The limits of a copy: bytes of a file and in all, files, and levels followed. */
+  limits: { fileBytes: number; totalBytes: number; files: number; depth: number }
+}
+
+export const fetchThemeCopy = (signal?: AbortSignal) =>
+  request<ThemeCopy>('GET', '/settings/theme-copy', undefined, signal)
+/** Keeps a copy of the theme's files, or makes the copy again from where its files came from. */
+export const keepThemeCopy = () => request<ThemeCopy>('POST', '/settings/theme-copy')
+/** Removes the copy: the Custom texts name again the addresses its files came from. */
+export const removeThemeCopy = () => request<ThemeCopy>('DELETE', '/settings/theme-copy')
+
 /** The apps users are signed in with, by the name they send, each once whatever its case, sorted. */
 export const fetchSettingsApps = async (signal?: AbortSignal) =>
   (await request<{ apps: string[] }>('GET', '/settings/apps', undefined, signal)).apps
+
+/** The size presets of the badges over posters, the default first. */
+export const posterBadgeSizes = ['medium', 'small', 'large'] as const
+export type PosterBadgeSize = (typeof posterBadgeSizes)[number]
+
+/** A title whose poster previews the badges: the tags of its poster without and with them. */
+export type PosterPreview = { id: string; name: string; tag: string; badgedTag: string }
+
+/** Real titles of the administrator's libraries, with their posters' tags without and with badges at size. */
+export const fetchPosterPreviews = async (size: PosterBadgeSize, signal?: AbortSignal) =>
+  (
+    await request<{ titles: PosterPreview[] }>(
+      'GET',
+      `/settings/poster-previews?size=${encodeURIComponent(size)}`,
+      undefined,
+      signal,
+    )
+  ).titles
 
 /** The languages the server's addons were given, which users may choose as metadata language. */
 export const fetchMetadataLanguages = async (signal?: AbortSignal) =>
   (await request<{ languages: string[] }>('GET', '/metadata-languages', undefined, signal))
     .languages
 
+/** The web player themes users choose among: Custom while it has a text. */
+export const fetchWebThemes = (signal?: AbortSignal) =>
+  request<WebThemes>('GET', '/web-themes', undefined, signal)
+
 const scopePath = (scope: Scope) => `/scopes/${seg(scope)}`
 
 export const fetchAddons = (scope: Scope, signal?: AbortSignal) =>
   request<Addon[]>('GET', `${scopePath(scope)}/addons`, undefined, signal)
 
-export const installAddon = (scope: Scope, manifestUrl: string) =>
-  request<Addon>('POST', `${scopePath(scope)}/addons`, { manifestUrl })
+export const installAddon = (scope: Scope, manifestUrl: string, usedBy?: UsedBy) =>
+  request<Addon>('POST', `${scopePath(scope)}/addons`, { manifestUrl, usedBy })
 
 export const updateAddon = (scope: Scope, id: string, patch: AddonPatch) =>
   request<Addon>('PATCH', `${scopePath(scope)}/addons/${seg(id)}`, patch)
 
 export const refreshAddon = (scope: Scope, id: string) =>
   request<Addon>('POST', `${scopePath(scope)}/addons/${seg(id)}/refresh`)
+
+/** Refresh everything: the manifest again, and the addon's pages, descriptions and version lists made old. */
+export const refreshAddonAll = (scope: Scope, id: string) =>
+  request<Addon>('POST', `${scopePath(scope)}/addons/${seg(id)}/refresh-all`)
 
 export const addIptvSource = (scope: Scope, source: NewIptvSource) =>
   request<Addon>('POST', `${scopePath(scope)}/iptv`, source)
@@ -2836,14 +4405,74 @@ export const fetchRcloneRemotes = (query: {
     query,
   )
 
-/** Starts a scan of a local folder; the answer tells the scan under way. */
-export const scanLocalFolder = (id: string) =>
-  request<Addon>('POST', `${scopePath('shared')}/folders/${seg(id)}/scan`)
-
 export const fetchUnmatchedFiles = (id: string, signal?: AbortSignal) =>
   request<{ total: number; files: UnmatchedFile[] }>(
     'GET',
     `${scopePath('shared')}/folders/${seg(id)}/unmatched`,
+    undefined,
+    signal,
+  )
+
+/**
+ * A unit of a local folder a looser rule matched: a file, a show's folder or a disc's folder, its
+ * first file and how many it has, what its name was read as, and the title it was matched to.
+ */
+export type LooserMatch = {
+  unit: string
+  path: string
+  files: number
+  title: string
+  year: number | null
+  imdbId: string
+  name: string
+  titleYear: number | null
+  rule: LooserRule
+}
+
+export const fetchLooserMatches = (id: string, signal?: AbortSignal) =>
+  request<{ total: number; units: LooserMatch[] }>(
+    'GET',
+    `${scopePath('shared')}/folders/${seg(id)}/looser`,
+    undefined,
+    signal,
+  )
+
+/** The shows of a shows folder, with how their files are numbered. */
+export const fetchFolderShows = (id: string, signal?: AbortSignal) =>
+  request<{ shows: FolderShow[] }>(
+    'GET',
+    `${scopePath('shared')}/folders/${seg(id)}/shows`,
+    undefined,
+    signal,
+  )
+
+/** Says how a show's files are numbered, and answers the folder. */
+export const setShowNumbering = (
+  id: string,
+  imdbId: string,
+  numbering: ShowNumbering,
+  group = '',
+) =>
+  request<Addon>(
+    'PUT',
+    `${scopePath('shared')}/folders/${seg(id)}/shows/${seg(imdbId)}/numbering`,
+    { numbering, group },
+  )
+
+/** The TMDB episode groups a show of a folder may be numbered in. */
+export const fetchShowNumberingGroups = (id: string, imdbId: string, signal?: AbortSignal) =>
+  request<{ groups: EpisodeGroup[]; lookup: '' | 'no_key' | 'unknown' | 'failed' }>(
+    'GET',
+    `${scopePath('shared')}/folders/${seg(id)}/shows/${seg(imdbId)}/groups`,
+    undefined,
+    signal,
+  )
+
+/** The shows of a local folder whose files hold episodes their metadata addon does not list. */
+export const fetchUnlistedEpisodes = (id: string, signal?: AbortSignal) =>
+  request<{ shows: UnlistedShow[] }>(
+    'GET',
+    `${scopePath('shared')}/folders/${seg(id)}/unlisted`,
     undefined,
     signal,
   )
@@ -2900,6 +4529,22 @@ export const saveAddonSettings = (scope: Scope, id: string, values: Record<strin
 
 export const deleteAddon = (scope: Scope, id: string) =>
   request<void>('DELETE', `${scopePath(scope)}/addons/${seg(id)}`)
+
+/**
+ * What removing an addon loses: the home rows on its catalogs and collections, its enabled
+ * libraries with their names, images and settings, the users who have one of its libraries hidden
+ * (a source added again gets new libraries, not hidden for them), and the recordings scheduled on
+ * its channels; recordings already made are kept.
+ */
+export type AddonRemoval = {
+  homeRows: number
+  libraries: number
+  hiddenLibraries: number
+  recordings: number
+}
+
+export const fetchAddonRemoval = (scope: Scope, id: string, signal?: AbortSignal) =>
+  request<AddonRemoval>('GET', `${scopePath(scope)}/addons/${seg(id)}/removal`, undefined, signal)
 
 /** Sets the order of the scope's addons; `ids` must list every addon of the scope. */
 export const orderAddons = (scope: Scope, ids: string[]) =>
@@ -3207,15 +4852,24 @@ export type StreamInfo = {
 }
 
 /** How a playback reaches its app; `stream` is HLS whose encoding is idle, so details are unknown. */
-export type Delivery = 'directPlay' | 'remux' | 'conversion' | 'stream'
+type Delivery = 'directPlay' | 'remux' | 'conversion' | 'stream'
 
 /**
  * What set the size of converted video: nothing below the source's, the GPU's 4K, the
- * processor's 1080p, HDR converted by the processor, the user's quality group, the settings'
- * maximum quality of converted video, or the bitrate limit.
+ * processor's 1080p, HDR converted by the processor, HDR converted by a GPU that only keeps up
+ * at a lower height, the user's quality group, the settings' maximum quality of converted
+ * video, the bitrate limit, or what the app's profile allows.
  */
-export type SizeLimit =
-  'source' | 'gpu' | 'processor' | 'toneMapping' | 'qualityGroup' | 'serverMax' | 'bitrate'
+type SizeLimit =
+  | 'source'
+  | 'gpu'
+  | 'processor'
+  | 'toneMapping'
+  | 'gpuToneMapping'
+  | 'qualityGroup'
+  | 'serverMax'
+  | 'bitrate'
+  | 'app'
 
 /** A device playing, as the dashboard shows it. */
 export type LiveSession = {
@@ -3245,6 +4899,11 @@ export type LiveSession = {
     /** Seconds, 0 when unknown. */
     runtime: number
     posterId: string
+    /**
+     * Whether the item's page opens in the web player: it is served and the signed-in user
+     * reaches the item, as Recent activity's titles.
+     */
+    linked: boolean
   } | null
   /** Seconds. */
   position: number
@@ -3278,7 +4937,31 @@ export type LiveSession = {
     steppedDownFrom: number
   } | null
   audio: { codec: string; channels: number; bitrate: number } | null
+  /** The version the play went on from once its version's source failed; empty when it did not. */
+  switchedVersion: string
+  bandwidth: PlayBandwidth
+  /** Where the version is read from; null when not known, as for a recording. */
+  origin: PlayOrigin | null
 }
+
+/**
+ * What a play moves now, in bytes per second averaged over the last 10 seconds: sent to the app,
+ * and received from its source. `redirected` is true when the app was sent to read the source
+ * itself, so that none of its bytes pass through Polyfin.
+ */
+type PlayBandwidth = { sent: number; received: number; redirected: boolean }
+
+/** The kinds of source a play reads from. */
+type OriginKind = 'addon' | 'torrent' | 'localFolder' | 'networkShare' | 'iptv'
+
+/** Where a play's version is read from: its addon, folder or IPTV source by name, and a torrent's peers. */
+type PlayOrigin = { kind: OriginKind; name: string; peers: number }
+
+/** What every play moves now, in bytes per second: sent to apps, and received from sources. */
+export type ServerBandwidth = { sent: number; received: number }
+
+export const fetchBandwidth = (signal?: AbortSignal) =>
+  request<ServerBandwidth>('GET', '/bandwidth', undefined, signal)
 
 export const fetchLiveSessions = (signal?: AbortSignal) =>
   request<LiveSession[]>('GET', '/sessions', undefined, signal)
@@ -3289,16 +4972,45 @@ export const stopLiveSession = (id: string) => request<void>('POST', `/sessions/
 export const messageLiveSession = (id: string, message: { text: string; timeout: number }) =>
   request<void>('POST', `/sessions/${seg(id)}/message`, message)
 
-export type TaskResult = {
+type TaskResult = {
   start: string
   end: string
   status: 'Completed' | 'Failed' | 'Cancelled'
   error: string
 }
 
+export type TriggerType = 'daily' | 'weekly' | 'interval' | 'startup'
+
 /**
- * A scheduled task; `interval` is in seconds, 0 for a task run by hand only or daily, and `daily`
- * the hour of the server's time zone a daily task runs at.
+ * When a task runs. `time` is in minutes from midnight in the server's time zone (daily, weekly),
+ * `day` 0 to 6 from Sunday (weekly), `interval` in minutes (interval), and `maxRuntime` the
+ * minutes after which a run is stopped, which only Jellyfin's API sets.
+ */
+export type TaskTrigger = {
+  type: TriggerType
+  time?: number
+  day?: number
+  interval?: number
+  maxRuntime?: number
+}
+
+/** Why a task's triggers cannot be changed; "" when they can. */
+export type TaskLock = '' | 'settings' | 'recordings' | 'notifications' | 'byHand'
+
+/** What a task's triggers may be: the types allowed, the interval's bounds in minutes, and more. */
+export type TaskLimits = {
+  locked: TaskLock
+  types: TriggerType[]
+  minInterval: number
+  maxInterval: number
+  maxTriggers: number
+  /** The task needs at least one trigger. */
+  keepOne: boolean
+}
+
+/**
+ * A scheduled task, with its triggers and the code's defaults; `custom` when an administrator
+ * changed its triggers.
  */
 export type Task = {
   id: string
@@ -3306,11 +5018,13 @@ export type Task = {
   name: string
   description: string
   category: string
-  interval: number
-  daily: number | null
   state: 'Idle' | 'Running' | 'Cancelling'
   last: TaskResult | null
   next: string | null
+  triggers: TaskTrigger[]
+  defaultTriggers: TaskTrigger[]
+  custom: boolean
+  limits: TaskLimits
 }
 
 export const fetchTasks = (language: Language, signal?: AbortSignal) =>
@@ -3319,6 +5033,14 @@ export const fetchTasks = (language: Language, signal?: AbortSignal) =>
 export const runTask = (id: string) => request<void>('POST', `/tasks/${seg(id)}/run`)
 
 export const stopTask = (id: string) => request<void>('POST', `/tasks/${seg(id)}/stop`)
+
+/** Replaces a task's triggers; answers the task as it is now. */
+export const saveTaskTriggers = (id: string, triggers: TaskTrigger[]) =>
+  request<Task>('PUT', `/tasks/${seg(id)}/triggers`, { triggers })
+
+/** Gives a task its default triggers back; answers the task as it is now. */
+export const resetTaskTriggers = (id: string) =>
+  request<Task>('DELETE', `/tasks/${seg(id)}/triggers`)
 
 /** A Live TV recording scheduled or under way; it runs from `from` to `until`, padding included. */
 export type Timer = {
@@ -3344,6 +5066,102 @@ export const fetchTimers = (signal?: AbortSignal) =>
   request<{ available: boolean; timers: Timer[]; converted?: ConvertedRecordings }>(
     'GET',
     '/timers',
+    undefined,
+    signal,
+  )
+
+/** What a channel Polyfin airs, or one of its time blocks, is built from. */
+export type ChannelSourceKind = 'collection' | 'smartlist' | 'series' | 'titles'
+
+/** An item a channel's source names: a collection, a smart list, a series or a movie. */
+type ChannelSourceItem = { id: string; name: string; kind: string }
+
+export type ChannelSource = { kind: ChannelSourceKind; items: ChannelSourceItem[] }
+
+/** A daily time block, in minutes past midnight in the server's time zone. */
+type ChannelBlock = {
+  start: number
+  end: number
+  source: ChannelSource
+  shuffle: boolean
+  /** How many movies and episodes the block airs, and how long they last in seconds. */
+  entries: number
+  runtime: number
+}
+
+/** A programme a channel airs now or next. */
+type ChannelAiring = {
+  name: string
+  episode: string
+  season: number
+  number: number
+  start: string
+  end: string
+}
+
+/** A 24/7 channel Polyfin airs from titles of the library. */
+export type OwnChannel = {
+  id: string
+  name: string
+  /** Its number, null to follow the other channels. */
+  number: number | null
+  enabled: boolean
+  source: ChannelSource
+  shuffle: boolean
+  blocks: ChannelBlock[]
+  entries: number
+  runtime: number
+  airing: ChannelAiring[]
+  epoch: string
+  updatedAt: string
+}
+
+export type OwnChannelDraft = {
+  name: string
+  number: number | null
+  enabled: boolean
+  source: ChannelSource
+  shuffle: boolean
+  blocks: Pick<ChannelBlock, 'start' | 'end' | 'source' | 'shuffle'>[]
+  /** Freezes the sources' titles again, the schedule starting again today. */
+  rebuild?: boolean
+}
+
+/** A collection or a smart list a channel may be built from. */
+type ChannelChoice = { id: string; name: string; source: string }
+
+export type ChannelChoices = { collections: ChannelChoice[]; smartLists: ChannelChoice[] }
+
+/** A movie or a series found for a channel. */
+export type ChannelTitle = {
+  id: string
+  name: string
+  kind: 'movie' | 'series'
+  year: number | null
+}
+
+export const fetchOwnChannels = (signal?: AbortSignal) =>
+  request<OwnChannel[]>('GET', '/live-tv/channels', undefined, signal)
+
+export const fetchOwnChannel = (id: string, signal?: AbortSignal) =>
+  request<OwnChannel>('GET', `/live-tv/channels/${seg(id)}`, undefined, signal)
+
+export const createOwnChannel = (channel: OwnChannelDraft) =>
+  request<OwnChannel>('POST', '/live-tv/channels', channel)
+
+export const saveOwnChannel = (id: string, channel: OwnChannelDraft) =>
+  request<OwnChannel>('PUT', `/live-tv/channels/${seg(id)}`, channel)
+
+export const deleteOwnChannel = (id: string) =>
+  request<void>('DELETE', `/live-tv/channels/${seg(id)}`)
+
+export const fetchChannelChoices = (signal?: AbortSignal) =>
+  request<ChannelChoices>('GET', '/live-tv/channels/choices', undefined, signal)
+
+export const searchChannelTitles = (query: string, signal?: AbortSignal) =>
+  request<ChannelTitle[]>(
+    'GET',
+    `/live-tv/channels/titles?q=${encodeURIComponent(query)}`,
     undefined,
     signal,
   )
@@ -3385,6 +5203,9 @@ export type ShareHealth = {
   pollMinutes: number | null
 }
 
+/** The folders the settings choose for conversion, files being read and the cache. */
+type WorkFolderName = 'conversion' | 'reading' | 'cache'
+
 export type Health = {
   checkedAt: string
   process: {
@@ -3394,23 +5215,52 @@ export type Health = {
     memory: number
     heap: number
     goroutines: number
+    /** The last crash, as the start after it found it: null when none is kept. */
+    lastCrash: { at: string; trace: string } | null
   }
-  database: { reachable: boolean; size: number | null }
-  /** `torrents` is the part of `used` the pieces of torrents being played take. */
-  cache: { used: number; limit: number; sources: number; torrents: number } | null
+  /** `busy` when a check waited out its deadline for a connection, all in use: `size` is then null. */
+  database: { reachable: boolean; busy: boolean; size: number | null }
+  /**
+   * `torrents` is the part of `used` the pieces of torrents being played take; `kept` counts the
+   * files the cache holds parts of, `hits` and `misses` the bytes read since the start that were read
+   * before or kept from before the start and those read for the first time since they were fetched,
+   * and `days` how long parts are kept, 0 for not past a restart.
+   */
+  cache: {
+    used: number
+    limit: number
+    sources: number
+    kept: number
+    hits: number
+    misses: number
+    days: number
+    torrents: number
+  } | null
+  /** The image cache: images and bytes on disk against its limit, and in memory; null when unknown. */
+  images: ImageCacheUsage | null
   /**
    * How torrent streams play, null while they are off: their route ('' for none) and its name,
-   * the torrents playing, their peers, and the bytes shared since the server started.
+   * the WireGuard server for a tunnel, the torrents playing, their peers, those of them reached
+   * over uTP, and the bytes shared since the server started. Over a tunnel, `addresses` are its
+   * addresses and `lastHandshake` when its last handshake was, absent for none yet. `outages` are
+   * those of the route the plays went on through in the last 15 minutes, oldest first: when the
+   * route stopped answering, and for how many seconds.
    */
   torrents: {
-    route: 'interface' | 'proxy' | ''
+    route: 'interface' | 'proxy' | 'wireguard' | ''
     name: string
+    addresses?: string[]
+    lastHandshake?: string
     playing: number
+    /** The bound on `playing`, Torrents at once, 0 for none. */
+    atOnce: number
     peers: number
+    utpPeers: number
     uploaded: number
+    outages?: { at: string; seconds: number }[]
   } | null
   disks: {
-    folder: 'cache' | 'recordings' | 'backups'
+    folder: WorkFolderName | 'recordings' | 'backups'
     path: string
     free: number
     used: number
@@ -3419,13 +5269,21 @@ export type Health = {
     low: boolean
   }[]
   transcoder: {
-    hardware: { method: string; device: string; encoders: string[]; toneMapping: boolean } | null
+    hardware: {
+      method: string
+      device: string
+      encoders: string[]
+      toneMapping: boolean
+      olderDrivers: boolean
+      hdr: HDRPath | null
+    } | null
     encoders: string[]
     conversions: number
     limit: number
     remuxes: number
     maxHeight: number
     enabled: boolean
+    olderDriverFFmpeg: OlderDriverFFmpeg | null
   } | null
   thumbnails: {
     enabled: boolean
@@ -3433,6 +5291,8 @@ export type Health = {
     queueLength: number
     working: boolean
     pausedHosts: { host: string; until: string }[]
+    /** The local folders' files with thumbnails, those that cannot have them and those that failed. */
+    local: { made: number; cannot: number; failed: number }
   } | null
   addons: AddonHealth[]
   /** How the enabled network shares are watched for changes; `watchFolders` tells whether they are. */
@@ -3473,7 +5333,36 @@ export type Health = {
     waiting: number
     kept: number
   } | null
+  /**
+   * How artwork downloads fared in the last hour, null when unknown: those that failed, by kind and
+   * by host name (ten at most, most first), and the hosts that asked to wait, asked nothing until
+   * then, or showed they were overloaded, asked less at once until then. No address is told.
+   */
+  artwork: {
+    failed: number
+    kinds: Partial<Record<ArtworkFailureKind, number>>
+    hosts: { host: string; failed: number }[]
+    waiting: { host: string; until: string }[]
+    spared: { host: string; until: string }[]
+  } | null
+  /**
+   * How people's lookups on TMDB stand, null when unknown: whether a TMDB key is saved, the people
+   * TMDB found and did not find, those whose last lookup failed, the lookups waiting or under way,
+   * and TMDB's last 429 since the start, with the seconds it asked to wait (0 for none).
+   */
+  people: {
+    keySaved: boolean
+    found: number
+    notFound: number
+    failing: number
+    waiting: number
+    limitedAt: string | null
+    limitWait: number
+  } | null
 }
+
+/** The kinds of artwork download failures System › Health counts. */
+type ArtworkFailureKind = 'not_found' | 'rate_limited' | 'timeout' | 'server_error' | 'other'
 
 /**
  * A stored secret POLYFIN_SECRET_KEY cannot decrypt: a server setting (the SMTP password is one,
@@ -3481,7 +5370,13 @@ export type Health = {
  * notification target, by its name, of a user or of the server (`user` null).
  */
 export type UnreadableSecret = {
-  setting: ServerSecretName | 'smtpPassword' | 'torrentProxyPassword' | null
+  setting:
+    | ServerSecretName
+    | 'smtpPassword'
+    | 'torrentProxyPassword'
+    | 'torrentWireGuard'
+    | 'backupPassphrase'
+    | null
   service: TrackingServiceName | null
   app: AppKind | null
   target: string | null
@@ -3494,6 +5389,23 @@ export type UnreadableSecret = {
   certificate: boolean
   /** The two-step sign-in of `user`. */
   twoStep: boolean
+}
+
+/**
+ * The peers a torrent that did not start found: those connected, and the others by how their last
+ * dial or connection ended, each count left out at 0.
+ */
+type TorrentPeerCounts = {
+  found: number
+  connected: number
+  timedOut?: number
+  refused?: number
+  unreachable?: number
+  proxy?: number
+  closed?: number
+  left?: number
+  other?: number
+  untried?: number
 }
 
 /**
@@ -3510,17 +5422,39 @@ export type HealthProblem = {
   transient: boolean
 } & (
   | { code: 'database' }
-  | { code: 'disk'; folder: 'cache' | 'recordings' | 'backups'; free: number }
-  | { code: 'addon'; name: string; owner?: NonNullable<Owner>; failure: string }
+  | { code: 'disk'; folder: WorkFolderName | 'recordings' | 'backups'; free: number }
+  /**
+   * An addon whose last request failed. `until` is set while the background requests to its server
+   * pause, as it did not answer requests for versions in time: when the pause ends.
+   */
+  | {
+      code: 'addon'
+      name: string
+      owner?: NonNullable<Owner>
+      failure: string
+      until?: string
+    }
+  /** Searches leave out the addon's search catalog for a few minutes: it did not answer in time. */
+  | { code: 'search_late'; name: string; owner?: NonNullable<Owner> }
+  /**
+   * A smart list whose catalogs were all removed with their addons or dropped by them: it is kept
+   * and lists nothing until other catalogs are chosen. `owner` is set for a user's own list.
+   */
+  | { code: 'smart_list_empty'; name: string; owner?: NonNullable<Owner> }
+  /** A channel of the server's own titles airs a source that no longer exists. */
+  | { code: 'virtual_channel_source'; name: string }
   | { code: 'conversions_full' }
   | { code: 'thumbnails_paused'; host: string }
+  /** A host answers the same error file instead of the videos, since `at`: `host` names it, by name only. */
+  | { code: 'host_error_file'; host: string; at: string }
   | { code: 'unknown_proxy'; address: string }
   | { code: 'discovery_port'; port: number }
   | { code: 'discovery_address'; address: string }
   | { code: 'dlna_port'; port: number }
   /**
    * Torrent streams do not play: their route cannot carry them, `failure` tells why, `name` names
-   * the interface or the proxy; or the proxy offers no UDP ASSOCIATE.
+   * the interface or the proxy, and `grace`, while torrents playing ride the outage out, how long
+   * they go on for; or the proxy offers no UDP ASSOCIATE.
    */
   | {
       code: 'torrent_route'
@@ -3531,10 +5465,44 @@ export type HealthProblem = {
         | 'interface_unsupported'
         | 'proxy_unreachable'
         | 'proxy_refused'
+        | 'wireguard_endpoint'
+        | 'wireguard_down'
+        | 'wireguard_handshake'
         | 'no_route'
       name?: string
+      /** While torrents play through the outage, the seconds they go on for, the most. */
+      grace?: number
     }
   | { code: 'torrent_udp'; name: string }
+  /**
+   * A torrent did not start in time lately: `failure` tells why, and `peers`, when some were found,
+   * why they did not connect.
+   */
+  | {
+      code: 'torrent_start'
+      failure: 'no_udp' | 'refused' | 'no_trackers' | 'no_peers' | 'silent'
+      peers?: TorrentPeerCounts
+    }
+  /**
+   * A torrent stopped while it played lately, `at`, as its route did not answer: `failure` tells
+   * why, a route failure's kind, or 'route' for another; `name` names the interface, the proxy or
+   * the WireGuard server.
+   */
+  | {
+      code: 'torrent_stopped'
+      failure:
+        | 'interface_missing'
+        | 'interface_down'
+        | 'interface_no_address'
+        | 'proxy_unreachable'
+        | 'proxy_refused'
+        | 'wireguard_endpoint'
+        | 'wireguard_down'
+        | 'wireguard_handshake'
+        | 'route'
+      name?: string
+      at: string
+    }
   | { code: 'proxy_name_unresolved'; name: string }
   | { code: 'secrets_unreadable'; secrets: UnreadableSecret[] }
   | { code: 'secrets_plaintext' }
@@ -3546,13 +5514,69 @@ export type HealthProblem = {
   | { code: 'tuner'; name: string; failure: string }
   | { code: 'folder'; name: string; failure: string; share?: Exclude<FolderShare, ''> }
   | { code: 'folder_unwatched'; name: string; failure: string; share?: Exclude<FolderShare, ''> }
+  /** A local folder's searches failed: the addon that failed most of them ('' for another failure) and why. */
+  | { code: 'folder_search'; name: string; addon?: string; failure: string }
+  /** No addon of the server describes and searches the titles of a local folder's files. */
+  | { code: 'folder_no_search'; name: string }
   | { code: 'task'; task: string }
   | { code: 'https_port'; port: number }
   | { code: 'https_files'; failure: 'missing' | 'unreadable' | 'mismatch'; file: string }
   | { code: 'https_renewal'; error: string }
   | { code: 'https_expiry'; expires: string }
+  /**
+   * Tesseract has no data for a language tracks are in: `file` is the file to add, `download` tells
+   * that Polyfin can download it, and `error` why its last download failed.
+   */
+  | {
+      code: 'subtitle_ocr_language'
+      name: string
+      file: string
+      download?: boolean
+      error?: string
+    }
   /** Every metadata addon of the server has a language: `name` is the first one's. */
   | { code: 'metadata_languages'; name: string }
+  /** NVENC needs a newer NVIDIA driver than the GPU's: `name` is the version it needs. */
+  | { code: 'nvidia_driver'; name: string }
+  /** NVENC cannot use the FFmpeg for older NVIDIA drivers: not downloaded, or failing too. */
+  | { code: 'nvidia_older_ffmpeg'; failure: 'download' | 'encode'; error: string }
+  /** The copy kept of the Custom theme's files misses `missing` of its `files`. */
+  | { code: 'theme_copy_missing'; missing: number; files: number }
+  /** Polyfin Desktop went back to `previous`, as `name` did not start, for `error`. */
+  | { code: 'desktop_rolled_back'; name: string; previous: string; error: string }
+  /**
+   * The data folder, `path`, is the default one of earlier versions, in the system's temporary
+   * folder: its files are to be moved to `moveTo`, the default one.
+   */
+  | { code: 'data_folder_temporary'; path: string; moveTo: string }
+  /**
+   * Another account of the system can change the data folder, `path`, which an administrator
+   * chose: another user owns it, or its group or others can write into it. `command` mends it.
+   */
+  | { code: 'data_folder_shared'; path: string; failure: 'owner' | 'mode'; command: string }
+  /**
+   * The collation version of the database `name` changed: PostgreSQL recorded `previous`, the
+   * system's collation library now provides `version`; `kind` is the database's locale provider.
+   */
+  | {
+      code: 'collation_version'
+      name: string
+      previous: string
+      version: string
+      kind: 'libc' | 'icu' | 'builtin'
+    }
+  /**
+   * A folder the settings chose could not be written into at start: `path` is the folder, `error`
+   * why; the cache in the data folder keeps its files until the next start.
+   */
+  | { code: 'folder_unwritable'; folder: WorkFolderName; path: string; error: string }
+  /**
+   * A folder the settings chose was left as it is at start: under `name`, the name of a folder
+   * Polyfin empties at each start, as `torrents`, it holds files Polyfin did not make. `path` is the
+   * folder chosen; the cache in the data folder keeps Polyfin's files until the next start. Given
+   * while the setting names that folder.
+   */
+  | { code: 'folder_occupied'; folder: WorkFolderName; path: string; name: string }
   | { code: 'connection_stopped'; kind: 'app'; name: AppKind; owner: NonNullable<Owner> }
   | {
       code: 'connection_stopped'
@@ -3602,8 +5626,11 @@ export type BackupDestinationKind = 's3' | 'sftp' | 'webdav'
  * A place backups are sent to. Its password, secret key and private key are never sent:
  * `secretSet` and `privateKeySet` tell whether they are set. `address` is an S3 endpoint, an SFTP
  * server's host or a WebDAV folder's address; `folder` an S3 prefix or an SFTP folder. `hostKey` is
- * the fingerprint of the SFTP server's key saved at the first connection. `ranAt` and `error` are
- * the last upload, `newestFile` and `newestAt` the newest backup there.
+ * the fingerprint of the SFTP server's key saved at the first connection or accepted since;
+ * `offeredHostKey` that of a key the server offered instead, refused until it is accepted;
+ * `hostKeyForgotten` tells that the key was forgotten, so that the next one offered is shown, not
+ * saved. `ranAt` and `error` are the last upload, `newestFile` and `newestAt` the newest backup
+ * there.
  */
 export type BackupDestination = {
   id: string
@@ -3618,6 +5645,8 @@ export type BackupDestination = {
   secretSet: boolean
   privateKeySet: boolean
   hostKey: string
+  offeredHostKey: string
+  hostKeyForgotten: boolean
   kept: number
   createdAt: string
   ranAt: string | null
@@ -3628,7 +5657,11 @@ export type BackupDestination = {
   unreadable: boolean
 }
 
-/** A destination to add, or the fields to change: those left out keep their values. */
+/**
+ * A destination to add, or the fields to change: those left out keep their values. `hostKey: ''`
+ * forgets the saved key; `acceptHostKey` is the destination's `offeredHostKey`, to accept it. When
+ * the server has offered another key by then, nothing is accepted.
+ */
 export type BackupDestinationDraft = {
   kind?: BackupDestinationKind
   address?: string
@@ -3640,6 +5673,7 @@ export type BackupDestinationDraft = {
   secret?: string
   privateKey?: string
   hostKey?: ''
+  acceptHostKey?: string
   kept?: number
 }
 
@@ -3667,8 +5701,17 @@ export const testBackupDestination = (id: string) =>
     `/backup/destinations/${seg(id)}/test`,
   )
 
-/** A backup that can be restored, `madeAt` read from its name; `size` is -1 when its destination does not tell it. */
-export type BackupFile = { name: string; size: number; madeAt: string; beforeRestore: boolean }
+/**
+ * A backup that can be restored, `madeAt` read from its name; `size` is -1 when its destination
+ * does not tell it; `encrypted` tells one encrypted with a passphrase.
+ */
+export type BackupFile = {
+  name: string
+  size: number
+  madeAt: string
+  beforeRestore: boolean
+  encrypted: boolean
+}
 
 /** The backups of the folder and of each destination, newest first. */
 export type BackupFiles = {
@@ -3681,7 +5724,9 @@ export const fetchBackupFiles = (signal?: AbortSignal) =>
 
 /**
  * A backup checked to be restored: `unreadable` counts by kind the stored keys in it that
- * POLYFIN_SECRET_KEY cannot decrypt; `serverName` is what the confirmation asks to type.
+ * POLYFIN_SECRET_KEY cannot decrypt; `serverName` is what the confirmation asks to type. A
+ * `locked` backup is encrypted and waits for its passphrase (see `unlockRestore`): it is checked
+ * once opened, and `unreadable` is empty until then.
  */
 export type RestorePlan = {
   id: string
@@ -3703,6 +5748,8 @@ export type RestorePlan = {
       number
     >
   >
+  encrypted: boolean
+  locked: boolean
   serverName: string
 }
 
@@ -3710,16 +5757,27 @@ export type RestorePlan = {
 export const prepareRestore = (destination: string | null, file: string) =>
   request<RestorePlan>('POST', '/backup/restore/prepare', { destination, file })
 
-/** Sends a backup file and checks it, to restore it. */
-export async function uploadRestore(file: File): Promise<RestorePlan> {
-  const response = await fetch(`${apiBase}/backup/restore/upload?name=${seg(file.name)}`, {
+/** Sends a file as the body of a POST to `path`, and answers the plan the server checked. */
+async function sendBackup(
+  path: string,
+  file: File,
+  headers: Record<string, string> = {},
+): Promise<RestorePlan> {
+  const response = await fetch(`${apiBase}${path}?name=${seg(file.name)}`, {
     method: 'POST',
-    headers: { Accept: 'application/json', 'Content-Type': 'application/octet-stream' },
+    headers: { Accept: 'application/json', 'Content-Type': 'application/octet-stream', ...headers },
     body: file,
   })
   if (!response.ok) throw await apiError(response)
   return (await response.json()) as RestorePlan
 }
+
+/** Sends a backup file and checks it, to restore it. */
+export const uploadRestore = (file: File) => sendBackup('/backup/restore/upload', file)
+
+/** Opens the encrypted backup prepared with its passphrase, then checks it. */
+export const unlockRestore = (id: string, passphrase: string) =>
+  request<RestorePlan>('POST', '/backup/restore/unlock', { id, passphrase })
 
 /** Restores the backup checked: Polyfin stops, restores it, and starts again. */
 export const startRestore = (id: string, serverName: string, anyway: boolean) =>
@@ -3728,6 +5786,40 @@ export const startRestore = (id: string, serverName: string, anyway: boolean) =>
 /** Drops a backup checked and not restored, with the file downloaded or sent for it. */
 export const discardRestore = (id: string) =>
   request<void>('POST', '/backup/restore/discard', { id })
+
+/** The address that downloads a backup of the folder as it is. */
+export const backupDownloadUrl = (name: string) => `${apiBase}/backup/files/${seg(name)}`
+
+/**
+ * The address that downloads the dump an encrypted backup of the folder holds, with the ticket
+ * `checkBackupPassphrase` gave: a plain link, which the browser saves as it comes.
+ */
+export const backupDecryptedUrl = (name: string, ticket: string) =>
+  `${apiBase}/backup/files/${seg(name)}/decrypted?ticket=${seg(ticket)}`
+
+/**
+ * Checks that a passphrase opens an encrypted backup of the folder, and answers the ticket that
+ * downloads it decrypted, once, within a minute.
+ */
+export const checkBackupPassphrase = (name: string, passphrase: string) =>
+  request<{ ticket: string }>('POST', `/backup/files/${seg(name)}/check`, { passphrase })
+
+/**
+ * Sends a backup from the setup page, before any administrator exists, with the setup code; then
+ * `setupRestoreUnlock`, `setupRestoreStart` or `setupRestoreDiscard` with the plan's id.
+ */
+export const setupRestoreUpload = (setupCode: string, file: File) =>
+  sendBackup('/setup/restore/upload', file, { 'X-Polyfin-Setup-Code': setupCode })
+
+export const setupRestoreUnlock = (setupCode: string, id: string, passphrase: string) =>
+  request<RestorePlan>('POST', '/setup/restore/unlock', { setupCode, id, passphrase })
+
+/** Restores the backup sent from the setup page: Polyfin stops, restores it, and starts again. */
+export const setupRestoreStart = (setupCode: string, id: string, anyway: boolean) =>
+  request<{ restoring: boolean }>('POST', '/setup/restore', { setupCode, id, anyway })
+
+export const setupRestoreDiscard = (setupCode: string, id: string) =>
+  request<void>('POST', '/setup/restore/discard', { setupCode, id })
 
 /**
  * A device that asked Polyfin for something over DLNA, known by its address. `userId` is the user
@@ -3815,8 +5907,79 @@ export const fetchHealth = (signal?: AbortSignal) =>
   request<Health>('GET', '/health', undefined, signal)
 
 /** Asks an addon for its manifest once; allowed once a minute per addon. */
+/**
+ * What the image cache keeps, or what clearing it freed: `files` images on disk of `used` bytes,
+ * which `limit` bounds, and `memoryImages` in memory, of `memoryBytes` bytes.
+ */
+export type ImageCacheUsage = {
+  files: number
+  used: number
+  limit: number
+  memoryImages: number
+  memoryBytes: number
+}
+
+/** Empties the image cache, answering what it freed. */
+export const clearImageCache = () => request<ImageCacheUsage>('POST', '/health/images/clear')
+
+/** Downloads the Tesseract data of a language, its code as in jpn.traineddata, into POLYFIN_TESSDATA_DIR. */
+export const downloadLanguage = (language: string) =>
+  request<void>('POST', `/health/languages/${seg(language)}/download`)
+
 export const checkAddon = (id: string) =>
   request<AddonHealth>('POST', `/health/addons/${seg(id)}/check`)
+
+/**
+ * What starts Polyfin again once it exits: Polyfin Desktop, a restart policy or service manager an
+ * administrator confirmed, or nothing Polyfin knows of.
+ */
+type RestartKind = 'desktop' | 'confirmed' | 'unknown'
+
+/** The update Polyfin Desktop offers: its download's progress, and whether its last install failed. */
+export type DesktopUpdate = {
+  version: string
+  notes: string
+  installing: boolean
+  percent: number
+  failed: boolean
+}
+
+/** How the server's actions stand; `startedAt` changes once a restart has happened. */
+export type ServerActions = {
+  version: string
+  startedAt: string
+  restart: RestartKind
+  system: ServerSystem
+  desktopUpdate: DesktopUpdate | null
+  updateTool: boolean
+}
+
+export const fetchServerActions = (signal?: AbortSignal) =>
+  request<ServerActions>('GET', '/server', undefined, signal)
+
+/**
+ * Restarts Polyfin, confirmed with the password or a two-step code; `anyway` once the warning that
+ * nothing may start it again was seen. Answers when the stopping Polyfin started.
+ */
+export const restartServer = (confirmation: TwoStepConfirmation, anyway: boolean) =>
+  request<{ startedAt: string }>('POST', '/server/restart', { ...confirmation, anyway })
+
+/**
+ * Makes a new signing secret, then restarts Polyfin as `restartServer` does, with its confirmation
+ * and its answer: everything Polyfin signed before stops working.
+ */
+export const replaceSigningSecret = (confirmation: TwoStepConfirmation, anyway: boolean) =>
+  request<{ startedAt: string }>('POST', '/server/signing-secret', { ...confirmation, anyway })
+
+/** Has Polyfin Desktop install the update it offers, as its tray's Install Polyfin does. */
+export const installDesktopUpdate = (confirmation: TwoStepConfirmation, version: string) =>
+  request<{ version: string }>('POST', '/server/desktop-update', { ...confirmation, version })
+
+/** What the update tool answered Update now: its HTTP status and the start of its body. */
+export type UpdateToolAnswer = { status: number; body: string }
+
+export const askUpdateTool = (confirmation: TwoStepConfirmation) =>
+  request<UpdateToolAnswer>('POST', '/server/update-tool', confirmation)
 
 /** The log lines written after the first `after`, and the `after` of the next call. */
 export const fetchLogLines = (after: number, limit: number, signal?: AbortSignal) =>
@@ -3828,6 +5991,9 @@ export const fetchLogLines = (after: number, limit: number, signal?: AbortSignal
   )
 
 export const logDownloadUrl = `${apiBase}/logs/download`
+
+/** What every goroutine of the server is doing, as text, for a request that never answers. */
+export const goroutinesDownloadUrl = `${apiBase}/health/goroutines`
 
 /** Whose playbacks the statistics cover: everyone's (administrators) or the signed-in user's. */
 export type StatisticsScope = 'server' | 'own'
@@ -3853,6 +6019,8 @@ export type Statistics = {
   unit: 'day' | 'month'
   plays: number
   played: number
+  /** Bytes sent to the apps; playbacks Polyfin did not relay, or did not count, are left out. */
+  sent: number
   users: { id: string; name: string; plays: number; played: number }[]
   buckets: { start: string; played: number; users: { id: string; played: number }[] }[]
   movies: RankedTitle[]
@@ -3890,6 +6058,8 @@ export type HistoryEntry = {
   method: PlayMethod
   /** Whether a guest played it through the user's share link. */
   shared: boolean
+  /** Bytes sent to the app; 0 when none passed through Polyfin, or they were not counted. */
+  sent: number
 }
 
 export type HistoryPage = { items: HistoryEntry[]; total: number }
@@ -3952,32 +6122,57 @@ export const fetchVariables = (signal?: AbortSignal) =>
 
 export const queryKeys = {
   status: ['status'] as const,
+  themeCopy: ['settings', 'theme-copy'] as const,
   session: ['session'] as const,
   myDevices: ['account', 'devices'] as const,
   ownTwoStep: ['account', 'two-step'] as const,
+  ownProvider: ['account', 'provider'] as const,
   ownResume: ['account', 'resume'] as const,
   ownHidden: ['account', 'hidden'] as const,
+  ownNextUp: ['account', 'next-up'] as const,
   ownHomeRows: ['account', 'home-rows'] as const,
+  ownTrackChoices: ['account', 'track-choices'] as const,
+  ownTaste: ['account', 'taste'] as const,
   homeRows: ['home-rows'] as const,
   homeRowChoices: ['home-rows', 'choices'] as const,
+  /** Under homeRows: refreshed with the rows. */
+  homeRowPreview: (userId: string) => ['home-rows', 'preview', userId] as const,
   ownReminders: ['account', 'reminders'] as const,
   reminderSettings: ['account', 'reminders', 'settings'] as const,
   ownMetadataLanguage: ['account', 'metadata-language'] as const,
+  ownAudioRegion: ['account', 'audio-region'] as const,
+  ownSound: ['account', 'sound'] as const,
   /** The languages the server's addons were given: refreshed with the server's addons. */
   metadataLanguages: ['scopes', 'shared', 'metadata-languages'] as const,
+  ownWebTheme: ['account', 'web-theme'] as const,
+  /** The server's theme and the themes offered: refreshed as the settings are saved. */
+  webThemes: ['web-themes'] as const,
   tracking: ['account', 'tracking'] as const,
   users: ['users'] as const,
+  registrationCodes: ['registration-codes'] as const,
   /** Prefix of every group query: invalidating it refreshes the list and each group. */
   groups: ['groups'] as const,
   group: (id: string) => ['groups', id] as const,
+  /** What Reset to defaults would give a user or a group. */
+  userDefaults: (id: string) => ['users', id, 'defaults'] as const,
+  groupDefaults: (id: string) => ['groups', id, 'defaults'] as const,
   jellyfinImport: ['jellyfin-import'] as const,
   ownImport: ['account', 'server-import'] as const,
   ownAppImport: ['account', 'app-import'] as const,
   userAppImport: (id: string) => ['users', id, 'app-import'] as const,
   userLetterboxdImport: (id: string) => ['users', id, 'server-import'] as const,
+  /** Prefix of everything kept of a scope's titles not found: invalidated after a link. */
+  importTitles: (scope: ImportTitlesScope) =>
+    ['import-titles', importTitlesScopeKey(scope)] as const,
+  /** The counts by source, one query per scope shared by every import panel beside them. */
+  importTitleCounts: (scope: ImportTitlesScope) =>
+    ['import-titles', importTitlesScopeKey(scope), 'sources'] as const,
+  importTitleList: (scope: ImportTitlesScope, source: string) =>
+    ['import-titles', importTitlesScopeKey(scope), 'source', source] as const,
   userDevices: (id: string) => ['users', id, 'devices'] as const,
   settings: ['settings'] as const,
   settingsApps: ['settings', 'apps'] as const,
+  posterPreviews: (size: PosterBadgeSize) => ['settings', 'poster-previews', size] as const,
   parentalRatings: ['parental-ratings'] as const,
   /** Prefix of every scope: invalidating it refreshes all addons and libraries. */
   scopes: ['scopes'] as const,
@@ -3986,20 +6181,33 @@ export const queryKeys = {
   addons: (scope: Scope) => ['scopes', scope, 'addons'] as const,
   libraries: (scope: Scope) => ['scopes', scope, 'libraries'] as const,
   smartLists: (scope: Scope) => ['scopes', scope, 'smart-lists'] as const,
+  episodeOrders: ['episode-orders'] as const,
+  episodeOrder: (id: string) => ['episode-orders', id] as const,
+  orderedSeries: (search: string) => ['episode-orders', 'series', search] as const,
   smartList: (scope: Scope, id: string) => ['scopes', scope, 'smart-lists', id] as const,
+  /** What removing an addon loses, asked as its removal is confirmed; outside the scope prefix. */
+  addonRemoval: (scope: Scope, id: string) => ['addon-removal', scope, id] as const,
   smartChoices: (scope: Scope) => ['scopes', scope, 'smart-choices'] as const,
   smartPreview: (scope: Scope, list: SmartListDraft) =>
     ['scopes', scope, 'smart-preview', JSON.stringify(list)] as const,
   addonPreferences: ['account', 'addon-preferences'] as const,
   userContentChoices: ['user-content-choices'] as const,
+  lineupChannelChoices: (query: string, keys: readonly string[]) =>
+    ['channel-choices', query, ...keys] as const,
   apiKeys: ['api-keys'] as const,
   invites: ['invites'] as const,
-  registrationCodes: ['registration-codes'] as const,
   ownShareLinks: ['account', 'share-links'] as const,
   shareTitles: (term: string) => ['account', 'share-titles', term] as const,
   shareTitle: (id: string) => ['account', 'share-title', id] as const,
   shareEpisodes: (seriesId: string) => ['account', 'share-episodes', seriesId] as const,
   userShareLinks: (id: string) => ['users', id, 'share-links'] as const,
+  versionTitles: (user: string, term: string) => ['version-titles', user, term] as const,
+  versionTitle: (user: string, id: string) => ['version-title', user, id] as const,
+  versionEpisodes: (user: string, seriesId: string) =>
+    ['version-episodes', user, seriesId] as const,
+  /** A title's versions explained for a user: invalidated after a pin, a block or an analysis. */
+  titleVersions: (id: string, user: string) => ['title-versions', id, user] as const,
+  versionBlocks: ['version-blocks'] as const,
   activity: (query: ActivityQuery) => ['activity', query] as const,
   /** Everything a source's line-up shows: invalidated after any change to it. */
   lineup: (scope: Scope, id: string) => ['lineup', scope, id] as const,
@@ -4007,9 +6215,15 @@ export const queryKeys = {
   catalogGuides: (scope: Scope, target: CatalogTarget) =>
     ['catalog-guides', scope, target.addonId, target.catalogType, target.catalogId] as const,
   liveSessions: ['live-sessions'] as const,
+  bandwidth: ['bandwidth'] as const,
   tasks: (language: Language) => ['tasks', language] as const,
   timers: ['timers'] as const,
+  ownChannels: ['live-tv', 'channels'] as const,
+  ownChannel: (id: string) => ['live-tv', 'channels', id] as const,
+  channelChoices: ['live-tv', 'channels', 'choices'] as const,
+  channelTitles: (query: string) => ['live-tv', 'channels', 'titles', query] as const,
   health: ['health'] as const,
+  serverActions: ['server', 'actions'] as const,
   /** Under the health's key: refreshing the health refreshes them too. */
   healthProblems: (language: Language) => ['health', 'problems', language] as const,
   backup: ['backup'] as const,
@@ -4018,6 +6232,14 @@ export const queryKeys = {
   sources: ['sources'] as const,
   /** The unmatched files of a local folder. */
   unmatched: (id: string) => ['unmatched', id] as const,
+  /** The units of a local folder a looser rule matched. */
+  looser: (id: string) => ['looser', id] as const,
+  /** The shows of a local folder whose files hold episodes their metadata addon does not list. */
+  unlisted: (id: string) => ['unlisted', id] as const,
+  /** The shows of a shows folder, with how their files are numbered. */
+  folderShows: (id: string) => ['folderShows', id] as const,
+  /** The TMDB episode groups a show of a folder may be numbered in. */
+  numberingGroups: (id: string, imdbId: string) => ['numberingGroups', id, imdbId] as const,
   /** A title search for a local folder's unit. */
   folderTitles: (id: string, query: string, year: number | null) =>
     ['folder-titles', id, query, year] as const,
@@ -4034,24 +6256,52 @@ export const queryKeys = {
     ['history', scope, query] as const,
 }
 
-/** Any 401 means the session is gone: drop back to the sign-in page. */
-function handleUnauthenticated(error: unknown) {
-  if (error instanceof ApiError && error.status === 401) {
-    queryClient.setQueryData(queryKeys.session, null)
-  }
+/**
+ * Asks the session again: this browser may be signed in as another user now, as when another tab
+ * of the admin app, which shares its session, or the web client changed it. Joins a session request
+ * under way rather than cancelling it, which could leave the web client's token taken without the
+ * session it opened.
+ */
+function askSessionAgain() {
+  void queryClient.refetchQueries({ queryKey: queryKeys.session }, { cancelRefetch: false })
+}
+
+/**
+ * The session ended, as when the web client it was taken from signed out or changed user: the
+ * sign-in page shows, and the session is asked again, which takes the web client's sign-in if it is
+ * a new one.
+ */
+export function sessionEnded() {
+  if (queryClient.getQueryData(queryKeys.session) === null) return
+  queryClient.setQueryData(queryKeys.session, null)
+  askSessionAgain()
+}
+
+/**
+ * A 401 means the session is gone. A 403 "forbidden" may mean that another user signed in to this
+ * browser meanwhile: the session is asked again.
+ */
+function handleSessionErrors(error: unknown) {
+  if (!(error instanceof ApiError)) return
+  if (error.status === 401) sessionEnded()
+  else if (error.status === 403 && error.code === 'forbidden') askSessionAgain()
 }
 
 export const queryClient: QueryClient = new QueryClient({
-  queryCache: new QueryCache({ onError: handleUnauthenticated }),
+  queryCache: new QueryCache({ onError: handleSessionErrors }),
   mutationCache: new MutationCache({
     onError: (error, _variables, _context, mutation) => {
       // Sign-in and setup failures are credential errors, not an expired session.
       if (mutation.options.meta?.public === true) return
-      handleUnauthenticated(error)
+      handleSessionErrors(error)
     },
   }),
   defaultOptions: {
     queries: {
+      // An answer is read again on a component's mount only once 5 seconds old: the components of
+      // a page that load after its first answer, such as the nine that read the status, share it,
+      // and a page load asks each address once. Polls and invalidations read again regardless.
+      staleTime: 5_000,
       // Fail fast so an unreachable server is reported within seconds, not after long backoff.
       // Client errors (401, 403, 404) are answers, not transient failures.
       retry: (failureCount, error) =>
@@ -4059,3 +6309,77 @@ export const queryClient: QueryClient = new QueryClient({
     },
   },
 })
+
+/** The admin app's tabs in this browser, which share one session, tell each other it changed. */
+const sessionChannel =
+  typeof BroadcastChannel === 'function' ? new BroadcastChannel('polyfin-admin-session') : null
+sessionChannel?.addEventListener('message', askSessionAgain)
+
+/**
+ * The user the answers kept are for. When the session's user changes, signed out or another, they
+ * are forgotten before any page draws them, but for the public status. The other tabs are told
+ * whenever this one learns who is signed in, the first time included: the browser's session may
+ * have changed under them.
+ */
+let answersFor: string | null | undefined
+queryClient.getQueryCache().subscribe((event) => {
+  if (event.type !== 'updated' || event.action.type !== 'success') return
+  if (event.query.queryKey[0] !== queryKeys.session[0]) return
+  const user = (event.query.state.data as SessionUser | null | undefined)?.id ?? null
+  if (user === answersFor) return
+  if (answersFor !== undefined) {
+    queryClient.removeQueries({
+      predicate: (query) => query.queryKey[0] !== 'status' && query.queryKey[0] !== 'session',
+    })
+  }
+  answersFor = user
+  sessionChannel?.postMessage(null)
+})
+
+// The web client signing in or out in another tab changes the session this one may take.
+window.addEventListener('storage', (event) => {
+  if (event.key === null || event.key === webClientCredentialsKey) askSessionAgain()
+})
+
+// This fork's additions (kohnorw/polyfin).
+
+/** This fork's settings, part of Settings. */
+export type ForkSettings = {
+  /** Lets anyone who opens /register create a member account. */
+  registration: boolean
+  /** Asks /register for an unused registration code before its form. */
+  registrationCodes: boolean
+  /** Leaves series' specials (season 0) out of seasons, episode lists and Next Up. */
+  hideSpecials: boolean
+  /** Leaves out the versions whose file name names another title. */
+  exactTitleMatch: boolean
+  /** Offers the web player no HEVC, Dolby Vision or AV1 video, which browsers often show black. */
+  webSafeVideo: boolean
+  /** The web player's logo in place of Jellyfin's, as a data URL; empty for Jellyfin's. */
+  brandLogo: string
+  /** The CSS Polyfin serves for the AIOStreams theme (read-only). */
+  aioStreams?: { css: string; js: string }
+}
+
+export type RegistrationCode = {
+  code: string
+  createdAt: string
+  usedAt: string | null
+  usedBy: string | null
+  /** Accounts created with it. */
+  uses: number
+  /** Accounts it may create, 0 for no limit. */
+  maxUses: number
+}
+
+export const fetchRegistrationCodes = (signal?: AbortSignal) =>
+  request<RegistrationCode[]>('GET', '/registration-codes', undefined, signal)
+
+export const createRegistrationCodes = (count: number, maxUses = 1) =>
+  request<RegistrationCode[]>('POST', '/registration-codes', { count, maxUses })
+
+export const updateRegistrationCode = (code: string, maxUses: number) =>
+  request<void>('PATCH', `/registration-codes/${seg(code)}`, { maxUses })
+
+export const deleteRegistrationCode = (code: string) =>
+  request<void>('DELETE', `/registration-codes/${seg(code)}`)

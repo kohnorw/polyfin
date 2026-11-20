@@ -16,6 +16,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/eclipse"
 	"github.com/moodiness/polyfin/internal/loudness"
+	"github.com/moodiness/polyfin/internal/process"
 )
 
 // sine makes a mono sine of seconds at path, at amplitude, with tags, in
@@ -75,6 +76,7 @@ func near(gain *float64, want float64) bool {
 // the album tag its tracks agree on. The tracks read before gains were are
 // read again by the next scan, once.
 func TestReplayGainTagsAreRead(t *testing.T) {
+	t.Parallel()
 	ffmpeg, ffprobe := musicTools(t)
 	e := newEnv(t)
 	e.service.UseTools(ffprobe, ffmpeg)
@@ -149,7 +151,7 @@ func countedFFmpeg(t *testing.T, ffmpeg string) (string, func() int) {
 	dir := t.TempDir()
 	runs := filepath.Join(dir, "runs")
 	script := filepath.Join(dir, "ffmpeg")
-	if err := os.WriteFile(script, []byte("#!/bin/sh\necho run >> '"+runs+"'\nexec '"+ffmpeg+"' \"$@\"\n"), 0o755); err != nil {
+	if err := process.WriteExecutable(script, strings.NewReader("#!/bin/sh\necho run >> '"+runs+"'\nexec '"+ffmpeg+"' \"$@\"\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
 	return script, func() int {
@@ -201,6 +203,7 @@ func (e env) rescan(id accounts.ID) {
 // minutes never are. An album's gain is its tracks' loudness together
 // once each is known. With measuring off, FFmpeg never runs.
 func TestLocalTracksAreMeasured(t *testing.T) {
+	t.Parallel()
 	ffmpeg, ffprobe := musicTools(t)
 	e := newEnv(t)
 	e.service.UseTools(ffprobe, ffmpeg)

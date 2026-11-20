@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -88,6 +89,34 @@ func tuned(t *testing.T, addon *tvAddon) (testServer, string, accounts.User) {
 	return s, s.signIn("member", "tv"), user
 }
 
+// Of the users Live TV is enabled for, a member's apps are told of the
+// member alone, of no other user, shown or hidden; an administrator's,
+// of every one.
+func TestLiveTvInfoNamesOnlyTheMemberToAMember(t *testing.T) {
+	t.Parallel()
+	s, token, member := tuned(t, newTVAddon(t, false, ""))
+	hidden := s.user("hidden", nil)
+	shown := s.user("shown", func(c *accounts.UserChanges) { c.IsHidden = new(false) })
+	admin := s.user("admin", func(c *accounts.UserChanges) { c.IsAdministrator = new(true) })
+	enabled := func(token string) []string {
+		t.Helper()
+		var info LiveTvInfo
+		if status := s.get(t, "/LiveTv/Info", token, &info); status != http.StatusOK {
+			t.Fatalf("Live TV info: %d", status)
+		}
+		slices.Sort(info.EnabledUsers)
+		return info.EnabledUsers
+	}
+	if got := enabled(token); !slices.Equal(got, []string{member.ID.String()}) {
+		t.Errorf("enabled users told to a member: %v", got)
+	}
+	everyone := []string{member.ID.String(), hidden.ID.String(), shown.ID.String(), admin.ID.String()}
+	slices.Sort(everyone)
+	if got := enabled(s.signIn("admin", "dashboard")); !slices.Equal(got, everyone) {
+		t.Errorf("enabled users told to an administrator: %v, want %v", got, everyone)
+	}
+}
+
 var liveShapes = shapeRules{
 	dynamic: []string{"ImageTags", "ImageBlurHashes", "ProviderIds", "RequiredHttpHeaders"},
 	absent: map[string][]string{
@@ -111,11 +140,15 @@ var liveShapes = shapeRules{
 		"CurrentProgram": {"*"},
 		"Name":           {"*"}, "ETag": {"*"}, "VideoType": {"*"},
 		// Jellyfin leaves these out of programmes; Polyfin sends them on
-		// every item, and images whether asked or not.
-		"IsFolder":     {"livetv-program", "livetv-guided-programs", "livetv-guided-recommended"},
-		"LocationType": {"livetv-program", "livetv-guided-programs", "livetv-guided-recommended"},
-		"ImageTags":    {"livetv-guided-programs"}, "BackdropImageTags": {"livetv-channels", "livetv-guided-programs"},
-		"PrimaryImageAspectRatio": {"livetv-channel-items"}, "Container": {"livetv-channel"},
+		// every item, and images whether asked or not but in programme
+		// listings, which leave them out without EnableImages as Jellyfin
+		// does (livetv-guided-programs asks for none).
+		"IsFolder":          {"livetv-program", "livetv-guided-programs", "livetv-guided-recommended"},
+		"LocationType":      {"livetv-program", "livetv-guided-programs", "livetv-guided-recommended"},
+		"BackdropImageTags": {"livetv-channels"},
+		// The Live TV view has an image of Polyfin's, its emblem, which is
+		// wide; Jellyfin's has none.
+		"PrimaryImageAspectRatio": {"livetv-channel-items", "livetv-view"}, "Container": {"livetv-channel"},
 		// The recorded stream had no language and its bitrate was unknown.
 		"BitRate": {"livetv-playback-info"}, "IsAVC": {"livetv-playback-info"}, "Language": {"livetv-playback-info"},
 	},
@@ -144,6 +177,8 @@ func TestTVCatalogsListAsChannels(t *testing.T) {
 
 	var views QueryResult
 	s.get(t, "/UserViews", token, &views)
+	views.Items = libraryViews(views.Items)
+	// This fork's Live TV view opens on its categories, a view of folders.
 	if len(views.Items) != 1 || views.Items[0].Name != "Live TV" || views.Items[0].CollectionType != "folders" {
 		t.Fatalf("views: a live TV catalog must give the Live TV view and no library: %+v", views.Items)
 	}
@@ -280,6 +315,135 @@ func TestSearchFindsChannelsAndProgrammes(t *testing.T) {
 	s.limit(t, user, func(c *accounts.UserChanges) { c.LiveTv = new(false) })
 	if found := search(combined); len(found.Items) != 0 {
 		t.Errorf("channels found by a user without Live TV: %+v", found.Items)
+	}
+}
+
+// airingNow asks what airs now, as jellyfin-web's home does, until it
+// lists want, the programmes' names: the first answer lacks the pages
+// Polyfin does not keep yet, which it reads in the background meanwhile.
+func airingNow(t *testing.T, s testServer, token string, want ...string) {
+	t.Helper()
+	var programs QueryResult
+	for deadline := time.Now().Add(5 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+		s.get(t, "/LiveTv/Programs/Recommended?IsAiring=true", token, &programs)
+		if slices.Equal(programNames(programs), want) {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("airing now: %q, want %q", programNames(programs), want)
+		}
+	}
+}
+
+// The On Now rows ask what airs now: only today's guide is read for it,
+// not the week ahead.
+func TestProgrammesAiringNowReadTodaysGuideOnly(t *testing.T) {
+	t.Skip("this fork recommends no programmes: Live TV opens on its categories (see programs)")
+	t.Parallel()
+	addon := newTVAddon(t, true, "")
+	s, token, _ := tuned(t, addon)
+	airingNow(t, s, token, "Now")
+	if n := addon.guides.Load(); n > 2 {
+		t.Errorf("%d guide pages read for what airs now", n)
+	}
+}
+
+// jellyfin-web's home fills none of its rows before the request of its
+// Live TV section, what airs now, answers (#1042). So what airs now never
+// waits for an addon: it answers from the pages Polyfin keeps, with the
+// programmes of the channels kept, while an addon whose live TV catalog
+// does not answer is asked in the background, once however many requests
+// come. The other requests the home waits for wait for no addon either.
+// The stuck addon holds every request until the end of the test, or until
+// Polyfin gives up on it: an answer that waited for it comes only once one
+// of them ended, whatever the time the server takes under load.
+func TestOnNowNeverWaitsForAnAddon(t *testing.T) {
+	t.Skip("this fork recommends no programmes: Live TV opens on its categories (see programs)")
+	t.Parallel()
+	addon := newTVAddon(t, true, "")
+	s, token, user := tuned(t, addon)
+	// The guide of the first addon, read in the background, is kept.
+	airingNow(t, s, token, "Now")
+
+	// A second addon whose channels and guide never answer, and a movie
+	// catalog that does not either.
+	var asked, ended atomic.Int32
+	release := make(chan struct{})
+	answer := sync.OnceFunc(func() { close(release) })
+	stuck := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/manifest.json" {
+			manifest := stremio.Manifest{ID: "stuck", Name: "Stuck", Version: "1", Types: []string{"tv", "movie"},
+				Resources: []stremio.Resource{{Name: "catalog"}, {Name: "stream"}},
+				Catalogs: []stremio.Catalog{{Type: "tv", ID: "sport", Name: "Sport", Extra: []stremio.Extra{{Name: "date"}}},
+					{Type: "movie", ID: "films", Name: "Movies"}}}
+			manifest.BehaviorHints.EpgProvider = true
+			_ = json.NewEncoder(w).Encode(manifest)
+			return
+		}
+		if strings.HasPrefix(r.URL.Path, "/catalog/tv/") {
+			asked.Add(1)
+		}
+		defer ended.Add(1)
+		select {
+		case <-release:
+		case <-r.Context().Done():
+		}
+	}))
+	t.Cleanup(stuck.Close)
+	t.Cleanup(answer)
+	if _, err := s.addons.Install(t.Context(), addons.Shared(), stuck.URL+"/manifest.json", false); err != nil {
+		t.Fatal(err)
+	}
+
+	// What jellyfin-web's home asks before it fills its rows: the user, the
+	// home's sections, the views, and its Live TV section's programme.
+	id := user.ID.String()
+	home := []string{
+		"/Users/" + id,
+		"/DisplayPreferences/usersettings?userId=" + id + "&client=emby",
+		"/UserViews?userId=" + id,
+		"/LiveTv/Programs/Recommended?userId=" + id + "&isAiring=true&limit=1&imageTypeLimit=1&enableImageTypes=Primary&enableImageTypes=Thumb" +
+			"&enableImageTypes=Backdrop&enableTotalRecordCount=false&fields=ChannelInfo&fields=PrimaryImageAspectRatio",
+	}
+	for round := range 3 {
+		for _, path := range home {
+			status, body := s.call(http.MethodGet, path, app("tv", token), nil)
+			// Every request to the stuck addon was still pending when the
+			// answer came: it waited for none of them.
+			if n := ended.Load(); status != http.StatusOK || n != 0 {
+				t.Fatalf("round %d, %s: %d, after %d of the stuck addon's requests ended", round, path, status, n)
+			}
+			if strings.HasPrefix(path, "/LiveTv/") {
+				var programs QueryResult
+				if json.Unmarshal(body, &programs) != nil || !slices.Equal(programNames(programs), []string{"Now"}) ||
+					programs.Items[0].ChannelName != "One" {
+					t.Errorf("round %d, what airs now: %s", round, body)
+				}
+			}
+		}
+	}
+	// Its channels and today's guide are asked once each, in the
+	// background, the later requests sharing the fetches under way.
+	for deadline := time.Now().Add(2 * time.Second); asked.Load() < 2 && time.Now().Before(deadline); time.Sleep(10 * time.Millisecond) {
+	}
+	if n := asked.Load(); n != 2 {
+		t.Fatalf("the stuck catalog's pages were asked %d times, want 2", n)
+	}
+	// A listing that waits for the addon, as the Live TV page's channels
+	// do, waits for those fetches rather than asking again, and lists the
+	// channels once the addon answers.
+	listed := make(chan int, 1)
+	go func() {
+		status, _ := s.call(http.MethodGet, "/LiveTv/Channels", app("tv", token), nil)
+		listed <- status
+	}()
+	time.Sleep(200 * time.Millisecond)
+	if n := asked.Load(); n != 2 {
+		t.Errorf("the stuck catalog's pages were asked %d times by a listing that waits, want 2", n)
+	}
+	answer()
+	if status := <-listed; status != http.StatusOK {
+		t.Errorf("channels: %d", status)
 	}
 }
 
@@ -444,7 +608,7 @@ func TestChannelPlaysItsHLSStreamDirectly(t *testing.T) {
 	}
 	// The test addon is on a local address: the playlist is relayed, its
 	// segments named through Polyfin.
-	response, err := http.Get(source.Path)
+	response, err := testClient.Get(source.Path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -459,7 +623,7 @@ func TestChannelPlaysItsHLSStreamDirectly(t *testing.T) {
 			segment = strings.TrimSpace(line)
 		}
 	}
-	response, err = http.Get(segment)
+	response, err = testClient.Get(segment)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -471,7 +635,7 @@ func TestChannelPlaysItsHLSStreamDirectly(t *testing.T) {
 	// Parts of a file, as EXT-X-BYTERANGE asks them, are relayed as parts.
 	request, _ := http.NewRequest(http.MethodGet, segment, nil)
 	request.Header.Set("Range", "bytes=0-6")
-	if response, err := http.DefaultClient.Do(request); err != nil {
+	if response, err := testClient.Do(request); err != nil {
 		t.Error(err)
 	} else {
 		part, _ := io.ReadAll(response.Body)
@@ -482,7 +646,7 @@ func TestChannelPlaysItsHLSStreamDirectly(t *testing.T) {
 	}
 	// A link Polyfin did not sign relays nothing.
 	forged := strings.Replace(segment, "target=", "target=aHR0cDovL2V4YW1wbGUuY29tLw", 1)
-	if response, err := http.Get(forged); err != nil || response.StatusCode != http.StatusUnauthorized {
+	if response, err := testClient.Get(forged); err != nil || response.StatusCode != http.StatusUnauthorized {
 		t.Errorf("forged link: %v %v", response, err)
 	}
 
@@ -505,7 +669,7 @@ func TestChannelPlaysItsHLSStreamDirectly(t *testing.T) {
 	if status, _ := s.call(http.MethodPost, "/Items/"+channel+"/PlaybackInfo", app("tv", token), map[string]any{}); status != http.StatusNotFound {
 		t.Errorf("PlaybackInfo of a channel whose catalog was removed: %d", status)
 	}
-	if response, err := http.Get(segment); err != nil || response.StatusCode != http.StatusNotFound {
+	if response, err := testClient.Get(segment); err != nil || response.StatusCode != http.StatusNotFound {
 		t.Errorf("a segment of a channel whose catalog was removed: %v %v", response, err)
 	}
 }
@@ -517,9 +681,16 @@ func TestChannelPlaysThroughFFmpeg(t *testing.T) {
 		t.Skip("POLYFIN_TEST_FFMPEG is not set")
 	}
 	dir := t.TempDir()
-	cmd := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=12",
-		"-f", "lavfi", "-i", "sine=duration=12", "-c:v", "libx264", "-g", "24", "-pix_fmt", "yuv420p", "-c:a", "aac",
-		"-f", "hls", "-hls_time", "2", "-hls_list_size", "0", filepath.Join(dir, "one.m3u8"))
+	// The channel streams a live playlist of six seconds, without an
+	// EXT-X-ENDLIST: FFmpeg reads it at once, then waits for a next
+	// segment. It cuts six segments of a second at most, fewer than the
+	// eleven that follow a segment before the live window deletes it, so
+	// the first segment the playlist lists stays until the app leaves. A
+	// finished playlist, read whole at once, could lose it to the window
+	// before the app asks for it.
+	cmd := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=320x180:rate=24:duration=6",
+		"-f", "lavfi", "-i", "sine=duration=6", "-c:v", "libx264", "-g", "24", "-pix_fmt", "yuv420p", "-c:a", "aac",
+		"-f", "hls", "-hls_time", "2", "-hls_list_size", "0", "-hls_flags", "omit_endlist", filepath.Join(dir, "one.m3u8"))
 	if output, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("%v: %s", err, output)
 	}

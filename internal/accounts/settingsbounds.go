@@ -1,37 +1,62 @@
 package accounts
 
 import (
-	_ "embed"
 	"net/netip"
 	"slices"
+
+	"github.com/moodiness/polyfin/internal/i18n"
+	"github.com/moodiness/polyfin/internal/localization"
+	"github.com/moodiness/polyfin/internal/torrent"
+	"github.com/moodiness/polyfin/internal/webtheme"
 )
 
-// DefaultCustomCss and DefaultCustomJs are the web player's custom CSS and
-// script on a new server: the AIOStreams look (aiostreams_theme.css), held
-// whole in the setting (it fetches only the Inter font), and no script.
-// Changing the CSS takes a new migration replacing the column default and
-// the values still equal to the last one, which
-// scripts/aiostreams-look-migration.py writes (0145, 0147, 0148).
-//
-//go:embed aiostreams_theme.css
-var DefaultCustomCss string
+// LumaaGlaassCss and LumaaGlaassJs are the custom CSS and script Polyfin
+// serves to the web player when its theme is WebThemeLumaaGlaass, the
+// default: they load the LumaaGlaass theme Polyfin bundles (see webtheme),
+// from the web client's own address, with its settings page for each user
+// and its home carousel off. The page takes the script's options as its
+// defaults. Their addresses carry the version of the bundled files, which
+// changes with them; they are not stored, so a new copy of the theme takes
+// no migration.
+var LumaaGlaassCss = `@import url('` + webtheme.Address("assets/lumaaglaass.css") + `');`
 
-const DefaultCustomJs = ""
+var LumaaGlaassJs = `(() => {
+    window.LumaaGlaassOptions = {
+        preferences: true,
+        homeCarousel: false,
+        collectionFilter: true
+    };
+
+    const id = 'lg-script';
+    if (document.getElementById(id)) return;
+
+    const script = document.createElement('script');
+    script.id = id;
+    script.src = '` + webtheme.Address("assets/lumaaglaass.js") + `';
+    script.onerror = () => {
+        script.remove();
+        console.error('LumaaGlaass could not be loaded.');
+    };
+
+    document.head.appendChild(script);
+})();`
 
 // DefaultSettings are the settings of a new server, those the columns of
 // the settings default to: changing a default takes this and a migration
 // setting the column's.
-func DefaultSettings() Settings {
+func upstreamDefaultSettings() Settings {
 	return Settings{
 		ServerName:          "Polyfin",
 		QuickConnectEnabled: true,
 		LegacyAuthorization: false,
-		Language:            Languages[0],
+		Language:            i18n.Languages[0],
+		RatingCountry:       localization.DefaultRatingCountry,
 		PrepareAhead:        true,
 		Transcoding:         true,
 		CatalogLimit:        DefaultCatalogLimit,
 		ChannelLimit:        DefaultChannelLimit,
 		UpdateCheck:         true,
+		IncludePrereleases:  false,
 		LocalDiscovery:      true,
 		LocalAddress:        "",
 		DLNA:                false,
@@ -59,7 +84,6 @@ func DefaultSettings() Settings {
 		PersonalAddons:     true,
 		ServerImports:      true,
 		ShareLinks:         false,
-		Registration:       true,
 		LoginAttempts:      DefaultLoginAttempts,
 		InactiveDeviceDays: DefaultInactiveDeviceDays,
 		KnownProxies:       []netip.Prefix{},
@@ -78,20 +102,24 @@ func DefaultSettings() Settings {
 		AnalysisTimeout:     DefaultAnalysisTimeout,
 		VersionAttempts:     DefaultVersionAttempts,
 		PreferDirectPlay:    false,
+		SendAppsToSource:    false,
 		VersionOrder:        []string{},
 		VersionCodecOrder:   slices.Clone(VersionCodecs),
 		VersionSourceOrder:  []ID{},
 		HiddenVersionCodecs: []string{},
 		HiddenVersionWords:  []string{},
-		HiddenRipTypes:      slices.Clone(RipTypes),
-		HideSpecials:        true,
-		ExactTitleMatch:     true,
-		SubtitleExtraction:  true,
 		NameHowVersionsPlay: true,
+		VersionNames:        VersionNameChoices[0],
+		HiddenReleases:      []string{},
+		VersionEditionOrder: slices.Clone(VersionEditions),
+		VersionLabelRules:   []VersionLabelRule{},
+		SyncAddonSubtitles:  true,
 		MaxConversions:      DefaultMaxConversions,
 		MaxConversionHeight: ConversionHeights[0],
 		ConvertedDownloads:  false,
-		WebSafeVideo:        true,
+		SubtitleOCR:         SubtitleOCRModes[0],
+		SubtitleOCRTracks:   DefaultSubtitleOCRTracks,
+		SubtitleOCRDownload: false,
 
 		EncoderPreset:              EncoderPresets[0],
 		AllowHevcEncoding:          false,
@@ -109,6 +137,9 @@ func DefaultSettings() Settings {
 		MaxAudioChannels:           AudioChannelLimits[0],
 		AheadSeconds:               DefaultAheadSeconds,
 		KeepConvertedVideo:         false,
+		FastStart:                  false,
+		NormalizeConvertedAudio:    false,
+		DynamicRangeCompression:    DynamicRangeCompressions[0],
 
 		Trickplay:          false,
 		TrickplayInterval:  DefaultTrickplayInterval,
@@ -122,6 +153,7 @@ func DefaultSettings() Settings {
 		RecordingCommercials:   false,
 		LiveTvRefreshHours:     DefaultLiveTvRefreshHours,
 		LocalScanHours:         DefaultLocalScanHours,
+		WatchlistCheckHours:    DefaultWatchlistCheckHours,
 		WatchLocalFolders:      true,
 
 		ConvertRecordings:            false,
@@ -129,9 +161,11 @@ func DefaultSettings() Settings {
 		ConvertRecordingsUntil:       DefaultConvertRecordingsUntil,
 		ConvertRecordingsOnProcessor: false,
 
-		CustomCss:             DefaultCustomCss,
-		CustomJs:              DefaultCustomJs,
+		WebTheme:              WebThemeLumaaGlaass,
+		CustomCss:             "",
+		CustomJs:              "",
 		AddVersionsToOpenPage: true,
+		VersionBadges:         true,
 
 		LastFMAPIKey: "",
 		LastFMSecret: "",
@@ -141,9 +175,7 @@ func DefaultSettings() Settings {
 		MyAnimeListClientID:     "",
 		MyAnimeListClientSecret: "",
 
-		BackupHour:            DefaultBackupHour,
 		BackupsKept:           DefaultBackupsKept,
-		CollectionReadHour:    DefaultCollectionReadHour,
 		CollectionLibraryApps: []string{},
 
 		RemuxDB:    false,
@@ -155,6 +187,7 @@ func DefaultSettings() Settings {
 		RecordingsFolder: "",
 		Backups:          false,
 		BackupFolder:     "",
+		BackupPassphrase: "",
 
 		PublicAddress: "",
 
@@ -177,13 +210,47 @@ func DefaultSettings() Settings {
 		Metrics:      false,
 		MetricsToken: "",
 
+		RestartConfirmed: false,
+		UpdateToolURL:    "",
+		UpdateToolToken:  "",
+
 		TorrentStreams:       false,
 		TorrentInterface:     "",
 		TorrentProxy:         "",
 		TorrentProxyUser:     "",
 		TorrentProxyPassword: "",
+		TorrentWireGuard:     "",
 		TorrentDownloadMbps:  0,
 		TorrentUploadMbps:    0,
+		TorrentsAtOnce:       DefaultTorrentsAtOnce,
+		TorrentTrackers:      []string{},
+
+		ConversionFolder: "",
+		ReadingFolder:    "",
+		CacheFolder:      "",
+		SiloApps:         false,
+
+		PosterRatings:          false,
+		PosterBadges:           false,
+		PosterBadgeSize:        PosterBadgeSizes[0],
+		PosterTemplate:         "",
+		ProviderIssuer:         "",
+		ProviderName:           "",
+		ProviderClientID:       "",
+		ProviderClientSecret:   "",
+		ProviderUserClaim:      "preferred_username",
+		ProviderCreateAccounts: false,
+		ProviderAdminClaim:     "",
+		ProviderAdminValue:     "",
+
+		SourceCachePreset:     SourceCacheSmall,
+		SourceCacheDays:       DefaultSourceCacheDays,
+		SourceCacheCreditDays: DefaultSourceCacheCreditDays,
+		PreloadNextEpisodes:   false,
+		PreloadEpisodes:       DefaultPreloadEpisodes,
+		PreloadMbps:           DefaultPreloadMbps,
+		PreloadReserveGB:      DefaultPreloadReserveGB,
+		PreloadWholeFiles:     false,
 	}
 }
 
@@ -192,9 +259,9 @@ type SettingBounds struct {
 	// Default is the setting's value on a new server.
 	Default any
 	// Min and Max bound a number, the length of a text, in characters for
-	// the server name and in bytes for the others, or the number of
-	// entries of a list of addresses or apps. Bounded tells whether they
-	// apply.
+	// the server name and the backup passphrase's Min, and in bytes for
+	// the others, or the number of entries of a list of addresses or apps.
+	// Bounded tells whether they apply.
 	Min, Max float64
 	Bounded  bool
 	// Zero tells that 0 is accepted too, below Min, turning the setting
@@ -208,7 +275,7 @@ type SettingBounds struct {
 // SettingsBounds returns what each setting accepts, and its default, by
 // the name the admin API gives it. The settings themselves check the same
 // bounds (see UpdateSettings), as do the database's constraints.
-func SettingsBounds() map[string]SettingBounds {
+func upstreamSettingsBounds() map[string]SettingBounds {
 	d := DefaultSettings()
 	between := func(min, max float64, value any) SettingBounds {
 		return SettingBounds{Default: value, Min: min, Max: max, Bounded: true}
@@ -225,12 +292,14 @@ func SettingsBounds() map[string]SettingBounds {
 		"serverName":          between(1, maxNameLength, d.ServerName),
 		"quickConnectEnabled": is(d.QuickConnectEnabled),
 		"legacyAuthorization": is(d.LegacyAuthorization),
-		"language":            choice(d.Language, anys(Languages)),
+		"language":            choice(d.Language, anys(i18n.Languages)),
+		"ratingCountry":       choice(d.RatingCountry, anys(localization.RatingCountries())),
 		"prepareAhead":        is(d.PrepareAhead),
 		"transcoding":         is(d.Transcoding),
 		"catalogLimit":        between(MinCatalogLimit, MaxCatalogLimit, d.CatalogLimit),
 		"channelLimit":        between(MinChannelLimit, MaxChannelLimit, d.ChannelLimit),
 		"updateCheck":         is(d.UpdateCheck),
+		"includePrereleases":  is(d.IncludePrereleases),
 		"localDiscovery":      is(d.LocalDiscovery),
 		"localAddress":        text(MaxLocalAddressBytes, d.LocalAddress),
 		"dlna":                is(d.DLNA),
@@ -249,6 +318,7 @@ func SettingsBounds() map[string]SettingBounds {
 		"mdblistRatingsKey":     text(MaxRatingsKeyBytes, d.MDBListRatingsKey),
 		"criticRatingShows":     choice(d.CriticRatingShows, anys(CriticRatingChoices)),
 		"tmdbKey":               text(MaxTMDBKeyBytes, d.TMDBKey),
+		"waitDigitalRelease":    is(d.WaitDigitalRelease),
 		"lyrics":                is(d.Lyrics),
 		"evenVolume":            is(d.EvenVolume),
 		"measureLoudness":       choice(d.MeasureLoudness, anys(MeasureLoudnessChoices)),
@@ -262,7 +332,6 @@ func SettingsBounds() map[string]SettingBounds {
 		"personalAddons":     is(d.PersonalAddons),
 		"serverImports":      is(d.ServerImports),
 		"shareLinks":         is(d.ShareLinks),
-		"registration":       is(d.Registration),
 		"loginAttempts":      orZero(MinLoginAttempts, MaxLoginAttempts, d.LoginAttempts),
 		"inactiveDeviceDays": between(0, MaxInactiveDeviceDays, d.InactiveDeviceDays),
 		"knownProxies":       between(0, MaxKnownProxies, d.KnownProxies),
@@ -280,26 +349,32 @@ func SettingsBounds() map[string]SettingBounds {
 		"analysisTimeout":  between(MinAnalysisTimeout, MaxAnalysisTimeout, d.AnalysisTimeout),
 		"versionAttempts":  between(MinVersionAttempts, MaxVersionAttempts, d.VersionAttempts),
 		"preferDirectPlay": is(d.PreferDirectPlay),
+		"sendAppsToSource": is(d.SendAppsToSource),
 		// Up to MaxVersionCriteria of them, one of each kind.
 		"versionOrder":      choice(d.VersionOrder, anys(VersionCriteria)),
 		"versionCodecOrder": choice(d.VersionCodecOrder, anys(VersionCodecs)),
 		// The server's sources, each once.
-		"versionSourceOrder":      between(0, MaxVersionSources, d.VersionSourceOrder),
-		"hideVersionsLargerGb":    orZero(1, MaxHideVersionsLargerGB, d.HideVersionsLargerGB),
-		"hiddenVersionCodecs":     choice(d.HiddenVersionCodecs, anys(VersionCodecs)),
-		"hiddenVersionWords":      between(0, MaxHiddenVersionWords, d.HiddenVersionWords),
-		"hiddenRipTypes":          choice(d.HiddenRipTypes, anys(RipTypes)),
-		"hideSpecials":            is(d.HideSpecials),
-		"exactTitleMatch":         is(d.ExactTitleMatch),
-		"subtitleExtraction":      is(d.SubtitleExtraction),
-		"registrationCodes":       is(d.RegistrationCodes),
-		"defaultAudioLanguage":    is(d.DefaultAudioLanguage),
-		"defaultSubtitleLanguage": is(d.DefaultSubtitleLanguage),
-		"nameHowVersionsPlay":     is(d.NameHowVersionsPlay),
-		"maxConversions":          between(MinMaxConversions, MaxMaxConversions, d.MaxConversions),
-		"maxConversionHeight":     choice(d.MaxConversionHeight, anys(ConversionHeights)),
-		"convertedDownloads":      is(d.ConvertedDownloads),
-		"webSafeVideo":            is(d.WebSafeVideo),
+		"versionSourceOrder":   between(0, MaxVersionSources, d.VersionSourceOrder),
+		"hideVersionsLargerGb": orZero(1, MaxHideVersionsLargerGB, d.HideVersionsLargerGB),
+		"hiddenVersionCodecs":  choice(d.HiddenVersionCodecs, anys(VersionCodecs)),
+		"hiddenVersionWords":   between(0, MaxHiddenVersionWords, d.HiddenVersionWords),
+		"nameHowVersionsPlay":  is(d.NameHowVersionsPlay),
+		"versionNames":         choice(d.VersionNames, anys(VersionNameChoices)),
+		"hiddenReleases":       choice(d.HiddenReleases, anys(ReleaseKinds)),
+		"versionEditionOrder":  choice(d.VersionEditionOrder, anys(VersionEditions)),
+		// Megabytes a minute; 0 puts the largest a minute first.
+		"versionMbPerMinute":  between(0, MaxVersionMBPerMinute, d.VersionMBPerMinute),
+		"versionLabelRules":   between(0, MaxVersionLabelRules, d.VersionLabelRules),
+		"syncAddonSubtitles":  is(d.SyncAddonSubtitles),
+		"maxConversions":      between(MinMaxConversions, MaxMaxConversions, d.MaxConversions),
+		"maxConversionHeight": choice(d.MaxConversionHeight, anys(ConversionHeights)),
+		"convertedDownloads":  is(d.ConvertedDownloads),
+		"subtitleOcr":         choice(d.SubtitleOCR, anys(SubtitleOCRModes)),
+		"subtitleOcrTracks":   between(MinSubtitleOCRTracks, MaxSubtitleOCRTracks, d.SubtitleOCRTracks),
+		"subtitleOcrDownload": is(d.SubtitleOCRDownload),
+		// "" or the ISO 639-2/B code of a language (see TrackLanguages).
+		"defaultAudioLanguage":    choice(d.DefaultAudioLanguage, anys(TrackLanguages())),
+		"defaultSubtitleLanguage": choice(d.DefaultSubtitleLanguage, anys(TrackLanguages())),
 
 		"encoderPreset":              choice(d.EncoderPreset, anys(EncoderPresets)),
 		"h264Quality":                orZero(MinVideoQuality, MaxVideoQuality, d.H264Quality),
@@ -323,6 +398,9 @@ func SettingsBounds() map[string]SettingBounds {
 		"encodingThreads":            between(0, MaxEncodingThreads, d.EncodingThreads),
 		"aheadSeconds":               between(MinAheadSeconds, MaxAheadSeconds, d.AheadSeconds),
 		"keepConvertedVideo":         is(d.KeepConvertedVideo),
+		"fastStart":                  is(d.FastStart),
+		"normalizeConvertedAudio":    is(d.NormalizeConvertedAudio),
+		"dynamicRangeCompression":    choice(d.DynamicRangeCompression, anys(DynamicRangeCompressions)),
 
 		"trickplay":          is(d.Trickplay),
 		"trickplayInterval":  between(MinTrickplayInterval, MaxTrickplayInterval, d.TrickplayInterval),
@@ -336,6 +414,7 @@ func SettingsBounds() map[string]SettingBounds {
 		"recordingCommercials":   is(d.RecordingCommercials),
 		"liveTvRefreshHours":     between(MinLiveTvRefreshHours, MaxLiveTvRefreshHours, d.LiveTvRefreshHours),
 		"localScanHours":         between(0, MaxLocalScanHours, d.LocalScanHours),
+		"watchlistCheckHours":    between(0, MaxWatchlistCheckHours, d.WatchlistCheckHours),
 		"watchLocalFolders":      is(d.WatchLocalFolders),
 
 		"convertRecordings":            is(d.ConvertRecordings),
@@ -343,11 +422,12 @@ func SettingsBounds() map[string]SettingBounds {
 		"convertRecordingsUntil":       between(0, 23, d.ConvertRecordingsUntil),
 		"convertRecordingsOnProcessor": is(d.ConvertRecordingsOnProcessor),
 
+		"webTheme":                choice(d.WebTheme, anys(WebThemes)),
 		"customCss":               text(MaxCustomCodeBytes, d.CustomCss),
 		"customJs":                text(MaxCustomCodeBytes, d.CustomJs),
 		"loginDisclaimer":         text(MaxLoginDisclaimerBytes, d.LoginDisclaimer),
-		"brandLogo":               text(MaxBrandLogoBytes, d.BrandLogo),
 		"addVersionsToOpenPage":   is(d.AddVersionsToOpenPage),
+		"versionBadges":           is(d.VersionBadges),
 		"traktClientId":           text(MaxTrackingAppBytes, d.TraktClientID),
 		"traktClientSecret":       text(MaxTrackingAppBytes, d.TraktClientSecret),
 		"simklClientId":           text(MaxTrackingAppBytes, d.SimklClientID),
@@ -358,9 +438,7 @@ func SettingsBounds() map[string]SettingBounds {
 		"myAnimeListClientId":     text(MaxTrackingAppBytes, d.MyAnimeListClientID),
 		"myAnimeListClientSecret": text(MaxTrackingAppBytes, d.MyAnimeListClientSecret),
 
-		"backupHour":            between(0, 23, d.BackupHour),
 		"backupsKept":           between(MinBackupsKept, MaxBackupsKept, d.BackupsKept),
-		"collectionReadHour":    between(-1, 23, d.CollectionReadHour),
 		"collectionLibraryApps": between(0, MaxCollectionLibraryApps, d.CollectionLibraryApps),
 
 		"remuxDb":    is(d.RemuxDB),
@@ -372,6 +450,7 @@ func SettingsBounds() map[string]SettingBounds {
 		"recordingsFolder": text(MaxFolderBytes, d.RecordingsFolder),
 		"backups":          is(d.Backups),
 		"backupFolder":     text(MaxFolderBytes, d.BackupFolder),
+		"backupPassphrase": orZero(MinBackupPassphraseRunes, MaxBackupPassphraseBytes, d.BackupPassphrase),
 
 		"publicAddress": text(MaxPublicAddressBytes, d.PublicAddress),
 
@@ -394,13 +473,47 @@ func SettingsBounds() map[string]SettingBounds {
 		"metrics":      is(d.Metrics),
 		"metricsToken": text(MaxMetricsTokenBytes, d.MetricsToken),
 
+		"restartConfirmed": is(d.RestartConfirmed),
+		"updateToolUrl":    text(MaxUpdateToolURLBytes, d.UpdateToolURL),
+		"updateToolToken":  text(MaxUpdateToolTokenBytes, d.UpdateToolToken),
+
 		"torrentStreams":       is(d.TorrentStreams),
 		"torrentInterface":     text(MaxTorrentInterfaceName, d.TorrentInterface),
 		"torrentProxy":         text(MaxTorrentProxyBytes, d.TorrentProxy),
 		"torrentProxyUser":     text(MaxTorrentProxyBytes, d.TorrentProxyUser),
 		"torrentProxyPassword": text(MaxTorrentProxyBytes, d.TorrentProxyPassword),
+		"torrentWireGuard":     text(torrent.MaxWireGuardConfigBytes, d.TorrentWireGuard),
 		"torrentDownloadMbps":  between(0, MaxTorrentMbps, d.TorrentDownloadMbps),
 		"torrentUploadMbps":    between(0, MaxTorrentMbps, d.TorrentUploadMbps),
+		"torrentsAtOnce":       between(0, MaxTorrentsAtOnce, d.TorrentsAtOnce),
+		"torrentTrackers":      between(0, MaxTorrentTrackers, d.TorrentTrackers),
+
+		"conversionFolder": text(MaxFolderBytes, d.ConversionFolder),
+		"readingFolder":    text(MaxFolderBytes, d.ReadingFolder),
+		"cacheFolder":      text(MaxFolderBytes, d.CacheFolder),
+		"siloApps":         is(d.SiloApps),
+
+		"posterRatings":          is(d.PosterRatings),
+		"posterBadges":           is(d.PosterBadges),
+		"posterBadgeSize":        choice(d.PosterBadgeSize, anys(PosterBadgeSizes)),
+		"posterTemplate":         text(MaxPosterTemplateBytes, d.PosterTemplate),
+		"providerIssuer":         text(MaxProviderIssuerBytes, d.ProviderIssuer),
+		"providerName":           text(MaxProviderNameBytes, d.ProviderName),
+		"providerClientId":       text(MaxProviderClientBytes, d.ProviderClientID),
+		"providerClientSecret":   text(MaxProviderClientBytes, d.ProviderClientSecret),
+		"providerUserClaim":      between(1, MaxProviderClaimBytes, d.ProviderUserClaim),
+		"providerCreateAccounts": is(d.ProviderCreateAccounts),
+		"providerAdminClaim":     text(MaxProviderClaimBytes, d.ProviderAdminClaim),
+		"providerAdminValue":     text(MaxProviderValueBytes, d.ProviderAdminValue),
+
+		"sourceCachePreset":     choice(d.SourceCachePreset, anys(SourceCachePresets)),
+		"sourceCacheDays":       between(0, MaxSourceCacheDays, d.SourceCacheDays),
+		"sourceCacheCreditDays": between(0, MaxSourceCacheCreditDays, d.SourceCacheCreditDays),
+		"preloadNextEpisodes":   is(d.PreloadNextEpisodes),
+		"preloadEpisodes":       between(MinPreloadEpisodes, MaxPreloadEpisodes, d.PreloadEpisodes),
+		"preloadMbps":           between(MinPreloadMbps, MaxPreloadMbps, d.PreloadMbps),
+		"preloadReserveGb":      between(MinPreloadReserveGB, MaxPreloadReserveGB, d.PreloadReserveGB),
+		"preloadWholeFiles":     is(d.PreloadWholeFiles),
 	}
 }
 

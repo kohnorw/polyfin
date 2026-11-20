@@ -14,6 +14,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/moodiness/polyfin/internal/process"
 )
 
 // unindexedSource writes a 30-second file of 24 frames a second FFmpeg
@@ -58,6 +60,7 @@ func unindexedSource(t *testing.T, ffmpeg, ffprobe, name string, args ...string)
 // further apart: FFmpeg, which lands on the first keyframe past the time
 // asked, starts far enough before the segment.
 func TestSearchedSegmentsHoldTheFramesReadInOrder(t *testing.T) {
+	t.Parallel()
 	ffmpeg, ffprobe := tools(t)
 	for _, c := range []struct {
 		name, file string
@@ -70,6 +73,7 @@ func TestSearchedSegmentsHoldTheFramesReadInOrder(t *testing.T) {
 		{"MPEG program stream, a keyframe every 10 seconds", "long.mpg", []string{"-c:v", "mpeg2video", "-g", "240", "-bf", "2", "-c:a", "mp2"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			input, video, audio := unindexedSource(t, ffmpeg, ffprobe, c.file, c.args...)
 			m, err := NewManager(ffmpeg, t.TempDir(), slog.New(slog.DiscardHandler))
 			if err != nil {
@@ -137,6 +141,7 @@ func TestSearchedSegmentsHoldTheFramesReadInOrder(t *testing.T) {
 // starts with that lookback, as kept by the file, seeks with a single
 // FFmpeg start, to that segment and to others.
 func TestSeeksStartWithTheLookbackLearned(t *testing.T) {
+	t.Parallel()
 	ffmpeg, ffprobe := tools(t)
 	input, video, audio := unindexedSource(t, ffmpeg, ffprobe, "long.ts", "-c:v", "libx264", "-preset", "veryfast", "-bf", "3", "-g", "240",
 		"-keyint_min", "240", "-sc_threshold", "0", "-c:a", "aac")
@@ -146,7 +151,7 @@ func TestSeeksStartWithTheLookbackLearned(t *testing.T) {
 	}
 	dir := t.TempDir()
 	runs, wrapper := filepath.Join(dir, "runs"), filepath.Join(dir, "ffmpeg")
-	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\necho \"$*\" >> '"+runs+"'\nexec '"+ffmpeg+"' \"$@\"\n"), 0o700); err != nil {
+	if err := process.WriteExecutable(wrapper, strings.NewReader("#!/bin/sh\necho \"$*\" >> '"+runs+"'\nexec '"+ffmpeg+"' \"$@\"\n"), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	m, err := NewManager(wrapper, t.TempDir(), slog.New(slog.DiscardHandler))

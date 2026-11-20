@@ -1,6 +1,7 @@
 package torrent
 
 import (
+	"bytes"
 	"crypto/sha1"
 	"encoding/hex"
 	"errors"
@@ -8,6 +9,8 @@ import (
 	"path"
 	"strconv"
 	"strings"
+
+	"github.com/moodiness/polyfin/internal/episodename"
 )
 
 // Hash is a torrent's info hash, the SHA-1 of its info dictionary.
@@ -44,6 +47,9 @@ type Info struct {
 	Pieces      []Hash
 	Files       []File
 	Length      int64
+	// Private marks a torrent whose peers come from its trackers alone
+	// (BEP 27): no peer exchange.
+	Private bool
 }
 
 // maxPieceLength and maxInfoSize bound what a torrent may claim, so that
@@ -55,23 +61,77 @@ const (
 	maxPieces      = maxInfoSize / 20
 )
 
-// errInfo reports an info dictionary that does not describe a torrent.
-var errInfo = errors.New("the torrent's info dictionary is invalid")
+// maxFileName, maxFilePath and maxInfoFiles bound the files an info
+// dictionary names, so that what is read from it stays a small multiple
+// of its bytes, a torrent's name being part of the path of each of its
+// files. Nothing writes these names to a disk: they bound what a
+// dictionary has the server hold, and a torrent made on any system
+// plays. The name and each part of a path are as long as a file's name
+// is anywhere: 255 units of UTF-16 where names count so, which is 765
+// bytes of the UTF-8 torrents write, and 255 bytes elsewhere. A path is
+// as long as the longest path a system takes unless told otherwise,
+// 4,096 bytes; what is read is bounded without it, by the name and the
+// files. The files are no more than several times those of the largest
+// packs of seasons. maxInfoValues bounds the values the dictionary
+// holds, its lists, its dictionaries and their keys counted as what
+// they hold is: decoding keeps up to a hundred bytes and more for each,
+// however short it is written. That is 16 values for each of
+// maxInfoFiles files, where the entry of a file in a folder holds 7.
+const (
+	maxFileName   = 765
+	maxFilePath   = 4096
+	maxInfoFiles  = 50_000
+	maxInfoValues = 16 * maxInfoFiles
+)
+
+// minPieceLength is the least a torrent's pieces are long: a block, as
+// the programs that make torrents make them. A torrent of shorter pieces
+// would have as many pieces as it likes for few bytes, down to one a
+// byte, and Polyfin as many pieces to fetch past a read, to count, and to
+// keep as files, which its bounds in bytes do not see.
+const minPieceLength = blockSize
+
+// fileBytes is what a File takes in memory beside its path.
+const fileBytes = 40
+
+// ErrInfoRefused reports an info dictionary Polyfin does not read: past
+// one of the bounds above, or not a torrent's. The error that wraps it
+// tells which. One that matches its torrent's hash is the one every peer
+// sends: that torrent cannot start, and its reads fail with that error
+// (see torrent.refuse).
+var ErrInfoRefused = errors.New("the torrent's info dictionary is refused")
+
+// infoRefused is ErrInfoRefused, for the reason given.
+func infoRefused(format string, args ...any) error {
+	return fmt.Errorf("%w: %s", ErrInfoRefused, fmt.Sprintf(format, args...))
+}
 
 // parseInfo reads an info dictionary, whose hash it does not check.
 func parseInfo(data []byte) (Info, error) {
 	if len(data) > maxInfoSize {
-		return Info{}, errInfo
+		return Info{}, infoRefused("it is larger than %d bytes", maxInfoSize)
+	}
+	if !valuesWithin(data, maxInfoValues) {
+		return Info{}, infoRefused("it holds more than %d values, or is malformed", maxInfoValues)
 	}
 	d, rest, err := decodeDict(data)
 	if err != nil || len(rest) != 0 {
-		return Info{}, errInfo
+		return Info{}, infoRefused("it is malformed")
 	}
-	info := Info{Name: str(d, "name")}
+	private, _ := num(d, "private")
+	info := Info{Name: str(d, "name"), Private: private == 1}
+	if len(info.Name) > maxFileName {
+		return Info{}, infoRefused("its name is longer than %d bytes", maxFileName)
+	}
 	pieceLength, _ := num(d, "piece length")
 	pieces := str(d, "pieces")
-	if pieceLength <= 0 || pieceLength > maxPieceLength || len(pieces) == 0 || len(pieces)%20 != 0 {
-		return Info{}, errInfo
+	switch {
+	case pieceLength < minPieceLength:
+		return Info{}, infoRefused("its pieces are shorter than %d bytes", minPieceLength)
+	case pieceLength > maxPieceLength:
+		return Info{}, infoRefused("its pieces are longer than %d bytes", maxPieceLength)
+	case len(pieces) == 0 || len(pieces)%20 != 0:
+		return Info{}, infoRefused("its pieces' hashes are malformed")
 	}
 	info.PieceLength = pieceLength
 	info.Pieces = make([]Hash, len(pieces)/20)
@@ -84,37 +144,97 @@ func parseInfo(data []byte) (Info, error) {
 	room := int64(len(info.Pieces)) * pieceLength
 	if length, ok := num(d, "length"); ok {
 		if length < 0 || length > room {
-			return Info{}, errInfo
+			return Info{}, infoRefused("its length does not match its pieces")
 		}
 		info.Files = []File{{Path: info.Name, Length: length}}
 		info.Length = length
 	} else {
-		for _, entry := range list(d, "files") {
+		files := list(d, "files")
+		if len(files) > maxInfoFiles {
+			return Info{}, infoRefused("it lists more than %d files", maxInfoFiles)
+		}
+		info.Files = make([]File, 0, len(files))
+		for _, entry := range files {
 			f, ok := entry.(map[string]any)
 			if !ok {
-				return Info{}, errInfo
+				return Info{}, infoRefused("a file is malformed")
 			}
 			length, ok := num(f, "length")
 			if !ok || length < 0 || length > room-info.Length {
-				return Info{}, errInfo
+				return Info{}, infoRefused("its files' lengths do not match its pieces")
 			}
 			parts := []string{info.Name}
 			for _, part := range list(f, "path") {
 				name, _ := part.(string)
+				if len(name) > maxFileName {
+					return Info{}, infoRefused("a file or folder name is longer than %d bytes", maxFileName)
+				}
 				parts = append(parts, name)
 			}
-			info.Files = append(info.Files, File{Path: path.Join(parts...), Offset: info.Length, Length: length,
+			joined := path.Join(parts...)
+			if len(joined) > maxFilePath {
+				return Info{}, infoRefused("a path is longer than %d bytes", maxFilePath)
+			}
+			info.Files = append(info.Files, File{Path: joined, Offset: info.Length, Length: length,
 				Padding: strings.Contains(str(f, "attr"), "p")})
 			info.Length += length
 		}
 		if len(info.Files) == 0 {
-			return Info{}, errInfo
+			return Info{}, infoRefused("it lists no file")
 		}
 	}
 	if pieces := (info.Length + pieceLength - 1) / pieceLength; pieces != int64(len(info.Pieces)) {
-		return Info{}, errInfo
+		return Info{}, infoRefused("its length does not match its pieces")
 	}
 	return info, nil
+}
+
+// valuesWithin reports whether bencoded data holds limit values at most,
+// which it reads as decode does, keeping none: a list and a dictionary
+// count, and so does each value and each key they hold. It is false too
+// where the bytes stop being values, which decode refuses.
+func valuesWithin(data []byte, limit int) bool {
+	for count := 0; len(data) > 0; {
+		switch c := data[0]; {
+		case c == 'e':
+			data = data[1:]
+			continue
+		case c == 'l' || c == 'd':
+			data = data[1:]
+		case c == 'i':
+			end := bytes.IndexByte(data, 'e')
+			if end < 0 {
+				return false
+			}
+			data = data[end+1:]
+		case c >= '0' && c <= '9':
+			colon := bytes.IndexByte(data, ':')
+			if colon < 0 {
+				return false
+			}
+			n, err := strconv.Atoi(string(data[:colon]))
+			if err != nil || n < 0 || n > len(data)-colon-1 {
+				return false
+			}
+			data = data[colon+1+n:]
+		default:
+			return false
+		}
+		if count++; count > limit {
+			return false
+		}
+	}
+	return true
+}
+
+// size estimates the bytes info takes in memory: its pieces' hashes, and
+// its files with their paths.
+func (info Info) size() int {
+	size := len(info.Name) + len(info.Pieces)*len(Hash{}) + len(info.Files)*fileBytes
+	for _, f := range info.Files {
+		size += len(f.Path)
+	}
+	return size
 }
 
 // checkInfo reads an info dictionary whose SHA-1 must be hash.
@@ -125,25 +245,42 @@ func checkInfo(hash Hash, data []byte) (Info, error) {
 	return parseInfo(data)
 }
 
-// File returns the file of the torrent to play: the one at index, else,
-// for index -1, the largest, as Stremio picks it.
-func (info Info) File(index int) (File, error) {
-	if index >= 0 {
+// File returns the file of the torrent spec plays: the one at its index;
+// without one, the file of the name the addon gives, else, for an
+// episode, the largest video whose name tells that episode (see
+// episodename.Of), as in a season's pack, else the largest.
+func (info Info) File(spec Spec) (File, error) {
+	if index := spec.File; index >= 0 {
 		if index >= len(info.Files) || info.Files[index].Padding {
 			return File{}, fmt.Errorf("the torrent has no file %s", strconv.Itoa(index))
 		}
 		return info.Files[index], nil
 	}
-	largest := -1
+	name := path.Base(strings.ReplaceAll(spec.Name, `\`, "/"))
+	named, episode, largest := -1, -1, -1
+	larger := func(i, than int) bool { return than < 0 || info.Files[i].Length > info.Files[than].Length }
 	for i, f := range info.Files {
-		if !f.Padding && (largest < 0 || f.Length > info.Files[largest].Length) {
+		if f.Padding {
+			continue
+		}
+		if spec.Name != "" && strings.EqualFold(path.Base(f.Path), name) && larger(i, named) {
+			named = i
+		}
+		if spec.Episode > 0 && episodename.Video(f.Path) && larger(i, episode) {
+			if e, ok := episodename.Of(f.Path); ok && e.Holds(spec.Season, spec.Episode) {
+				episode = i
+			}
+		}
+		if larger(i, largest) {
 			largest = i
 		}
 	}
-	if largest < 0 {
-		return File{}, errors.New("the torrent has no file to play")
+	for _, i := range []int{named, episode, largest} {
+		if i >= 0 {
+			return info.Files[i], nil
+		}
 	}
-	return info.Files[largest], nil
+	return File{}, errors.New("the torrent has no file to play")
 }
 
 // pieceSize is the length of piece index, the last one being shorter.

@@ -1,9 +1,11 @@
 package stremio
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 	"time"
@@ -50,13 +52,20 @@ type Health struct {
 	// Requests and Failures count the requests and those that failed.
 	Requests int
 	Failures int
+	// CatalogsWaitUntil is when the wait an addon on the same host asked
+	// for ends, its catalog pages not asked for meanwhile (see
+	// Client.CatalogsWait); zero when none runs. Failure is then
+	// FailureRateLimited, whatever answered since.
+	CatalogsWaitUntil time.Time
 }
 
 // healthRecords keeps the Health of each addon, by base URL: the address
-// is a key only, never shown.
+// is a key only, never shown; and waits, the end of the wait each host
+// asked for.
 type healthRecords struct {
 	mu      sync.Mutex
 	byAddon map[string]*Health
+	waits   map[string]time.Time
 }
 
 // record accounts for a request for target to the addon manifestURL
@@ -98,7 +107,8 @@ func resourceOf(manifestURL, target string) string {
 	if target == manifestURL {
 		return "manifest"
 	}
-	rest, ok := strings.CutPrefix(target, BaseURL(manifestURL)+"/")
+	base, _ := SplitManifestURL(manifestURL)
+	rest, ok := strings.CutPrefix(target, base+"/")
 	resource, _, _ := strings.Cut(rest, "/")
 	switch {
 	case !ok:
@@ -134,7 +144,54 @@ func (c *Client) Health(manifestURL string) (Health, bool) {
 	if !ok {
 		return Health{}, false
 	}
-	return *health, true
+	result := *health
+	if until := c.health.waits[HostOf(manifestURL)]; time.Now().Before(until) {
+		result.CatalogsWaitUntil, result.Failure = until, FailureRateLimited
+	}
+	return result, true
+}
+
+// KeepHealth forgets the health of the addons whose base URL (see BaseURL)
+// keep does not keep, as once they are removed: an address installed
+// again starts anew.
+func (c *Client) KeepHealth(keep func(base string) bool) {
+	c.health.mu.Lock()
+	defer c.health.mu.Unlock()
+	for base := range c.health.byAddon {
+		if !keep(base) {
+			delete(c.health.byAddon, base)
+		}
+	}
+}
+
+// CatalogsWait records that the catalog pages of the addons on the host of
+// manifestURL are not asked for until until, as one of them asked to wait,
+// for Health to tell.
+func (c *Client) CatalogsWait(manifestURL string, until time.Time) {
+	c.health.mu.Lock()
+	defer c.health.mu.Unlock()
+	if c.health.waits == nil {
+		c.health.waits = map[string]time.Time{}
+	}
+	host := HostOf(manifestURL)
+	for key, end := range c.health.waits {
+		if time.Now().After(end) {
+			delete(c.health.waits, key)
+		}
+	}
+	if until.After(c.health.waits[host]) {
+		c.health.waits[host] = until
+	}
+}
+
+// HostOf is the host, its port included, of the addon manifestURL
+// installs: the server an addon's requests go to, whose limits all the
+// addons it serves share. It is the base URL when there is no host.
+func HostOf(manifestURL string) string {
+	if parsed, err := url.Parse(manifestURL); err == nil && parsed.Host != "" {
+		return strings.ToLower(parsed.Host)
+	}
+	return BaseURL(manifestURL)
 }
 
 // failureOf names the failure of a request that got no answer.
@@ -147,6 +204,31 @@ func failureOf(ctx context.Context, err error) string {
 	default:
 		return FailureUnreachable
 	}
+}
+
+// FailureOf names the failure of a request to an addon that returned err,
+// with the codes Health reports, for a feature telling why an addon failed
+// it: an answer "not found" is FailureHTTPError there, and an answer that
+// could not be read, too large or not of the expected form,
+// FailureInvalidResponse. It is empty for an error that is no addon's.
+func FailureOf(err error) string {
+	if _, waits := RetryAfter(err); waits || errors.Is(err, ErrAskedToWait) || errors.Is(err, ErrRateLimited) {
+		return FailureRateLimited
+	}
+	if status := StatusOf(err); status != 0 {
+		return cmp.Or(failureOfStatus(status), FailureHTTPError)
+	}
+	switch {
+	case errors.Is(err, ErrInvalidResponse):
+		return FailureInvalidResponse
+	case errors.Is(err, ErrPrivateNetwork):
+		return FailurePrivateNetwork
+	case errors.Is(err, context.DeadlineExceeded):
+		return FailureTimeout
+	case errors.Is(err, ErrUnreachable):
+		return FailureUnreachable
+	}
+	return ""
 }
 
 // failureOfStatus names the failure an HTTP status tells, none for an

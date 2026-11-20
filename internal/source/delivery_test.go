@@ -130,6 +130,7 @@ func streamAll(t *testing.T, s *Source, off int64) []byte {
 // order. The connections the host saw at once tell it, not the time the
 // read took, which a busy machine stretches.
 func TestFilesAreReadOverSeveralConnections(t *testing.T) {
+	t.Parallel()
 	host := &paced{data: randomData(32 * blockSize), rate: 16 << 20, delay: 20 * time.Millisecond}
 	server := httptest.NewServer(host)
 	t.Cleanup(server.Close)
@@ -150,8 +151,10 @@ func TestFilesAreReadOverSeveralConnections(t *testing.T) {
 // A host refusing a connection more, or asking to slow down, is read over
 // one connection per file from then on: the refusal fails nothing.
 func TestHostsRefusingConnectionsAreReadOverOne(t *testing.T) {
+	t.Parallel()
 	for _, status := range []int{http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusForbidden} {
 		t.Run(strconv.Itoa(status), func(t *testing.T) {
+			t.Parallel()
 			host := &paced{data: randomData(24 * blockSize), rate: 32 << 20, refuse: status}
 			server := httptest.NewServer(host)
 			t.Cleanup(server.Close)
@@ -182,6 +185,7 @@ func TestHostsRefusingConnectionsAreReadOverOne(t *testing.T) {
 // reader asks for it: the new reader always waits for its next block, as
 // a playback does, however slow the machine.
 func TestTheNewestReaderIsServedFirst(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, 64*blockSize)
 	turn := make(chan struct{}, 1)
 	o.mu.Lock()
@@ -241,6 +245,7 @@ func TestTheNewestReaderIsServedFirst(t *testing.T) {
 
 // A reader that gives up stops wanting its blocks: they are not fetched.
 func TestReadersGivingUpDropTheirBlocks(t *testing.T) {
+	t.Parallel()
 	host := &paced{data: randomData(40 * blockSize), rate: 64 << 20, delay: 300 * time.Millisecond}
 	server := httptest.NewServer(host)
 	t.Cleanup(server.Close)
@@ -270,6 +275,7 @@ func TestReadersGivingUpDropTheirBlocks(t *testing.T) {
 // A streaming reader reads ahead by more as it reads on, up to the budget;
 // the reads of an index, scattered, read nothing ahead.
 func TestReadAheadGrowsWithTheStream(t *testing.T) {
+	t.Parallel()
 	_, server := newOrigin(t, 200*blockSize)
 	cache := newCache(t, 1<<30)
 	cache.readahead, cache.aheadBudget = 4, func() int64 { return 64 }
@@ -315,6 +321,7 @@ func TestReadAheadGrowsWithTheStream(t *testing.T) {
 // An idle connection stays open longer while a streaming reader is
 // attached, as FFmpeg pauses ahead of the player, than when nobody is.
 func TestConnectionsLingerWhileAReaderIsAttached(t *testing.T) {
+	t.Parallel()
 	_, server := newOrigin(t, 4*blockSize)
 	cache := newCache(t, 1<<30)
 	cache.linger, cache.attachedLinger = 50*time.Millisecond, time.Hour
@@ -346,8 +353,13 @@ func TestConnectionsLingerWhileAReaderIsAttached(t *testing.T) {
 }
 
 // A connection that stops sending bytes is closed after a while and
-// opened again, as one more try: the reader gets the file.
+// opened again, as one more try: the reader gets the file. A stall right
+// after one fails the source, so the stall limit leaves the connection
+// opened again room to pause on a loaded machine: at 200 ms, it stalled
+// in turn on CI. The file still comes well before the 10 s of the limit
+// outside tests.
 func TestStalledConnectionsAreOpenedAgain(t *testing.T) {
+	t.Parallel()
 	data := randomData(3 * blockSize)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -364,14 +376,14 @@ func TestStalledConnectionsAreOpenedAgain(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	cache := newCache(t, 1<<30)
-	cache.stallTimeout = 200 * time.Millisecond
+	cache.stallTimeout = time.Second
 	s := cache.Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
 	defer s.Release()
 	started := time.Now()
 	if got := streamAll(t, s, 0); !bytes.Equal(got, data) {
 		t.Fatal("content differs")
 	}
-	if took := time.Since(started); requests.Load() != 2 || took > 2*time.Second {
+	if took := time.Since(started); requests.Load() != 2 || took > 5*time.Second {
 		t.Errorf("%d requests in %v", requests.Load(), took)
 	}
 }
@@ -380,6 +392,7 @@ func TestStalledConnectionsAreOpenedAgain(t *testing.T) {
 // within the header timeout, not the reader's deadline; what reads it
 // learns at once, and why.
 func TestSilentHostsFailTheSource(t *testing.T) {
+	t.Parallel()
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(_ http.ResponseWriter, r *http.Request) {
 		requests.Add(1)
@@ -407,7 +420,7 @@ func TestSilentHostsFailTheSource(t *testing.T) {
 	// A request of the loopback is answered 502 at once.
 	loopback := httptest.NewServer(s)
 	defer loopback.Close()
-	response, err := http.Get(loopback.URL)
+	response, err := clientHTTP.Get(loopback.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -419,8 +432,11 @@ func TestSilentHostsFailTheSource(t *testing.T) {
 
 // A host that stops answering in the middle of a file, its connection
 // silent and new ones unanswered, fails the source within seconds: the
-// stall, then a short wait for a new connection's headers.
+// stall, then a short wait for a new connection's headers, well before
+// the 15 s of a first connection's. The stall limit leaves the first
+// connection room to pause on a loaded machine before it is silent.
 func TestHostsThatStopAnsweringFailWithinSeconds(t *testing.T) {
+	t.Parallel()
 	data := randomData(8 * blockSize)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -435,8 +451,12 @@ func TestHostsThatStopAnsweringFailWithinSeconds(t *testing.T) {
 	}))
 	t.Cleanup(server.Close)
 	cache := newCache(t, 1<<30)
-	cache.stallTimeout, cache.recoveryTimeout = 300*time.Millisecond, 200*time.Millisecond
-	s := cache.Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
+	cache.stallTimeout, cache.recoveryTimeout = time.Second, 200*time.Millisecond
+	// The connections are counted as the source opens them: the server may
+	// see the new one late, or never, once the source gave up on it, as a
+	// loaded machine can take the 200 ms to dial it or to run its handler.
+	opener := &countingOpener{}
+	s := cache.Open(accounts.ID{1}, Location{URL: server.URL + "/file", Opener: opener}, nil)
 	defer s.Release()
 	r := s.NewReader()
 	defer r.Close()
@@ -445,12 +465,22 @@ func TestHostsThatStopAnsweringFailWithinSeconds(t *testing.T) {
 	}
 	started := time.Now()
 	_, err := r.ReadAt(t.Context(), make([]byte, 10), 5*blockSize)
-	if !errors.Is(err, ErrUnavailable) || time.Since(started) > 2*time.Second {
+	if !errors.Is(err, ErrUnavailable) || time.Since(started) > 5*time.Second {
 		t.Fatalf("%v after %v", err, time.Since(started))
 	}
-	if requests.Load() != 2 {
-		t.Errorf("%d requests", requests.Load())
+	if opened := opener.opened.Load(); opened != 2 {
+		t.Errorf("%d connections opened, want 2", opened)
 	}
+}
+
+// countingOpener opens requests as the tests' client does, counting them.
+type countingOpener struct {
+	opened atomic.Int32
+}
+
+func (o *countingOpener) Open(ctx context.Context, method, target string, header http.Header, confined bool) (*http.Response, error) {
+	o.opened.Add(1)
+	return client{}.Open(ctx, method, target, header, confined)
 }
 
 // switching serves a file, then, once switched, another of another size,
@@ -482,8 +512,10 @@ func (sw *switching) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // why, and the other file's bytes are never read as the file's, nor its
 // size taken, from a 206 or a 416.
 func TestAnotherFileFailsAfterOneRetry(t *testing.T) {
+	t.Parallel()
 	for _, unsatisfiable := range []bool{false, true} {
 		t.Run("416 "+strconv.FormatBool(unsatisfiable), func(t *testing.T) {
+			t.Parallel()
 			host := &switching{file: randomData(32 * blockSize), other: randomData(3 * blockSize), unsatisfiable: unsatisfiable}
 			server := httptest.NewServer(host)
 			t.Cleanup(server.Close)
@@ -523,6 +555,7 @@ func TestAnotherFileFailsAfterOneRetry(t *testing.T) {
 // refuses nothing. A size within 1% of the file's is the file's, as some
 // addons' are a little off: the file's own size is taken.
 func TestAnnouncedSizesCatchAnotherFile(t *testing.T) {
+	t.Parallel()
 	_, server := newOrigin(t, 2*blockSize)
 	cache := newCache(t, 1<<30)
 	open := func(id byte, size int64, announcer string) *Source {
@@ -603,6 +636,7 @@ func (rs *resolver) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // go along. An address that stops working sends the reads back to the
 // origin, before any renewal.
 func TestRedirectTargetsArePinned(t *testing.T) {
+	t.Parallel()
 	rs := &resolver{data: randomData(64 * blockSize)}
 	server := httptest.NewServer(rs)
 	t.Cleanup(server.Close)
@@ -654,6 +688,7 @@ func TestRedirectTargetsArePinned(t *testing.T) {
 // Warm reads the spans asked into the cache: reading them after takes no
 // request.
 func TestWarmReadsSpans(t *testing.T) {
+	t.Parallel()
 	o, server := newOrigin(t, 32*blockSize)
 	s := newCache(t, 1<<30).Open(accounts.ID{1}, Location{URL: server.URL + "/file"}, nil)
 	defer s.Release()
@@ -684,6 +719,7 @@ func TestWarmReadsSpans(t *testing.T) {
 // The cache tells when a source answered at a link, for the checks that a
 // player sent there would make.
 func TestAnsweredTellsWhenTheSourceAnswered(t *testing.T) {
+	t.Parallel()
 	_, server := newOrigin(t, blockSize)
 	cache := newCache(t, 1<<30)
 	link := server.URL + "/file"
@@ -720,6 +756,7 @@ func TestAnsweredTellsWhenTheSourceAnswered(t *testing.T) {
 // first: a body cut short reads as the end of the file. Failed is closed
 // before the body is cut.
 func TestLoopbackHoldsAFailingBody(t *testing.T) {
+	t.Parallel()
 	data := randomData(4 * blockSize)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -739,7 +776,7 @@ func TestLoopbackHoldsAFailingBody(t *testing.T) {
 	failed := s.Failed()
 	loopback := httptest.NewServer(s)
 	defer loopback.Close()
-	response, err := http.Get(loopback.URL)
+	response, err := clientHTTP.Get(loopback.URL)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"regexp"
 	"strings"
 	"sync"
 	"testing"
@@ -66,7 +67,7 @@ func newAppConnectionsAPI(t *testing.T) appConnectionsAPI {
 		o.Logger = logger
 		a.lib = library.New(deps.pool, deps.addons, deps.client, logger, o.Accounts.Settings)
 		a.data, a.installed, a.pool = userdata.New(deps.pool), deps.addons, deps.pool
-		o.Nuvio = nuvio.New(nuvio.Options{Version: "1.2.3"})
+		o.Nuvio = nuvio.New(nuvio.Options{Version: "1.2.3", Confined: nuviotest.Loopback()})
 		o.Stremio = stremioimport.New(stremioimport.Options{Metas: stremiotest.SampleMetas(), Version: "1.2.3", API: a.fake.API,
 			Link: a.fake.Link})
 		o.AppImport = appimport.New(appimport.Options{Settings: o.Accounts.Settings, Titles: a.lib, UserData: a.data, Addons: deps.addons,
@@ -128,10 +129,71 @@ func (a appConnectionsAPI) checkSecrets(t *testing.T, kept ...string) {
 			t.Errorf("a sign-in is stored unsealed: %q", signIn)
 		}
 	}
+	log := a.log.String()
 	for _, secret := range kept {
-		if secret != "" && strings.Contains(a.log.String(), secret) {
+		if secret != "" && holdsSecret(log, secret) {
 			t.Errorf("the log holds %q", secret)
 		}
+	}
+}
+
+// shortSecret is the length up to which a secret, such as a PIN, is too
+// short to be told apart from chance by a plain substring check: the
+// random user ids of the log and import keys of the answers are 32
+// hexadecimal digits, and one holds "4826" about once in 1,600 runs;
+// durations, times and ports hold digits too. A token or a key is far too
+// long for that.
+const shortSecret = 8
+
+// holdsSecret tells whether text, a log or an answer, holds secret. A
+// short secret counts only standing alone, not inside a longer number or
+// word: "pin=4826", "?pin=4826&", `"pin":"4826"`, and its URL-encoded and
+// escaped forms ("pin%3D4826", "\n4826") hold it; "user_id=…e04826a…" and
+// "took=1.248265ms" do not. A longer secret counts anywhere.
+func holdsSecret(text, secret string) bool {
+	if len(secret) > shortSecret {
+		return strings.Contains(text, secret)
+	}
+	alone := regexp.MustCompile(`(?:^|[^0-9A-Za-z]|%[0-9A-Fa-f]{2}|\\[nrt])` + regexp.QuoteMeta(secret) + `(?:[^0-9A-Za-z]|$)`)
+	return alone.MatchString(text)
+}
+
+// The secret check finds a PIN a log or an answer holds in any form, and
+// not the PIN's digits that a random number holds by chance.
+func TestTheSecretCheckTellsALeakFromChance(t *testing.T) {
+	t.Parallel()
+	pin := stremiotest.SamplePin
+	logged := func(args ...any) string {
+		var log bytes.Buffer
+		slog.New(slog.NewTextHandler(&log, nil)).Info("A line", args...)
+		return log.String()
+	}
+	for name, text := range map[string]string{
+		"a user id":  logged("user_id", "5f1c09a2b7e048269d1e3c7a0b5f2e61"),
+		"a duration": logged("took", 1248265*time.Nanosecond),
+		"a port":     logged("error", "dial tcp 127.0.0.1:54826: connect: connection refused"),
+		"a size":     logged("bytes", 148260),
+		"an answer":  `{"address":"http://127.0.0.1:54826/…/manifest.json","key":"5f1c09a2b7e048269d1e3c7a0b5f2e61"}`,
+	} {
+		if holdsSecret(text, pin) {
+			t.Errorf("%s holds the PIN: %s", name, text)
+		}
+	}
+	for name, text := range map[string]string{
+		"plain":       logged("pin", pin),
+		"a query":     logged("url", "https://app.example/api?pin="+pin+"&profile=3"),
+		"JSON":        logged("body", `{"pin":"`+pin+`"}`),
+		"URL-encoded": logged("url", "https://app.example/?next=%2Fapi%3Fpin%3D"+pin),
+		"on a line":   logged("error", "the answer:\n"+pin),
+		"an answer":   `{"key":"5f1c09a2b7e048269d1e3c7a0b5f2e61","pin":"` + pin + `"}`,
+	} {
+		if !holdsSecret(text, pin) {
+			t.Errorf("%s does not hold the PIN: %s", name, text)
+		}
+	}
+	// A long secret counts anywhere, even inside a word.
+	if !holdsSecret(logged("key", "x0123456789abcdefx"), "0123456789abcdef") {
+		t.Error("a long secret inside a word is not found")
 	}
 }
 
@@ -248,9 +310,8 @@ func TestUsersStayConnectedToStremio(t *testing.T) {
 	if status, _, _ := bob.call(http.MethodDelete, "/account/app-connections/stremio", nil); status != http.StatusNoContent {
 		t.Fatalf("disconnecting: %d", status)
 	}
-	if a.fake.Open() != 0 {
-		t.Errorf("%d sessions open", a.fake.Open())
-	}
+	// In the background.
+	fakeOpen(t, a.fake, 0)
 	if c := connectionOf(t, bob, "/account/app-import", "stremio"); c != nil {
 		t.Errorf("after disconnecting: %v", c)
 	}
@@ -359,9 +420,7 @@ func TestUsersStayConnectedToNuvio(t *testing.T) {
 	if status, _, _ := bob.call(http.MethodDelete, "/account/app-connections/nuvio", nil); status != http.StatusNoContent {
 		t.Fatalf("disconnecting: %d", status)
 	}
-	if backend.Open() != 0 {
-		t.Errorf("%d sessions open after disconnecting", backend.Open())
-	}
+	fakeOpen(t, backend, 0)
 }
 
 func TestAppConnectionsFollowTheirPermissions(t *testing.T) {
@@ -421,7 +480,105 @@ func TestAppConnectionsFollowTheirPermissions(t *testing.T) {
 	if status, _, _ := bob.call(http.MethodDelete, "/account/app-connections/stremio", nil); status != http.StatusNoContent {
 		t.Errorf("Bob disconnects with the setting off: %d", status)
 	}
-	if a.fake.Open() != 0 {
-		t.Errorf("%d sessions open", a.fake.Open())
+	fakeOpen(t, a.fake, 0)
+}
+
+func TestUsersStayConnectedToAStremioProfile(t *testing.T) {
+	t.Parallel()
+	a := newAppConnectionsAPI(t)
+	stremioSample(a.fake, "https://first.example/u/secret/manifest.json")
+	a.fake.Set(func(f *stremiotest.Fake) {
+		f.Profiles = stremiotest.SampleProfiles("https://alice.example/u/secret/manifest.json")
+	})
+	bob := a.signedIn("bob", false)
+	bobID := a.userID("bob")
+
+	// Bob opens Alice's profile with its PIN, and stays connected to it.
+	_, read, _ := bob.call(http.MethodPost, "/account/app-import/stremio/password",
+		map[string]any{"email": "bob@example.com", "password": "bob's password", "stayConnected": true})
+	alice := profileOf(t, read, "Alice")
+	status, opened, _ := bob.call(http.MethodPost, "/account/app-import/stremio/unlock",
+		map[string]any{"key": read["key"], "profile": alice["id"], "pin": stremiotest.SamplePin})
+	if status != http.StatusOK || opened["stayConnected"] != true {
+		t.Fatalf("Alice's PIN: %d %v", status, opened)
 	}
+	if status, body, _ := bob.call(http.MethodPost, "/account/app-import", map[string]any{"key": read["key"], "profile": alice["id"]}); status != http.StatusOK {
+		t.Fatalf("the import: %d %v", status, body)
+	}
+	appImportDone(t, bob, "/account/app-import")
+	c := connectionIdle(t, bob, "/account/app-import", "stremio")
+	if last, _ := c["lastImport"].(map[string]any); c["problem"] != nil || last == nil || last["read"] != 1.0 || last["resumed"] != 1.0 {
+		t.Fatalf("the connection: %v", c)
+	}
+	// The account's session and Alice's stay open: Polyfin keeps them, not
+	// the PIN.
+	fakeOpen(t, a.fake, 2)
+	var session string
+	for _, r := range a.fake.Requests() {
+		if r.Path == "/api/datastoreGet" {
+			session = r.AuthKey
+		}
+	}
+
+	// Alice watches another movie: Import now reads her profile again,
+	// with her session, without the PIN.
+	a.fake.Set(func(f *stremiotest.Fake) {
+		f.Profiles[2].Library = append(f.Profiles[2].Library.([]any), map[string]any{"_id": "tt0000077", "type": "movie", "name": "Later",
+			"removed": false, "temp": false, "_mtime": "2026-10-10T20:00:00.000Z", "state": map[string]any{
+				"lastWatched": "2026-10-10T20:00:00.000Z", "timesWatched": 1}})
+	})
+	requests := len(a.fake.Requests())
+	bob.call(http.MethodPost, "/account/app-connections/stremio/import", nil)
+	c = connectionIdle(t, bob, "/account/app-import", "stremio")
+	if last := c["lastImport"].(map[string]any); last["problem"] != nil || last["read"] != 2.0 || !playedMovie(t, a.lib, a.data, bobID, "tt0000077") {
+		t.Errorf("imported again: %v", c)
+	}
+	for _, r := range a.fake.Requests()[requests:] {
+		if r.Path == "/api/premiumPrefs/authenticateProfile" || r.Path == "/api/datastoreGet" && r.AuthKey != session {
+			t.Errorf("imported again with %s", r.Path)
+		}
+	}
+	a.checkSecrets(t, stremiotest.SamplePin, session, "bob's password")
+
+	// Alice's PIN changes, which ends her session: the connection asks to
+	// choose her again, and goes on.
+	a.fake.ChangePin(alice["id"].(string), "7391")
+	bob.call(http.MethodPost, "/account/app-connections/stremio/import", nil)
+	c = connectionIdle(t, bob, "/account/app-import", "stremio")
+	if c["problem"] != nil || c["lastImport"].(map[string]any)["problem"] != "profile_locked" || c["nextImportAt"] == nil {
+		t.Errorf("another PIN: %v", c)
+	}
+	// Alice's profile is removed.
+	a.fake.Set(func(f *stremiotest.Fake) { f.Profiles = f.Profiles[:2] })
+	bob.call(http.MethodPost, "/account/app-connections/stremio/import", nil)
+	c = connectionIdle(t, bob, "/account/app-import", "stremio")
+	if c["problem"] != nil || c["lastImport"].(map[string]any)["problem"] != "profile_missing" {
+		t.Errorf("Alice removed: %v", c)
+	}
+
+	// Choosing Kids, who has no PIN, replaces the connection: each import
+	// opens Kids' session, and signs it out.
+	_, read, _ = bob.call(http.MethodPost, "/account/app-import/stremio/password",
+		map[string]any{"email": "bob@example.com", "password": "bob's password", "stayConnected": true})
+	if status, body, _ := bob.call(http.MethodPost, "/account/app-import", map[string]any{"key": read["key"], "profile": profileOf(t, read, "Kids")["id"]}); status != http.StatusOK {
+		t.Fatalf("the import: %d %v", status, body)
+	}
+	appImportDone(t, bob, "/account/app-import")
+	c = connectionIdle(t, bob, "/account/app-import", "stremio")
+	if last := c["lastImport"].(map[string]any); last["problem"] != nil || last["read"] != 2.0 {
+		t.Errorf("Kids: %v", c)
+	}
+	bob.call(http.MethodPost, "/account/app-connections/stremio/import", nil)
+	if last := connectionIdle(t, bob, "/account/app-import", "stremio")["lastImport"].(map[string]any); last["problem"] != nil || last["read"] != 2.0 {
+		t.Errorf("Kids again: %v", last)
+	}
+	// The first connection's session was signed out as it was replaced.
+	fakeOpen(t, a.fake, 1)
+
+	// Disconnecting signs out the account's session.
+	if status, _, _ := bob.call(http.MethodDelete, "/account/app-connections/stremio", nil); status != http.StatusNoContent {
+		t.Fatalf("disconnecting: %d", status)
+	}
+	fakeOpen(t, a.fake, 0)
+	a.checkSecrets(t, stremiotest.SamplePin, "7391")
 }

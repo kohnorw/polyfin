@@ -23,6 +23,7 @@ var serverSecrets = map[string]func(accounts.Settings) string{
 	"aniListClientSecret":     func(s accounts.Settings) string { return s.AniListClientSecret },
 	"myAnimeListClientSecret": func(s accounts.Settings) string { return s.MyAnimeListClientSecret },
 	"metricsToken":            func(s accounts.Settings) string { return s.MetricsToken },
+	"updateToolToken":         func(s accounts.Settings) string { return s.UpdateToolToken },
 }
 
 // secretJSON is a secret revealed on demand. Answers never cache it.
@@ -131,7 +132,7 @@ func (h *handler) secretsHealth(ctx context.Context) *secretsHealthJSON {
 	if h.Health.Secrets == nil {
 		return nil
 	}
-	report, err := h.Health.Secrets(ctx)
+	report, err := h.secretsReport(ctx)
 	if err != nil {
 		// A request that ended, such as a tab closed during a refresh, is
 		// not a failure: nobody reads the answer.

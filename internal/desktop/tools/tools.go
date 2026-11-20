@@ -1,7 +1,10 @@
 // Package tools downloads FFmpeg and ffprobe 9.0 into the data folder of
 // Polyfin Desktop at its first start: the builds of the Docker image for
 // Windows and Linux, and a build made for macOS, each archive checked
-// against the checksum pinned here before anything in it is used.
+// against the checksum pinned here before anything in it is used. The
+// server, in Docker as in Polyfin Desktop, downloads the same way the
+// FFmpeg for NVIDIA drivers older than 610 when NVENC needs it (see
+// OlderDriver).
 package tools
 
 import (
@@ -20,7 +23,9 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"time"
 
+	"github.com/moodiness/polyfin/internal/process"
 	"github.com/ulikunitz/xz"
 )
 
@@ -68,7 +73,7 @@ type Progress func(done, total int64)
 
 // btbn is the release of the builds the Docker image takes (Dockerfile):
 // the shared builds, whose ffmpeg and ffprobe load the same libraries.
-const btbn = "https://github.com/BtbN/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n9.0.2-17-g2a571b6068-"
+const btbn = "https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/autobuild-2026-09-30-13-08/ffmpeg-n9.0.2-17-g2a571b6068-"
 
 // macOS has no build there: these are static builds made for macOS, with
 // VideoToolbox, one archive per program.
@@ -147,6 +152,8 @@ type Tools struct {
 	Dir      string
 	Manifest Manifest
 	Client   *http.Client
+	// retryDelays replaces defaultRetryDelays, for tests.
+	retryDelays []time.Duration
 }
 
 // folder is where the manifest's tools are unpacked.
@@ -215,19 +222,20 @@ func (t Tools) Ensure(ctx context.Context, progress Progress) (Paths, error) {
 		return Paths{}, err
 	}
 	defer os.RemoveAll(building)
+	programs := []string{filepath.Join(building, filepath.FromSlash(t.Manifest.FFmpeg)),
+		filepath.Join(building, filepath.FromSlash(t.Manifest.FFprobe))}
 	for i, f := range t.Manifest.Files {
 		archive := filepath.Join(downloads, fmt.Sprintf("%d.%s", i, f.Format))
-		if err := t.download(ctx, f, archive, report); err != nil {
+		if err := t.downloadRetrying(ctx, f, archive, report); err != nil {
 			return Paths{}, err
 		}
 		done += f.Size
-		if err := unpack(archive, f, building); err != nil {
+		if err := unpack(archive, f, building, programs); err != nil {
 			return Paths{}, fmt.Errorf("unpack %s: %w", f.URL, err)
 		}
 	}
-	for _, p := range []string{t.Manifest.FFmpeg, t.Manifest.FFprobe} {
-		executable := filepath.Join(building, filepath.FromSlash(p))
-		if err := os.Chmod(executable, 0o755); err != nil {
+	for i, p := range []string{t.Manifest.FFmpeg, t.Manifest.FFprobe} {
+		if err := os.Chmod(programs[i], 0o755); err != nil {
 			return Paths{}, fmt.Errorf("the downloads lack %s: %w", p, err)
 		}
 	}
@@ -258,6 +266,51 @@ func (t Tools) removeOthers() {
 	}
 }
 
+// defaultRetryDelays are the waits before each new attempt at a download
+// that failed in passing: a network error, a timeout, or a 5xx or 429
+// answer, as GitHub gives during an outage.
+var defaultRetryDelays = []time.Duration{5 * time.Second, 15 * time.Second, 30 * time.Second, 60 * time.Second}
+
+// statusError is an answer other than 200.
+type statusError struct {
+	url  string
+	code int
+}
+
+func (e statusError) Error() string {
+	return fmt.Sprintf("download %s: the download failed (HTTP %d)", e.url, e.code)
+}
+
+func (e statusError) transient() bool {
+	return e.code >= 500 || e.code == http.StatusTooManyRequests
+}
+
+// downloadRetrying is download, tried again after a passing failure. A
+// file that arrives whole but differs is refused at once.
+func (t Tools) downloadRetrying(ctx context.Context, f File, file string, report func(int64)) error {
+	delays := t.retryDelays
+	if delays == nil {
+		delays = defaultRetryDelays
+	}
+	for attempt := 0; ; attempt++ {
+		err := t.download(ctx, f, file, report)
+		var status statusError
+		switch {
+		case err == nil:
+			return nil
+		case errors.Is(err, ErrChecksum), ctx.Err() != nil, attempt == len(delays),
+			errors.As(err, &status) && !status.transient():
+			return err
+		}
+		report(0)
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(delays[attempt]):
+		}
+	}
+}
+
 // download writes f to file, checking its size and checksum as it goes.
 func (t Tools) download(ctx context.Context, f File, file string, report func(int64)) error {
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, f.URL, nil)
@@ -274,7 +327,7 @@ func (t Tools) download(ctx context.Context, f File, file string, report func(in
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: status %d", f.URL, response.StatusCode)
+		return statusError{url: f.URL, code: response.StatusCode}
 	}
 	out, err := os.OpenFile(file, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
@@ -333,14 +386,15 @@ func target(f File, member, dir string) (string, bool, error) {
 	return out, true, nil
 }
 
-func unpack(archive string, f File, dir string) error {
+// unpack unpacks f's archive into dir, where programs are the files run.
+func unpack(archive string, f File, dir string, programs []string) error {
 	if f.Format == "zip" {
-		return unzip(archive, f, dir)
+		return unzip(archive, f, dir, programs)
 	}
-	return untar(archive, f, dir)
+	return untar(archive, f, dir, programs)
 }
 
-func unzip(archive string, f File, dir string) error {
+func unzip(archive string, f File, dir string, programs []string) error {
 	reader, err := zip.OpenReader(archive)
 	if err != nil {
 		return err
@@ -361,7 +415,7 @@ func unzip(archive string, f File, dir string) error {
 		if err != nil {
 			return err
 		}
-		err = write(out, in, member.Mode().Perm())
+		err = write(out, in, member.Mode().Perm(), slices.Contains(programs, out))
 		in.Close()
 		if err != nil {
 			return err
@@ -370,7 +424,7 @@ func unzip(archive string, f File, dir string) error {
 	return nil
 }
 
-func untar(archive string, f File, dir string) error {
+func untar(archive string, f File, dir string, programs []string) error {
 	file, err := os.Open(archive)
 	if err != nil {
 		return err
@@ -398,7 +452,7 @@ func untar(archive string, f File, dir string) error {
 		}
 		switch header.Typeflag {
 		case tar.TypeReg:
-			if err := write(out, reader, header.FileInfo().Mode().Perm()); err != nil {
+			if err := write(out, reader, header.FileInfo().Mode().Perm(), slices.Contains(programs, out)); err != nil {
 				return err
 			}
 		case tar.TypeSymlink:
@@ -417,12 +471,19 @@ func untar(archive string, f File, dir string) error {
 	}
 }
 
-func write(out string, in io.Reader, mode os.FileMode) error {
+// write writes what in reads to out, with mode. A program, run as soon as
+// it is there, is written as process.WriteExecutable writes it: the
+// server may download one while it converts video, starting programs all
+// the time.
+func write(out string, in io.Reader, mode os.FileMode, program bool) error {
 	if err := os.MkdirAll(filepath.Dir(out), 0o755); err != nil {
 		return err
 	}
 	if mode == 0 {
 		mode = 0o644
+	}
+	if program {
+		return process.WriteExecutable(out, in, mode|0o600)
 	}
 	file, err := os.OpenFile(out, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode|0o600)
 	if err != nil {

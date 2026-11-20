@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/ulikunitz/xz"
 )
@@ -119,6 +120,7 @@ func read(t *testing.T, path string) string {
 // Two archives of one program each, as macOS's, are downloaded with
 // progress, checked, unpacked into bin, and not downloaded again.
 func TestEnsureDownloadsChecksAndUnpacks(t *testing.T) {
+	t.Parallel()
 	ffmpeg := zipOf(t, map[string]string{"ffmpeg": "fake ffmpeg", "README": "left out"})
 	ffprobe := zipOf(t, map[string]string{"ffprobe": "fake ffprobe"})
 	server := newFake(t, map[string][]byte{"/ffmpeg.zip": ffmpeg, "/ffprobe.zip": ffprobe})
@@ -182,12 +184,14 @@ func TestEnsureDownloadsChecksAndUnpacks(t *testing.T) {
 // An archive whose checksum or size is not the pinned one is refused, and
 // nothing is put in place.
 func TestEnsureRefusesAWrongChecksum(t *testing.T) {
+	t.Parallel()
 	good := zipOf(t, map[string]string{"ffmpeg": "fake ffmpeg", "ffprobe": "fake ffprobe"})
 	tampered := zipOf(t, map[string]string{"ffmpeg": "evil ffmpeg", "ffprobe": "evil ffprobe"})
 	larger := append(append([]byte{}, good...), 0)
 	server := newFake(t, map[string][]byte{"/tampered.zip": tampered, "/larger.zip": larger})
 	for _, path := range []string{"/tampered.zip", "/larger.zip"} {
 		t.Run(path, func(t *testing.T) {
+			t.Parallel()
 			file := pin(server.URL+path, good, "zip")
 			file.Into = "bin"
 			dir := t.TempDir()
@@ -208,9 +212,58 @@ func TestEnsureRefusesAWrongChecksum(t *testing.T) {
 	}
 }
 
+// A server that answers 504, as GitHub did on 2026-11-08, is tried again
+// until the file comes; one that keeps failing, or answers 404, is told
+// as a failed download, not as a wrong checksum.
+func TestEnsureRetriesPassingFailures(t *testing.T) {
+	t.Parallel()
+	good := zipOf(t, map[string]string{"ffmpeg": "fake ffmpeg", "ffprobe": "fake ffprobe"})
+	for _, c := range []struct {
+		name         string
+		failures     int32
+		code         int
+		wantErr      string
+		wantRequests int32
+	}{
+		{name: "504 twice", failures: 2, code: http.StatusGatewayTimeout, wantRequests: 3},
+		{name: "504 always", failures: 100, code: http.StatusGatewayTimeout, wantErr: "the download failed (HTTP 504)", wantRequests: 4},
+		{name: "404", failures: 100, code: http.StatusNotFound, wantErr: "the download failed (HTTP 404)", wantRequests: 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if requests.Add(1) <= c.failures {
+					w.WriteHeader(c.code)
+					_, _ = w.Write([]byte("<html><body><h1>504 Gateway Time-out</h1></body></html>\n"))
+					return
+				}
+				_, _ = w.Write(good)
+			}))
+			t.Cleanup(server.Close)
+			file := pin(server.URL+"/ffmpeg.zip", good, "zip")
+			file.Into = "bin"
+			tools := Tools{Dir: t.TempDir(), Client: server.Client(),
+				retryDelays: []time.Duration{time.Millisecond, time.Millisecond, time.Millisecond},
+				Manifest:    Manifest{Version: "9.0.2", FFmpeg: "bin/ffmpeg", FFprobe: "bin/ffprobe", Files: []File{file}}}
+			_, err := tools.Ensure(context.Background(), nil)
+			switch {
+			case c.wantErr == "" && err != nil:
+				t.Fatalf("Ensure: %v", err)
+			case c.wantErr != "" && (err == nil || errors.Is(err, ErrChecksum) || !strings.Contains(err.Error(), c.wantErr)):
+				t.Fatalf("Ensure = %v, want %q", err, c.wantErr)
+			}
+			if got := requests.Load(); got != c.wantRequests {
+				t.Errorf("%d requests, want %d", got, c.wantRequests)
+			}
+		})
+	}
+}
+
 // A shared Linux build: the top folder left out, the libraries and the
 // links to them kept, the rest left out.
 func TestEnsureUnpacksTarXZWithLinks(t *testing.T) {
+	t.Parallel()
 	if runtime.GOOS == "windows" {
 		t.Skip("symbolic links need a privilege on Windows")
 	}
@@ -245,6 +298,7 @@ func TestEnsureUnpacksTarXZWithLinks(t *testing.T) {
 
 // A member whose path leaves the folder is refused.
 func TestEnsureRefusesAMemberLeavingTheFolder(t *testing.T) {
+	t.Parallel()
 	archive := tarXZOf(t, []entry{{name: "top/bin/ffmpeg", content: "x"}, {name: "top/lib/evil", link: "../../../outside"}})
 	server := newFake(t, map[string][]byte{"/a.tar.xz": archive})
 	file := pin(server.URL+"/a.tar.xz", archive, "tar.xz")
@@ -261,6 +315,7 @@ func TestEnsureRefusesAMemberLeavingTheFolder(t *testing.T) {
 
 // Every system the app is built for has its pinned downloads.
 func TestEverySystemIsPinned(t *testing.T) {
+	t.Parallel()
 	for _, system := range []string{"linux/amd64", "linux/arm64", "windows/amd64", "windows/arm64", "darwin/amd64", "darwin/arm64"} {
 		goos, goarch, _ := strings.Cut(system, "/")
 		m, ok := Pinned(goos, goarch)

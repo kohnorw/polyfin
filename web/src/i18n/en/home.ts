@@ -12,7 +12,7 @@ const home = {
   quickConnect: {
     title: 'Quick Connect',
     description:
-      'Sign in a TV or phone app without typing your password: choose Quick Connect in the app, then enter the 6-digit code it shows.',
+      'Sign in a TV or phone app without typing your password: choose Quick Connect in a Jellyfin app, or open Silo’s app on a TV, then enter the code it shows.',
     code: 'Quick Connect code',
     codeHint: 'Codes expire after 10 minutes.',
     lookingUp: 'Looking for the device…',
@@ -20,13 +20,29 @@ const home = {
     device: 'Device',
     app: 'App',
     requested: 'Asked',
+    address: 'Address',
+    /** Where the device asks from, told from where the person approving is. */
+    network: {
+      own: 'Your address',
+      local: 'Your local network',
+      other: 'Another network',
+    },
+    claims:
+      'The device gives its name and its app itself. The address is where Polyfin saw it ask from.',
+    otherNetwork:
+      'This device asks from another network than yours. Approve it only if you started this sign-in yourself, on a device in front of you.',
+    linked:
+      'You came here from a link or a QR code. To approve this device, type the code its screen shows.',
+    linkedHint: 'Type the code the device shows. Codes expire after 10 minutes.',
+    identity:
+      'Your account uses two-step sign-in, and this device will sign in without it. Confirm it is you.',
     approve: 'Approve and sign in this device',
     approving: 'Approving…',
     approved: (device: string, user: string) => `${device} is now signed in as ${user}.`,
     another: 'Approve another device',
     steps: [
-      'Open the Jellyfin app on the device and choose Quick Connect.',
-      'Type the 6-digit code it shows here.',
+      'On the device, choose Quick Connect in a Jellyfin app, or open Silo’s app on a TV.',
+      'Type the code it shows here: 6 digits from Jellyfin, 8 from Silo.',
       'Check the device, then approve it.',
     ],
     stepsLabel: 'How it works',
@@ -52,13 +68,17 @@ const home = {
       conversions: 'Video conversions',
       conversionsOf: (count: number, limit: number) =>
         limit > 0 ? `${count} of ${limit}` : `${count}, no limit`,
+      /** The Bandwidth panel: what every play moves now, and the video conversions. */
+      bandwidth: 'Bandwidth',
+      sentToApps: 'sent to apps',
+      receivedFromSources: 'received from sources',
       uptime: 'Running for',
       problems: 'To look at',
       problemsEmpty: 'Nothing to look at',
       problemsEmptyHelp:
         'Polyfin checks its disks, sources, guides, backups and tasks. Anything that needs you shows up here.',
-      problemError: 'Problem',
-      problemWarning: 'To check',
+      /** The kind word of the tile of a new version, in To look at. */
+      updateKind: 'New version',
       update: (version: string, running: string) =>
         `Polyfin ${version} is available. This server runs version ${running}.`,
       releaseNotes: 'Release notes',
@@ -78,6 +98,110 @@ const home = {
       graphicsCpu: 'Conversions use the processor',
       toneMapping: 'tone mapping',
     },
+    /** Home's Get started card: the steps of a good setup, each done or not. */
+    getStarted: {
+      title: 'Get started',
+      progress: (done: number, total: number) => `${done} of ${total} steps done`,
+      next: 'Next',
+      showSteps: (count: number) => `All ${count} steps`,
+      hideSteps: 'Hide the steps',
+      dismiss: 'Dismiss',
+      done: 'Done',
+      todo: 'To do',
+      steps: {
+        metadata: {
+          title: 'Add a metadata addon',
+          help: 'It gives titles their posters, summaries and episodes.',
+        },
+        library: {
+          title: 'Choose your libraries',
+          help: 'The catalogs of your sources that apps show as libraries.',
+        },
+        users: {
+          title: 'Create users or an invite link',
+          help: 'An account for each person you share Polyfin with.',
+        },
+        backups: {
+          title: 'Back up the database every day',
+          help: 'A copy of the accounts, the settings and what everyone watched.',
+        },
+        secretKey: {
+          title: 'Set POLYFIN_SECRET_KEY',
+          help: 'It encrypts the keys and passwords Polyfin stores. Set it, then restart.',
+        },
+        address: {
+          title: 'Serve HTTPS or set a public address',
+          help: 'Apps away from home connect securely, and notifications link to Polyfin.',
+        },
+        discovery: {
+          title: 'Let apps on your network find Polyfin',
+          help: 'Answer local network discovery with the address apps reach.',
+        },
+      },
+    },
+    /** Restart, the install of Polyfin Desktop's update, and Update now, on Home. */
+    server: {
+      restart: 'Restart',
+      updateNow: 'Update now',
+      install: (version: string) => `Install Polyfin ${version}`,
+      downloading: (percent: number) => `Downloading: ${percent}%`,
+      confirmWith: 'Confirm with',
+      withPassword: 'Password',
+      withCode: 'Two-step code',
+      password: 'Your password',
+      code: 'Code of your app, or a recovery code',
+      identityHelp: 'Each of these actions asks for it again.',
+      restartTitle: 'Restart Polyfin',
+      restartText:
+        'Polyfin stops what it is doing, playbacks and recordings included, and exits. Apps connect again once it answers.',
+      restartBy: {
+        desktop: 'Polyfin Desktop starts it again by itself.',
+        confirmed:
+          'Its container’s restart policy, or its service manager, starts it again, as confirmed under Settings › General.',
+      },
+      unknownTitle: 'Polyfin may not come back',
+      unknown: {
+        container:
+          'Polyfin cannot see its container’s restart policy. Without one that starts it again, such as unless-stopped or always, Polyfin stays stopped until it is started on the host.',
+        other:
+          'Polyfin cannot tell whether a service manager starts it again. Without one, Polyfin stays stopped until it is started on the host.',
+      },
+      unknownHelp:
+        'Once it is set, turn on “Polyfin is started again when it stops” under Settings › General, and this warning goes.',
+      restartConfirm: 'Restart',
+      restartAnyway: 'Restart anyway',
+      restarting: 'Restarting…',
+      waitingTitle: 'Polyfin is restarting',
+      waiting: 'Waiting for Polyfin to answer again…',
+      waitingLong: (seconds: number) =>
+        `Polyfin has not answered for ${seconds} seconds. If nothing starts it again, start it on the host.`,
+      secretTitle: 'Make a new signing secret',
+      secretText:
+        'Polyfin makes a new signing secret, then restarts: it stops what it is doing, playbacks and recordings included, and exits. Every playback address, live stream link, image address and Configure link it gave before stops working. Apps stay signed in, and ask again for what they play once it answers.',
+      secretConfirm: 'Make it and restart',
+      secretAnyway: 'Make it and restart anyway',
+      installTitle: (version: string) => `Install Polyfin ${version}`,
+      installText:
+        'Polyfin Desktop downloads the new version and checks it, then stops Polyfin, installs it and starts it, as Install Polyfin does in its menu. Playbacks and recordings stop meanwhile.',
+      installConfirm: 'Install',
+      installing: 'Asking…',
+      installWaitingTitle: (version: string) => `Installing Polyfin ${version}`,
+      installStopping: 'Polyfin stops to install the new version. Waiting for it to answer again…',
+      installFailed:
+        'Polyfin Desktop could not install the update: the log folder tells why. Polyfin runs on as it was.',
+      updateTitle: 'Update now',
+      updateText:
+        'Polyfin asks the update tool set under Settings › General to update now. What the tool does next is up to it: one that replaces Polyfin’s container stops Polyfin for a moment.',
+      updateConfirm: 'Send the request',
+      sending: 'Sending…',
+      answer: (status: number) => `The update tool answered HTTP ${status}.`,
+      answerEmpty: 'Its answer holds no text.',
+      watching:
+        'If the tool replaces Polyfin’s container, this page reloads once Polyfin answers again.',
+      gone: 'Polyfin stopped before the tool answered: the tool is probably replacing it. Waiting for Polyfin to answer again…',
+      tooSoon: 'This was asked less than a minute ago. Try again in a moment.',
+      close: 'Close',
+    },
     live: {
       title: 'Now playing',
       empty: 'Nothing is playing right now.',
@@ -89,6 +213,8 @@ const home = {
       liveChannel: 'Live',
       progress: (title: string) => `Playback position of ${title}`,
       remaining: (time: string) => `${time} left`,
+      /** After the position: "of 1:44:00". */
+      ofRuntime: (time: string) => `of ${time}`,
       startedAt: (time: string) => `Started ${time}`,
       appOn: (app: string, device: string) => (app ? `${app} on ${device}` : device),
       /** A guest's playback through a share link, in place of its app and device. */
@@ -130,14 +256,33 @@ const home = {
       sizeLimit: 'Smaller than the source',
       /** Shown when the app may switch between several qualities of converted video. */
       qualityPlayed: 'Quality played',
+      /** The version the play went on from once its source failed. */
+      switchedVersion: 'Switched version',
+      /** What a play moves now, and where its version is read from. */
+      bandwidth: {
+        sent: (rate: string) => `${rate} to the app`,
+        received: (rate: string) => `${rate} from the source`,
+        redirected: 'The app reads the source itself',
+      },
+      origins: {
+        addon: 'Addon',
+        torrent: 'Torrent',
+        localFolder: 'Local folder',
+        networkShare: 'Network share',
+        iptv: 'IPTV',
+      } as Record<string, string>,
+      peers: (count: number) => (count === 1 ? '1 peer' : `${count} peers`),
       qualityAmong: (played: string, offered: string) => `${played}, among ${offered}`,
       sizeLimits: {
         steppedDown: (height: string) => `The app stepped down from ${height}`,
         gpu: (height: string) => `${height} at most: converted by the graphics card`,
         processor: (height: string) => `${height} at most: converted by the processor`,
         toneMapping: (height: string) => `${height} at most: HDR converted by the processor`,
+        gpuToneMapping: (height: string) =>
+          `${height} at most: the graphics card converts HDR in time only up to there`,
         qualityGroup: (height: string) => `Quality group: ${height}`,
         serverMax: (height: string) => `Maximum quality of converted video: ${height}`,
+        app: (height: string) => `Quality allowed by the app: ${height}`,
         appBitrate: (rate: string) => `Bitrate allowed by the app: ${rate}`,
         userBitrate: (rate: string) => `User’s maximum quality: ${rate}`,
       },
@@ -187,6 +332,16 @@ const home = {
       VideoRangeTypeNotSupported: 'HDR not supported',
       StreamCountExceedsLimit: 'Too many tracks',
     } as Record<string, string>,
+    /** A member's Home. */
+    member: {
+      /** The member in their own playback's tile. */
+      you: 'You',
+      /** The lede while the member plays one title. */
+      watching: (title: string, device: string) => `You are watching ${title} on ${device}.`,
+      lede: 'Approve a device with Quick Connect, choose your sources and set up your account.',
+      sourceCount: (count: number) =>
+        count === 0 ? 'None yet' : count === 1 ? '1 source' : `${count} sources`,
+    },
     activity: {
       title: 'Recent activity',
       openLog: 'Open the log',

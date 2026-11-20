@@ -52,8 +52,13 @@ const backups = {
       hostKeyNone: 'Saved at the first connection.',
       hostKeyForget: 'Forget',
       hostKeyForgetHelp:
-        'Forget the saved key when the server’s key changed on purpose: the key it offers at the next connection is saved.',
-      hostKeyForgotten: 'The key the server offers at the next connection will be saved.',
+        'Forget the saved key when the server’s key changed on purpose. The key it then offers is shown here, to accept after comparing it with the server’s own.',
+      hostKeyForgotten:
+        'Forgotten. The key the server offers at the next connection will be shown here, to accept. Test the destination to see it.',
+      hostKeyOffered: (fingerprint: string) =>
+        `The server offers the host key ${fingerprint}, and Polyfin refuses it. Accept it only after comparing it with the server’s own fingerprint.`,
+      acceptHostKey: 'Accept this key',
+      hostKeyAccepted: (name: string) => `The host key of ${name} is accepted.`,
       create: 'Add',
       creating: 'Adding…',
       save: 'Save',
@@ -89,20 +94,29 @@ const backups = {
       button: 'Restore',
       title: 'Restore a backup',
       intro:
-        'The database comes back as it was when the backup was made. Choose a backup of the folder or of a destination, or send a .dump file.',
+        'The database comes back as it was when the backup was made. Choose a backup of the folder or of a destination, or send a backup file.',
       loading: 'Listing the backups…',
       folder: 'Backups folder',
       none: 'No backup here.',
       beforeRestore: 'before a restore',
+      encrypted: 'encrypted',
       choose: 'Restore this backup',
-      upload: 'Send a .dump file',
+      download: 'Download',
+      downloadDecrypted: 'Download decrypted',
+      downloadTitle: (file: string) => `Download ${file} decrypted`,
+      downloadBody:
+        'Type the passphrase this backup was encrypted with. The dump is saved unencrypted on this computer: keep it as safe as the server.',
+      passphrase: 'Backup passphrase',
+      downloading: 'Checking the passphrase…',
+      upload: 'Send a backup file',
       uploadHelp:
-        'A backup of Polyfin’s database, made by Polyfin or with pg_dump --format=custom.',
+        'A .dump file of Polyfin’s database, made by Polyfin or with pg_dump --format=custom, or a .dump.enc file Polyfin encrypted.',
+      unlockTitle: (file: string) => `Open ${file}`,
+      unlockBody:
+        'This backup is encrypted. Type the passphrase it was made with: Polyfin decrypts it, checks every part of it, then tells what restoring it does.',
+      unlock: 'Open',
+      unlocking: 'Decrypting and checking…',
       checking: 'Checking the backup…',
-      unavailable: {
-        pg_restore_missing:
-          'pg_restore was not found on the server: install PostgreSQL 18’s client tools, which the Docker image includes.',
-      },
       confirmTitle: (file: string) => `Restore ${file}?`,
       made: (date: string) => `Made ${date}.`,
       from: (name: string) => `From ${name}.`,
@@ -142,6 +156,7 @@ const backups = {
         'Polyfin is restoring the backup, then starts again. This page reloads once it answers.',
       lastRestore: 'Last restore',
       lastRestoreOk: (file: string, by: string) => `${file}, by ${by}`,
+      lastRestoreSetup: (file: string) => `${file}, from the setup page`,
       lastRestoreFailed: (file: string) =>
         `${file} could not be restored: the database is as it was.`,
     },

@@ -12,8 +12,6 @@
       "height": 360,
       "coded_width": 640,
       "coded_height": 360,
-      "closed_captions": 0,
-      "film_grain": 0,
       "has_b_frames": 2,
       "sample_aspect_ratio": "1:1",
       "display_aspect_ratio": "16:9",
@@ -22,13 +20,14 @@
       "color_range": "tv",
       "chroma_location": "left",
       "field_order": "progressive",
-      "refs": 1,
+      "view_ids_available": "",
+      "view_pos_available": "",
       "r_frame_rate": "24/1",
       "avg_frame_rate": "24/1",
       "time_base": "1/1000",
       "start_pts": 0,
       "start_time": "0.000000",
-      "extradata_size": 2413,
+      "extradata_size": 2435,
       "disposition": {
         "default": 0,
         "dub": 0,
@@ -47,10 +46,11 @@
         "descriptions": 0,
         "metadata": 0,
         "dependent": 0,
-        "still_image": 0
+        "still_image": 0,
+        "multilayer": 0
       },
       "tags": {
-        "ENCODER": "Lavc60.31.102 libx265",
+        "ENCODER": "Lavc63.1.102 libx265",
         "DURATION": "00:00:10.000000000"
       }
     },
@@ -92,10 +92,11 @@
         "descriptions": 0,
         "metadata": 0,
         "dependent": 0,
-        "still_image": 0
+        "still_image": 0,
+        "multilayer": 0
       },
       "tags": {
-        "ENCODER": "Lavc60.31.102 dca",
+        "ENCODER": "Lavc63.1.102 dca",
         "DURATION": "00:00:10.000000000"
       }
     },
@@ -136,10 +137,11 @@
         "descriptions": 0,
         "metadata": 0,
         "dependent": 0,
-        "still_image": 0
+        "still_image": 0,
+        "multilayer": 0
       },
       "tags": {
-        "ENCODER": "Lavc60.31.102 truehd",
+        "ENCODER": "Lavc63.1.102 truehd",
         "DURATION": "00:00:10.000000000"
       }
     }
@@ -148,15 +150,16 @@
     "filename": "hevc-dts-truehd-mkv.mkv",
     "nb_streams": 3,
     "nb_programs": 0,
+    "nb_stream_groups": 0,
     "format_name": "matroska,webm",
     "format_long_name": "Matroska / WebM",
     "start_time": "0.000000",
     "duration": "10.000000",
-    "size": "3521590",
-    "bit_rate": "2817272",
+    "size": "3519000",
+    "bit_rate": "2815200",
     "probe_score": 100,
     "tags": {
-      "ENCODER": "Lavf60.16.100"
+      "ENCODER": "Lavf63.1.102"
     }
   }
 }

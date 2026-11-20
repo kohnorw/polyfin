@@ -16,8 +16,11 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype/zeronull"
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/moodiness/polyfin/internal/i18n"
+	"github.com/moodiness/polyfin/internal/localization"
 	"github.com/moodiness/polyfin/internal/secrets"
 )
 
@@ -54,6 +57,9 @@ type User struct {
 	CreatedAt      time.Time
 	LastLoginAt    *time.Time
 	LastActivityAt *time.Time
+	// LastActivityApp is the app of the last activity, written with
+	// LastActivityAt: a device's Client, or AdminApp. Empty when unknown.
+	LastActivityApp string
 	// Parental limits the titles the user reaches by their rating.
 	Parental ParentalControl
 	// VideoTranscoding and AudioTranscoding let the user's apps have the
@@ -70,9 +76,10 @@ type User struct {
 	// before their own, when they may use their own; otherwise they see
 	// the server's alone whatever its value.
 	UseSharedAddons bool
-	// InvalidLoginAttempts counts the user's wrong passwords in a row,
-	// while the server blocks accounts after Settings.LoginAttempts of them;
-	// BlockedUntil is when the last block ends (see Store.BlockedUntil).
+	// InvalidLoginAttempts is the highest count of wrong passwords in a
+	// row among the user's clients, while the server blocks them after
+	// Settings.LoginAttempts; BlockedUntil is when the latest of their
+	// blocks ends (see Store.AuthenticateFrom).
 	InvalidLoginAttempts int
 	BlockedUntil         *time.Time
 	// MaxPlaybacks is how many of the user's other devices may be playing
@@ -117,6 +124,11 @@ type User struct {
 	// from that date in the server's time zone, it is refused as a
 	// disabled one is (see Ended). An administrator's never ends.
 	EndsOn *time.Time
+	// EndsAt is the exact time the account ends, nil for none: an invite
+	// link with an account end gives it to the accounts it creates (see
+	// Invite.AccountDays), and a date set since replaces it. An account
+	// has EndsOn or EndsAt, never both.
+	EndsAt *time.Time
 	// CanShare lets the user give a movie or an episode to someone without
 	// an account, through a share link, while the server allows them
 	// (Settings.ShareLinks). Losing it revokes the user's links.
@@ -125,19 +137,71 @@ type User struct {
 	// while the server plays them (see Settings.TorrentsAllowed). Off for
 	// every user, administrators included, until given.
 	TorrentStreams bool
-	// GroupID is the group the user belongs to, nil for none (see Group);
-	// while FollowGroup is set, the settings the group holds are its
-	// values, otherwise the user's own. FollowGroup is set without a group.
+	// GroupID is the group the user belongs to, nil for none (see Group).
+	// OwnSections lists the GroupSections in which the user keeps their
+	// own values: in the others, the settings the group holds are its
+	// values. It is empty without a group.
 	GroupID     *ID
-	FollowGroup bool
+	OwnSections []string
 	// MetadataLanguage is the language the user's titles are described in,
 	// by the server's addons given that language (see addons.Addon.Language);
 	// empty for the server's descriptions. It also names what Polyfin
-	// generates when it is English or French.
+	// generates when Polyfin speaks it (see i18n.Match).
 	MetadataLanguage string
 	// TwoStep is set once the user signs in with a code from an
 	// authenticator app after their password (see Store.ConfirmTwoStep).
 	TwoStep bool
+	// ProviderOnly has the user sign in through the identity provider
+	// alone: their password is refused (see Authenticate).
+	ProviderOnly bool
+	// ProviderIssuer is the issuer of the identity provider the account
+	// is linked at, to the person who signs in as it there; empty without
+	// a link (see ProviderLinked). ProviderLinkAllowed is an
+	// administrator's permission to link the account at the next sign-in
+	// through the provider of the person it is named after, once (see
+	// Store.ProviderUser).
+	ProviderIssuer      string
+	ProviderLinkAllowed bool
+	// WebTheme is the user's web player theme, one of WebThemes, empty for
+	// the server's (see Settings.WebThemeOf); WebThemeLocked keeps the user
+	// from changing it themselves (see SetOwnWebTheme).
+	WebTheme       string
+	WebThemeLocked bool
+	// AudioRegion is the regional variant of audio the user prefers, one
+	// of localization.AudioVariants ("fr-CA"), empty for none. It refines
+	// the audio language they or the server chose for them, or names it
+	// when neither did.
+	AudioRegion string
+	// RemoteAccess lets the user sign in and use the server from outside
+	// the local network, Jellyfin's EnableRemoteAccess: without it, only
+	// from the local network (see AllowedFrom). On for every user until
+	// taken away.
+	RemoteAccess bool
+	// LiveTvChannels chooses the Live TV channels of the server's sources
+	// the user sees, while LiveTv lets them reach Live TV at all.
+	LiveTvChannels ChannelRule
+	// LocalFirst offers the user the versions of local folders and
+	// network shares before the others, whatever the version order's
+	// criteria: those of Order versions by, and their order of sources
+	// (see Settings.VersionOrder). Off for every user until given.
+	LocalFirst bool
+	// NextUpWithResume has taking an episode off Continue Watching also
+	// take its series off Next Up, as Remove from Next Up does. The
+	// user's own choice, off until they turn it on.
+	NextUpWithResume bool
+	// BoostVolume makes jellyfin-web's player louder for the user, in the
+	// browser itself: Polyfin's script there sends the sound of videos
+	// through a gain and a compressor. Nothing changes on the server.
+	BoostVolume bool
+	// ConvertSound converts the audio of the user's videos and channels,
+	// evened at -16 LUFS whatever Settings.NormalizeConvertedAudio says,
+	// the video copied where it plays as it is: every app then plays it
+	// louder, at the cost of direct play. Both are off until chosen.
+	ConvertSound bool
+	// InterfaceSize is the size of the admin app for the user, one of
+	// InterfaceSizes: InterfaceCompact, the default, or InterfaceLarge.
+	// The user's own choice; the admin app applies it on every browser.
+	InterfaceSize string
 }
 
 // NewUser describes an account to create.
@@ -149,6 +213,9 @@ type NewUser struct {
 	// Group is the group the account joins and follows, nil for none; an
 	// administrator cannot join one (ErrAdministratorGroup).
 	Group *ID
+	// ProviderOnly has the account sign in through the identity provider
+	// only; it then needs no password.
+	ProviderOnly bool
 }
 
 // UserChanges lists the fields to update; nil fields are kept.
@@ -185,31 +252,59 @@ type UserChanges struct {
 	QualityGroup *int
 	// UseSharedAddons, see User.
 	UseSharedAddons *bool
-	// EndsOn sets the date the account ends, the zero time for never; an
-	// administrator's cannot be set (ErrAdministratorEnds), and making a
-	// user an administrator clears theirs. See User.
+	// EndsOn sets the date the account ends, the zero time for never, and
+	// clears its exact end (User.EndsAt); an administrator's cannot be set
+	// (ErrAdministratorEnds), and making a user an administrator clears
+	// both. See User.
 	EndsOn *time.Time
 	// CanShare, see User.
 	CanShare *bool
 	// TorrentStreams, see User.
 	TorrentStreams *bool
 	// Group sets the user's group, the zero ID for none. Joining a group
-	// follows it, unless FollowGroup says otherwise; leaving one keeps its
+	// follows it everywhere, unless OwnSections says otherwise; leaving one keeps its
 	// values as the user's own. An administrator cannot join one
 	// (ErrAdministratorGroup), and making a member one takes them out.
 	Group *ID
-	// FollowGroup has the user follow their group, taking its values back,
-	// or keep its values as their own and stop following it.
-	FollowGroup *bool
+	// OwnSections sets the sections in which a member keeps their own
+	// values (see User.OwnSections), all of them: those they follow again
+	// take the group's values back, those they no longer follow keep the
+	// group's current values as their own (ErrInvalidOwnSections for
+	// another name than GroupSections).
+	OwnSections *[]string
 	// DetachFromGroup decides what a change to a setting the user's group
-	// holds does while they follow it, when it sets another value than the
-	// group's: with it, the user stops following the group and keeps the
+	// holds does in a section they follow, when it sets another value than
+	// the group's: with it, the section becomes their own and keeps the
 	// change; without it, the change is refused (ErrFollowsGroup).
 	DetachFromGroup bool
 	// MetadataLanguage, see User: a language code (MetadataLanguageCode)
 	// or empty. Which languages the server's addons have is the caller's to
 	// check.
 	MetadataLanguage *string
+	// ProviderOnly, see User.
+	ProviderOnly *bool
+	// ProviderLinkAllowed, see User: turning it on for an administrator
+	// or an account with two-step sign-in is ErrProviderLinkRefused.
+	ProviderLinkAllowed *bool
+	// WebTheme and WebThemeLocked, see User: WebTheme is one of WebThemes
+	// or empty. Whether the Custom theme is offered is the caller's to
+	// check.
+	WebTheme       *string
+	WebThemeLocked *bool
+	// AudioRegion, see User: one of localization.AudioVariants or empty.
+	AudioRegion *string
+	// RemoteAccess, see User.
+	RemoteAccess *bool
+	// LiveTvChannels, see User.
+	LiveTvChannels *ChannelRule
+	// LocalFirst, see User.
+	LocalFirst *bool
+	// NextUpWithResume, see User.
+	NextUpWithResume *bool
+	// BoostVolume and ConvertSound, see User.
+	BoostVolume, ConvertSound *bool
+	// InterfaceSize, see User: one of InterfaceSizes.
+	InterfaceSize *string
 }
 
 // Store is the accounts repository.
@@ -220,6 +315,9 @@ type Store struct {
 	signedOut atomic.Pointer[func(devices []ID)]
 	// now is the clock blocks and unused devices are measured by.
 	now func() time.Time
+	// verifying, when a test sets it, is told the hash each sign-in's
+	// password is about to be verified against.
+	verifying func(hash string)
 	// logLevel follows the settings' DetailedLog (see FollowLogLevel).
 	logLevel atomic.Pointer[followedLevel]
 	// changed is closed at the next change of the settings, then made
@@ -238,6 +336,10 @@ type Store struct {
 	// guards them.
 	leaversMu sync.Mutex
 	leavers   []Leaver
+	// everywhere are told of each account signed out everywhere (see
+	// OnSignOutEverywhere); everywhereMu guards them.
+	everywhereMu sync.Mutex
+	everywhere   []func(user ID)
 }
 
 // Option completes a store.
@@ -260,6 +362,25 @@ func (s *Store) OnSignOut(f func(devices []ID)) {
 func (s *Store) notifySignOut(devices []ID) {
 	if f := s.signedOut.Load(); f != nil && len(devices) > 0 {
 		(*f)(devices)
+	}
+}
+
+// OnSignOutEverywhere adds f to those told of each account signed out
+// everywhere, by a new password or by being disabled, once it is done:
+// what was granted to the account outside the database, and waits in
+// memory, ends with its devices and sessions. f must not wait.
+func (s *Store) OnSignOutEverywhere(f func(user ID)) {
+	s.everywhereMu.Lock()
+	defer s.everywhereMu.Unlock()
+	s.everywhere = append(s.everywhere, f)
+}
+
+func (s *Store) notifySignOutEverywhere(user ID) {
+	s.everywhereMu.Lock()
+	told := slices.Clone(s.everywhere)
+	s.everywhereMu.Unlock()
+	for _, f := range told {
+		f(user)
 	}
 }
 
@@ -296,24 +417,30 @@ func Open(ctx context.Context, db *pgxpool.Pool, options ...Option) (*Store, err
 	return store, nil
 }
 
-const userColumns = "id, name, is_administrator, is_hidden, is_disabled, created_at, last_login_at, last_activity_at, " +
+const userColumns = "id, name, is_administrator, is_hidden, is_disabled, created_at, last_login_at, last_activity_at, last_activity_app, " +
 	"max_parental_rating, max_parental_sub_rating, block_unrated_items, video_transcoding, audio_transcoding, content_downloading, " +
 	"personal_addons, use_shared_addons, invalid_login_attempts, blocked_until, " +
 	"max_playbacks, max_bitrate, live_tv, sync_play, remote_control, " +
 	"hidden_libraries, blocked_genres, access_schedules, collection_management, " +
-	"subtitle_management, image_tag, live_tv_management, quality_group, ends_on, can_share, group_id, follow_group, metadata_language, two_step, torrent_streams, hidden_live_tv"
+	"subtitle_management, image_tag, live_tv_management, quality_group, ends_on, ends_at, can_share, group_id, own_sections, metadata_language, two_step, torrent_streams, " +
+	"provider_issuer, provider_link_allowed, " +
+	"provider_only, web_theme, web_theme_locked, audio_region, remote_access, live_tv_channels, local_first, next_up_with_resume, " +
+	"boost_volume, convert_sound, interface_size, hidden_live_tv"
 
 // fields lists where the userColumns of a row go.
 func (user *User) fields() []any {
 	return []any{&user.ID, &user.Name, &user.IsAdministrator, &user.IsHidden, &user.IsDisabled,
-		&user.CreatedAt, &user.LastLoginAt, &user.LastActivityAt,
+		&user.CreatedAt, &user.LastLoginAt, &user.LastActivityAt, &user.LastActivityApp,
 		&user.Parental.MaxRating, &user.Parental.MaxSubRating, &user.Parental.BlockUnrated,
 		&user.VideoTranscoding, &user.AudioTranscoding, &user.ContentDownloading,
 		&user.PersonalAddons, &user.UseSharedAddons, &user.InvalidLoginAttempts, &user.BlockedUntil,
 		&user.MaxPlaybacks, &user.MaxBitrate, &user.LiveTv, &user.SyncPlay, &user.RemoteControl,
 		&user.HiddenLibraries, &user.BlockedGenres, &user.AccessSchedules, &user.CollectionManagement,
-		&user.SubtitleManagement, &user.ImageTag, &user.LiveTvManagement, &user.QualityGroup, &user.EndsOn, &user.CanShare,
-		&user.GroupID, &user.FollowGroup, &user.MetadataLanguage, &user.TwoStep, &user.TorrentStreams, &user.HiddenLiveTv}
+		&user.SubtitleManagement, &user.ImageTag, &user.LiveTvManagement, &user.QualityGroup, &user.EndsOn, &user.EndsAt, &user.CanShare,
+		&user.GroupID, &user.OwnSections, &user.MetadataLanguage, &user.TwoStep, &user.TorrentStreams,
+		(*zeronull.Text)(&user.ProviderIssuer), &user.ProviderLinkAllowed,
+		&user.ProviderOnly, &user.WebTheme, &user.WebThemeLocked, &user.AudioRegion, &user.RemoteAccess, &user.LiveTvChannels, &user.LocalFirst,
+		&user.NextUpWithResume, &user.BoostVolume, &user.ConvertSound, &user.InterfaceSize, &user.HiddenLiveTv}
 }
 
 func scanUser(row pgx.Row) (User, error) {
@@ -362,7 +489,7 @@ func (s *Store) SetupRequired(ctx context.Context) (bool, error) {
 
 // CreateFirstAdministrator creates the first administrator, once. language,
 // the language the administrator set the server up in, becomes the server
-// language when it is one of Languages; anything else is ignored.
+// language when it is one of i18n.Languages; anything else is ignored.
 func (s *Store) CreateFirstAdministrator(ctx context.Context, name, password, language string) (User, error) {
 	var user User
 	var settings *Settings
@@ -379,7 +506,7 @@ func (s *Store) CreateFirstAdministrator(ctx context.Context, name, password, la
 		}
 		var err error
 		user, err = createUser(ctx, tx, NewUser{Name: name, Password: password, IsAdministrator: true, IsHidden: true})
-		if err != nil || !ValidLanguage(language) {
+		if err != nil || !i18n.Valid(language) {
 			return err
 		}
 		settings = &Settings{}
@@ -467,24 +594,40 @@ func createUser(ctx context.Context, db interface {
 	if err != nil {
 		return User{}, err
 	}
-	if err := checkPassword(user.Password); err != nil {
+	password := user.Password
+	if user.ProviderOnly && password == "" {
+		password = unknowablePassword()
+	}
+	if err := checkPassword(password); err != nil {
 		return User{}, err
 	}
-	// An administrator may control other users' apps and manage collections,
-	// subtitles and Live TV recordings unless that is taken away, a user may
-	// not unless given it. So may an administrator watch Live TV.
+	// The administratorPermissions take is_administrator, the other
+	// settings a group holds their columns' defaults (see newUserValues).
 	created, err := scanUser(db.QueryRow(ctx,
-		"INSERT INTO users (name, password_hash, is_administrator, is_hidden, remote_control, collection_management, subtitle_management, live_tv_management, live_tv) VALUES ($1, $2, $3, $4, $3, $3, $3, $3, $3) RETURNING "+userColumns,
-		name, hashPassword(user.Password), user.IsAdministrator, user.IsHidden))
+		"INSERT INTO users (name, password_hash, is_administrator, is_hidden, provider_only, "+strings.Join(administratorPermissions, ", ")+
+			") VALUES ($1, $2, $3, $4, $5"+strings.Repeat(", $3", len(administratorPermissions))+") RETURNING "+userColumns,
+		name, hashPassword(password), user.IsAdministrator, user.IsHidden, user.ProviderOnly))
 	if uniqueViolation(err) {
 		return User{}, ErrNameTaken
 	}
 	return created, err
 }
 
-// User returns one account.
+// User returns one account. One read less than signInLife ago is not read
+// again: every change to it this process makes forgets it (see
+// forgetSignIns), so that it applies from the user's next request.
 func (s *Store) User(ctx context.Context, id ID) (User, error) {
-	return scanUser(s.db.QueryRow(ctx, "SELECT "+userColumns+" FROM users WHERE id = $1", id))
+	now := s.now()
+	if user, ok := s.signIns.user(id, now); ok {
+		return user, nil
+	}
+	generation := s.signIns.current()
+	user, err := scanUser(s.db.QueryRow(ctx, "SELECT "+userColumns+" FROM users WHERE id = $1", id))
+	if err != nil {
+		return User{}, err
+	}
+	s.signIns.keepUser(user, now, generation)
+	return user, nil
 }
 
 // Users returns every account, sorted by name.
@@ -500,21 +643,37 @@ func (s *Store) Users(ctx context.Context) ([]User, error) {
 // regard to case. A disabled or ended account is reported only after its
 // password is verified, so the response does not reveal which names exist.
 //
-// While Settings.LoginAttempts is set, that many wrong passwords in a row
-// block the account for LoginBlock: every sign-in is then refused as a
-// wrong password is, the right password included, and a sign-in, a new
-// password or Unblock starts the count again. The wrong password that
-// blocks the account is a *BlockError. Jellyfin disables the account
-// instead, until an administrator enables it again; Polyfin only blocks it
-// for a while, so that the last administrator can never be locked out for
-// good.
+// It is for a caller that names no client: it does what AuthenticateFrom
+// does for one, and the wrong passwords sent this way count together, as
+// one client's.
 func (s *Store) Authenticate(ctx context.Context, name, password string) (User, error) {
+	return s.AuthenticateFrom(ctx, name, password, DeviceInfo{})
+}
+
+// AuthenticateFrom checks a name and password as Authenticate does, sent
+// by from: its RemoteAddress is the client's address and its DeviceID the
+// device's identifier, when the app names one. The time of the answer
+// reveals no more than the answer which names exist: every sign-in
+// verifies one hash, whatever the name and the password's length.
+//
+// While Settings.LoginAttempts is set, that many wrong passwords in a row
+// from one client, an address or the /64 of an IPv6 one, block that
+// client's sign-ins to the account for LoginBlock: each is then refused as
+// a wrong password is, the right password included, unless it comes from a
+// device the account signed in from before. The other clients sign in as
+// before. A sign-in from the client, a new password or Unblock starts the
+// count again. The wrong password that blocks a client is a *BlockError.
+// Jellyfin disables the account instead, until an administrator enables it
+// again; Polyfin only blocks one client for a while, so that nobody keeps
+// an account's owner out with wrong passwords.
+func (s *Store) AuthenticateFrom(ctx context.Context, name, password string, from DeviceInfo) (User, error) {
 	var hash string
 	var user User
 	err := s.db.QueryRow(ctx,
 		"SELECT password_hash, "+userColumns+" FROM users WHERE lower(name) = lower($1)",
 		strings.TrimSpace(name)).Scan(append([]any{&hash}, user.fields()...)...)
 	if errors.Is(err, pgx.ErrNoRows) {
+		s.hashVerified(unknownUserHash)
 		_, _ = verifyPassword(password, unknownUserHash)
 		return User{}, ErrInvalidCredentials
 	}
@@ -523,35 +682,38 @@ func (s *Store) Authenticate(ctx context.Context, name, password string) (User, 
 	}
 	ok := false
 	if len(password) <= maxPasswordLength {
+		s.hashVerified(hash)
 		if ok, err = verifyPassword(password, hash); err != nil {
 			return User{}, fmt.Errorf("user %s: %w", user.ID, err)
 		}
+	} else {
+		// A password over the bound is never right. It costs the hash an
+		// unknown name's does, so that the time tells nothing of the name.
+		s.hashVerified(unknownUserHash)
+		_, _ = verifyPassword(password, unknownUserHash)
 	}
-	limit, now := s.Settings().LoginAttempts, s.now()
-	if limit > 0 && user.Blocked(now) {
+	// An account that signs in through the provider alone refuses every
+	// password, as a wrong one, which counts toward the client's attempts
+	// but not toward the account's: nobody may block it with passwords
+	// that could never be right.
+	if user.ProviderOnly {
 		return User{}, ErrInvalidCredentials
 	}
-	if !ok {
-		if limit > 0 {
-			counted, blocked, err := s.countWrongPassword(ctx, user.ID, limit, now)
-			if err != nil {
-				return User{}, err
-			}
-			if blocked {
-				return User{}, &BlockError{User: counted}
-			}
-		}
-		return User{}, ErrInvalidCredentials
+	if user, err = s.passwordChecked(ctx, user, ok, from, ErrInvalidCredentials); err != nil {
+		return User{}, err
 	}
-	if user.InvalidLoginAttempts > 0 || user.BlockedUntil != nil {
-		if user, err = s.Unblock(ctx, user.ID); err != nil {
-			return User{}, err
-		}
-	}
-	if user.Refused(now) {
+	if user.Refused(s.now()) {
 		return User{}, ErrDisabled
 	}
 	return user, nil
+}
+
+// hashVerified tells the test that counts them of a hash a sign-in's
+// password is about to be verified against.
+func (s *Store) hashVerified(hash string) {
+	if s.verifying != nil {
+		s.verifying(hash)
+	}
 }
 
 // UpdateUser applies changes to an account. A new password or disabling the
@@ -585,6 +747,7 @@ type userUpdate struct {
 	hiddenLive *[]ID
 	genres     *[]string
 	schedules  *[]AccessSchedule
+	channels   *ChannelRule
 }
 
 // prepare checks changes and normalizes what they set.
@@ -620,8 +783,24 @@ func (changes UserChanges) prepare() (userUpdate, error) {
 		}
 		u.schedules = &normalized
 	}
+	if changes.LiveTvChannels != nil {
+		normalized, err := changes.LiveTvChannels.normalized()
+		if err != nil {
+			return u, err
+		}
+		u.channels = &normalized
+	}
 	if changes.MetadataLanguage != nil && *changes.MetadataLanguage != "" && !MetadataLanguageCode(*changes.MetadataLanguage) {
 		return u, ErrInvalidMetadataLanguage
+	}
+	if changes.WebTheme != nil && *changes.WebTheme != "" && !slices.Contains(WebThemes, *changes.WebTheme) {
+		return u, ErrInvalidWebTheme
+	}
+	if changes.AudioRegion != nil && *changes.AudioRegion != "" && !localization.AudioVariantOffered(*changes.AudioRegion) {
+		return u, ErrInvalidAudioRegion
+	}
+	if changes.InterfaceSize != nil && !slices.Contains(InterfaceSizes, *changes.InterfaceSize) {
+		return u, ErrInvalidInterfaceSize
 	}
 	if changes.Name != nil {
 		normalized, err := normalizeName(*changes.Name)
@@ -657,13 +836,20 @@ func (s *Store) updateUser(ctx context.Context, id ID, changes UserChanges, keep
 	s.forgetSignIns()
 	if err == nil {
 		s.notifySignOut(signedOut)
+		// A list, even empty, is an account signed out everywhere (see
+		// applyUserChanges).
+		if signedOut != nil {
+			s.notifySignOutEverywhere(id)
+		}
 	}
 	return updated, err
 }
 
 // applyUserChanges applies changes, prepared as u, to the account id in tx,
-// and returns it with the devices it signed out. It takes the
-// administrators' lock first, which also serializes the changes to groups.
+// and returns it with the devices it signed out: nil unless it signed the
+// account out everywhere, and then a list, empty when no device was signed
+// in. It takes the administrators' lock first, which also serializes the
+// changes to groups.
 func applyUserChanges(ctx context.Context, tx pgx.Tx, id ID, changes UserChanges, u userUpdate, keep signIn) (User, []ID, error) {
 	if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock($1)", administratorsLock); err != nil {
 		return User{}, nil, err
@@ -680,10 +866,11 @@ func applyUserChanges(ctx context.Context, tx pgx.Tx, id ID, changes UserChanges
 		}
 	}
 	// An administrator's account never ends, so that the last one is
-	// never locked out: making a user one clears their end date.
-	endsOn := current.EndsOn
+	// never locked out: making a user one clears their end. A date set,
+	// or never, replaces an exact end, which no other change touches.
+	endsOn, endsAt := current.EndsOn, current.EndsAt
 	if changes.EndsOn != nil {
-		endsOn = endDate(*changes.EndsOn)
+		endsOn, endsAt = endDate(*changes.EndsOn), nil
 	}
 	administrator := current.IsAdministrator
 	if changes.IsAdministrator != nil {
@@ -693,15 +880,19 @@ func applyUserChanges(ctx context.Context, tx pgx.Tx, id ID, changes UserChanges
 		if changes.EndsOn != nil && endsOn != nil {
 			return User{}, nil, ErrAdministratorEnds
 		}
-		endsOn = nil
+		endsOn, endsAt = nil, nil
 	}
 	membership, err := groupMembership(ctx, tx, current, administrator, changes, u)
 	if err != nil {
 		return User{}, nil, err
 	}
 	if u.hash != nil {
-		// A new password starts the count of wrong ones again.
+		// A new password starts the count of wrong ones again, for every
+		// client.
 		if _, err := tx.Exec(ctx, "UPDATE users SET invalid_login_attempts = 0, blocked_until = NULL WHERE id = $1", id); err != nil {
+			return User{}, nil, err
+		}
+		if _, err := tx.Exec(ctx, "DELETE FROM wrong_passwords WHERE user_id = $1", id); err != nil {
 			return User{}, nil, err
 		}
 	}
@@ -732,13 +923,25 @@ func applyUserChanges(ctx context.Context, tx pgx.Tx, id ID, changes UserChanges
 			quality_group = coalesce($26, quality_group),
 			use_shared_addons = coalesce($27, use_shared_addons),
 			ends_on = $28,
-			end_recorded = end_recorded AND ends_on IS NOT DISTINCT FROM $28,
+			ends_at = $45,
+			end_recorded = end_recorded AND ends_on IS NOT DISTINCT FROM $28 AND ends_at IS NOT DISTINCT FROM $45,
 			can_share = coalesce($29, can_share),
 			group_id = $30,
-			follow_group = $31,
+			own_sections = $31,
 			metadata_language = coalesce($32, metadata_language),
 			torrent_streams = coalesce($33, torrent_streams),
-			hidden_live_tv = coalesce($34, hidden_live_tv)
+			provider_only = coalesce($34, provider_only),
+			web_theme = coalesce($35, web_theme),
+			web_theme_locked = coalesce($36, web_theme_locked),
+			audio_region = coalesce($37, audio_region),
+			remote_access = coalesce($38, remote_access),
+			live_tv_channels = coalesce($39::jsonb, live_tv_channels),
+			local_first = coalesce($40, local_first),
+			next_up_with_resume = coalesce($41, next_up_with_resume),
+			boost_volume = coalesce($42, boost_volume),
+			convert_sound = coalesce($43, convert_sound),
+			interface_size = coalesce($44, interface_size),
+			hidden_live_tv = coalesce($46, hidden_live_tv)
 		WHERE id = $1 RETURNING `+userColumns,
 		id, u.name, u.hash, changes.IsAdministrator, changes.IsHidden, changes.IsDisabled,
 		changes.Parental != nil, u.parental.MaxRating, u.parental.MaxSubRating, u.parental.BlockUnrated,
@@ -747,7 +950,9 @@ func applyUserChanges(ctx context.Context, tx pgx.Tx, id ID, changes UserChanges
 		changes.MaxPlaybacks, changes.MaxBitrate, changes.LiveTv, changes.SyncPlay, changes.RemoteControl,
 		u.hidden, u.genres, u.schedules, changes.CollectionManagement,
 		changes.SubtitleManagement, changes.LiveTvManagement, changes.QualityGroup, changes.UseSharedAddons, endsOn, changes.CanShare,
-		membership.group, membership.follow, changes.MetadataLanguage, changes.TorrentStreams, u.hiddenLive))
+		membership.group, membership.own, changes.MetadataLanguage, changes.TorrentStreams, changes.ProviderOnly,
+		changes.WebTheme, changes.WebThemeLocked, changes.AudioRegion, changes.RemoteAccess, u.channels, changes.LocalFirst,
+		changes.NextUpWithResume, changes.BoostVolume, changes.ConvertSound, changes.InterfaceSize, endsAt, u.hiddenLive))
 	if uniqueViolation(err) {
 		return User{}, nil, ErrNameTaken
 	}
@@ -755,8 +960,12 @@ func applyUserChanges(ctx context.Context, tx pgx.Tx, id ID, changes UserChanges
 		return User{}, nil, err
 	}
 	if membership.takeValues {
-		if updated, err = scanUser(tx.QueryRow(ctx, "UPDATE users SET ("+groupColumns+") = (SELECT "+groupColumns+
-			" FROM user_groups WHERE id = $2) WHERE id = $1 RETURNING "+userColumns, id, membership.group)); err != nil {
+		if updated, err = scanUser(tx.QueryRow(ctx, "UPDATE users SET "+groupCopy+" WHERE id = $1 RETURNING "+userColumns, id)); err != nil {
+			return User{}, nil, err
+		}
+	}
+	if changes.ProviderLinkAllowed != nil {
+		if updated, err = allowProviderLink(ctx, tx, updated, *changes.ProviderLinkAllowed); err != nil {
 			return User{}, nil, err
 		}
 	}
@@ -776,32 +985,58 @@ func applyUserChanges(ctx context.Context, tx pgx.Tx, id ID, changes UserChanges
 }
 
 // ChangePassword replaces the caller's own password after checking the
-// current one.
+// current one, for a caller that names no client, as ChangePasswordAt
+// does for one.
 func (s *Store) ChangePassword(ctx context.Context, id ID, current, next string, keepSession []byte) error {
-	return s.changePassword(ctx, id, current, next, signIn{adminSession: keepSession})
+	return s.ChangePasswordAt(ctx, id, current, next, keepSession, "")
+}
+
+// ChangePasswordAt replaces the caller's own password after checking the
+// current one, sent from the client at address: a wrong one counts, and a
+// blocked client is refused, as at sign-in (see changePassword).
+func (s *Store) ChangePasswordAt(ctx context.Context, id ID, current, next string, keepSession []byte, address string) error {
+	return s.changePassword(ctx, id, current, next, signIn{adminSession: keepSession}, address)
 }
 
 // ChangePasswordFromDevice replaces the password of the user signed in on a
-// Jellyfin app after checking the current one. The app's device stays
-// signed in; the account's other devices and admin sessions are signed out.
+// Jellyfin app after checking the current one, for a caller that names no
+// client, as ChangePasswordFromDeviceAt does for one.
 func (s *Store) ChangePasswordFromDevice(ctx context.Context, id ID, current, next string, device ID) error {
-	return s.changePassword(ctx, id, current, next, signIn{device: &device})
+	return s.ChangePasswordFromDeviceAt(ctx, id, current, next, device, "")
 }
 
-func (s *Store) changePassword(ctx context.Context, id ID, current, next string, keep signIn) error {
+// ChangePasswordFromDeviceAt replaces the password of the user signed in
+// on a Jellyfin app after checking the current one, sent from the client
+// at address, as ChangePasswordAt does. The app's device stays signed in;
+// the account's other devices and admin sessions are signed out.
+func (s *Store) ChangePasswordFromDeviceAt(ctx context.Context, id ID, current, next string, device ID, address string) error {
+	return s.changePassword(ctx, id, current, next, signIn{device: &device}, address)
+}
+
+// changePassword replaces the password of the user id once current is
+// their password. A wrong current password counts as a wrong password at
+// sign-in does toward the block of the client at address, and is a
+// *BlockError when it blocks it; while that client is blocked, every
+// current password is refused as a wrong one. The device that asks does
+// not pass the block as it does at sign-in: whoever changes a password is
+// signed in, on a device the account used.
+func (s *Store) changePassword(ctx context.Context, id ID, current, next string, keep signIn, address string) error {
 	var hash string
-	if err := s.db.QueryRow(ctx, "SELECT password_hash FROM users WHERE id = $1", id).Scan(&hash); err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrNotFound
-		}
+	var user User
+	err := s.db.QueryRow(ctx, "SELECT password_hash, "+userColumns+" FROM users WHERE id = $1", id).
+		Scan(append([]any{&hash}, user.fields()...)...)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotFound
+	}
+	if err != nil {
 		return err
 	}
 	ok, err := verifyPassword(current, hash)
 	if err != nil {
 		return err
 	}
-	if !ok {
-		return ErrWrongPassword
+	if _, err := s.passwordChecked(ctx, user, ok, DeviceInfo{RemoteAddress: address}, ErrWrongPassword); err != nil {
+		return err
 	}
 	_, err = s.updateUser(ctx, id, UserChanges{Password: &next}, keep)
 	return err
@@ -876,12 +1111,22 @@ func requireAnotherAdministrator(ctx context.Context, tx pgx.Tx, except ID) erro
 	return nil
 }
 
+// signOutEverywhere ends the devices and admin sessions of user, but the
+// one kept, and returns the devices signed out: a list, never nil.
 func signOutEverywhere(ctx context.Context, tx pgx.Tx, user ID, keep signIn) ([]ID, error) {
-	devices, err := deletedDevices(tx.Query(ctx, "DELETE FROM devices WHERE user_id = $1 AND id IS DISTINCT FROM $2 RETURNING id", user, keep.device))
+	// The admin session kept keeps the web client's sign-in it was taken
+	// from, whose end would end it (see CreateDeviceAdminSession), as Jellyfin
+	// keeps the token that changed the password.
+	devices, err := deletedDevices(tx.Query(ctx, `DELETE FROM devices WHERE user_id = $1 AND id IS DISTINCT FROM $2
+		AND id IS DISTINCT FROM (SELECT device FROM admin_sessions WHERE token_hash = $3)
+		RETURNING id`, user, keep.device, keep.adminSession))
 	if err != nil {
 		return nil, err
 	}
 	_, err = tx.Exec(ctx,
 		"DELETE FROM admin_sessions WHERE user_id = $1 AND token_hash IS DISTINCT FROM $2", user, keep.adminSession)
+	if devices == nil {
+		devices = []ID{}
+	}
 	return devices, err
 }

@@ -8,52 +8,24 @@ import (
 	"runtime"
 	"strings"
 	"time"
+
+	"github.com/moodiness/polyfin/internal/i18n"
 )
 
-// Command is exec.CommandContext for the programs the app runs, which on
-// Windows open no console window.
+// Command is exec.CommandContext for the console programs the app runs,
+// such as the server and PostgreSQL's: on Windows they open no window,
+// as the app has no console of its own.
 func Command(ctx context.Context, name string, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, name, args...)
 	hideWindow(cmd)
 	return cmd
 }
 
-// Open opens an address in the default browser, or a folder in the
-// system's file manager.
-func Open(target string) error {
-	name, args := opener(runtime.GOOS, target, isDir(target))
-	return startDetached(name, args...)
-}
-
-// opener is the program that opens target on goos, and its arguments.
-func opener(goos, target string, dir bool) (string, []string) {
-	switch goos {
-	case "darwin":
-		return "open", []string{target}
-	case "windows":
-		if dir {
-			return "explorer", []string{target}
-		}
-		return "rundll32", []string{"url.dll,FileProtocolHandler", target}
-	default:
-		return "xdg-open", []string{target}
-	}
-}
-
-func isDir(path string) bool {
-	info, err := os.Stat(path)
-	return err == nil && info.IsDir()
-}
-
-// startDetached starts a program the app does not wait for, and reaps it
-// when it ends.
-func startDetached(name string, args ...string) error {
-	cmd := Command(context.Background(), name, args...)
-	if err := cmd.Start(); err != nil {
-		return err
-	}
-	go func() { _ = cmd.Wait() }()
-	return nil
+// WindowCommand is exec.CommandContext for a program with windows of its
+// own, such as an installer: they show as when the program is opened
+// from the file manager.
+func WindowCommand(ctx context.Context, name string, args ...string) *exec.Cmd {
+	return exec.CommandContext(ctx, name, args...)
 }
 
 // Copy puts text on the clipboard.
@@ -85,8 +57,8 @@ func clipboard(goos string) [][]string {
 	}
 }
 
-// Language is the system's language when the app speaks it, French or
-// English, else English: "fr" or "en".
+// Language is the system's language when the app speaks it (one of
+// i18n.Languages), else English.
 func Language() string {
 	for _, variable := range []string{"LC_ALL", "LC_MESSAGES", "LANG"} {
 		if value := os.Getenv(variable); value != "" && value != "C" && value != "POSIX" {
@@ -96,10 +68,11 @@ func Language() string {
 	return languageOf(systemLanguage())
 }
 
-// languageOf reads a locale such as fr_FR.UTF-8 or fr-CA.
+// languageOf reads a locale such as fr_FR.UTF-8, de-CH or pt-BR (see
+// i18n.Match).
 func languageOf(locale string) string {
-	if strings.HasPrefix(strings.ToLower(locale), "fr") {
-		return "fr"
+	if language := i18n.Match(locale); language != "" {
+		return language
 	}
 	return "en"
 }

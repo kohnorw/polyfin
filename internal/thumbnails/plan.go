@@ -6,6 +6,8 @@ import (
 	"slices"
 	"sort"
 	"time"
+
+	"github.com/moodiness/polyfin/internal/accounts"
 )
 
 // nearest returns the index of the time in times, ascending and not
@@ -21,15 +23,62 @@ func nearest(times []time.Duration, t time.Duration) int {
 	return i
 }
 
+// longestVersion is the longest a version with thumbnails lasts at the
+// shortest interval of the settings: ten days, well above the longest
+// recordings and mixes.
+const longestVersion = 240 * time.Hour
+
+// maxThumbnails is the most thumbnails a version has: those of
+// longestVersion at the shortest interval, 172,800 in 1,728 tiles. A
+// version whose duration gives more at the interval of the settings gets
+// none, as one without a duration: what is counted, sized and kept by
+// the thumbnails of a version then follows no number its file states
+// alone.
+const maxThumbnails = int(longestVersion / (accounts.MinTrickplayInterval * time.Second))
+
+// What a set keeps in memory until it is whole is bounded in bytes too,
+// as a count bounds neither a thumbnail's weight nor a keyframe's:
+//
+//   - maxTileBytes is the most the tiles of one set weigh, 256 MiB: a day
+//     at the shortest interval and the largest width takes about half of
+//     it. A set past it is given up, as one past maxThumbnails, and it
+//     is also the most one set writes.
+//   - maxFrameBytes is the most the images kept for one set weigh until
+//     its tiles are made, 2 GiB: each keyframe's thumbnail, encoded as a
+//     JPEG as soon as it is decoded, and each chapter's image. A
+//     thumbnail encoded alone weighs about its place in a tile, so a set
+//     within maxTileBytes keeps about as much; the bound guards against
+//     thumbnails that would weigh far more alone. A set past it is given
+//     up. During a play, thumbnails go into their tiles as their
+//     keyframes are decoded, and a pass keeps its tiles alone.
+const (
+	maxTileBytes  int64 = 256 << 20
+	maxFrameBytes int64 = 2 << 30
+)
+
 // thumbnailCount is how many thumbnails a version lasting duration has,
-// one every interval from its start, as Jellyfin makes them.
+// one every interval from its start, as Jellyfin makes them: none
+// without a duration.
 func thumbnailCount(duration, interval time.Duration) int {
-	return int((duration + interval - 1) / interval)
+	if duration <= 0 || interval <= 0 {
+		return 0
+	}
+	return int((duration-1)/interval) + 1
+}
+
+// spreads reports whether a version lasting duration has thumbnails every
+// interval: it has a duration, and they are maxThumbnails at most.
+func spreads(duration, interval time.Duration) bool {
+	return duration > 0 && interval > 0 && (duration-1)/interval < time.Duration(maxThumbnails)
 }
 
 // thumbnailTimes are the times of the thumbnails of a version lasting
-// duration, one every interval from its start.
+// duration, one every interval from its start: none for a version
+// thumbnails do not spread over (see spreads), whose count sizes nothing.
 func thumbnailTimes(duration, interval time.Duration) []time.Duration {
+	if !spreads(duration, interval) {
+		return nil
+	}
 	times := make([]time.Duration, thumbnailCount(duration, interval))
 	for i := range times {
 		times[i] = time.Duration(i) * interval

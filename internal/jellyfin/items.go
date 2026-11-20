@@ -12,6 +12,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/playback"
+	"github.com/moodiness/polyfin/internal/stremio"
 )
 
 // UserItemData is what a user did with an item: Jellyfin's
@@ -235,9 +236,6 @@ func (h *Handler) addMediaSources(r *http.Request, user accounts.User, dto *Base
 		if err != nil && r.Context().Err() == nil {
 			h.Logger.Warn("The versions of a title could not be listed", "error", err)
 		}
-		// NZB versions list their subtitle tracks once analyzed: the
-		// details wait a moment for them (see usenet.go).
-		waitUsenet(r.Context(), h.prepareUsenet(r.Context(), p.versions, opened))
 		sources = h.mediaSources(r, p, opened)
 		if len(sources) == 0 {
 			sources = []MediaSourceInfo{h.placeholderSource(r, item)}
@@ -316,8 +314,10 @@ var itemTypes = map[library.Kind]string{
 	library.KindLibrary:    "CollectionFolder",
 	library.KindCollection: "BoxSet",
 	library.KindMovie:      "Movie",
-	// Jellyfin's home videos are videos too.
+	// Jellyfin's home videos are videos too, and the titles of other
+	// types, without videos or with them, videos and folders of videos.
 	library.KindVideo:   "Video",
+	library.KindFolder:  "Folder",
 	library.KindSeries:  "Series",
 	library.KindSeason:  "Season",
 	library.KindEpisode: "Episode",
@@ -362,7 +362,7 @@ func namesType(name string, kind library.Kind) bool {
 func isFolder(kind library.Kind) bool {
 	switch kind {
 	case library.KindLibrary, library.KindCollection, library.KindSeries, library.KindSeason,
-		library.KindArtist, library.KindAlbum, library.KindMusicPlaylist, library.KindReplayFolder, library.KindLiveCategory:
+		library.KindArtist, library.KindAlbum, library.KindMusicPlaylist, library.KindReplayFolder, library.KindFolder, library.KindLiveCategory:
 		return true
 	}
 	return false
@@ -453,22 +453,36 @@ func (h *Handler) newItemDto(item library.Item, fields fieldSet, detail bool, st
 		dto.IndexNumber = new(item.IndexNumber)
 		dto.SeriesPrimaryImageTag = library.ImageTag(item.SeriesPoster)
 	case library.KindEpisode:
-		dto.IndexNumber = new(item.IndexNumber)
-		dto.ParentIndexNumber = new(item.ParentIndexNumber)
-		dto.SeasonId = item.SeasonID.String()
-		dto.SeasonName = item.SeasonName
+		// An episode shows where its series' order puts it.
+		place := item.ShownPlace()
+		dto.IndexNumber = new(place.Episode)
+		dto.ParentIndexNumber = new(place.Season)
+		dto.SeasonId = place.SeasonID.String()
+		dto.SeasonName = place.SeasonName
 		dto.SeriesPrimaryImageTag = library.ImageTag(item.SeriesPoster)
 		// Jellyfin shows the nearest parent artwork: the season's, else the
-		// series'.
-		if item.SeasonPoster != "" {
+		// series'. A season of an episode order shows its series'.
+		if item.SeasonPoster != "" && item.Shown == nil {
 			dto.ParentPrimaryImageItemId, dto.ParentPrimaryImageTag = item.SeasonID.String(), library.ImageTag(item.SeasonPoster)
 		} else if item.SeriesPoster != "" {
 			dto.ParentPrimaryImageItemId, dto.ParentPrimaryImageTag = item.SeriesID.String(), library.ImageTag(item.SeriesPoster)
 		}
 	case library.KindSeries:
 		dto.AirDays = &[]string{}
+		dto.DisplayOrder = item.DisplayOrder
 	case library.KindCollection:
 		dto.DisplayOrder = "PremiereDate"
+	case library.KindFolder:
+		// Listings count a folder's videos when asked; its own description
+		// always does (see below).
+		if c := item.Contents; c != nil && !detail {
+			if fields.has("ChildCount") {
+				dto.ChildCount = new(c.Children)
+			}
+			if fields.has("RecursiveItemCount") {
+				dto.RecursiveItemCount = new(c.Released)
+			}
+		}
 	}
 	if playable {
 		dto.VideoType = "VideoFile"
@@ -478,7 +492,7 @@ func (h *Handler) newItemDto(item library.Item, fields fieldSet, detail bool, st
 		dto.ParentBackdropItemId = item.SeriesID.String()
 		dto.ParentBackdropImageTags = []string{}
 	}
-	h.setImages(&dto, item)
+	h.setImages(&dto, item, state.badges)
 
 	if item.Overview != "" && (detail || fields.has("Overview")) {
 		dto.Overview = new(item.Overview)
@@ -508,15 +522,18 @@ func (h *Handler) newItemDto(item library.Item, fields fieldSet, detail bool, st
 		// Until its versions are known; see setDownload.
 		dto.CanDownload = new(false)
 	}
-	describeEdited(&dto, item, fields, detail)
+	h.describeEdited(&dto, item, fields, detail)
 	if detail || fields.has("People") {
-		dto.People = new(people(item.People))
+		dto.People = new(h.people(item.People))
 	}
 	if detail || fields.has("Chapters") {
 		dto.Chapters = &[]ChapterInfo{}
 	}
 	if (detail || fields.has("ParentId") || item.ExtraType != "") && item.ParentID != (accounts.ID{}) {
 		dto.ParentId = item.ParentID.String()
+		if item.Shown != nil {
+			dto.ParentId = item.Shown.SeasonID.String()
+		}
 	}
 	dto.ExtraType = item.ExtraType
 	if detail {
@@ -525,7 +542,7 @@ func (h *Handler) newItemDto(item library.Item, fields fieldSet, detail bool, st
 		dto.EnableMediaSourceDisplay = new(true)
 		dto.PlayAccess = "Full"
 		dto.RemoteTrailers = new(trailers(item.Trailers))
-		dto.GenreItems = new(genreItems(item.Genres))
+		dto.GenreItems = new(h.namedPairs(state.reader, genresOf(item.Kind), item.Genres))
 		dto.LocalTrailerCount = new(0)
 		dto.SpecialFeatureCount = new(0)
 		dto.DisplayPreferencesId = item.ID.String()
@@ -567,8 +584,9 @@ func nonNil(values []string) []string {
 // describeEdited adds to a DTO what only administrators' edits give an
 // item (see library.Overrides), or MDBList for its critic rating: its sort
 // name, original title, taglines, tags, studios and critic and custom
-// ratings, as Jellyfin describes them.
-func describeEdited(dto *BaseItemDto, item library.Item, fields fieldSet, detail bool) {
+// ratings, as Jellyfin describes them. A studio's identifier opens its
+// page (see names.go).
+func (h *Handler) describeEdited(dto *BaseItemDto, item library.Item, fields fieldSet, detail bool) {
 	if detail || fields.has("SortName") {
 		dto.SortName = sortName(item)
 		if detail {
@@ -591,17 +609,27 @@ func describeEdited(dto *BaseItemDto, item library.Item, fields fieldSet, detail
 		dto.Tags = new(nonNil(item.Tags))
 	}
 	if detail || fields.has("Studios") {
-		studios := make([]NameGuidPair, 0, len(item.Studios))
-		for _, studio := range item.Studios {
-			studios = append(studios, NameGuidPair{Name: studio, Id: nameID("studio", studio)})
-		}
-		dto.Studios = &studios
+		dto.Studios = new(h.namedPairs(accounts.ID{}, studioNamed, item.Studios))
 	}
 }
 
-func (h *Handler) setImages(dto *BaseItemDto, item library.Item) {
+// setImages sets the tags of an item's images on its DTO: its Primary
+// image's is the badged one (see badgedTag) when badges holds what its
+// badges show. Artwork found dead is left out (see withoutDead). A movie
+// or series lacking a poster TMDB was not asked about yet advertises the
+// tag of its lookup (see library.Item.TMDBPoster), the poster looked up
+// when asked for (see taggedArtwork).
+func (h *Handler) setImages(dto *BaseItemDto, item library.Item, badges map[accounts.ID]string) {
+	item.Images = h.withoutDead(item.Images)
+	if item.Images.Primary == "" && item.TMDBPoster != "" {
+		dto.ImageTags["Primary"] = library.ImageTag(item.TMDBPoster)
+		dto.PrimaryImageAspectRatio = new(2.0 / 3.0)
+	}
 	if item.Images.Primary != "" {
 		dto.ImageTags["Primary"] = library.ImageTag(item.Images.Primary)
+		if shown, ok := badges[item.ID]; ok {
+			dto.ImageTags["Primary"] = h.badgedTag(posterBadgesPurpose, item.ID, dto.ImageTags["Primary"], shown)
+		}
 		ratio := 2.0 / 3.0
 		switch item.Kind {
 		case library.KindEpisode, library.KindVideo, library.KindProgram, library.KindRecording, library.KindReplay, library.KindExtra:
@@ -612,14 +640,19 @@ func (h *Handler) setImages(dto *BaseItemDto, item library.Item) {
 		case library.KindArtist, library.KindAlbum, library.KindTrack, library.KindAudiobook, library.KindMusicPlaylist:
 			// Covers are square.
 			ratio = 1
+		default:
+			// A title's or collection's poster has the shape its addon
+			// declares.
+			switch item.PosterShape {
+			case stremio.ShapeLandscape:
+				ratio = 16.0 / 9.0
+			case stremio.ShapeSquare:
+				ratio = 1
+			}
 		}
-		// The shape the addon gives its poster: collections' wide artwork
-		// shows on wide cards, as Jellyfin apps choose cards by this ratio.
-		switch item.PosterShape {
-		case "landscape":
+		if item.WidePrimary {
+			// A library's generated image, or the backdrop it found.
 			ratio = 16.0 / 9.0
-		case "square":
-			ratio = 1
 		}
 		dto.PrimaryImageAspectRatio = new(ratio)
 	}
@@ -648,12 +681,14 @@ func (h *Handler) setImages(dto *BaseItemDto, item library.Item) {
 	}
 }
 
-func people(credits []library.Person) []BaseItemPerson {
+// people describes a title's credits, without the tags of photos found
+// dead (see withoutDead).
+func (h *Handler) people(credits []library.Person) []BaseItemPerson {
 	result := make([]BaseItemPerson, 0, len(credits))
 	for _, person := range credits {
 		entry := BaseItemPerson{Name: person.Name, Id: person.ID.String(), Role: person.Role, Type: person.Type}
-		if person.Image != "" {
-			entry.PrimaryImageTag = library.ImageTag(person.Image)
+		if photo := h.withoutDead(library.Images{Primary: person.Image}).Primary; photo != "" {
+			entry.PrimaryImageTag = library.ImageTag(photo)
 		}
 		result = append(result, entry)
 	}
@@ -664,14 +699,6 @@ func trailers(list []library.Trailer) []MediaUrl {
 	result := make([]MediaUrl, 0, len(list))
 	for _, trailer := range list {
 		result = append(result, MediaUrl{Url: trailer.URL, Name: trailer.Name})
-	}
-	return result
-}
-
-func genreItems(genres []string) []NameGuidPair {
-	result := make([]NameGuidPair, 0, len(genres))
-	for _, genre := range genres {
-		result = append(result, NameGuidPair{Name: genre, Id: nameID("genre", genre)})
 	}
 	return result
 }

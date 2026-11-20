@@ -613,7 +613,7 @@ func TestProgrammeIsRecordedAndPlays(t *testing.T) {
 	}
 	request, _ := http.NewRequest(http.MethodGet, s.url+"/Items/"+recording.Id+"/Download", nil)
 	request.Header.Set("Authorization", app("tv", token))
-	if response, err := http.DefaultClient.Do(request); err != nil || response.StatusCode != http.StatusOK ||
+	if response, err := testClient.Do(request); err != nil || response.StatusCode != http.StatusOK ||
 		!strings.Contains(response.Header.Get("Content-Disposition"), ".mkv") {
 		t.Errorf("the recording downloaded: %v %v", response, err)
 	} else {
@@ -642,7 +642,7 @@ func TestProgrammeIsRecordedAndPlays(t *testing.T) {
 	if _, err := s.store.UpdateUser(t.Context(), admin.ID, accounts.UserChanges{LiveTv: &yes}, nil); err != nil {
 		t.Fatal(err)
 	}
-	if status, _ := s.call(http.MethodPost, "/Videos/"+recording.Id+"/Subtitles", app("web", s.signIn("boss", "web")), upload); status != http.StatusBadRequest && status != http.StatusForbidden && status != http.StatusNotFound {
+	if status, _ := s.call(http.MethodPost, "/Videos/"+recording.Id+"/Subtitles", app("web", s.signIn("boss", "web")), upload); status != http.StatusBadRequest {
 		t.Errorf("a subtitle file for a recording, by an administrator: %d", status)
 	}
 

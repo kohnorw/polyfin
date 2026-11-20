@@ -23,6 +23,7 @@ import {
   type TrackingServiceName,
 } from '@/api'
 import { useSessionUser } from '@/app/session'
+import { TitlesNotFound } from '@/features/imports/TitlesNotFound'
 import { dateTime, errorMessage, relativeTime } from '@/format'
 import { useI18n, type Messages } from '@/i18n'
 import {
@@ -37,23 +38,13 @@ import {
   SecretField,
   SkeletonRows,
   StatusPill,
-  Switch,
+  SettingRow,
   TextInput,
   TextLink,
   useToast,
   type StatusTone,
 } from '@/ui'
-
-const serviceNames: Record<TrackingServiceName, string> = {
-  trakt: 'Trakt',
-  simkl: 'Simkl',
-  mdblist: 'MDBList',
-  publicmetadb: 'PublicMetaDB',
-  anilist: 'AniList',
-  myanimelist: 'MyAnimeList',
-  lastfm: 'Last.fm',
-  listenbrainz: 'ListenBrainz',
-}
+import { serviceNames } from './serviceNames'
 
 /** The letters in each service's tile. */
 const monograms: Record<TrackingServiceName, string> = {
@@ -104,7 +95,7 @@ export default function TrackingServices() {
     )
   }
   return (
-    <ul className="overflow-hidden rounded-panel border border-line-2 bg-s1">
+    <ul className="flex flex-col gap-1.5">
       {tracking.data.services.map((service) => (
         <ServiceRow
           key={service.service}
@@ -283,23 +274,33 @@ function ServiceRow({
       onConnect={(key) => connect.mutate(key)}
     />
   )
+  // Trakt also refuses users its app's Members omit, and free accounts past their one app: the
+  // answer does not tell these from a wrong app, so its messages name every check.
+  const trakt = service.service === 'trakt'
+  const appRefusedText = trakt ? text.traktAppRefused : text.appRefused(name)
   const appRefused =
     connect.isError && connect.error instanceof ApiError && connect.error.code === 'app_refused'
   const codeError = service.connection !== 'key' && connect.isError && (
     <Notice tone="danger" live action={appRefused ? setUpLink : undefined}>
-      {connectError(t, name, connect.error)}
+      {appRefused ? appRefusedText : connectError(t, name, connect.error)}
     </Notice>
   )
   const ended = (expired || codeEnded) && (
     <Notice tone="warn" live>
-      {paste ? text.pasteEnded : signIn ? text.signInEnded : text.codeEnded}
+      {paste
+        ? text.pasteEnded
+        : signIn
+          ? text.signInEnded
+          : trakt
+            ? text.traktCodeEnded
+            : text.codeEnded}
     </Notice>
   )
   const startAgain = signIn || paste ? text.signInAgain : text.newCode
   // The server's app was refused while the code waited; another attempt clears it.
   const refusedApp = service.problem === 'app_refused' && !connect.isError && (
     <Notice tone="danger" action={setUpLink || undefined}>
-      {text.appRefused(name)}
+      {appRefusedText}
     </Notice>
   )
   const cancelError = !service.connected && disconnect.isError && (
@@ -344,7 +345,7 @@ function ServiceRow({
     const expiry = relativeTime(code.expiresAt, language, t.time.justNow)
     body = (
       <>
-        <div className="flex flex-col gap-4 rounded-row border border-line bg-bg px-[18px] py-4 max-sm:p-3.5">
+        <div className="flex flex-col gap-3 rounded-row bg-s2 px-4 py-3">
           {paste ? (
             <>
               <p className="text-control text-ink">
@@ -377,7 +378,7 @@ function ServiceRow({
               <div className="flex flex-wrap items-center gap-3">
                 <p
                   aria-label={text.codeLabel}
-                  className="rounded-field border border-accent/50 bg-s2 px-5 py-2 font-mono text-[26px] font-semibold tracking-[0.2em] text-ink select-all"
+                  className="rounded-field bg-s3 px-4 py-1.5 font-mono text-[1.375rem] font-semibold tracking-[0.2em] text-ink select-all"
                 >
                   {code.userCode}
                 </p>
@@ -398,7 +399,7 @@ function ServiceRow({
         {service.account !== null ? (
           <>
             {text.connectedAs}
-            <span className="font-mono text-ink">{service.account}</span>
+            <span className="font-semibold text-ink">{service.account}</span>
           </>
         ) : service.connection === 'key' ? (
           text.connectedWithKey
@@ -493,8 +494,8 @@ function ServiceRow({
     <li
       aria-labelledby={headingId}
       className={cx(
-        'grid grid-cols-[40px_minmax(0,1fr)_auto] items-start gap-x-4 px-[22px] py-5 [&+&]:border-t [&+&]:border-line',
-        'max-sm:grid-cols-[40px_minmax(0,1fr)] max-sm:gap-x-3.5 max-sm:px-4 max-sm:py-[18px]',
+        'grid grid-cols-[2.25rem_minmax(0,1fr)_auto] items-start gap-x-3 rounded-row bg-s1 py-2.5 pr-3 pl-4',
+        'max-sm:grid-cols-[2.25rem_minmax(0,1fr)] max-sm:px-3.5',
       )}
     >
       {service.available ? (
@@ -502,7 +503,7 @@ function ServiceRow({
       ) : (
         <span
           aria-hidden="true"
-          className="inline-grid size-10 place-items-center rounded-row border border-line-2 bg-s2 text-[15px] font-semibold text-ink-3"
+          className="inline-grid size-9 place-items-center rounded-[0.75rem] bg-s3 text-small font-semibold text-ink-3"
         >
           {monograms[service.service]}
         </span>
@@ -511,24 +512,24 @@ function ServiceRow({
         <h3
           id={headingId}
           className={cx(
-            'flex h-10 items-center text-[15px] font-semibold tracking-[-0.01em]',
+            'flex h-9 items-center text-h3',
             service.available ? 'text-ink' : 'text-ink-2',
           )}
         >
           {name}
         </h3>
-        <p className={cx('-mt-1.5 text-control', service.available ? 'text-ink-2' : 'text-ink-3')}>
+        <p className={cx('-mt-1 text-small', service.available ? 'text-ink-2' : 'text-ink-3')}>
           {sub}
         </p>
       </div>
-      <div className="flex h-10 items-center justify-end gap-1.5 max-sm:col-span-full max-sm:mt-3 max-sm:h-auto max-sm:flex-wrap">
+      <div className="flex h-9 items-center justify-end gap-1.5 max-sm:col-span-full max-sm:mt-2 max-sm:h-auto max-sm:flex-wrap">
         <StatusPill tone={status.tone} icon={status.icon} className="max-sm:mr-auto">
           {status.label}
         </StatusPill>
         {actions}
       </div>
       {body !== null && (
-        <div className="col-start-2 -col-end-1 mt-4 flex min-w-0 flex-col gap-4 max-sm:col-span-full">
+        <div className="col-start-2 -col-end-1 mt-3 flex min-w-0 flex-col gap-3 max-sm:col-span-full">
           {body}
         </div>
       )}
@@ -676,8 +677,6 @@ function HistoryImport({
 }) {
   const { t } = useI18n()
   const text = t.account.tracking.history
-  const labelId = useId()
-  const helpId = useId()
   const toggle = useMutation({
     mutationFn: (change: {
       importHistory?: boolean
@@ -686,10 +685,6 @@ function HistoryImport({
     }) => setTrackingImport(service.service, change),
     onSuccess: store,
   })
-  const watchlistLabelId = useId()
-  const watchlistHelpId = useId()
-  const ratingsLabelId = useId()
-  const ratingsHelpId = useId()
   const importing = service.importHistory || service.importWatchlist || service.syncRatings
   const list =
     service.service in text.watchlist.lists
@@ -703,82 +698,68 @@ function HistoryImport({
   const busy = toggle.isPending || now.isPending
   const failed = toggle.error ?? now.error
   return (
-    <div className="rounded-row border border-line bg-bg px-[18px] py-4 max-sm:p-3.5">
-      <div className="flex items-start justify-between gap-6 max-sm:gap-4">
-        <div className="min-w-0">
-          <p id={labelId} className="text-control font-medium text-ink">
-            {service.ratings ? text.listsToggle(name) : text.toggle(name)}
-          </p>
-          <p id={helpId} className="mt-0.5 text-small text-ink-3">
-            {(service.ratings ? text.listsToggleHelp : text.toggleHelp)(
-              name,
-              t.account.importEvery(importEveryMinutes),
-            )}
-          </p>
-        </div>
-        <Switch
+    <div className="flex flex-col gap-2">
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-1.5">
+        <SettingRow
+          kind="switch"
+          nested
+          label={service.ratings ? text.listsToggle(name) : text.toggle(name)}
+          help={(service.ratings ? text.listsToggleHelp : text.toggleHelp)(
+            name,
+            t.account.importEvery(importEveryMinutes),
+          )}
           checked={service.importHistory}
           disabled={busy}
-          labelledBy={labelId}
-          describedById={helpId}
           onChange={(on) => {
             now.reset()
             toggle.mutate({ importHistory: on })
           }}
-          className="mt-0.5"
         />
-      </div>
-      {service.watchlist && (
-        <div className="mt-3 flex items-start justify-between gap-6 border-t border-line pt-3 max-sm:gap-4">
-          <div className="min-w-0">
-            <p id={watchlistLabelId} className="text-control font-medium text-ink">
-              {text.watchlist.toggle(name, list)}
-            </p>
-            <p id={watchlistHelpId} className="mt-0.5 text-small text-ink-3">
-              {text.watchlist.toggleHelp(name, list)}
-            </p>
-          </div>
-          <Switch
+        {service.watchlist && (
+          <SettingRow
+            kind="switch"
+            nested
+            label={(service.watchlistSent ? text.watchlist.syncToggle : text.watchlist.toggle)(
+              name,
+              list,
+            )}
+            help={
+              (service.watchlistSent ? text.watchlist.syncHelp : text.watchlist.toggleHelp)(
+                name,
+                list,
+              ) +
+              (service.service === 'simkl' && service.watchlistSent
+                ? ` ${text.watchlist.simklNote}`
+                : '')
+            }
             checked={service.importWatchlist}
             disabled={busy}
-            labelledBy={watchlistLabelId}
-            describedById={watchlistHelpId}
             onChange={(on) => {
               now.reset()
               toggle.mutate({ importWatchlist: on })
             }}
-            className="mt-0.5"
           />
-        </div>
-      )}
-      {service.ratings && (
-        <div className="mt-3 flex items-start justify-between gap-6 border-t border-line pt-3 max-sm:gap-4">
-          <div className="min-w-0">
-            <p id={ratingsLabelId} className="text-control font-medium text-ink">
-              {text.ratings.toggle}
-            </p>
-            <p id={ratingsHelpId} className="mt-0.5 text-small text-ink-3">
-              {text.ratings.toggleHelp(name)}
-            </p>
-          </div>
-          <Switch
+        )}
+        {service.ratings && (
+          <SettingRow
+            kind="switch"
+            nested
+            label={text.ratings.toggle}
+            help={text.ratings.toggleHelp(name)}
             checked={service.syncRatings}
             disabled={busy}
-            labelledBy={ratingsLabelId}
-            describedById={ratingsHelpId}
             onChange={(on) => {
               now.reset()
               toggle.mutate({ syncRatings: on })
             }}
-            className="mt-0.5"
           />
-        </div>
-      )}
+        )}
+      </div>
       {importing && (
-        <div className="mt-3 flex items-center justify-between gap-4 border-t border-line pt-3 max-sm:flex-col max-sm:items-start">
+        <div className="flex items-center justify-between gap-3 rounded-row bg-s2 px-4 py-3 max-sm:flex-col max-sm:items-start">
           <p role="status" className="flex min-w-0 items-start gap-2 text-control text-ink-2">
             <ClockCounterClockwiseIcon
-              size={16}
+              size="1rem"
               aria-hidden="true"
               className="mt-0.5 shrink-0 text-ink-3"
             />
@@ -825,13 +806,15 @@ function HistoryImport({
           </Button>
         </div>
       )}
+      {importing && <TitlesNotFound scope="own" source={service.service} stamp={last?.at ?? ''} />}
       {importing && !service.importing && last?.problem && (
-        <Notice tone="warn" className="mt-3">
-          {text.problem[last.problem](name)}
-        </Notice>
+        <Notice tone="warn">{text.problem[last.problem](name)}</Notice>
+      )}
+      {service.importWatchlist && service.watchlistFull && (
+        <Notice tone="warn">{text.watchlist.full(name)}</Notice>
       )}
       {failed && (
-        <Notice tone="danger" live className="mt-3">
+        <Notice tone="danger" live>
           {errorMessage(t, failed)}
         </Notice>
       )}

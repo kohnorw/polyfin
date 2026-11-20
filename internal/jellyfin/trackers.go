@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"slices"
+	"strconv"
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/library"
@@ -32,14 +33,17 @@ func markScope(kind library.Kind) trackers.Scope {
 // episodes among items that they can know: episodes by their series'
 // identifiers, loaded once per series. Those an anime addon names by
 // their Kitsu, MyAnimeList or AniDB identifier go by those the anime
-// mapping gives, when it knows them, and keep the entry for AniList and
+// mapping gives, when it knows them, with the TMDB and TVDB identifiers an
+// administrator set winning over them, and keep the entry for AniList and
 // MyAnimeList. An episode of a series the mapping numbers in part as
 // TVDB's absolute numbering gets its absolute number, from the episodes
-// Polyfin lists of its series. It is called in the background.
+// Polyfin lists of its series. Episodes also carry TMDB's numbers, which
+// services numbering as TMDB does are sent. It is called in the background.
 func (h *Handler) trackedTitles(user accounts.User, items []library.Item) func(context.Context) []trackers.Title {
 	return func(ctx context.Context) []trackers.Title {
 		series := map[accounts.ID]map[string]string{}
 		episodes := map[accounts.ID][]library.Item{}
+		numberings := map[accounts.ID]library.EpisodeNumbering{}
 		var titles []trackers.Title
 		for _, item := range items {
 			if item.Kind != library.KindMovie && item.Kind != library.KindEpisode {
@@ -53,6 +57,7 @@ func (h *Handler) trackedTitles(user accounts.User, items []library.Item) func(c
 			switch {
 			case isAnime && anime.Identified():
 				title, ok = anime, true
+				h.withEditedIDs(&title, cmp.Or(item.SeriesID, item.ID))
 			case item.Kind == library.KindMovie:
 				title, ok = trackers.Movie(item.ID, item.ProviderIDs)
 			default:
@@ -64,6 +69,15 @@ func (h *Handler) trackedTitles(user accounts.User, items []library.Item) func(c
 					series[item.SeriesID] = ids
 				}
 				title, ok = trackers.Episode(item.ID, ids, item.ParentIndexNumber, item.IndexNumber)
+				if ok && !isAnime {
+					numbering, loaded := numberings[item.SeriesID]
+					if !loaded {
+						// An error leaves the zero numbering: TMDB's alike.
+						numbering, _ = h.Library.TMDBNumbering(ctx, item.SeriesID)
+						numberings[item.SeriesID] = numbering
+					}
+					title.SetTMDBNumbers(numbering.ToTMDB(title.Season, title.Number))
+				}
 			}
 			switch {
 			case ok && isAnime:
@@ -75,7 +89,8 @@ func (h *Handler) trackedTitles(user accounts.User, items []library.Item) func(c
 			if ok && h.Trackers.NeedsAbsolute(title) {
 				listed, loaded := episodes[item.SeriesID]
 				if !loaded {
-					listed, _ = h.Library.Episodes(ctx, user, item.SeriesID, nil)
+					// Numbered as aired, whatever order the series shows in.
+					listed, _ = h.Library.Episodes(library.InAiredOrder(ctx), user, item.SeriesID, nil)
 					episodes[item.SeriesID] = listed
 				}
 				title.Absolute = absoluteNumber(listed, title.Season, title.Number)
@@ -85,6 +100,21 @@ func (h *Handler) trackedTitles(user accounts.User, items []library.Item) func(c
 			}
 		}
 		return titles
+	}
+}
+
+// withEditedIDs sets on title, which the anime mapping identified, the
+// TMDB and TVDB identifiers an administrator set of the movie or series
+// holder: an edit wins over every source of them (see
+// library.Overrides.TmdbID). Only an episode is sent with its series' TVDB
+// identifier.
+func (h *Handler) withEditedIDs(title *trackers.Title, holder accounts.ID) {
+	edit := h.Library.Overrides(holder)
+	if edit.TmdbID != nil {
+		title.TMDB, _ = strconv.Atoi(*edit.TmdbID)
+	}
+	if edit.TvdbID != nil && title.Episode {
+		title.TVDB, _ = strconv.Atoi(*edit.TvdbID)
 	}
 }
 
@@ -141,4 +171,43 @@ func (h *Handler) rated(user accounts.User, item library.Item, was, now *float64
 		return
 	}
 	h.Trackers.Rate(user.ID, trackers.Rating{Score: now, Title: h.ratedTitle(item)})
+}
+
+// watchlistEdited sends the movies and series that a change user made to
+// the watchlist of owner listed or no longer lists to the tracking
+// services owner syncs their watchlist with.
+func (h *Handler) watchlistEdited(user accounts.User, owner accounts.ID, change library.WatchlistChange) {
+	if h.Trackers == nil || len(change.Added) == 0 && len(change.Removed) == 0 {
+		return
+	}
+	h.Trackers.Watchlist(owner, trackers.WatchlistChange{Titles: func(ctx context.Context) (added, removed []trackers.Title) {
+		return h.listedTitles(ctx, user, change.Added), h.listedTitles(ctx, user, change.Removed)
+	}})
+}
+
+// listedTitles identifies to the tracking services the movies and series
+// of ids by their own identifiers, leaving out those that have none.
+func (h *Handler) listedTitles(ctx context.Context, user accounts.User, ids []accounts.ID) []trackers.Title {
+	if len(ids) == 0 {
+		return nil
+	}
+	items, err := h.Library.Items(ctx, user, ids)
+	if err != nil {
+		return nil
+	}
+	var titles []trackers.Title
+	for _, item := range items {
+		var title trackers.Title
+		ok := false
+		switch item.Kind {
+		case library.KindMovie:
+			title, ok = trackers.Movie(item.ID, item.ProviderIDs)
+		case library.KindSeries:
+			title, ok = trackers.Series(item.ID, item.ProviderIDs)
+		}
+		if ok {
+			titles = append(titles, title)
+		}
+	}
+	return titles
 }

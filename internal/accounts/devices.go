@@ -24,6 +24,34 @@ type DeviceInfo struct {
 	Client        string
 	ClientVersion string
 	RemoteAddress string
+	// Provider is set for a device signed in through the identity
+	// provider, which asked for whatever second step it requires.
+	Provider bool
+}
+
+// The bounds of what a sign-in keeps of a device, in bytes: its
+// identifier, and each of its name, its app's name and its app's version.
+// The web player's identifier is its browser's user agent and a time, in
+// base64: 170 to 200 bytes for the usual browsers, more than 256 past a
+// user agent of 178. Names and versions are a few tens of bytes.
+const (
+	MaxDeviceIDBytes   = 1024
+	MaxDeviceTextBytes = 256
+)
+
+// MaxUserDevices bounds the devices a user keeps signed in: past it, a
+// sign-in signs out those used longest ago (see SignInDevice).
+const MaxUserDevices = 100
+
+// ErrInvalidDevice reports a sign-in from a device that passes a bound
+// (see DeviceInfo.Bounded).
+var ErrInvalidDevice = errors.New("invalid device")
+
+// Bounded reports whether the device's identifier, name, app and version
+// are each within the bound a sign-in keeps.
+func (info DeviceInfo) Bounded() bool {
+	return len(info.DeviceID) <= MaxDeviceIDBytes && len(info.DeviceName) <= MaxDeviceTextBytes &&
+		len(info.Client) <= MaxDeviceTextBytes && len(info.ClientVersion) <= MaxDeviceTextBytes
 }
 
 // Capabilities are what a signed-in app reports it can play and control.
@@ -39,6 +67,35 @@ func DefaultCapabilities() Capabilities {
 	return Capabilities{PlayableMediaTypes: []string{}, SupportedCommands: []string{}, SupportsPersistentIdentifier: true}
 }
 
+// The bounds of each list of capabilities a device keeps: its entries, and
+// the bytes of each. Jellyfin names five media types and under fifty
+// commands, the longest of 22 letters.
+const (
+	MaxCapabilityEntries = 64
+	MaxCapabilityBytes   = 64
+)
+
+// ErrInvalidCapabilities reports capabilities that pass a bound (see
+// Capabilities.Bounded): SetCapabilities stores none of them, and the
+// device keeps those it had.
+var ErrInvalidCapabilities = errors.New("invalid capabilities")
+
+// Bounded reports whether both lists are within MaxCapabilityEntries
+// entries of MaxCapabilityBytes bytes.
+func (c Capabilities) Bounded() bool {
+	for _, list := range [][]string{c.PlayableMediaTypes, c.SupportedCommands} {
+		if len(list) > MaxCapabilityEntries {
+			return false
+		}
+		for _, entry := range list {
+			if len(entry) > MaxCapabilityBytes {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // Device is a Jellyfin app signed in as a user. Each holds one access token.
 type Device struct {
 	ID     ID
@@ -52,13 +109,13 @@ type Device struct {
 	Unfamiliar bool
 }
 
-const deviceColumns = "d.id, d.user_id, d.device_id, d.device_name, d.client, d.client_version, d.remote_address, d.capabilities, d.created_at, d.last_activity_at"
+const deviceColumns = "d.id, d.user_id, d.device_id, d.device_name, d.client, d.client_version, d.remote_address, d.capabilities, d.created_at, d.last_activity_at, d.provider"
 
 func scanDevice(row pgx.Row, extra ...any) (Device, error) {
 	var device Device
 	var capabilities []byte
 	err := row.Scan(append([]any{&device.ID, &device.UserID, &device.DeviceID, &device.DeviceName, &device.Client,
-		&device.ClientVersion, &device.RemoteAddress, &capabilities, &device.CreatedAt, &device.LastActivityAt}, extra...)...)
+		&device.ClientVersion, &device.RemoteAddress, &capabilities, &device.CreatedAt, &device.LastActivityAt, &device.Provider}, extra...)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return device, ErrNotFound
 	}
@@ -77,17 +134,28 @@ func scanDevice(row pgx.Row, extra ...any) (Device, error) {
 // and resets the capabilities the app reported. The device identifiers an
 // account signed in from are kept after their devices sign out, so that
 // the device comes back Unfamiliar when the account never used it, unless
-// it is the account's first.
+// it is the account's first. Admin sessions opened with a token of the
+// device identifier, whoever's, end (see CreateDeviceAdminSession).
+//
+// A device past a bound (see DeviceInfo.Bounded) is ErrInvalidDevice, and
+// nothing is stored. A user keeps MaxUserDevices devices signed in: past
+// them, those used longest ago, by their last activity, are signed out
+// through the same path as any other sign-out, the device signing in
+// never. A user who held more before the bound is brought down to it.
 func (s *Store) SignInDevice(ctx context.Context, user ID, info DeviceInfo) (string, Device, error) {
+	if !info.Bounded() {
+		return "", Device{}, ErrInvalidDevice
+	}
 	// The device's previous token, if any, stops working.
 	defer s.forgetSignIns()
 	token, hash := newToken()
 	var device Device
+	var signedOut []ID
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		var err error
 		device, err = scanDevice(tx.QueryRow(ctx, `INSERT INTO devices AS d
-				(user_id, token_hash, device_id, device_name, client, client_version, remote_address)
-			VALUES ($1, $2, $3, $4, $5, $6, $7)
+				(user_id, token_hash, device_id, device_name, client, client_version, remote_address, provider)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
 			ON CONFLICT (user_id, device_id) DO UPDATE SET
 				token_hash = excluded.token_hash,
 				device_name = excluded.device_name,
@@ -95,10 +163,33 @@ func (s *Store) SignInDevice(ctx context.Context, user ID, info DeviceInfo) (str
 				client_version = excluded.client_version,
 				remote_address = excluded.remote_address,
 				capabilities = '{}',
-				last_activity_at = now()
+				provider = excluded.provider,
+				last_activity_at = greatest(d.last_activity_at, now())
 			RETURNING `+deviceColumns,
-			user, hash, info.DeviceID, info.DeviceName, info.Client, info.ClientVersion, info.RemoteAddress))
+			user, hash, info.DeviceID, info.DeviceName, info.Client, info.ClientVersion, info.RemoteAddress, info.Provider))
 		if err != nil {
+			return err
+		}
+		// The user's sign-ins wait for one another from here to their
+		// commit, so that each counts the devices the others added.
+		if _, err := tx.Exec(ctx, "SELECT pg_advisory_xact_lock(hashtext($1))", "devices:"+user.String()); err != nil {
+			return err
+		}
+		// The activity of a device is written once a minute while it asks
+		// for anything, as one that is playing does with its progress: it
+		// is among the latest, and goes after every device left unused.
+		signedOut, err = deletedDevices(tx.Query(ctx, `DELETE FROM devices WHERE id IN (
+				SELECT id FROM devices WHERE user_id = $1 AND id <> $2
+				ORDER BY last_activity_at DESC, created_at DESC, id OFFSET $3)
+			RETURNING id`, user, device.ID, MaxUserDevices-1))
+		if err != nil {
+			return err
+		}
+		// The admin sessions taken from this device's sign-ins, this user's
+		// earlier one or another user's, end: the browser's web client now
+		// holds this sign-in, which the admin app takes again if asked.
+		if _, err := tx.Exec(ctx, `DELETE FROM admin_sessions s USING devices d
+			WHERE s.device = d.id AND d.device_id = $1`, info.DeviceID); err != nil {
 			return err
 		}
 		// A device seen for the first time inserts its row, which another
@@ -111,18 +202,20 @@ func (s *Store) SignInDevice(ctx context.Context, user ID, info DeviceInfo) (str
 			return err
 		}
 		device.Unfamiliar = first && others
-		_, err = tx.Exec(ctx, "UPDATE users SET last_login_at = now(), last_activity_at = now() WHERE id = $1", user)
+		_, err = tx.Exec(ctx, recordSignIn, user, info.Client)
 		return err
 	})
 	if err != nil {
 		return "", Device{}, err
 	}
+	s.notifySignOut(signedOut)
 	return token, device, nil
 }
 
 // DeviceByToken resolves an access token to its device and enabled user, and
 // records the activity, at most once a minute or when the device's address
-// changes. A token resolved less than signInLife ago is not looked up again.
+// changes, never moving it backwards. A token resolved less than signInLife
+// ago is not looked up again, and its user is remembered as User reads one.
 // The device of an account that ended is refused, as one of a disabled
 // account is, and kept: a later end date brings it back.
 func (s *Store) DeviceByToken(ctx context.Context, token, remoteAddress string) (Device, User, error) {
@@ -139,21 +232,24 @@ func (s *Store) DeviceByToken(ctx context.Context, token, remoteAddress string) 
 		}
 		entry.device, entry.at = device, now
 		s.signIns.keepDevice(hash, entry, generation)
+		s.signIns.keepUser(entry.user, now, generation)
 	}
 	if entry.user.Ended(now) {
 		return Device{}, User{}, ErrNotFound
 	}
 	if now.Sub(entry.device.LastActivityAt) >= activityResolution || entry.device.RemoteAddress != remoteAddress {
+		// The user's app moves with the time only.
 		_, err := s.db.Exec(ctx, `WITH touched AS (
-				UPDATE devices SET last_activity_at = $3, remote_address = $2 WHERE id = $1 RETURNING user_id
-			) UPDATE users SET last_activity_at = $3 WHERE id = (SELECT user_id FROM touched)`,
+				UPDATE devices SET last_activity_at = greatest(last_activity_at, $3), remote_address = $2 WHERE id = $1 RETURNING user_id, client
+			) UPDATE users u SET last_activity_at = $3, last_activity_app = t.client FROM touched t
+			WHERE u.id = t.user_id AND (u.last_activity_at IS NULL OR u.last_activity_at < $3)`,
 			entry.device.ID, remoteAddress, now)
 		if err != nil {
 			return Device{}, User{}, err
 		}
-		s.signIns.touched(hash, now, remoteAddress)
-		entry.device.LastActivityAt, entry.device.RemoteAddress = now, remoteAddress
-		entry.user.LastActivityAt = &now
+		s.signIns.touched(hash, entry.device, now, remoteAddress)
+		entry.device.LastActivityAt, entry.device.RemoteAddress = latest(entry.device.LastActivityAt, now), remoteAddress
+		entry.user.active(now, entry.device.Client)
 	}
 	return entry.device, entry.user, nil
 }
@@ -200,15 +296,42 @@ func (s *Store) Devices(ctx context.Context, user ID) ([]Device, error) {
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Device, error) { return scanDevice(row) })
 }
 
-// Device returns a signed-in device by its identifier.
+// Device returns a signed-in device by its identifier: as its token
+// resolved, when that was less than signInLife ago.
 func (s *Store) Device(ctx context.Context, id ID) (Device, error) {
+	if device, ok := s.signIns.deviceByID(id, s.now()); ok {
+		return device, nil
+	}
 	return scanDevice(s.db.QueryRow(ctx, "SELECT "+deviceColumns+" FROM devices d WHERE d.id = $1", id))
+}
+
+// SignedIn reports whether the device of identifier id is signed in: as
+// it was found less than signInLife ago, else as the database tells. The
+// media requests that carry a grant given to a device ask at every range
+// and segment, and a device signed out since is refused from its next
+// request (see forgetSignIns). Only devices found are remembered, as only
+// tokens that resolved are.
+func (s *Store) SignedIn(ctx context.Context, id ID) (bool, error) {
+	now := s.now()
+	if s.signIns.signedIn(id, now) {
+		return true, nil
+	}
+	generation := s.signIns.current()
+	var found bool
+	if err := s.db.QueryRow(ctx, "SELECT EXISTS (SELECT FROM devices WHERE id = $1)", id).Scan(&found); err != nil || !found {
+		return false, err
+	}
+	s.signIns.keepSignedIn(id, now, generation)
+	return true, nil
 }
 
 // SetCapabilities records what a signed-in app reported it supports.
 func (s *Store) SetCapabilities(ctx context.Context, device ID, capabilities Capabilities) error {
 	// Requests carry the device, capabilities included.
-	defer s.forgetSignIns()
+	defer s.signIns.forgetDevice(device)
+	if !capabilities.Bounded() {
+		return ErrInvalidCapabilities
+	}
 	if capabilities.PlayableMediaTypes == nil {
 		capabilities.PlayableMediaTypes = []string{}
 	}

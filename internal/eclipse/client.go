@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"net/url"
 	"strconv"
 	"strings"
@@ -319,21 +320,27 @@ type Addon struct {
 	Confined    bool
 }
 
-// BaseURL is the address an addon's resources are under: its manifest URL
-// without /manifest.json.
-func BaseURL(manifestURL string) string {
-	return strings.TrimSuffix(manifestURL, "/manifest.json")
-}
-
-// get asks an addon for path, with the settings and extra in the query,
-// and decodes the answer into v.
+// get asks an addon for path, under its manifest URL's path without
+// /manifest.json, and decodes the answer into v. The query carries the
+// manifest URL's own query, where some addons keep the user's token, then
+// the settings, then extra, each replacing the parameters of the same name
+// before it.
 func (c *Client) get(ctx context.Context, addon Addon, path string, extra url.Values, v any) error {
-	query := addon.Manifest.Query(addon.Settings)
-	for key, values := range extra {
-		query[key] = values
+	base, rawQuery := stremio.SplitManifestURL(addon.ManifestURL)
+	query, err := url.ParseQuery(rawQuery)
+	if err != nil {
+		// A query Go cannot read is sent as it is written, what the request
+		// adds after it.
+		query = url.Values{}
 	}
-	target := BaseURL(addon.ManifestURL) + path
-	if encoded := query.Encode(); encoded != "" {
+	maps.Copy(query, addon.Manifest.Query(addon.Settings))
+	maps.Copy(query, extra)
+	encoded := query.Encode()
+	if err != nil {
+		encoded = strings.TrimSuffix(rawQuery+"&"+encoded, "&")
+	}
+	target := base + path
+	if encoded != "" {
 		target += "?" + encoded
 	}
 	body, err := c.http.Fetch(ctx, addon.ManifestURL, target, addon.Confined)
@@ -492,10 +499,10 @@ func (c *Client) Catalog(ctx context.Context, addon Addon, catalog Catalog, skip
 // Stream resolves where a track plays from.
 func (c *Client) Stream(ctx context.Context, addon Addon, id string) (Stream, error) {
 	var raw struct {
-		URL       string         `json:"url"`
-		Format    string         `json:"format"`
-		Quality   string         `json:"quality"`
-		ExpiresAt stremio.Number `json:"expiresAt"`
+		URL       string           `json:"url"`
+		Format    string           `json:"format"`
+		Quality   string           `json:"quality"`
+		ExpiresAt stremio.Number64 `json:"expiresAt"`
 		Chapters  []struct {
 			Title     string  `json:"title"`
 			StartTime float64 `json:"startTime"`

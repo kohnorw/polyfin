@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
-	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/media"
 	"github.com/moodiness/polyfin/internal/playback"
 )
@@ -113,7 +112,7 @@ func (h *Handler) attachment(w http.ResponseWriter, r *http.Request) {
 		notFoundProblem(w)
 		return
 	}
-	user, _, signedIn := h.streamAccess(r)
+	user, _, signedIn := h.streamAccess(r, servedToAnyone)
 	if !signedIn {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -122,7 +121,8 @@ func (h *Handler) attachment(w http.ResponseWriter, r *http.Request) {
 	if owner, ok := h.Library.VersionOwner(opened); ok {
 		item = owner
 	}
-	if _, err := h.title(r.Context(), user, item); err != nil {
+	title, err := h.title(r.Context(), user, item)
+	if err != nil {
 		notFoundProblem(w)
 		return
 	}
@@ -131,9 +131,10 @@ func (h *Handler) attachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// The title's own identifier stands for the version its first media
-	// source describes (see firstWorkingVersion).
+	// source describes (see firstWorkingVersion), as the app asking is
+	// offered them, with the user's track choices on the title.
 	if wanted == item {
-		wanted = h.firstWorkingVersion(r.Context(), user, library.Item{ID: item})
+		wanted = h.firstWorkingVersion(h.mediaContext(r, servedToAnyone, user), user, title)
 	}
 	version, err := h.Library.Version(r.Context(), user, item, wanted)
 	if err != nil {
@@ -159,7 +160,7 @@ func (h *Handler) attachment(w http.ResponseWriter, r *http.Request) {
 	data, err := h.Playback.Attachment(r.Context(), version, analysis, index)
 	if err != nil {
 		if r.Context().Err() == nil && !errors.Is(err, playback.ErrNoAttachment) {
-			h.Logger.Warn("An attached file could not be read", "addon", version.Addon, "error", err)
+			h.Logger.Warn("An attached file could not be read", "addon", version.AddonLog, "error", err)
 		}
 		cannotExtract()
 		return

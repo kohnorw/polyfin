@@ -3,28 +3,6 @@ const users = {
   users: {
     title: 'Users',
     description: 'Create and manage the accounts allowed to use this server.',
-    registrationTitle: 'Registration',
-    registration: 'Let people register',
-    registrationHelp:
-      'Anyone who opens /register on this server can create a member account with the default settings. Off, the page says registration is closed.',
-    registrationOpenPage: 'Open the page',
-    registrationFailed: 'The setting could not be saved. Try again.',
-    registrationCodes: 'Require a registration code',
-    registrationCodesHelp:
-      'Visitors of /register type one of these codes before the form. Choose beside each code how many accounts it may create.',
-    registrationCodesCount: (n: number) => (n === 1 ? '1 usable code' : `${n} usable codes`),
-    registrationCodesNew: 'New code',
-    registrationCodesFailed: 'The codes could not be changed. Try again.',
-    registrationCodeUsed: (name: string) => `Used by ${name}`,
-    registrationCodeUnused: 'Unused',
-    registrationCodeUses: (uses: number, max: number) =>
-      max === 0 ? `Used ${uses} times` : `Used ${uses} of ${max}`,
-    registrationCodeLimit: (n: number) => (n === 1 ? 'Single use' : `${n} uses`),
-    registrationCodeUnlimited: 'Unlimited',
-    registrationCodeLimitLabel: 'How many times the code can be used',
-    registrationCodeCopy: 'Copy code',
-    registrationCodeCopied: 'Copied',
-    registrationCodeDelete: 'Delete code',
     listTitle: 'Accounts',
     empty: 'No user yet.',
     administrator: 'Administrator',
@@ -38,14 +16,12 @@ const users = {
     isAdministratorHelp: 'Administrators can manage users and server settings.',
     showOnSignIn: 'Show on the sign-in screen',
     showOnSignInHelp:
-      'Visible users are listed on the sign-in screen of Jellyfin apps. Hidden users type their name, like the Jellyfin default.',
+      'Visible users are listed on the sign-in screen of Jellyfin apps. Hidden users type their name, like the Jellyfin default. Other members’ apps are told of visible users only.',
     create: 'Create user',
     creating: 'Creating…',
     created: (name: string) => `${name} has been created.`,
     edit: 'Edit',
     close: 'Close',
-    rename: 'Rename',
-    renamed: 'The name has been changed.',
     resetPassword: 'Reset password',
     newPassword: 'New password',
     resetPasswordHelp: 'Changing the password signs out all of this user’s Jellyfin devices.',
@@ -53,9 +29,21 @@ const users = {
     accessTitle: 'Access',
     isDisabled: 'Disabled',
     isDisabledHelp: 'A disabled user cannot sign in, and all their devices are signed out.',
+    providerOnly: 'Identity provider only',
+    providerOnlyHelp:
+      'The user signs in through the identity provider set up under Settings › Security, never with a password: the password is refused, and an account created so needs none. Jellyfin apps that cannot open the provider sign in with Quick Connect.',
+    /** A user's page › Access: the account's link at the identity provider, while one is set up. */
+    providerLink: 'Identity provider link',
+    providerLinked: 'Linked',
+    providerLinkedHelp:
+      'Someone at the identity provider signs in as this account, whatever their name there becomes.',
+    providerLinkAllowed: 'Link at the next provider sign-in',
+    providerLinkAllowedHelp:
+      'Not linked yet. On, the next person who signs in through the identity provider under this account’s name, as their claim or their verified email, gets this account, and it turns off. Turn it on only when the account is theirs. Otherwise the account links itself under My account, as administrators and accounts with two-step sign-in always do.',
     ended: 'Ended',
     endsOn: (date: string) => `Ends on ${date}`,
     endedOn: (date: string) => `Ended on ${date}`,
+    endMoment: (date: string, time: string) => `${date} at ${time}`,
     endTitle: 'Ends on',
     endHelp:
       'From this date, in the server’s time zone, the account is refused as a disabled one is: it cannot sign in, and its devices are refused. Everything it has stays, and a later date, or Never, brings it back.',
@@ -64,24 +52,21 @@ const users = {
     endDate: 'End date',
     saveEnd: 'Save date',
     endNever: 'Never',
-    canTranscode: 'Can use conversion (transcoding)',
-    canTranscodeHelp:
-      'Lets the server re-encode video and audio when this user’s app cannot play a file as it is. Without it, files play as they are or simply repackaged.',
+    videoTranscoding: 'Can convert video (transcoding)',
+    videoTranscodingHelp:
+      'Lets the server re-encode the video when this user’s app cannot play it as it is. Without it, the video plays as it is or simply repackaged, never re-encoded.',
+    audioTranscoding: 'Can convert audio (transcoding)',
+    audioTranscodingHelp:
+      'Lets the server re-encode the audio when this user’s app cannot play it as it is, the video copied when it can be. Without it, the audio plays as it is, never re-encoded.',
     canDownload: 'Can download',
     canDownloadHelp: 'Lets this user save titles in Jellyfin apps to watch offline.',
     canPlayTorrents: 'Can play torrent streams',
     canPlayTorrentsHelp:
       'Offers this user the torrents addons list, while Settings › Torrents plays them. Off for everyone, administrators included, until given.',
     noTranscoding: 'No conversion',
+    noVideoTranscoding: 'No video conversion',
+    noAudioTranscoding: 'No audio conversion',
     noDownloads: 'No downloads',
-    deleteSelected: (n: number) => `Delete selected (${n})`,
-    deleteSelectedHelp:
-      'These accounts and their watch history, favorites and settings are deleted for good.',
-    previousPage: 'Previous',
-    nextPage: 'Next',
-    selectAll: 'Select all',
-    liveTvOn: 'Turn Live TV on',
-    liveTvOff: 'Turn Live TV off',
     turnOffDownloads: 'Turn off downloads for everyone',
     turnOffDownloadsConfirm:
       'Every user and every group lose the permission to download, also in the Jellyfin apps already signed in. You can give it back to a user or a group on their page, under Access.',
@@ -94,19 +79,46 @@ const users = {
           : `${count} users can no longer download.`,
     lastAdminHelp: 'The last enabled administrator cannot be deleted, demoted or disabled.',
     updated: 'Changes saved.',
+    moreActions: (name: string) => `More actions for ${name}`,
+    disable: 'Disable',
+    enable: 'Enable',
+    disableTitle: (name: string) => `Disable ${name}?`,
+    disabling: 'Disabling…',
+    disabledNow: (name: string) => `${name} has been disabled.`,
+    enabledNow: (name: string) => `${name} can sign in again.`,
+    signOutAll: 'Sign out of all devices',
+    signOutAllConfirm: (name: string) =>
+      `Sign out every Jellyfin device of ${name}? Each app will need to sign in again.`,
+    signingOutAll: 'Signing out…',
+    signedOutAll: (count: number) =>
+      count === 0
+        ? 'No device was signed in.'
+        : count === 1
+          ? '1 device has been signed out.'
+          : `${count} devices have been signed out.`,
     metadataLanguageTitle: 'Metadata language',
     metadataLanguageHelp:
-      'The language of titles’ names, overviews and images in this user’s apps, when one of the server’s addons describes them in it; titles no addon describes in it keep the server’s description. Genres, ratings and people stay the same for everyone, so parental control and blocked genres judge every user alike. The names Polyfin makes itself follow it when it is English or French.',
+      'The language of titles’ names, overviews and images in this user’s apps, when one of the server’s addons describes them in it; titles no addon describes in it keep the server’s description. Genres, ratings and people stay the same for everyone, so parental control and blocked genres judge every user alike. The names Polyfin makes itself follow it when Polyfin speaks it: English, French, German, Spanish, Italian or Portuguese.',
     metadataLanguageNone:
       'No addon of the server has a language yet. Give one a language on its page under Content › Sources.',
+    webThemeTitle: 'Web player theme',
+    webThemeHelp:
+      'The web player’s look for this user, on every browser they sign in with: the server’s theme, LumaaGlaass, jellyfin-web’s own look, lighter, for TVs and older phones, or the Custom theme while it has a text. Browsers too old for LumaaGlaass get jellyfin-web’s own look by themselves.',
+    webThemeChange: 'Let them change it',
+    webThemeChangeHelp:
+      'Under My account › Web player theme. Off, the theme chosen here stays theirs.',
+    audioRegionTitle: 'Audio region',
+    audioRegionHelp:
+      'The dub this user prefers where a language is dubbed apart for a region, such as French for Quebec. It applies to the audio language they chose in their apps, else the server’s, when that is the region’s language, and sets it when neither is set: in that language, the audio tracks of the region play first, and its versions come first where the server orders versions by language.',
     parentalTitle: 'Parental control',
     maxRating: 'Maximum rating',
-    maxRatingHelp: 'Titles rated above this limit are hidden from this user.',
+    maxRatingHelp:
+      'The ratings of the server’s Rating country, set under Settings › General. Titles rated above this limit in that country are hidden from this user.',
     noLimit: 'No limit',
     blockUnratedMovies: 'Block unrated movies',
     blockUnratedShows: 'Block unrated shows',
     ratingLimit: (rating: string) => `Up to ${rating}`,
-    saveParental: 'Save parental control',
+    ratingAge: (age: number) => `Age ${age}`,
     devicesTitle: 'Devices',
     delete: 'Delete user',
     deleteConfirm: (name: string) =>
@@ -115,11 +127,11 @@ const users = {
     deleted: (name: string) => `${name} has been deleted.`,
     canAddAddons: 'Can add their own addons',
     canAddAddonsHelp:
-      'Lets this user add Stremio addons of their own on their My sources page. Without it, their addons are kept but not used.',
+      'Lets this user add Stremio addons of their own, and make smart lists, on their My sources page. Without it, their addons and smart lists are kept but not used.',
     noPersonalAddons: 'No own addons',
     blockedUntil: (time: string) => `Blocked until ${time}`,
     blockedHelp:
-      'Too many wrong passwords were entered for this account: it cannot sign in until then, even with the right password.',
+      'Too many wrong passwords were entered for this account from one address: sign-ins from that address are refused until then, even with the right password. Other addresses, and devices the account already used, still sign in.',
     unblock: 'Unblock',
     unblocking: 'Unblocking…',
     unblocked: 'The account is unblocked.',
@@ -158,12 +170,19 @@ const users = {
       'Lets this user play, pause or send messages to the Jellyfin apps of other users. Everyone can control their own apps.',
     liveTvManagement: 'Can record Live TV',
     liveTvManagementHelp: 'Schedule and delete recordings.',
-    savePlaybackAccess: 'Save playback and access',
+    localFirst: 'Play local files first',
+    localFirstHelp:
+      'Puts the versions of local folders and network shares before the others in this user’s version menus, whatever "Order versions by" says, so that Play starts them. Other users keep the server’s order.',
+    boostVolume: 'Boost the volume in the web player',
+    boostVolumeHelp:
+      'Makes videos louder in this user’s web player, in a browser and in the Jellyfin apps for Android and iOS: about 8 dB on quiet passages and 5 dB on loud ones, peaks held near full scale. The browser does the work, but for it to reach the streams of addons, the server sends this user’s web player those streams itself rather than sending the player to their source, which takes the server’s bandwidth. The apps’ own players are not reached, nor streams an iPhone or iPad plays as HLS.',
+    convertSound: 'Convert the sound to even it',
+    convertSoundHelp:
+      'The server converts the audio of this user’s videos and channels and evens it at -16 LUFS, the picture copied, so that every app plays it louder and evenly. The cost: nothing plays directly, each play takes a little of the server’s processor, and surround sound reaches a receiver converted rather than as the original track.',
     visibleLibrariesTitle: 'Visible libraries',
     visibleLibrariesHelp:
       'The server’s libraries this user’s apps show. Libraries added later are shown. This only chooses the libraries shown: titles stay reachable through other libraries, search or links. To block titles, use parental control or blocked genres.',
     noServerLibraries: 'The server has no library yet.',
-    saveVisibleLibraries: 'Save visible libraries',
     blockedGenresTitle: 'Blocked genres',
     blockedGenresHelp:
       'Titles of any of these genres are hidden from this user everywhere, like titles above their parental control limit.',
@@ -172,7 +191,30 @@ const users = {
     addGenre: 'Add',
     removeGenre: (genre: string) => `Remove ${genre}`,
     noBlockedGenres: 'No genre is blocked.',
-    saveBlockedGenres: 'Save blocked genres',
+    liveTvChannelsTitle: 'Live TV channels',
+    liveTvChannelsHelp:
+      'The channels of the server’s Live TV sources this user sees, chosen by group and by channel. Hidden channels are left out of the channel list, the guide, searches, Replay, recordings, timers and reminders, and do not play. The user’s own sources are not limited.',
+    channelsMode: 'Channels',
+    channelsAll: 'All',
+    channelsOnly: 'Only these',
+    channelsExcept: 'All except these',
+    channelsOnlyHelp: 'Only the groups and channels ticked are shown.',
+    channelsExceptHelp: 'The groups and channels ticked are hidden.',
+    channelGroups: 'Groups',
+    filterChannelGroups: 'Filter groups',
+    moreChannelGroups: (count: number) => `${count} more: filter to find them.`,
+    newChannelGroup: 'New',
+    noChannelGroups: 'The server’s Live TV sources have no channel yet.',
+    singleChannels: 'Channels',
+    searchChannels: 'Search channels by name or number',
+    tickedChannels: 'Ticked channels',
+    noTickedChannels: 'No channel ticked.',
+    goneChannel: 'Channel no longer listed',
+    removeChannel: (name: string) => `Remove ${name}`,
+    moreChannels: (count: number) => `${count} more: search to find them.`,
+    hideNewChannelGroups: 'Hide channels from groups added later',
+    hideNewChannelGroupsHelp:
+      'Groups a source adds after this is saved are hidden. They show here ticked, marked New, until saved again.',
     allowedHoursTitle: 'Allowed hours',
     allowedHoursHelp:
       'When hours are set, this user can only sign in and use the server during them, in the server’s time zone. Outside them, their apps are refused.',
@@ -183,7 +225,6 @@ const users = {
     addHours: 'Add hours',
     removeHours: 'Remove',
     hoursOrder: 'Each end time must come after its start time.',
-    saveAllowedHours: 'Save allowed hours',
     days: {
       Sunday: 'Sunday',
       Monday: 'Monday',
@@ -209,15 +250,23 @@ const users = {
     canShare: 'Can share titles',
     canShareHelp:
       'Lets this user give a movie or an episode to someone without an account, through a link that expires, from My account or a title’s page in the web player, while Settings › Security › Allow share links is on. Turning it off revokes their links.',
+    remoteAccess: 'Can connect from outside the local network',
+    remoteAccessHelp:
+      'Lets this user sign in, browse and play from anywhere. Turned off, they may only from the local network, administrators included, as Known proxies under Settings › Security tells it. The links they share still play anywhere.',
+    remoteAccessUnknownProxy:
+      'Health sees a reverse proxy missing from Known proxies: everyone who comes through it counts as outside the local network, so this user is refused through it, from the local network too.',
+    openKnownProxies: 'Open Known proxies',
     shareLinksTitle: 'Shared links',
     shareLinksHelp:
       'The links this user made to share a movie or an episode. Revoke stops one at once.',
     qualityGroup: 'Quality group',
     qualityGroupHelp:
-      'The highest resolution this user is offered. Higher versions are left out while one fits; if none fits, they are converted down, or refused when this user cannot use conversion. Live TV is converted down too. Only versions that fit are downloaded as they are; with "Converted downloads" on (Settings › Conversion), the apps that ask for it download the others converted down.',
+      'The highest resolution this user is offered. Higher versions are left out while one fits; if none fits, they are converted down, or refused when this user cannot use conversion. Live TV is converted down too. Only versions that fit are downloaded as they are; with "Converted downloads" on under Settings › Conversion (transcoding), the apps that ask for it download the others converted down.',
     qualityGroupOriginal: 'Original (no limit)',
     member: 'Member',
-    lastSignInLabel: 'Last sign-in:',
+    lastActivityLabel: 'Last activity:',
+    /** The app of a last activity in this admin app. */
+    adminApp: 'Admin app',
     active: 'Active',
     pinRequested: 'PIN requested',
     emptyHelp:
@@ -229,19 +278,26 @@ const users = {
     sectionsLabel: 'Sections of the user',
     profileTitle: 'Name and password',
     accessHelp: 'Each change is saved at once.',
-    liveTvAccessTitle: 'Live TV access',
-    liveTvAccessHelp:
-      'The IPTV sources and categories this user gets, with the Live TV permission. Categories a source adds later show, unless the whole source is off.',
-    saveLiveTvAccess: 'Save Live TV access',
-    noLiveTvSources: 'No IPTV sources',
-    noLiveTvSourcesHelp: 'Add an IPTV source in Content › Sources, then assign it here.',
     noServerLibrariesHelp:
       'Add a library in Content › Libraries, then choose here which ones this user sees.',
+    moreTitle: 'Imports and downloads',
+    turnOffDownloadsSummary:
+      'Every user and group loses the permission to download, once you confirm.',
+    libraryShown: 'Shown',
+    libraryHidden: 'Hidden',
+    draftInvalid: 'A section has an error to fix before saving.',
+    watching: (title: string) => `Watching ${title}`,
+    pausedOn: (title: string) => `Paused on ${title}`,
+    positionOf: (position: string, total: string) => `${position} of ${total}`,
+    metadataLanguageRow: 'Language of titles',
+    webThemeRow: 'Theme',
+    audioRegionRow: 'Dub region',
     jellyfinImport: {
+      summary: 'Accounts and watch data from a Jellyfin, Emby or Plex server.',
       open: 'Import from another server',
       title: 'Import from another server',
       description:
-        'Bring accounts and their watch data over from a Jellyfin, Emby or Plex server: account names and administrator status, then for each user the movies and episodes played with their dates, resume points and favorites, matched by IMDb, TMDB or TVDB. Polyfin’s data is only added to, and nothing is written to the other server. Servers do not give out passwords: you set one for each new account, or keep the one a user signs in with.',
+        'Bring accounts and their watch data over from a Jellyfin, Emby or Plex server: account names and administrator status, then for each user the movies and episodes played with their dates, resume points and favorites, matched by IMDb, TMDB or TVDB, and if you choose their ratings, the server’s collections and their playlists. Polyfin’s data is only added to, and nothing is written to the other server. Servers do not give out passwords: you set one for each new account, or keep the one a user signs in with.',
       serverKind: 'Server',
       servers: {
         jellyfin: 'Jellyfin',
@@ -290,12 +346,48 @@ const users = {
       newUser: 'New user',
       watchData: 'Import watch data',
       watchDataHelp: 'Played titles with their dates, resume points and favorites.',
-      plexOwnerWatchDataHelp: 'Played titles with their dates and play counts, and resume points.',
+      plexOwnerWatchDataHelp:
+        'Played titles with their dates and play counts, resume points and ratings.',
       plexWatchDataHelp:
-        'Played titles with their dates and play counts. Plex does not let Polyfin read this account’s resume points.',
+        'The titles this account played to the end on this server, from Plex’s playback history, with their dates and play counts. Titles it marked as watched or synced from its Plex account, and its resume points, stay on Plex.',
       watchDataNeeded: 'Without it, nothing is imported for this user.',
+      /** What an import brings besides watch data, each on by default. */
+      extras: {
+        title: 'Also bring',
+        ratings: 'Ratings',
+        ratingsHelp:
+          'Each user’s ratings from 0 to 10, as they are. A thumb up without a rating becomes a favorite. A rating Polyfin already has stays.',
+        collections: 'Collections',
+        collectionsHelp:
+          'The server’s collections, as Polyfin collections every user sees, with the titles found. A collection with no title found is not created.',
+        playlists: 'Playlists',
+        playlistsHelp:
+          'Each user’s video playlists, as playlists of their own, in order, with the titles found.',
+        plexHelp:
+          'Plex gives ratings and playlists only for the accounts read with their own token: the owner’s, and the others’ once you sign in with Plex as the owner.',
+      },
       plexNotice:
-        'With the owner’s token, Plex lets Polyfin read the owner’s played titles and resume points, but only the played titles of the other accounts, from their playback history: their resume points stay on Plex. Plex has no favorites to import.',
+        'With the owner’s token, Plex lets Polyfin read the owner’s played titles, resume points and ratings. Of the other accounts, it gives only their playback history on this server: the titles they played to the end here. Titles they marked as watched without playing them, titles synced from their Plex account, their resume points and their ratings are not in it. To read each account’s own watch data, sign in with Plex as the owner above. Plex has no favorites to import.',
+      /** The owner's sign-in to Plex, in the import of a Plex server. */
+      plexOwner: {
+        title: 'Read every account with Plex',
+        help: 'Sign in with Plex as this server’s owner. Plex then gives Polyfin the token of each account the server is shared with, and Polyfin reads with it what the account played, marked or synced as watched, its resume points and its ratings, not only its plays here. The profiles of your Plex Home are read with their PIN, when they have one.',
+        signIn: 'Sign in with Plex as the owner',
+        checking: 'Asking Plex which accounts it gives a token for…',
+        signedInAs: (name: string) => `Signed in to Plex as ${name}, the server’s owner.`,
+        signOut: 'Sign out of Plex',
+        notice:
+          'Polyfin reads each account below with the token Plex gives the owner for it, as that account’s own Plex apps read this server. The tokens serve this import only: they are never kept, and your sign-in is signed out of Plex once the import ends.',
+        all: 'Everything: the titles played, marked or synced as watched, the resume points and the ratings.',
+        pin: 'A Plex Home profile with a PIN: everything with its PIN, only its plays on this server without it.',
+        plays:
+          'Only its plays on this server, from Plex’s playback history: Plex gives no token for this account.',
+        everything: 'Everything',
+        playsOnly: 'Plays only',
+        pinLabel: 'Profile PIN',
+        pinHelp: (name: string) =>
+          `The PIN ${name} asks for on Plex. Left empty, only its plays are read.`,
+      },
       ownerNotice: (owner: string | null, signedIn: boolean) =>
         `${signedIn ? `Signed in as ${owner ?? 'a user'}, Polyfin reads only that user’s watch data.` : `This key is ${owner === null ? 'a user’s' : `${owner}’s`}: it reads only that user’s watch data.`} To import another user’s, type the password of their account on the server: Polyfin signs in as them to read it. Without it, their account can still be created.`,
       ownerOnlyNotice: (owner: string | null, signedIn: boolean) =>
@@ -319,8 +411,6 @@ const users = {
       endedLabel: 'Ended',
       startedBy: (name: string, own: boolean) =>
         own ? `${name}’s own watch history, from My account` : `Started by ${name}`,
-      runningHelp:
-        'You can leave this page: the import goes on. If Polyfin restarts meanwhile, the import stops: what it imported stays, and importing again adds nothing twice.',
       stop: 'Stop import',
       stopping: 'Stopping…',
       states: {
@@ -381,15 +471,42 @@ const users = {
       read: (count: number) => (count === 1 ? '1 item read' : `${count} items read`),
       counts: (played: number, resumed: number, favorites: number) =>
         `${played} marked played, ${resumed === 1 ? '1 resume point' : `${resumed} resume points`}, ${favorites === 1 ? '1 favorite' : `${favorites} favorites`}`,
-      unmatched: (count: number) =>
-        count === 1 ? '1 title not found' : `${count} titles not found`,
-      unmatchedTitle: (name: string) => `Titles not found for ${name}`,
-      unmatchedHelp:
-        'These titles were not imported: no Polyfin title matches them by IMDb, TMDB or TVDB.',
-      titleColumn: 'Title',
-      kindColumn: 'Kind',
-      yearColumn: 'Year',
-      reasonColumn: 'Reason',
+      upToDate: (count: number) => `${count} already in Polyfin`,
+      ratings: (count: number) => (count === 1 ? '1 rated' : `${count} rated`),
+      collections: (count: number) =>
+        count === 1 ? '1 collection created' : `${count} collections created`,
+      playlists: (count: number) =>
+        count === 1 ? '1 playlist created' : `${count} playlists created`,
+      /** Titles added to collections and playlists an earlier import brought. */
+      listTitles: (count: number) =>
+        count === 1
+          ? '1 title added to lists brought before'
+          : `${count} titles added to lists brought before`,
+      /** A collection or playlist of the server with no title found, which was not created. */
+      skipped: {
+        collection: (name: string) => `Collection “${name}”: no title found, not created.`,
+        playlist: (name: string) => `Playlist “${name}”: no title found, not created.`,
+      },
+      watchlist: (count: number) => `${count} added to the Watchlist playlist`,
+      undated: (count: number) =>
+        count === 1
+          ? '1 resume point without a date, not added'
+          : `${count} resume points without a date, not added`,
+      /** Why a user's import added nothing; `server` is the kind of server's name. */
+      nothingAdded: {
+        up_to_date: () => 'Everything read was already in Polyfin: there was nothing to add.',
+        nothing_played: (server: string) =>
+          `${server} lists nothing played, in progress or favorite for this user.`,
+        no_sections: () =>
+          'This Plex server has no movie or show library: there was nothing to read.',
+        plex_owner_nothing_watched: () =>
+          'The owner has nothing played or in progress in this server’s movie and show libraries.',
+        plex_nothing_watched: () =>
+          'This account has nothing played, in progress or rated in this server’s movie and show libraries.',
+        plex_no_history: () =>
+          'Plex lists no play of this account on this server. Its playback history holds only the titles played to the end on this server: titles marked as watched without playing them, or synced from the Plex account, are not in it. To bring everything over, resume points included, sign in with Plex as the owner in this import, with the PIN of a Plex Home profile that has one, or the person signs in with Plex under My account › Import from another server.',
+      },
+      unmatchedHelp: 'These titles were not imported: the reason tells why.',
       kinds: {
         movie: 'Movie',
         episode: 'Episode',
@@ -398,18 +515,22 @@ const users = {
       reasons: {
         no_identifier: 'No IMDb, TMDB or TVDB identifier',
         not_found: 'Not in Polyfin',
+        not_in_library: 'No longer in Plex’s libraries',
+        other_episode_order: 'Numbered in another of TheTVDB’s episode orders',
+        episode_not_placed: 'Numbered otherwise: no episode surely matches',
       },
-      more: (count: number) => `And ${count} more.`,
     },
     appImport: {
+      summary: 'A user’s watch data from their account on an app built on addons.',
       open: 'Import from an app',
       title: 'Import from an app',
       description:
-        'Bring a user’s watch data over from their account on an app built on addons: the movies and episodes they played with their dates, their resume points, and the app’s library as favorites, matched by IMDb, TMDB or Kitsu. Polyfin’s data is only added to, and nothing is written to the app. You need the user’s sign-in to the app; users can also import themselves, under My account.',
+        'Bring a user’s watch data over from their account on an app built on addons: the movies and episodes they played with their dates, their resume points, and the app’s library, which goes to their Watchlist playlist in Jellyfin apps, matched by IMDb, TMDB or Kitsu. Polyfin’s data is only added to, and nothing is written to the app. You need the user’s sign-in to the app; users can also import themselves, under My account.',
       user: 'Into the account of',
       userHelp: 'The Polyfin user whose watch data and addons the import adds to.',
     },
     letterboxdImport: {
+      summary: 'A user’s movies from their Letterboxd export file.',
       open: 'Import from Letterboxd',
       title: 'Import from Letterboxd',
       description:
@@ -430,7 +551,8 @@ const users = {
     after: (days: number) => (days === 1 ? 'After 1 day' : `After ${days} days`),
     never: 'Never',
     accountsEnd: 'Accounts end',
-    accountsEndHelp: 'Each account the link creates ends this many days after it is created.',
+    accountsEndHelp:
+      'Each account the link creates ends exactly this many days after its creation, at the same time of day, as the link’s expiry counts.',
     accountsEndAfter: (days: number) =>
       days === 1 ? 'Accounts end after 1 day' : `Accounts end after ${days} days`,
     model: 'Settings of',
@@ -443,7 +565,6 @@ const users = {
     createdNotice: 'Copy this link now: it is shown only this once.',
     copy: 'Copy link',
     copied: 'Link copied.',
-    copyFailed: 'The link could not be copied. Select it and copy it by hand.',
     done: 'Done',
     uses: (uses: number, maxUses: number) =>
       maxUses === 1 ? `${uses} of 1 account created` : `${uses} of ${maxUses} accounts created`,
@@ -491,9 +612,7 @@ const users = {
     notFoundHelp: 'It may have been deleted.',
     backToGroups: 'Back to groups',
     sectionsLabel: 'Sections of the group',
-    pageHelp: 'Each section saves on its own and reaches the members who follow the group at once.',
-    rename: 'Rename',
-    renamed: 'The group has been renamed.',
+    pageHelp: 'Saved changes reach the members who follow the group at once.',
     updated: 'The group has been updated.',
     accessHelp:
       'The permissions members take from the group. Their role, sign-in screen, Disabled and end date stay on their own page.',
@@ -505,12 +624,12 @@ const users = {
     deleted: (name: string) => `The group ${name} has been deleted.`,
     membersTitle: 'Members',
     membersHelp:
-      'A member who no longer follows the group keeps its values as their own settings, marked Own settings.',
+      'A member keeps their own values in the sections they choose, which their page can change; they follow the group in the others.',
     noMembers: 'No member yet.',
     noMembersHelp: 'Add members here, or choose the group in the Access section of a user’s page.',
     ownSettings: 'Own settings',
     followsHelp: 'Follows the group',
-    ownSettingsHelp: 'Keeps their own settings',
+    ownSections: (sections: string) => `Own: ${sections}`,
     addMembers: 'Add members',
     addMembersTitle: (name: string) => `Add members to ${name}`,
     addMembersHelp:
@@ -525,30 +644,70 @@ const users = {
     group: 'Group',
     noGroup: 'No group',
     groupHelp:
-      'A member follows the group: its values apply, and this page shows them read only. Leaving it keeps them as the user’s own.',
+      'A member follows the group: its values apply, and this page shows them read only, except in the sections kept as own. Leaving it keeps them as the user’s own.',
     administratorNoGroup: 'Administrators cannot join a group, as their permissions differ.',
     administratorLeaves: (name: string) =>
       `Making this user an administrator takes them out of the group ${name}.`,
     newAccountGroupHelp: 'The accounts created join this group and follow it.',
     newUserGroupHelp: 'The user joins this group and follows it.',
-    followGroup: 'Follow the group',
-    followGroupHelp:
-      'Turned off, the user keeps the group’s current values as their own, and this page can change them.',
+    values: 'Values',
+    valuesHelp:
+      'Taken from the group, the values change with it. Own, they are set on this page, and later changes to the group pass them by.',
+    valuesFromGroup: (name: string) => `From the group ${name}`,
+    valuesOwn: 'Own for this user',
+    followEverywhere: 'Follow the group everywhere',
     setByGroup: (name: string) => `Set by the group ${name}.`,
     openGroup: 'Open the group',
     joinTitle: 'Join the group?',
     joinConfirm: (user: string, group: string) =>
       `${user} joins ${group} and follows it: the group’s values replace theirs in Access, Playback and access, Parental control, Visible libraries, Blocked genres and Allowed hours.`,
     join: 'Join',
-    followAgainTitle: 'Follow the group again?',
-    followAgainConfirm: (user: string, group: string) =>
-      `${user} takes the values of ${group} back: their own settings in the group’s sections are replaced.`,
+    followSectionTitle: (section: string) => `Follow the group for ${section}?`,
+    followSectionConfirm: (user: string, group: string, section: string) =>
+      `${user} takes the values of ${group} back in ${section}: their own settings there are replaced.`,
+    followEverywhereTitle: 'Follow the group everywhere?',
+    followEverywhereConfirm: (user: string, group: string) =>
+      `${user} takes the values of ${group} back in every section: all their own settings are replaced.`,
     followAgain: 'Follow the group',
     groupBadge: (name: string) => `Group ${name}`,
     groupOwnBadge: (name: string) => `Group ${name}, own settings`,
     filter: 'Show the users of',
     allGroups: 'All groups',
     noneShown: 'No user here.',
+    sourcesTitle: 'Sources',
+    sourcesHelp:
+      'The server’s sources every member gets, whether they follow the group or keep their own settings. Each change is saved at once in the source’s Used by. Members’ own sources are not listed.',
+    noSources: 'No server source yet.',
+    noSourcesHelp:
+      'Add an addon, an IPTV source or a folder: it can then be given to the group here.',
+    sourceEveryone: 'Used by everyone',
+    changeWhoUses: 'Change who uses it on its page',
+    sourceGiven: (name: string) => `The group gets ${name}.`,
+    sourceTaken: (name: string) => `The group no longer gets ${name}.`,
+  },
+  resetDefaults: {
+    button: 'Reset to defaults',
+    title: (name: string) => `Reset the settings of ${name}?`,
+    groupTitle: (name: string) => `Reset the settings of the group ${name}?`,
+    userHelp: (name: string) =>
+      `The permissions under Access, Playback and access with the Quality group, Parental control, Visible libraries, Blocked genres and Allowed hours go back to a new user’s settings, those Create a user gives; ${name}’s apps already signed in have them at once. Their name and password, Administrator, Show on the sign-in screen, Disabled, Ends on, their group, their own addons, connections, tracking accounts and everything they watched stay.`,
+    ownSettingsHelp: (group: string, sections: string) =>
+      `Only the sections they keep as their own go back: ${sections}. They stay in the group ${group} and follow it in the others.`,
+    groupHelp:
+      'The permissions under Access, Playback and access with the Quality group, Parental control, Visible libraries, Blocked genres and Allowed hours go back to a new user’s settings. The group’s name and members stay.',
+    followers: (count: number) =>
+      count === 0
+        ? 'No member follows the group: the change reaches no one.'
+        : count === 1
+          ? '1 member follows the group and takes these settings at once.'
+          : `${count} members follow the group and take these settings at once.`,
+    changesTitle: 'What changes',
+    loading: 'Looking for what changes…',
+    noChange: 'Nothing changes: these are already a new user’s settings.',
+    confirm: 'Reset',
+    resetting: 'Resetting…',
+    done: (name: string) => `The settings of ${name} have been reset.`,
+    groupDone: (name: string) => `The settings of the group ${name} have been reset.`,
   },
 }
 

@@ -2,6 +2,8 @@ package hls
 
 import (
 	"context"
+	"errors"
+	"io"
 	"log/slog"
 	"os"
 	"os/exec"
@@ -16,6 +18,7 @@ import (
 )
 
 func TestImageSubtitlesAreBurnedIn(t *testing.T) {
+	t.Parallel()
 	ffmpeg, ffprobe := tools(t)
 	video, keyframes := source(t, ffmpeg, ffprobe, "aac")
 	dir := t.TempDir()
@@ -42,6 +45,7 @@ func TestImageSubtitlesAreBurnedIn(t *testing.T) {
 	}{{"software", "", false}, {"nvenc", "nvenc", false}, {"vaapi", "vaapi", false}, {"videotoolbox", "videotoolbox", false},
 		{"nvenc tone mapped", "nvenc", true}, {"videotoolbox tone mapped", "videotoolbox", true}} {
 		t.Run(variant.name, func(t *testing.T) {
+			t.Parallel()
 			m, err := NewManager(ffmpeg, t.TempDir(), slog.New(slog.DiscardHandler))
 			if err != nil {
 				t.Fatal(err)
@@ -70,15 +74,19 @@ func TestImageSubtitlesAreBurnedIn(t *testing.T) {
 
 // A PGS file and a VobSub pair beside the video, read as a second input,
 // are burned in as an image track is; a run started while a subtitle is
-// shown shows it.
+// shown shows it. Of a pair of two tracks, each given a sentinel (see
+// vobSubSentinel), the first is burned in.
 func TestImageSubtitleFilesAreBurnedIn(t *testing.T) {
+	t.Parallel()
 	ffmpeg, ffprobe := tools(t)
 	video, keyframes := source(t, ffmpeg, ffprobe, "aac")
 	dir := t.TempDir()
 	rectangle := testsubtitles.Rectangle{CanvasWidth: 320, CanvasHeight: 180, X: 60, Y: 120, Width: 200, Height: 40,
 		Shown: [][2]time.Duration{{2 * time.Second, 5 * time.Second}, {15 * time.Second, 19 * time.Second}}}
 	idx, sub := rectangle.VobSub()
-	for name, data := range map[string][]byte{"rectangle.sup": rectangle.PGS(), "rectangle.idx": []byte(idx), "rectangle.sub": sub} {
+	twoIdx, twoSub := twoTrackVobSub()
+	for name, data := range map[string][]byte{"rectangle.sup": rectangle.PGS(), "rectangle.idx": []byte(idx), "rectangle.sub": sub,
+		"two.idx": []byte(twoIdx), "two.sub": twoSub} {
 		if err := os.WriteFile(filepath.Join(dir, name), data, 0o600); err != nil {
 			t.Fatal(err)
 		}
@@ -93,8 +101,9 @@ func TestImageSubtitleFilesAreBurnedIn(t *testing.T) {
 	if first == plan.Len() || plan.Start(first) > 15500*time.Millisecond {
 		t.Fatal("no segment starts between 15 and 15.5 s")
 	}
-	for _, file := range []string{"rectangle.sup", "rectangle.idx"} {
+	for _, file := range []string{"rectangle.sup", "rectangle.idx", "two.idx"} {
 		t.Run(file, func(t *testing.T) {
+			t.Parallel()
 			m, err := NewManager(ffmpeg, t.TempDir(), slog.New(slog.DiscardHandler))
 			if err != nil {
 				t.Fatal(err)
@@ -119,32 +128,36 @@ type shown struct {
 
 // checkBurned plays remux as an app would, a run started at segment first
 // then one from the start, and checks a pixel inside the rectangle, at 80,
-// 70 of a 160×90 picture, at each time of want.
+// 70 of a 160×90 picture, at each time of want. A request answered that
+// the encoding made no progress is asked again, as an app does: FFmpeg
+// 9.0.2 at times deadlocks on a subtitle file burned in, and the request
+// asking again starts another (see encoding.waitProgress).
 func checkBurned(t *testing.T, ffmpeg string, m *Manager, remux Remux, first int, want []shown) {
 	t.Helper()
 	open := func(context.Context) (Remux, func(), error) { return remux, func() {}, nil }
 	key := Key{Session: "session", Audio: remux.Audio, Format: remux.Format}
 	ctx, cancel := context.WithTimeout(t.Context(), time.Minute)
 	defer cancel()
-	if f, err := m.Segment(ctx, key, open, first); err != nil {
-		t.Fatal(err)
-	} else {
-		f.Close()
-	}
-	init, err := m.Init(ctx, key, open)
-	if err != nil {
-		t.Fatal(err)
-	}
-	joined, _ := os.ReadFile(init.Name())
-	init.Close()
-	for n := range remux.Plan.Len() {
-		f, err := m.Segment(ctx, key, open, n)
+	read := func(get func() (*os.File, error)) []byte {
+		t.Helper()
+		f, err := get()
+		for errors.Is(err, ErrStalled) {
+			f, err = get()
+		}
 		if err != nil {
 			t.Fatal(err)
 		}
-		data, _ := os.ReadFile(f.Name())
-		f.Close()
-		joined = append(joined, data...)
+		defer f.Close()
+		data, err := io.ReadAll(f)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return data
+	}
+	read(func() (*os.File, error) { return m.Segment(ctx, key, open, first) })
+	joined := read(func() (*os.File, error) { return m.Init(ctx, key, open) })
+	for n := range remux.Plan.Len() {
+		joined = append(joined, read(func() (*os.File, error) { return m.Segment(ctx, key, open, n) })...)
 	}
 	all := filepath.Join(t.TempDir(), "joined.mp4")
 	if err := os.WriteFile(all, joined, 0o600); err != nil {

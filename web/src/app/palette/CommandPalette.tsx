@@ -1,4 +1,4 @@
-import { MagnifyingGlassIcon } from '@phosphor-icons/react'
+import { CaretRightIcon, MagnifyingGlassIcon } from '@phosphor-icons/react'
 import {
   createContext,
   use,
@@ -17,8 +17,10 @@ import './navigationEntries'
 import { paletteGroups, paletteSources, type PaletteEntry } from './registry'
 
 // Each area registers its entries in `src/features/<area>/palette.ts`; loading them here is all
-// it takes for the palette to offer them.
-import.meta.glob('/src/features/*/palette.ts', { eager: true })
+// it takes for the palette to offer them. They load on the palette's first opening, not with the
+// app: the settings' entries bring the settings catalog and two languages' words for it.
+const areaEntries = import.meta.glob('/src/features/*/palette.ts')
+let areaEntriesLoaded: Promise<unknown> | undefined
 
 const PaletteContext = createContext<() => void>(() => {})
 
@@ -42,6 +44,14 @@ function isTyping(target: EventTarget | null): boolean {
  */
 export function CommandPaletteProvider({ children }: { children: ReactNode }) {
   const [open, setOpen] = useState(false)
+  // Drawn once the areas' entries are in: each source is a hook, so the list of them must not
+  // change while the palette is drawn.
+  const [ready, setReady] = useState(false)
+  useEffect(() => {
+    if (!open || ready) return
+    areaEntriesLoaded ??= Promise.all(Object.values(areaEntries).map((load) => load()))
+    void areaEntriesLoaded.then(() => setReady(true))
+  }, [open, ready])
 
   useEffect(() => {
     function onKeyDown(event: globalThis.KeyboardEvent) {
@@ -70,7 +80,7 @@ export function CommandPaletteProvider({ children }: { children: ReactNode }) {
   return (
     <PaletteContext value={() => setOpen(true)}>
       {children}
-      <CommandPalette open={open} onClose={() => setOpen(false)} />
+      {ready && <CommandPalette open={open} onClose={() => setOpen(false)} />}
     </PaletteContext>
   )
 }
@@ -97,7 +107,7 @@ function CommandPalette({ open, onClose }: { open: boolean; onClose: () => void 
       onClick={(event) => {
         if (event.target === event.currentTarget) onClose()
       }}
-      className="mx-auto mt-[14vh] w-[600px] max-w-[calc(100vw-32px)] overflow-hidden rounded-panel bg-s2 p-0 text-ink shadow-pop backdrop:bg-scrim backdrop:backdrop-blur-[3px] open:animate-pop max-md:mt-4"
+      className="raised mx-auto mt-[14vh] w-[42.5rem] max-w-[calc(100vw-1.5rem)] overflow-hidden rounded-panel p-0 text-ink backdrop:bg-scrim backdrop:backdrop-blur-[6px] open:animate-pop max-md:mt-3"
     >
       {open && <PaletteBody onClose={onClose} />}
     </dialog>
@@ -179,8 +189,8 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
   let index = -1
   return (
     <>
-      <div className="flex h-14 items-center gap-3 border-b border-line px-4">
-        <MagnifyingGlassIcon size={18} aria-hidden="true" className="shrink-0 text-ink-3" />
+      <div className="m-3 flex h-16 items-center gap-3.5 rounded-field bg-s2 px-5">
+        <MagnifyingGlassIcon size="1.375rem" aria-hidden="true" className="shrink-0 text-ink-2" />
         <input
           autoFocus
           type="text"
@@ -199,7 +209,7 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
             setSelected(0)
           }}
           onKeyDown={onKeyDown}
-          className="h-full min-w-0 flex-1 bg-transparent text-[15.5px] text-ink outline-none placeholder:text-ink-3 focus-visible:outline-none"
+          className="h-full min-w-0 flex-1 bg-transparent text-lead text-ink outline-none placeholder:text-ink-3 focus-visible:outline-none"
         />
         <Kbd>{t.palette.escape}</Kbd>
       </div>
@@ -208,10 +218,10 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
         id={`${id}-list`}
         role="listbox"
         aria-label={t.palette.label}
-        className="max-h-[min(380px,60dvh)] overflow-y-auto p-2"
+        className="max-h-[min(28.75rem,60dvh)] overflow-y-auto px-3 pb-3"
       >
         {flat.length === 0 ? (
-          <p className="px-2.5 py-8 text-center text-control text-ink-3">
+          <p className="px-4 py-10 text-center text-body text-ink-2">
             {t.palette.empty(query.trim())}
           </p>
         ) : (
@@ -219,7 +229,7 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
             <div key={group.group} role="group" aria-labelledby={`${id}-${group.group}`}>
               <p
                 id={`${id}-${group.group}`}
-                className="px-2.5 pt-2.5 pb-1.5 text-micro font-medium text-ink-3"
+                className="px-4 pt-4 pb-2 text-small font-semibold text-ink-2"
               >
                 {t.palette.groups[group.group]}
               </p>
@@ -238,21 +248,28 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
                     }}
                     onClick={() => go(entry)}
                     className={cx(
-                      'flex h-10 cursor-pointer items-center gap-3 rounded-field px-2.5 text-body',
-                      isSelected ? 'bg-s3 text-ink' : 'text-ink-2',
+                      'flex min-h-15 cursor-pointer items-center gap-4 rounded-choice px-4 py-2 transition-[background-color,color] duration-220 ease-nuit',
+                      isSelected ? 'lit' : 'text-ink',
                     )}
                   >
                     <entry.icon
-                      size={16}
+                      size="1.375rem"
                       aria-hidden="true"
-                      className={cx('shrink-0', isSelected ? 'text-link' : 'text-ink-3')}
+                      className="shrink-0 text-ink-2"
                     />
-                    <span className="min-w-0 flex-1 truncate">{entry.label}</span>
+                    <span className="min-w-0 flex-1 truncate text-body font-semibold">
+                      {entry.label}
+                    </span>
                     {entry.hint && (
-                      <span className="max-w-[45%] shrink-0 truncate text-[12.5px] text-ink-3">
+                      <span className="max-w-[45%] shrink-0 truncate text-small text-ink-3">
                         {entry.hint}
                       </span>
                     )}
+                    <CaretRightIcon
+                      size="1.25rem"
+                      aria-hidden="true"
+                      className="shrink-0 text-ink-3"
+                    />
                   </div>
                 )
               })}
@@ -260,7 +277,7 @@ function PaletteBody({ onClose }: { onClose: () => void }) {
           ))
         )}
       </div>
-      <div className="flex gap-4 border-t border-line px-4 py-2.5 text-micro text-ink-3 max-md:hidden">
+      <div className="flex gap-6 px-6 pt-1 pb-4 text-micro text-ink-3 max-md:hidden">
         <span className="inline-flex items-center gap-1.5">
           <Kbd>↑</Kbd>
           <Kbd>↓</Kbd>

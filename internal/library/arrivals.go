@@ -3,6 +3,7 @@ package library
 import (
 	"cmp"
 	"context"
+	"errors"
 	"slices"
 	"time"
 
@@ -37,6 +38,9 @@ const (
 	arrivalForgotten = 180 * 24 * time.Hour
 	// maxArrivals bounds the new titles a listing describes.
 	maxArrivals = 500
+	// seenAgain is how often a catalog read again, or a title seen again,
+	// is noted: far more often than either is forgotten.
+	seenAgain = 24 * time.Hour
 )
 
 // arrivalKinds are what the home row of new titles lists.
@@ -45,14 +49,17 @@ var arrivalKinds = []Kind{KindMovie, KindSeries, KindVideo}
 // recordArrivals notes the titles of a page src's addon gave at skip, at
 // seen: new to the catalog when the page lies within what was read of it
 // before. The records of the titles new to Polyfin are saved, so that the
-// row of new titles describes them before any listing did.
+// row of new titles describes them before any listing did. A page read
+// again writes nothing, unless it extends the reach or seenAgain passed
+// since the catalog or its titles were last noted.
 func (s *Service) recordArrivals(ctx context.Context, src source, skip int, metas []stremio.Meta, seen time.Time) error {
 	if LiveCatalog(src.catalog.Type) || src.catalog.Type == "collection" || src.search != "" || src.date != "" {
 		return nil
 	}
 	var records []record
 	for _, meta := range metas {
-		if _, r, err := titleItem(src.addon.addon.ID, src.catalog, meta, accounts.ID{}, src.addon.confined); err == nil {
+		// Only the record is kept, which holds no rating: no country needed.
+		if _, r, err := s.titleItem(src.addon, src.catalog, meta, accounts.ID{}, ""); err == nil {
 			// The listing that reads the page saves its records with their
 			// folder; these keep any folder they have.
 			r.Parent = nil
@@ -65,15 +72,19 @@ func (s *Service) recordArrivals(ctx context.Context, src source, skip int, meta
 		ids = append(ids, r.ID)
 	}
 	key := []any{src.addon.addon.ID, src.catalog.Type, src.catalog.ID, src.genre}
+	noted := seen.Add(-seenAgain)
 	var fresh []accounts.ID
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
-		if _, err := tx.Exec(ctx, `INSERT INTO catalog_reach (addon_id, catalog_type, catalog_id, genre, reach, read_at)
-			VALUES ($1, $2, $3, $4, 0, $5) ON CONFLICT DO NOTHING`, append(key, seen)...); err != nil {
-			return err
+		reach, readAt, err := lockReach(ctx, tx, key)
+		if errors.Is(err, pgx.ErrNoRows) {
+			// A catalog never read, unless another read notes it first.
+			err = tx.QueryRow(ctx, `INSERT INTO catalog_reach (addon_id, catalog_type, catalog_id, genre, reach, read_at)
+				VALUES ($1, $2, $3, $4, 0, $5) ON CONFLICT DO NOTHING RETURNING reach, read_at`, append(key, seen)...).Scan(&reach, &readAt)
+			if errors.Is(err, pgx.ErrNoRows) {
+				reach, readAt, err = lockReach(ctx, tx, key)
+			}
 		}
-		var reach int
-		if err := tx.QueryRow(ctx, `SELECT reach FROM catalog_reach
-			WHERE addon_id = $1 AND catalog_type = $2 AND catalog_id = $3 AND genre = $4 FOR UPDATE`, key...).Scan(&reach); err != nil {
+		if err != nil {
 			return err
 		}
 		// Only a page that starts within the reach extends it: one beyond
@@ -82,20 +93,23 @@ func (s *Service) recordArrivals(ctx context.Context, src source, skip int, meta
 		if skip <= reach {
 			end = max(reach, skip+len(metas))
 		}
-		if _, err := tx.Exec(ctx, `UPDATE catalog_reach SET reach = $5, read_at = greatest(read_at, $6)
-			WHERE addon_id = $1 AND catalog_type = $2 AND catalog_id = $3 AND genre = $4`, append(key, end, seen)...); err != nil {
-			return err
+		if end != reach || readAt.Before(noted) {
+			if _, err := tx.Exec(ctx, `UPDATE catalog_reach SET reach = $5, read_at = greatest(read_at, $6)
+				WHERE addon_id = $1 AND catalog_type = $2 AND catalog_id = $3 AND genre = $4`, append(key, end, seen)...); err != nil {
+				return err
+			}
 		}
 		if len(ids) == 0 {
 			return nil
 		}
 		rows, _ := tx.Query(ctx, `INSERT INTO catalog_arrivals (addon_id, catalog_type, catalog_id, genre, item_id, first_seen, last_seen, arrived)
 			SELECT $1, $2, $3, $4, id, $6, $6, $7 FROM unnest($5::uuid[]) AS i(id) ORDER BY id
-			ON CONFLICT (addon_id, catalog_type, catalog_id, genre, item_id) DO UPDATE SET last_seen = greatest(catalog_arrivals.last_seen, excluded.last_seen)
-			RETURNING item_id, xmax = 0`, append(key, ids, seen, skip < reach)...)
+			ON CONFLICT (addon_id, catalog_type, catalog_id, genre, item_id) DO UPDATE SET last_seen = excluded.last_seen
+			WHERE catalog_arrivals.last_seen < $8
+			RETURNING item_id, xmax = 0`, append(key, ids, seen, skip < reach, noted)...)
 		var id accounts.ID
 		var inserted bool
-		_, err := pgx.ForEachRow(rows, []any{&id, &inserted}, func() error {
+		_, err = pgx.ForEachRow(rows, []any{&id, &inserted}, func() error {
 			if inserted {
 				fresh = append(fresh, id)
 			}
@@ -107,6 +121,14 @@ func (s *Service) recordArrivals(ctx context.Context, src source, skip int, meta
 		return err
 	}
 	return s.saveNew(ctx, slices.DeleteFunc(records, func(r record) bool { return !slices.Contains(fresh, r.ID) }))
+}
+
+// lockReach reads and locks the reach of the catalog of key, and when it
+// was last read: pgx.ErrNoRows for a catalog never read.
+func lockReach(ctx context.Context, tx pgx.Tx, key []any) (reach int, readAt time.Time, err error) {
+	err = tx.QueryRow(ctx, `SELECT reach, read_at FROM catalog_reach
+		WHERE addon_id = $1 AND catalog_type = $2 AND catalog_id = $3 AND genre = $4 FOR UPDATE`, key...).Scan(&reach, &readAt)
+	return reach, readAt, err
 }
 
 // inLockOrderValues is inLockOrder for records held by value.
@@ -123,14 +145,20 @@ func inLockOrderValues(records []record) []record {
 // catalogForgotten, and the titles no read saw for arrivalForgotten. Both
 // take their rows in key order, as recordArrivals does.
 func (s *Service) forgetArrivals(ctx context.Context) error {
-	if _, err := s.db.Exec(ctx, `DELETE FROM catalog_reach WHERE (addon_id, catalog_type, catalog_id, genre) IN (
+	reach, err := s.db.Exec(ctx, `DELETE FROM catalog_reach WHERE (addon_id, catalog_type, catalog_id, genre) IN (
 		SELECT addon_id, catalog_type, catalog_id, genre FROM catalog_reach WHERE read_at < $1
-		ORDER BY addon_id, catalog_type, catalog_id, genre FOR UPDATE)`, s.now().Add(-catalogForgotten)); err != nil {
+		ORDER BY addon_id, catalog_type, catalog_id, genre FOR UPDATE)`, s.now().Add(-catalogForgotten))
+	if err != nil {
 		return err
 	}
-	_, err := s.db.Exec(ctx, `DELETE FROM catalog_arrivals WHERE (addon_id, catalog_type, catalog_id, genre, item_id) IN (
+	arrivals, err := s.db.Exec(ctx, `DELETE FROM catalog_arrivals WHERE (addon_id, catalog_type, catalog_id, genre, item_id) IN (
 		SELECT addon_id, catalog_type, catalog_id, genre, item_id FROM catalog_arrivals WHERE last_seen < $1
 		ORDER BY addon_id, catalog_type, catalog_id, genre, item_id FOR UPDATE)`, s.now().Add(-arrivalForgotten))
+	// A title its first catalog no longer lists goes to the next one that
+	// does (see savedData): what saves learned of it no longer holds.
+	if reach.RowsAffected()+arrivals.RowsAffected() > 0 {
+		s.forgetAllSaved()
+	}
 	return err
 }
 
@@ -212,8 +240,10 @@ func (s *Service) describedPage(ctx context.Context, v view, ids []accounts.ID, 
 // one of a library of the server hidden from them, is ErrNotFound. So is
 // a catalog that cannot be browsed: a live TV catalog, a collection
 // catalog, or one that needs a search. Its titles carry the library of
-// the catalog the user sees, if any; the titles the user may not see, by
-// parental control or blocked genres, and those they hid, are left out.
+// the catalog the user sees, if any, and leave out what local folders
+// hold when that library does (see skiplocal.go); the titles the user may
+// not see, by parental control or blocked genres, and those they hid, are
+// left out.
 // Titles show the user's language as far as it is kept (see translate).
 func (s *Service) CatalogTitles(ctx context.Context, user accounts.User, addon accounts.ID, catalogType, catalogID string, start, count int,
 	first bool) (Page, error) {
@@ -240,7 +270,7 @@ func (s *Service) CatalogTitles(ctx context.Context, user accounts.User, addon a
 		return l.addon.addon.ID == addon && l.catalog.Type == catalogType && l.catalog.ID == catalogID && l.genre == ""
 	}); j >= 0 {
 		parent = v.libraries[j].item.ID
-		src.max = v.libraries[j].maxItems
+		src.max, src.skipLocal = v.libraries[j].maxItems, v.libraries[j].skipLocal
 		count = withinMax(start, count, src.max)
 	}
 	metas, total, err := s.window(ctx, v, src, start, count)
@@ -250,7 +280,7 @@ func (s *Service) CatalogTitles(ctx context.Context, user accounts.User, addon a
 	var items []Item
 	var records []record
 	for _, meta := range metas {
-		item, r, err := titleItem(addon, catalog, meta, parent, entry.confined)
+		item, r, err := s.titleItem(entry, catalog, meta, parent, v.country)
 		if err != nil {
 			continue
 		}

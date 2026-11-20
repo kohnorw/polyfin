@@ -17,9 +17,11 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
@@ -42,7 +44,8 @@ const (
 	// once item details stopped waiting for it (see describeWait).
 	askTimeout = 10 * time.Second
 	// describeWait is how long item details wait for RemuxDB's answer: one
-	// that comes later describes the versions at the next request.
+	// that comes later describes the versions at the next request, and is
+	// told (see OnDescribed).
 	describeWait = time.Second
 	// maxAnswer bounds the bytes read of an answer: a popular movie's takes
 	// a few MB, most of them its files' chapters, which are not read.
@@ -68,8 +71,11 @@ type Service struct {
 	clientID string
 	logger   *slog.Logger
 	now      func() time.Time
-	// wait is how long Describe waits for RemuxDB (see describeWait).
-	wait time.Duration
+	// wait is how long Describe waits for RemuxDB (see describeWait), and
+	// waitEnd gives what ends that wait, wait given: time.After, which
+	// tests replace (see SetWaitEnd).
+	wait    time.Duration
+	waitEnd func(wait time.Duration) <-chan time.Time
 	// descriptions holds what RemuxDB said lately of each version.
 	descriptions *cache.Cache[accounts.ID, description]
 
@@ -78,6 +84,9 @@ type Service struct {
 	asking map[string]*lookup
 	// pausedUntil is when RemuxDB may be asked again after it failed.
 	pausedUntil time.Time
+	// late is told the versions answers described too late for Describe
+	// (see OnDescribed).
+	late atomic.Pointer[func(versions []library.Version)]
 }
 
 // description is what RemuxDB said of a version: the analysis of its file
@@ -97,17 +106,20 @@ type lookup struct {
 // New returns a service asking RemuxDB as settings tell. serverID is the
 // server's identifier: RemuxDB is given a name derived from it, which
 // tells this server's requests apart without being the identifier apps
-// see.
+// see. Its transport is its own, a clone of the default one: whoever
+// closes the idle connections of http.DefaultTransport cannot break its
+// requests (#958).
 func New(serverID, version string, logger *slog.Logger, settings func() accounts.Settings) *Service {
 	sum := sha256.Sum256([]byte("polyfin remuxdb client " + serverID))
 	return &Service{
 		settings:     settings,
-		client:       &http.Client{},
+		client:       &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()},
 		userAgent:    "Polyfin/" + version,
 		clientID:     hex.EncodeToString(sum[:16]),
 		logger:       logger,
 		now:          time.Now,
 		wait:         describeWait,
+		waitEnd:      time.After,
 		descriptions: cache.New[accounts.ID, description](keptDescriptions, describedFor).Sized(keptBytes, cache.JSONSize[description]),
 		asking:       map[string]*lookup{},
 	}
@@ -144,29 +156,38 @@ func (s *Service) Describe(ctx context.Context, versions []library.Version) {
 		return
 	}
 	answered := make([]chan struct{}, 0, len(titles))
+	// started is taken before the timer below: a lookup measures how long
+	// it took from it, so one Describe stopped waiting for took as long.
+	started := s.now()
 	for title, versions := range titles {
 		l, asking := s.asking[title]
 		if !asking {
 			l = &lookup{done: make(chan struct{})}
 			s.asking[title] = l
-			go s.run(title, settings.RemuxDBURL, l)
+			go s.run(title, settings.RemuxDBURL, l, started)
 		}
 		l.versions = append(l.versions, versions...)
 		answered = append(answered, l.done)
 	}
 	s.mu.Unlock()
-	timer := time.NewTimer(s.wait)
-	defer timer.Stop()
+	end := s.waitEnd(s.wait)
 	for _, done := range answered {
 		select {
 		case <-done:
-		case <-timer.C:
+		case <-end:
 			return
 		case <-ctx.Done():
 			return
 		}
 	}
 }
+
+// SetWaitEnd replaces, before the service is used, what ends Describe's
+// wait for the answers, describeWait given: time.After, which the server
+// keeps. A test that lists what the answers describe gives one that never
+// ends, so that item details wait for them however long a busy machine
+// takes.
+func (s *Service) SetWaitEnd(end func(wait time.Duration) <-chan time.Time) { s.waitEnd = end }
 
 // Described returns RemuxDB's description of a version, as Describe got
 // it: an analysis of its file without its chapters, attachments nor what
@@ -179,15 +200,32 @@ func (s *Service) Described(version library.Version) (media.Analysis, bool) {
 	return kept.Analysis, ok && kept.Found
 }
 
+// OnDescribed has late told the versions an answer described once
+// Describe had stopped waiting for it: item details listed them without
+// the tracks they now list. late runs on the goroutine that asked
+// RemuxDB, so it must return quickly.
+func (s *Service) OnDescribed(late func(versions []library.Version)) {
+	if s != nil {
+		s.late.Store(&late)
+	}
+}
+
 // run asks RemuxDB at base about title, then describes the versions of l
-// from its answer. When RemuxDB fails, none is described: they are asked
-// about again once RemuxDB may be.
-func (s *Service) run(title, base string, l *lookup) {
+// from its answer, and tells those it described when Describe stopped
+// waiting for it (see OnDescribed): started is when Describe asked, before
+// it started waiting. When RemuxDB fails, none is described: they are
+// asked about again once RemuxDB may be.
+func (s *Service) run(title, base string, l *lookup, started time.Time) {
 	defer close(l.done)
-	started := s.now()
 	ctx, cancel := context.WithTimeout(context.Background(), askTimeout)
 	files, err := s.fetch(ctx, base, title)
 	cancel()
+	var told []library.Version
+	defer func() {
+		if late := s.late.Load(); late != nil && len(told) > 0 {
+			(*late)(told)
+		}
+	}()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	delete(s.asking, title)
@@ -195,11 +233,17 @@ func (s *Service) run(title, base string, l *lookup) {
 		s.pause(title, err)
 		return
 	}
+	// Describe waits as long from when it asked at the earliest, so an
+	// answer it stopped waiting for took as long from started.
+	waited := s.now().Sub(started) >= s.wait
 	described := 0
 	for _, version := range l.versions {
 		d := describe(files, version)
 		if d.Found {
 			described++
+			if waited {
+				told = append(told, version)
+			}
 		}
 		s.descriptions.Put(version.ID, d)
 	}
@@ -345,7 +389,10 @@ type track struct {
 }
 
 // describe is what RemuxDB's files of a title tell of a version: the
-// analysis of the file it is (see match), if any lists tracks.
+// analysis of the file it is (see match), if any lists tracks. A file
+// listed with video and no audio is left undescribed, as if absent: the
+// version would show as silent until its own analysis, which finds the
+// audio of such files.
 func describe(files []file, version library.Version) description {
 	f := match(files, version)
 	if f == nil {
@@ -356,7 +403,10 @@ func describe(files []file, version library.Version) description {
 		return description{}
 	}
 	analysis := f.analysis(tracks)
-	if len(analysis.Streams) == 0 {
+	has := func(kind string) bool {
+		return slices.ContainsFunc(analysis.Streams, func(s media.Stream) bool { return s.Type == kind })
+	}
+	if len(analysis.Streams) == 0 || has("video") && !has("audio") {
 		return description{}
 	}
 	return description{Analysis: analysis, Found: true}

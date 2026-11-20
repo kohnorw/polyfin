@@ -36,7 +36,7 @@ func defaultCases() []struct {
 				Encode: &VideoEncoding{Encoder: "libx264", Level: "4.1", Width: 1280, Height: 720, Bitrate: 5_000_000, FrameRate: 23.976, Deinterlace: true}}.args(1, 0)
 		}},
 		{"cpu hevc tone mapped", func() []string {
-			return Remux{Input: "http://127.0.0.1:1/a.mkv", Video: 0, Audio: 1, Format: TS, Plan: plan,
+			return Remux{Input: "http://127.0.0.1:1/a.mkv", Video: 0, Audio: 1, Format: TS, Plan: plan, Subtitles: []int{2},
 				AudioCodec: "ac3", AudioChannels: 6, AudioBitrate: 384_000,
 				Encode: &VideoEncoding{Encoder: "libx265", Level: "4.1", Width: 1280, Height: 720, Bitrate: 5_000_000, FrameRate: 24, ToneMap: true}}.args(0, 0)
 		}},
@@ -85,10 +85,12 @@ func defaultCases() []struct {
 
 // The conversion settings' defaults keep the FFmpeg command lines
 // Polyfin ran before they were settings: testdata/default-args.json was
-// recorded from version 0.11.0, then given FFmpeg's progress pipe and the
-// smaller probing of jobs past the first segment. The GPUs there keep no
-// frame in their memory (see TestGPUPipelines).
+// recorded from version 0.11.0, then given FFmpeg's progress pipe, the
+// smaller probing of jobs past the first segment, and x264's High
+// profile. The GPUs there keep no frame in their memory (see
+// TestGPUPipelines).
 func TestDefaultSettingsKeepTheArguments(t *testing.T) {
+	t.Parallel()
 	data, err := os.ReadFile("testdata/default-args.json")
 	if err != nil {
 		t.Fatal(err)
@@ -121,6 +123,7 @@ func TestDefaultSettingsKeepTheArguments(t *testing.T) {
 // the first segment, only the main input seeks, and the pictures shown
 // before burnLead ahead of the seek are left out before scaling.
 func TestSubtitleFileIsASecondInput(t *testing.T) {
+	t.Parallel()
 	plan := NewPlan([]time.Duration{0, 6 * time.Second, 12 * time.Second}, 18*time.Second)
 	encoding := &VideoEncoding{Encoder: "libx264", Level: "4.1", Width: 1280, Height: 720, Bitrate: 5_000_000, FrameRate: 24,
 		BurnFile: "http://127.0.0.1:1/local/key/1.sup"}
@@ -140,6 +143,7 @@ func TestSubtitleFileIsASecondInput(t *testing.T) {
 // A track converted on its own goes through its downmix after -ac, as
 // converted video's audio does.
 func TestAudioConversionsTakeTheirDownmix(t *testing.T) {
+	t.Parallel()
 	filter := "pan=stereo|c0=c0+0.707*c2+0.707*c4|c1=c1+0.707*c2+0.707*c5"
 	args := Audio{Encoder: "libmp3lame", Bitrate: 192_000, Channels: 2, Filter: filter}.args()
 	if !slices.Equal(args[len(args)-4:], []string{"-ac", "2", "-af", filter}) {
@@ -147,5 +151,32 @@ func TestAudioConversionsTakeTheirDownmix(t *testing.T) {
 	}
 	if args := (Audio{Encoder: "libmp3lame", Channels: 2}).args(); slices.Contains(args, "-af") {
 		t.Errorf("a filter without a downmix: %q", args)
+	}
+}
+
+// The options of converted audio's decoder go before the input, for its
+// stream alone, in every command line that converts it; copied audio gets
+// none, its decoder being the app's.
+func TestConvertedAudioTakesItsDecoderOptions(t *testing.T) {
+	t.Parallel()
+	plan := NewPlan([]time.Duration{0, 6 * time.Second}, 12*time.Second)
+	converted := Remux{Input: "http://127.0.0.1:1/a.mkv", Video: 0, Audio: 2, Format: TS, Plan: plan,
+		AudioCodec: "aac", AudioChannels: 2, AudioBitrate: 384_000, AudioDecoder: []string{"drc_scale", "0"}}
+	copied := converted
+	copied.AudioCodec, copied.AudioChannels, copied.AudioBitrate = "", 0, 0
+	lines := func(r Remux) map[string][]string {
+		return map[string][]string{"segments": r.args(0, 0), "live": r.liveArgs("/tmp/live", 0),
+			"progressive": r.progressiveArgs(0), "track": r.trackArgs(0)}
+	}
+	for name, args := range lines(converted) {
+		at, input := slices.Index(args, "-drc_scale:2"), slices.Index(args, "-i")
+		if at < 0 || args[at+1] != "0" || input < at {
+			t.Errorf("%s, converted: %q", name, args)
+		}
+	}
+	for name, args := range lines(copied) {
+		if slices.ContainsFunc(args, func(arg string) bool { return strings.HasPrefix(arg, "-drc_scale") }) {
+			t.Errorf("%s, copied: %q", name, args)
+		}
 	}
 }

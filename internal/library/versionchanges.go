@@ -31,10 +31,10 @@ type listedTitle struct {
 }
 
 // titlePage is what a user's title page follows: the title, and the addons
-// that list its streams in the user's view.
+// that list its streams in the user's view, with what each is asked.
 type titlePage struct {
 	t       target
-	serving []installed
+	serving []streamSource
 }
 
 // versionTracking ties addon lists to the items they list versions of,
@@ -45,7 +45,8 @@ type versionTracking struct {
 	titles  *cache.Cache[listedTitle, accounts.ID]
 	pages   *cache.Cache[askedKey, titlePage]
 	unsaved *cache.Cache[streamKey, bool]
-	// saving locks each stream list being saved or deleted.
+	// saving locks each stream list being saved or deleted, and every
+	// list while many are forgotten at once (see listLocks).
 	saving listLocks
 	// changed is told the item whose versions changed (see
 	// OnVersionsChanged).
@@ -105,8 +106,8 @@ func (s *Service) FollowedProgress(ctx context.Context, user accounts.User, id a
 		return 0, nil, false
 	}
 	pending = s.pendingOf(user.ID, page.t, page.serving)
-	versions, _ = s.listVersions(ctx, page.t, page.serving, knownOnly)
-	return pending, s.withoutTorrents(user, versions), true
+	versions, _ = s.listVersions(ctx, page.t, page.serving, knownOnly, s.settings().TorrentsAllowed(user))
+	return pending, versions, true
 }
 
 // streamListOf returns, as listOf does, the stream list an addon gave for

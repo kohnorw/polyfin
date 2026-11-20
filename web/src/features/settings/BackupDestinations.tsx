@@ -27,6 +27,8 @@ import {
   Modal,
   Notice,
   NumberInput,
+  Row,
+  RowList,
   SecretField,
   Select,
   SkeletonRows,
@@ -70,7 +72,7 @@ export default function BackupDestinations() {
           {text.emptyHint}
         </EmptyState>
       ) : (
-        <ul className="overflow-hidden rounded-panel border border-line-2 bg-s1">
+        <RowList aria-label={text.title}>
           {destinations.data.destinations.map((destination) => (
             <DestinationRow
               key={destination.id}
@@ -78,7 +80,7 @@ export default function BackupDestinations() {
               onEdit={() => setEditing(destination)}
             />
           ))}
-        </ul>
+        </RowList>
       )}
       <div>
         <Button icon={PlusIcon} onClick={() => setEditing('new')}>
@@ -147,44 +149,43 @@ function DestinationRow({
     },
   })
   const status = destinationStatus(t, destination)
-  const headingId = useId()
   return (
-    <li
-      aria-labelledby={headingId}
-      className="grid grid-cols-[40px_minmax(0,1fr)_auto] items-start gap-x-4 px-[22px] py-5 max-sm:grid-cols-[40px_minmax(0,1fr)] max-sm:gap-x-3.5 max-sm:px-4 [&+&]:border-t [&+&]:border-line"
-    >
-      <IconTile letters={monograms[destination.kind]} />
-      <div className="min-w-0">
-        <h3
-          id={headingId}
-          className="flex h-10 items-center font-mono text-[15px] font-semibold tracking-[-0.01em] break-all text-ink"
-        >
-          {destination.name}
-        </h3>
-        <p className="-mt-1.5 text-control text-ink-2">
+    <Row
+      leading={<IconTile letters={monograms[destination.kind]} />}
+      title={<span className="font-mono break-all">{destination.name}</span>}
+      meta={
+        <span>
           {text.kinds[destination.kind]} · {text.keeps(destination.kept)}
-        </p>
-        <p className="mt-1 text-small text-ink-3">
-          {text.lastUpload}{' '}
-          {destination.ranAt === null ? (
-            text.none
-          ) : (
-            <time dateTime={destination.ranAt} title={dateTime(destination.ranAt, language)}>
-              {relativeTime(destination.ranAt, language, t.time.justNow)}
-            </time>
-          )}
-          {destination.newestFile !== '' && (
-            <>
-              {' · '}
-              {text.newest} <code className="font-mono">{destination.newestFile}</code>
-            </>
-          )}
-        </p>
-      </div>
-      <div className="flex h-10 items-center justify-end gap-1.5 max-sm:col-span-full max-sm:mt-3 max-sm:h-auto max-sm:flex-wrap">
-        <StatusPill tone={status.tone} className="max-sm:mr-auto">
-          {status.label}
-        </StatusPill>
+        </span>
+      }
+      trailing={<StatusPill tone={status.tone}>{status.label}</StatusPill>}
+    >
+      <p className="text-small break-words text-ink-2">
+        {text.lastUpload}{' '}
+        {destination.ranAt === null ? (
+          text.none
+        ) : (
+          <time dateTime={destination.ranAt} title={dateTime(destination.ranAt, language)}>
+            {relativeTime(destination.ranAt, language, t.time.justNow)}
+          </time>
+        )}
+        {destination.newestFile !== '' && (
+          <>
+            {' · '}
+            {text.newest} <code className="font-mono break-all">{destination.newestFile}</code>
+          </>
+        )}
+      </p>
+      {(destination.unreadable || destination.error !== '' || destination.problem === 'stale') && (
+        <Notice tone={status.tone === 'warn' ? 'warn' : 'danger'} nested className="mt-4">
+          {destination.unreadable
+            ? text.unreadable
+            : destination.error !== ''
+              ? destination.error
+              : text.staleHelp}
+        </Notice>
+      )}
+      <div className="mt-4 flex flex-wrap gap-2">
         <Button
           variant="secondary"
           loading={test.isPending}
@@ -201,17 +202,6 @@ function DestinationRow({
           {text.delete}
         </Button>
       </div>
-      {(destination.unreadable || destination.error !== '' || destination.problem === 'stale') && (
-        <div className="col-start-2 -col-end-1 mt-4 max-sm:col-span-full">
-          <Notice tone={status.tone === 'warn' ? 'warn' : 'danger'}>
-            {destination.unreadable
-              ? text.unreadable
-              : destination.error !== ''
-                ? destination.error
-                : text.staleHelp}
-          </Notice>
-        </div>
-      )}
       <ConfirmDialog
         open={confirming}
         onClose={() => {
@@ -227,7 +217,7 @@ function DestinationRow({
       >
         {text.deleteBody}
       </ConfirmDialog>
-    </li>
+    </Row>
   )
 }
 
@@ -387,7 +377,7 @@ function DestinationModal({
               value={kind}
               options={kinds.map((value) => ({ value, label: text.kinds[value] }))}
               onValue={change(setKind)}
-              className="max-w-xs"
+              className="max-w-[23.75rem]"
             />
           </Field>
         )}
@@ -458,22 +448,11 @@ function DestinationModal({
               '/backups/polyfin',
             )}
             {destination !== null && (
-              <Field label={text.hostKey} help={text.hostKeyForgetHelp}>
-                <div className="flex flex-wrap items-center gap-3">
-                  <code className="font-mono text-small break-all text-ink-2">
-                    {destination.hostKey === '' || forgetHostKey
-                      ? forgetHostKey
-                        ? text.hostKeyForgotten
-                        : text.hostKeyNone
-                      : destination.hostKey}
-                  </code>
-                  {destination.hostKey !== '' && !forgetHostKey && (
-                    <Button variant="secondary" size="sm" onClick={() => setForgetHostKey(true)}>
-                      {text.hostKeyForget}
-                    </Button>
-                  )}
-                </div>
-              </Field>
+              <HostKey
+                destination={destination}
+                forgetting={forgetHostKey}
+                onForget={() => setForgetHostKey(true)}
+              />
             )}
           </>
         )}
@@ -508,5 +487,81 @@ function DestinationModal({
         {otherError && <Notice tone="danger">{otherError}</Notice>}
       </form>
     </Modal>
+  )
+}
+
+/**
+ * An SFTP destination's saved host key, with Forget, and the key its server offers instead, to
+ * accept by the fingerprint shown. The destination is read from the list, so that what is shown
+ * follows it after an acceptance, or a refusal of one.
+ */
+function HostKey({
+  destination,
+  forgetting,
+  onForget,
+}: {
+  destination: BackupDestination
+  forgetting: boolean
+  onForget: () => void
+}) {
+  const { t } = useI18n()
+  const text = t.backups.destinations
+  const toast = useToast()
+  const listed = useQuery({
+    queryKey: queryKeys.backupDestinations,
+    queryFn: ({ signal }) => fetchBackupDestinations(signal),
+    select: (data) => data.destinations.find((current) => current.id === destination.id),
+  })
+  const current = listed.data ?? destination
+  const accept = useMutation({
+    // The key accepted is the one whose fingerprint shows, not one offered since.
+    mutationFn: () =>
+      updateBackupDestination(destination.id, { acceptHostKey: current.offeredHostKey }),
+    onSuccess: (saved) => {
+      store(saved)
+      toast(text.hostKeyAccepted(saved.name))
+    },
+    onSettled: () => queryClient.invalidateQueries({ queryKey: queryKeys.backupDestinations }),
+  })
+  const saved = forgetting ? '' : current.hostKey
+  const forgotten = forgetting || current.hostKeyForgotten
+  return (
+    <Field label={text.hostKey} help={text.hostKeyForgetHelp}>
+      <div className="flex flex-col gap-3">
+        <div className="flex flex-wrap items-center gap-3">
+          {saved !== '' ? (
+            <code className="font-mono text-small break-all text-ink-2">{saved}</code>
+          ) : (
+            <p className="text-small text-ink-2">
+              {forgotten ? text.hostKeyForgotten : text.hostKeyNone}
+            </p>
+          )}
+          {current.hostKey !== '' && !forgetting && (
+            <Button variant="secondary" size="sm" onClick={onForget}>
+              {text.hostKeyForget}
+            </Button>
+          )}
+        </div>
+        {current.offeredHostKey !== '' && !forgetting && (
+          <Notice tone="danger">
+            {/* The fingerprint is one long word: it wraps, so that it shows whole to compare. */}
+            <p className="[overflow-wrap:anywhere]">
+              {text.hostKeyOffered(current.offeredHostKey)}
+            </p>
+            <div className="mt-3">
+              <Button
+                size="sm"
+                variant="danger"
+                onClick={() => accept.mutate()}
+                loading={accept.isPending}
+              >
+                {text.acceptHostKey}
+              </Button>
+            </div>
+            {accept.isError && <InlineError>{errorMessage(t, accept.error)}</InlineError>}
+          </Notice>
+        )}
+      </div>
+    </Field>
   )
 }

@@ -2,6 +2,7 @@ package jellyfin
 
 import (
 	"cmp"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -10,8 +11,8 @@ import (
 	"net/http"
 	"net/url"
 	"slices"
-	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
@@ -20,6 +21,7 @@ import (
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/media"
 	"github.com/moodiness/polyfin/internal/playback"
+	"github.com/moodiness/polyfin/internal/plays"
 )
 
 // liveTvViewID identifies the Live TV view, the same on every server.
@@ -27,6 +29,11 @@ var liveTvViewID, _ = accounts.ParseID(nameID("view", "livetv"))
 
 // guideDays is how far the guide reaches, Jellyfin's default.
 const guideDays = 7
+
+// recommendedReach is the fewest programmes airing now Jellyfin reads for
+// its recommended ones, of which it counts those it read: 200, or four
+// times the limit (see programs).
+const recommendedReach = 200
 
 // liveTvRoutes registers Jellyfin's Live TV API: the channels of the
 // users' live TV catalogs and the programmes of their addons' guides.
@@ -47,11 +54,11 @@ func (h *Handler) liveTvRoutes(rt *router) {
 	// The DVR: timers, series timers and recordings.
 	h.recordingRoutes(rt, signedIn)
 	// Polyfin's programme reminders.
-	h.reminderRoutes(signedIn)
+	h.reminderRoutes(rt, signedIn)
 	// Players fetch these without credentials: see liveFile and
 	// liveSegment.
-	rt.handle(http.MethodGet, "/Videos/{itemId}/live/{file}", http.HandlerFunc(h.liveFile))
-	rt.handle(http.MethodGet, "/Videos/{itemId}/hls/{playlistId}/{file}", http.HandlerFunc(h.liveSegment))
+	rt.handle(http.MethodGet, "/Videos/{itemId}/live/{file}", h.meteredStream(h.liveFile))
+	rt.handle(http.MethodGet, "/Videos/{itemId}/hls/{playlistId}/{file}", h.meteredStream(h.liveSegment))
 }
 
 type LiveTvServiceInfo struct {
@@ -70,12 +77,17 @@ type LiveTvInfo struct {
 
 // liveTvInfo describes the live TV service: the users' addons, enabled for
 // the users who have live TV catalogs, as Jellyfin enables users once it
-// has a tuner.
+// has a tuner. An administrator reads every such user; anyone else, only
+// themselves.
 func (h *Handler) liveTvInfo(w http.ResponseWriter, r *http.Request) {
-	users, err := h.Accounts.Users(r.Context())
-	if err != nil {
-		h.internalError(w, r, err)
-		return
+	caller := callerFrom(r.Context()).User
+	users := []accounts.User{caller}
+	if caller.IsAdministrator {
+		var err error
+		if users, err = h.Accounts.Users(r.Context()); err != nil {
+			h.internalError(w, r, err)
+			return
+		}
 	}
 	enabled := []string{}
 	for _, user := range users {
@@ -137,12 +149,21 @@ func describeLive(dto *BaseItemDto, item library.Item, fields fieldSet, detail b
 		if item.ParentIndexNumber > 0 {
 			dto.ParentIndexNumber = new(item.ParentIndexNumber)
 		}
-		flags := programFlags(item)
-		for flag, field := range map[string]**bool{"movie": &dto.IsMovie, "series": &dto.IsSeries, "news": &dto.IsNews,
-			"kids": &dto.IsKids, "sports": &dto.IsSports} {
-			if flags[flag] {
-				*field = new(true)
-			}
+		categories := programCategoriesOf(item)
+		if categories.movie {
+			dto.IsMovie = new(true)
+		}
+		if categories.series {
+			dto.IsSeries = new(true)
+		}
+		if categories.news {
+			dto.IsNews = new(true)
+		}
+		if categories.kids {
+			dto.IsKids = new(true)
+		}
+		if categories.sports {
+			dto.IsSports = new(true)
 		}
 		if item.Repeat {
 			dto.IsRepeat = new(true)
@@ -153,22 +174,41 @@ func describeLive(dto *BaseItemDto, item library.Item, fields fieldSet, detail b
 // programFlags classifies a programme by its categories, as Jellyfin
 // classifies guide programmes: movie, series, news, kids or sports.
 func programFlags(item library.Item) map[string]bool {
+	c := programCategoriesOf(item)
 	flags := map[string]bool{}
-	for _, genre := range item.Genres {
-		switch strings.ToLower(strings.TrimSpace(genre)) {
-		case "movie", "movies", "film":
-			flags["movie"] = true
-		case "series", "show":
-			flags["series"] = true
-		case "news":
-			flags["news"] = true
-		case "kids", "children", "family":
-			flags["kids"] = true
-		case "sports", "sport":
-			flags["sports"] = true
+	for flag, set := range map[string]bool{"movie": c.movie, "series": c.series, "news": c.news, "kids": c.kids, "sports": c.sports} {
+		if set {
+			flags[flag] = true
 		}
 	}
 	return flags
+}
+
+// programCategories are the categories Jellyfin classifies guide
+// programmes in (see programCategoriesOf).
+type programCategories struct {
+	movie, series, news, kids, sports bool
+}
+
+// programCategoriesOf classifies a programme by its genres, without the
+// map programFlags makes: listings classify each programme of a guide.
+func programCategoriesOf(item library.Item) programCategories {
+	var c programCategories
+	for _, genre := range item.Genres {
+		switch strings.ToLower(strings.TrimSpace(genre)) {
+		case "movie", "movies", "film":
+			c.movie = true
+		case "series", "show":
+			c.series = true
+		case "news":
+			c.news = true
+		case "kids", "children", "family":
+			c.kids = true
+		case "sports", "sport":
+			c.sports = true
+		}
+	}
+	return c
 }
 
 // channelPlaceholder stands for a channel's streams in its details.
@@ -179,10 +219,14 @@ func channelPlaceholder(item library.Item) MediaSourceInfo {
 		RequiredHttpHeaders: map[string]string{}, TranscodingSubProtocol: "http"}
 }
 
+// liveTvViewItem is the Live TV view, with its emblem.
+func liveTvViewItem() library.Item {
+	return withEmblem(library.Item{ID: liveTvViewID, Kind: library.KindLibrary, Name: "Live TV", CollectionType: "livetv"})
+}
+
 // liveTvView describes the Live TV view, a view of Jellyfin's own.
 func (h *Handler) liveTvView(r *http.Request, user accounts.User) (BaseItemDto, error) {
-	view := library.Item{ID: liveTvViewID, Kind: library.KindLibrary, Name: "Live TV", CollectionType: "livetv"}
-	dtos, err := h.folderDtos(r, user, []library.Item{view})
+	dtos, err := h.folderDtos(r, user, []library.Item{liveTvViewItem()})
 	if err != nil {
 		return BaseItemDto{}, err
 	}
@@ -279,20 +323,20 @@ func (h *Handler) searchLiveTv(r *http.Request, user accounts.User, term string,
 	holds := func(name string) bool { return strings.Contains(iptv.Fold(name), folded) }
 	var found []library.Item
 	if channels {
-		all, err := h.Library.Channels(r.Context(), user)
+		// Only the channels found are recorded, not every channel tested.
+		matched, err := h.Library.SearchChannels(r.Context(), user, holds, limit)
 		if err != nil {
 			return nil, err
 		}
-		for _, channel := range all {
-			if holds(channel.Name) && (limit < 0 || len(found) < limit) {
-				found = append(found, channel)
-			}
-		}
+		found = append(found, matched...)
 	}
 	if programs {
 		now := time.Now()
-		guide, err := h.Library.Guide(r.Context(), user, library.GuideQuery{From: now, To: now.AddDate(0, 0, guideDays),
-			Keep: func(p library.Item) bool { return holds(p.Name) && categories.keeps(p, now) }, Limit: max(limit, 0)})
+		// The guides are read for the programmes whose title holds the
+		// term alone (see library.WithProgrammeNames).
+		guide, err := h.Library.Guide(library.WithProgrammeNames(r.Context(), folded), user, library.GuideQuery{From: now,
+			To: now.AddDate(0, 0, guideDays), Keep: func(p library.Item) bool { return holds(p.Name) && categories.keeps(p, now) },
+			Limit: max(limit, 0)})
 		if err != nil {
 			return nil, err
 		}
@@ -328,20 +372,32 @@ func (h *Handler) liveChannels(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	channels, err := h.Library.Channels(r.Context(), user)
+	// Only the channels of the page asked are recorded, and their state
+	// read, but when only favorites are listed.
+	channels, record, err := h.Library.ChannelPage(r.Context(), user)
 	if err != nil {
 		h.browseError(w, r, err)
 		return
 	}
-	state, err := h.userState(r.Context(), user, channels)
-	if err != nil {
-		h.internalError(w, r, err)
-		return
-	}
+	var state userState
 	if favoriteSet {
+		if state, err = h.userState(r.Context(), user, channels); err != nil {
+			h.internalError(w, r, err)
+			return
+		}
 		channels = slices.DeleteFunc(channels, func(c library.Item) bool { return state.of(c).IsFavorite != favorite })
 	}
 	from, to := bounds(len(channels), start, limit)
+	if err := record(r.Context(), channels[from:to]); err != nil {
+		h.browseError(w, r, err)
+		return
+	}
+	if !favoriteSet {
+		if state, err = h.userState(r.Context(), user, channels[from:to]); err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+	}
 	fields := requestedFields(r)
 	var airing map[accounts.ID]library.Item
 	if current || !currentSet {
@@ -358,7 +414,7 @@ func (h *Handler) liveChannels(w http.ResponseWriter, r *http.Request) {
 	for _, channel := range channels[from:to] {
 		dto := h.newItemDto(channel, fields, false, state)
 		if program, ok := airing[channel.ID]; ok {
-			dto.CurrentProgram = new(h.newItemDto(program, fields, false, userState{}))
+			dto.CurrentProgram = new(h.newItemDto(program, fields, false, userState{reader: user.ID}))
 		}
 		dtos = append(dtos, dto)
 	}
@@ -384,7 +440,7 @@ func (h *Handler) addCurrentPrograms(r *http.Request, user accounts.User, dtos [
 	for i := range dtos {
 		if id, ok := parseGUID(dtos[i].Id); ok && dtos[i].Type == "TvChannel" {
 			if program, ok := airing[id]; ok {
-				dtos[i].CurrentProgram = new(h.newItemDto(program, fields, false, userState{}))
+				dtos[i].CurrentProgram = new(h.newItemDto(program, fields, false, userState{reader: user.ID}))
 			}
 		}
 	}
@@ -494,7 +550,7 @@ func (h *Handler) liveChannel(w http.ResponseWriter, r *http.Request) {
 	h.addMediaSources(r, user, &dto, item, id, true)
 	if airing, err := h.airing(r, user, []accounts.ID{item.ID}); err == nil {
 		if program, ok := airing[item.ID]; ok {
-			dto.CurrentProgram = new(h.newItemDto(program, nil, true, userState{}))
+			dto.CurrentProgram = new(h.newItemDto(program, nil, true, userState{reader: user.ID}))
 		}
 	}
 	writeJSON(w, http.StatusOK, dto)
@@ -510,7 +566,10 @@ type programQuery struct {
 	HasAired, IsAiring                                 *bool
 	IsMovie, IsSeries, IsNews, IsKids, IsSports        *bool
 	EnableUserData, EnableTotalRecordCount             *bool
-	StartIndex, Limit                                  *int
+	// EnableImages false leaves the programmes' image tags out, as
+	// Jellyfin's DtoOptions does (see programs).
+	EnableImages      *bool
+	StartIndex, Limit *int
 	// channels are the ChannelIds that are identifiers, read once.
 	channels map[accounts.ID]bool
 }
@@ -560,7 +619,7 @@ func readProgramQuery(w http.ResponseWriter, r *http.Request) (programQuery, boo
 	var q programQuery
 	if r.Method == http.MethodPost {
 		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
-		if err != nil || json.Unmarshal(body, &q) != nil {
+		if err != nil || unmarshalBody(body, &q) != nil {
 			validationProblem(w, map[string][]string{"$": {"The JSON value could not be converted."}})
 			return programQuery{}, false
 		}
@@ -583,7 +642,7 @@ func readProgramQuery(w http.ResponseWriter, r *http.Request) (programQuery, boo
 	}
 	readCategories(b, r, &q)
 	for name, field := range map[string]**bool{"hasAired": &q.HasAired, "isAiring": &q.IsAiring, "enableUserData": &q.EnableUserData,
-		"enableTotalRecordCount": &q.EnableTotalRecordCount} {
+		"enableTotalRecordCount": &q.EnableTotalRecordCount, "enableImages": &q.EnableImages} {
 		if value, ok := b.bool(r, name); ok {
 			*field = new(value)
 		}
@@ -627,6 +686,8 @@ func (q *programQuery) readChannels() {
 // programs lists programmes of the user's guides that match the query,
 // by start time; recommended lists, like Jellyfin, those airing or about
 // to, by channel. Without a guide, the lists are empty, as Jellyfin's.
+// Those airing now (On Now) never wait for an addon (see
+// library.GuideQuery.Kept).
 func (h *Handler) programs(recommended bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		// Apps open Live TV by its categories: recommending nothing leaves
@@ -688,11 +749,29 @@ func (h *Handler) programs(recommended bool) http.HandlerFunc {
 		byName := slices.ContainsFunc(q.SortBy, func(s string) bool { return strings.EqualFold(s, "SortName") })
 		descending := slices.ContainsFunc(q.SortOrder, func(s string) bool { return strings.EqualFold(s, "Descending") })
 		guide := library.GuideQuery{From: from, To: to, Keep: func(p library.Item) bool { return q.keeps(p, now) }}
+		// What airs now, as recommended (On Now), is read from the pages
+		// Polyfin keeps, those missing fetched for the next time:
+		// jellyfin-web's home waits for this request before it fills any
+		// of its rows. It is listed by channel.
+		guide.Kept = recommended && airing
+		guide.ByChannel = recommended && airing
 		if len(q.ChannelIds) > 0 {
 			guide.Channels = slices.Collect(maps.Keys(q.channels))
 		}
 		counted := q.EnableTotalRecordCount == nil || *q.EnableTotalRecordCount
-		if limit >= 0 && !counted && !byName && !descending && !(recommended && airing) {
+		switch {
+		case recommended && airing && limit > 0 && !descending:
+			// Like Jellyfin, which reads at most max(4 * limit, 200)
+			// programmes airing now and counts those it read
+			// (src/Jellyfin.LiveTv/LiveTvManager.cs,
+			// GetRecommendedProgramsInternal), On Now reads the first
+			// channels' only, and records the page it shows.
+			guide.Limit = max(max(start, 0)+limit, 4*limit, recommendedReach)
+			guide.Shown = func(programs []library.Item) []library.Item {
+				from, to := bounds(len(programs), start, limit)
+				return programs[from:to]
+			}
+		case limit >= 0 && !counted && !byName && !descending:
 			guide.Limit = max(start, 0) + limit
 		}
 		programs, err := h.Library.Guide(r.Context(), user, guide)
@@ -700,15 +779,9 @@ func (h *Handler) programs(recommended bool) http.HandlerFunc {
 			h.browseError(w, r, err)
 			return
 		}
-		// Recommended programmes airing now are listed by channel, those to
-		// come by start time.
-		if recommended && airing {
-			slices.SortStableFunc(programs, func(a, b library.Item) int {
-				x, _ := strconv.Atoi(a.Channel.Number)
-				y, _ := strconv.Atoi(b.Channel.Number)
-				return x - y
-			})
-		} else if byName {
+		// Recommended programmes airing now are listed by channel (see
+		// library.GuideQuery.ByChannel), those to come by start time.
+		if byName && !guide.ByChannel {
 			slices.SortStableFunc(programs, func(a, b library.Item) int { return strings.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name)) })
 		}
 		if descending {
@@ -718,23 +791,70 @@ func (h *Handler) programs(recommended bool) http.HandlerFunc {
 		for _, field := range q.Fields {
 			fields[strings.ToLower(field)] = true
 		}
+		// Like Jellyfin's LiveTvController, whose DtoOptions take
+		// EnableImages and EnableUserData (Jellyfin.Api/Extensions/
+		// DtoExtensions.cs, AddAdditionalDtoOptions: images unless false,
+		// user data unless false), the user data is neither read nor
+		// given without EnableUserData, and the image tags are left out
+		// without EnableImages (Emby.Server.Implementations/Dto/
+		// DtoService.cs: ImageTags only with EnableImages, BackdropImageTags
+		// only within DtoOptions.GetImageLimit, which is 0 without them).
+		// jellyfin-web's guide asks for neither, for hundreds of channels.
+		userData := q.EnableUserData == nil || *q.EnableUserData
+		images := q.EnableImages == nil || *q.EnableImages
 		from2, to2 := bounds(len(programs), start, limit)
-		dtos := make([]BaseItemDto, 0, to2-from2)
-		state, err := h.userState(r.Context(), user, programs[from2:to2])
-		if err != nil {
-			h.internalError(w, r, err)
+		// jellyfin-web's guide gets the programmes as Jellyfin describes
+		// them for its request, streamed (see writeLeanPrograms); other
+		// listings keep the full description.
+		if !recommended && !userData && !images {
+			h.writeLeanPrograms(w, r, programs[from2:to2], len(programs), start, fields)
 			return
+		}
+		dtos := make([]BaseItemDto, 0, to2-from2)
+		var state userState
+		if userData {
+			if state, err = h.userState(r.Context(), user, programs[from2:to2]); err != nil {
+				h.internalError(w, r, err)
+				return
+			}
 		}
 		for _, program := range programs[from2:to2] {
 			dto := h.newItemDto(program, fields, false, state)
-			if q.EnableUserData != nil && !*q.EnableUserData {
+			if !userData {
 				dto.UserData = UserItemData{}
 			}
 			dtos = append(dtos, dto)
 		}
 		h.addTimers(r.Context(), dtos)
+		if !images {
+			writeJSON(w, http.StatusOK, programsWithoutImages(dtos, len(programs), start))
+			return
+		}
 		writeJSON(w, http.StatusOK, QueryResult{Items: dtos, TotalRecordCount: len(programs), StartIndex: start})
 	}
+}
+
+// imagelessProgram is a programme's DTO without images: its image tags
+// are left out, as Jellyfin leaves out what it does not set.
+type imagelessProgram struct {
+	*BaseItemDto
+	ImageTags         map[string]string `json:",omitzero"`
+	BackdropImageTags []string          `json:",omitzero"`
+}
+
+// programsWithoutImages is the listing of programmes asked for without
+// images (EnableImages false): a QueryResult whose items have no image
+// tags.
+func programsWithoutImages(dtos []BaseItemDto, total, start int) any {
+	items := make([]imagelessProgram, len(dtos))
+	for i := range dtos {
+		items[i].BaseItemDto = &dtos[i]
+	}
+	return struct {
+		Items            []imagelessProgram
+		TotalRecordCount int
+		StartIndex       int
+	}{items, total, start}
 }
 
 // keeps reports whether a programme matches the query's filters.
@@ -758,9 +878,15 @@ func (q programQuery) keeps(p library.Item, now time.Time) bool {
 	}) {
 		return false
 	}
-	flags := programFlags(p)
-	for flag, want := range map[string]*bool{"movie": q.IsMovie, "series": q.IsSeries, "news": q.IsNews, "kids": q.IsKids, "sports": q.IsSports} {
-		if want != nil && *want != flags[flag] {
+	if q.IsMovie == nil && q.IsSeries == nil && q.IsNews == nil && q.IsKids == nil && q.IsSports == nil {
+		return true
+	}
+	c := programCategoriesOf(p)
+	for _, filter := range []struct {
+		want *bool
+		is   bool
+	}{{q.IsMovie, c.movie}, {q.IsSeries, c.series}, {q.IsNews, c.news}, {q.IsKids, c.kids}, {q.IsSports, c.sports}} {
+		if filter.want != nil && *filter.want != filter.is {
 			return false
 		}
 	}
@@ -818,14 +944,28 @@ func webClient(client string) bool {
 // live media source, played as it is when the app takes it, else
 // converted into HLS by FFmpeg as it comes. Unlike Jellyfin's tuners, a
 // channel's source needs no opening (RequiresOpening is false): Polyfin
-// keeps nothing open for it until a player asks for its stream.
+// keeps nothing open for it until a player asks for its stream. A source
+// slow to send its first bytes keeps the app waiting (see patientWriter).
 func (h *Handler) livePlaybackInfo(w http.ResponseWriter, r *http.Request, user accounts.User, channel library.Item, opened accounts.ID, request playbackInfoRequest) {
 	versions, err := h.Library.Versions(r.Context(), user, channel.ID)
 	if err != nil {
 		h.browseError(w, r, err)
 		return
 	}
-	versions = h.inGroup(r.Context(), user, slices.DeleteFunc(versions, func(v library.Version) bool { return h.Playback.Failed(v.ID) }))
+	// A stream that failed lately is left out until its failure is
+	// forgotten (see playback.Service.Failed): the log says so, as an app
+	// left with none tells only that nothing plays.
+	versions = h.inGroup(r.Context(), user, slices.DeleteFunc(versions, func(v library.Version) bool {
+		failure := h.Playback.Failure(v.ID)
+		if failure != nil {
+			h.Logger.Info("A channel's stream is left out: it failed lately", "addon", v.AddonLog, "error", failure)
+		}
+		return failure != nil
+	}))
+	// Every answer from here on is a 200.
+	patient := newPatientWriter(w, playbackInfoPatience)
+	defer patient.stop()
+	w = patient
 	requested, asked := parseGUID(request.MediaSourceId)
 	allowed := h.Accounts.Conversions(user)
 	attempts, tries := 0, h.Accounts.Settings().VersionAttempts
@@ -840,32 +980,105 @@ func (h *Handler) livePlaybackInfo(w http.ResponseWriter, r *http.Request, user 
 		// next one is tried at once.
 		analysis, err := h.Playback.AnalyzeLive(playback.ForUser(r.Context(), user.ID), version)
 		if err != nil {
-			h.Logger.Info("A channel's stream could not be analyzed", "addon", version.Addon, "failure", playback.LiveFailure(err), "error", err)
+			h.Logger.Info("A channel's stream could not be analyzed", "addon", version.AddonLog, "channel", channel.Name, "failure", playback.LiveFailure(err), "error", err)
 			continue
 		}
 		manifest := playback.Manifest(analysis)
 		relay := mustRelay(r, version) || manifest && (webApp(r) || !h.Playback.Redirectable(r.Context(), version))
-		session := h.Playback.Signer().Sign(playback.Grant{Version: version.ID, User: user.ID, Relay: relay})
+		session := h.grant(playback.Grant{Version: version.ID, User: user.ID, Device: callerFrom(r.Context()).Device.ID, Relay: relay})
 		permits := h.convertible(allowed, user, version)
 		source, ok := h.liveSource(r, channel, version, id, analysis, request, session, relay, permits)
 		if !ok {
 			if permits != allowed {
-				h.Logger.Info("A channel's stream would need its video converted while the server converts as many as it may", "addon", version.Addon)
+				h.Logger.Info("A channel's stream would need its video converted while the server converts as many as it may", "addon", version.AddonLog)
 			} else {
-				h.Logger.Info("A channel's stream would need a conversion the user may not have, or is above their bitrate limit or quality group", "addon", version.Addon)
+				h.Logger.Info("A channel's stream would need a conversion the user may not have, or is above their bitrate limit or quality group", "addon", version.AddonLog)
 			}
 			continue
 		}
 		writeJSON(w, http.StatusOK, playbackInfoResponse{MediaSources: []MediaSourceInfo{source}, PlaySessionId: session})
 		return
 	}
-	writeJSON(w, http.StatusOK, noCompatibleStream{MediaSources: []MediaSourceInfo{}, ErrorCode: "NoCompatibleStream"})
+	h.refusePlay(w, r, user, channel, "NoCompatibleStream", plays.FailedNoStream)
 }
+
+// playbackInfoPatience is how long PlaybackInfo of a channel waits before
+// it sends its answer's status and headers, then a space each time again,
+// while the channel's source has not sent its first bytes: JSON allows
+// spaces before a value, and Swiftfin gives up on an answer after 20
+// seconds without a byte (URLSessionConfiguration.swift, line 16), while a
+// source may take as long to start (see playback's liveTimes).
+const playbackInfoPatience = 5 * time.Second
+
+// patientWriter sends an answer's status, 200, and its headers once wait
+// passed with nothing written, then a space after each wait, until the
+// handler writes its answer, whose status must then be 200 too.
+type patientWriter struct {
+	http.ResponseWriter
+	wait time.Duration
+
+	mu    sync.Mutex
+	timer *time.Timer
+	sent  bool
+	done  bool
+}
+
+func newPatientWriter(w http.ResponseWriter, wait time.Duration) *patientWriter {
+	p := &patientWriter{ResponseWriter: w, wait: wait}
+	p.mu.Lock()
+	p.timer = time.AfterFunc(wait, p.keep)
+	p.mu.Unlock()
+	return p
+}
+
+// keep sends the status and headers, the first time, and a space.
+func (p *patientWriter) keep() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.done {
+		return
+	}
+	if !p.sent {
+		p.Header().Set("Content-Type", "application/json; charset=utf-8")
+		p.ResponseWriter.WriteHeader(http.StatusOK)
+		p.sent = true
+	}
+	if _, err := io.WriteString(p.ResponseWriter, " "); err != nil {
+		return
+	}
+	_ = http.NewResponseController(p.ResponseWriter).Flush()
+	p.timer.Reset(p.wait)
+}
+
+// stop sends no more spaces; it reports whether the status was sent.
+func (p *patientWriter) stop() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.done = true
+	p.timer.Stop()
+	return p.sent
+}
+
+func (p *patientWriter) WriteHeader(status int) {
+	if !p.stop() {
+		p.ResponseWriter.WriteHeader(status)
+	}
+}
+
+func (p *patientWriter) Write(data []byte) (int, error) {
+	p.stop()
+	return p.ResponseWriter.Write(data)
+}
+
+// Unwrap returns the underlying writer, for http.ResponseController.
+func (p *patientWriter) Unwrap() http.ResponseWriter { return p.ResponseWriter }
 
 // liveSource describes a channel's stream with the decision for the app's
 // device profile. Subtitles in live streams are not offered. Only the
 // conversions allowed are planned: it reports false when the stream would
-// need another to play on the app.
+// need another to play on the app. A DASH stream plays only converted
+// into HLS, as Jellyfin plays a manifest (M3UTunerHost.cs, lines
+// 161-167): an app that sends no profile is offered none.
 func (h *Handler) liveSource(r *http.Request, channel library.Item, version library.Version, id accounts.ID, analysis media.Analysis,
 	request playbackInfoRequest, session string, relay bool, allowed accounts.Conversions) (MediaSourceInfo, bool) {
 	streams := slices.DeleteFunc(playback.MediaStreams(analysis, nil, h.Accounts.Settings().Language),
@@ -890,7 +1103,8 @@ func (h *Handler) liveSource(r *http.Request, channel library.Item, version libr
 		MaxStreamingBitrate: request.MaxStreamingBitrate.value,
 		UserBitrate:         request.userLimit,
 		SubtitleStreamIndex: new(-1),
-		EnableDirectPlay:    request.EnableDirectPlay == nil || *request.EnableDirectPlay,
+		EnableDirectPlay:    (request.EnableDirectPlay == nil || *request.EnableDirectPlay) && !playback.DASH(analysis),
+		DirectPlayOff:       request.directPlayOff && !playback.DASH(analysis),
 		EnableDirectStream:  request.EnableDirectStream == nil || *request.EnableDirectStream,
 		ConvertAudio:        request.AllowAudioStreamCopy != nil && !*request.AllowAudioStreamCopy,
 		ConvertVideo:        request.AllowVideoStreamCopy != nil && !*request.AllowVideoStreamCopy,
@@ -898,9 +1112,29 @@ func (h *Handler) liveSource(r *http.Request, channel library.Item, version libr
 		ConversionHeight:    request.conversionHeight,
 		Can:                 h.Playback.Capabilities(),
 	}
+	// No app names a channel's audio track: when none is flagged default,
+	// the one that plays is passed for the decision to check it (see
+	// flaggedAudio).
+	if !flaggedAudio(streams) {
+		options.AudioStreamIndex = defaultAudio(streams)
+	}
+	described := playback.MediaSource{Container: container, Bitrate: analysis.Bitrate, Streams: streams}
 	decision := playback.Decision{DirectPlay: true, Container: container, AudioStreamIndex: -1, SubtitleStreamIndex: -1}
 	if request.DeviceProfile != nil {
-		decision = playback.Decide(request.DeviceProfile, playback.MediaSource{Container: container, Bitrate: analysis.Bitrate, Streams: streams}, options)
+		decision = playback.Decide(request.DeviceProfile, described, options)
+		// A user who has their sound converted gets it for channels too,
+		// as for videos (see soundConverted); a live stream is never cut
+		// on a grid.
+		if request.convertSound {
+			converting := options
+			convertSound(&converting)
+			if converted := playback.Decide(request.DeviceProfile, described, converting); soundConverted(converted, decision, false, allowed) {
+				decision, options = converted, converting
+			}
+		}
+	}
+	if playback.DASH(analysis) && !decision.HLS {
+		return MediaSourceInfo{}, false
 	}
 	if decision.HLS && !permitted(allowed, decision) {
 		return MediaSourceInfo{}, false
@@ -912,14 +1146,21 @@ func (h *Handler) liveSource(r *http.Request, channel library.Item, version libr
 	}
 	source.Container = cmp.Or(decision.Container, container)
 	source.SupportsDirectPlay, source.SupportsDirectStream = decision.DirectPlay, decision.DirectPlay
-	if _, video := playback.LiveVideo(analysis); decision.HLS && video {
+	_, video := playback.LiveVideo(analysis)
+	// Played as it is, a stream offers a lower quality when one would play
+	// it converted, which a stream with video is over HLS (see lowerable).
+	if decision.DirectPlay && video {
+		lower, overHLS := lowerable(request.DeviceProfile, described, options, allowed)
+		source.SupportsTranscoding = lower && overHLS
+	}
+	if decision.HLS && video {
 		limit := request.MaxStreamingBitrate.value
 		if limit <= 0 && request.DeviceProfile.MaxStreamingBitrate != nil {
 			limit = *request.DeviceProfile.MaxStreamingBitrate
 		}
 		source.SupportsTranscoding = true
-		source.TranscodingUrl = transcodingURL(r, channel.ID, id, version, analysis, streams, decision, limit, session)
-		// Not remote, for Jellyfin for Roku (see decidedSource).
+		source.TranscodingUrl = transcodingURL(r, channel.ID, id, version, analysis, streams, decision, limit, session, nil)
+		// Not remote, for Jellyfin for Roku (see decidedSource, this fork).
 		source.IsRemote = false
 		source.TranscodingSubProtocol = "hls"
 		source.TranscodingContainer = decision.Transcoding.Container
@@ -935,74 +1176,89 @@ func (h *Handler) liveSource(r *http.Request, channel library.Item, version libr
 // is: an HLS playlist is relayed, its files named through Polyfin, unless
 // the player may be sent to the source; an MPEG-TS stream is relayed from
 // its shared feed, or redirected to when that costs no connection (see
-// playback.Service.ServeChannel).
-func (h *Handler) serveChannel(w http.ResponseWriter, r *http.Request, user accounts.User, channel library.Item, version library.Version, relay bool) {
+// playback.Service.ServeChannel). A DASH stream plays only converted.
+// accepted is the grant streamAccess accepted the request with.
+func (h *Handler) serveChannel(w http.ResponseWriter, r *http.Request, user accounts.User, channel library.Item, version library.Version, relay bool, accepted playback.Grant) {
 	r = r.WithContext(playback.ForUser(r.Context(), user.ID))
 	analysis, err := h.Playback.AnalyzeLive(r.Context(), version)
 	if err != nil {
 		http.Error(w, "source unavailable", http.StatusBadGateway)
 		return
 	}
+	if playback.DASH(analysis) {
+		w.WriteHeader(http.StatusUnsupportedMediaType)
+		return
+	}
 	// PlaybackInfo never offers a stream taller than the user's quality
 	// group as it is: this guards URLs kept, or made up.
 	if !user.FitsGroup(videoHeight(analysis)) {
-		h.Logger.Info("A channel's stream taller than the user's quality group was refused", "addon", version.Addon)
+		h.Logger.Info("A channel's stream taller than the user's quality group was refused", "addon", version.AddonLog)
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 	if !playback.Manifest(analysis) {
 		err = h.Playback.ServeChannel(w, r, version, relay)
 	} else if relay {
-		grant := h.Playback.Signer().Sign(playback.Grant{Version: version.ID, User: user.ID, Relay: true})
-		err = h.Playback.ServeLive(w, r, version, "", h.liveLink(r, channel.ID, grant))
+		// The files the playlist names are the same play's.
+		err = h.Playback.ServeLive(w, r, version, "", h.liveLink(r, channel.ID, h.filesGrant(accepted, user, version)))
 	} else {
 		err = h.Playback.Serve(w, r, version, playback.Delivery{})
 	}
 	if err != nil && r.Context().Err() == nil {
-		h.Logger.Warn("A channel's stream could not be served", "addon", version.Addon, "error", err)
+		h.Logger.Warn("A channel's stream could not be served", "addon", version.AddonLog, "error", err)
 	}
 }
 
 // liveLink names the files a relayed playlist refers to: Polyfin's
-// addresses, signed for the grant, so that they relay nothing else.
-func (h *Handler) liveLink(r *http.Request, channel accounts.ID, grant string) func(string) string {
+// addresses, signed for the grant, so that they relay nothing else, with
+// the file name the playlist gives (see playback.ServeLive).
+func (h *Handler) liveLink(r *http.Request, channel accounts.ID, grant string) func(target, name string) string {
 	base := baseURL(r) + "/Videos/" + channel.String() + "/live/"
-	return func(target string) string {
+	return func(target, name string) string {
 		q := url.Values{grantParameter: {grant}, "target": {base64.RawURLEncoding.EncodeToString([]byte(target))},
 			"sign": {h.Playback.Signer().Link(grant, target)}}
-		return base + url.PathEscape(playback.FileName(target)) + "?" + q.Encode()
+		return base + url.PathEscape(name) + "?" + q.Encode()
 	}
 }
 
 // liveFile relays a file a relayed playlist names, for the grant it was
-// signed for.
+// signed for: of a channel's stream, a video playing live, or a version
+// analyzed as an HLS playlist (see playback.Service.Serve).
 func (h *Handler) liveFile(w http.ResponseWriter, r *http.Request) {
 	token := query(r, grantParameter)
-	grant, err := h.Playback.Signer().Verify(token)
+	user, grant, stands := h.granted(r, token)
 	target, decodeErr := base64.RawURLEncoding.DecodeString(query(r, "target"))
-	if err != nil || decodeErr != nil || !h.Playback.Signer().VerifyLink(token, string(target), query(r, "sign")) {
-		w.WriteHeader(http.StatusUnauthorized)
-		return
-	}
 	opened, ok := parseGUID(r.PathValue("itemId"))
-	user, userErr := h.Accounts.User(r.Context(), grant.User)
-	if !ok || userErr != nil || user.Refused(h.now()) || h.outsideHours(user) {
+	if !stands || !ok || decodeErr != nil || !h.Playback.Signer().VerifyLink(token, string(target), query(r, "sign")) {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	channel, err := h.played(r.Context(), user, opened)
-	if err != nil || channel.Kind != library.KindChannel {
-		processingError(w, http.StatusNotFound)
-		return
-	}
-	version, err := h.Library.Version(r.Context(), user, channel.ID, grant.Version)
+	item, err := h.played(r.Context(), user, opened)
 	if err != nil {
 		processingError(w, http.StatusNotFound)
 		return
 	}
-	if err := h.Playback.ServeLive(w, r, version, string(target), h.liveLink(r, channel.ID, token)); err != nil && r.Context().Err() == nil {
-		h.Logger.Debug("A file of a channel's stream could not be relayed", "addon", version.Addon, "error", err)
+	version, err := h.Library.Version(r.Context(), user, item.ID, grant.Version)
+	if err != nil || !h.playsLive(r.Context(), item, version) && !h.relaysPlaylist(r.Context(), version) {
+		processingError(w, http.StatusNotFound)
+		return
 	}
+	// The files of a playlist are its playback's: they keep its device's
+	// place, or ask for one when the address was kept from an earlier one.
+	if !h.admitPlay(w, r, user, grant.Device) {
+		return
+	}
+	if err := h.Playback.ServeLive(w, r, version, string(target), h.liveLink(r, item.ID, token)); err != nil && r.Context().Err() == nil {
+		h.Logger.Debug("A file of a relayed playlist could not be relayed", "addon", version.AddonLog, "error", err)
+	}
+}
+
+// relaysPlaylist reports whether a version is relayed as an HLS
+// playlist whose files are relayed too: analyzed as one (see
+// playback.Service.Serve).
+func (h *Handler) relaysPlaylist(ctx context.Context, version library.Version) bool {
+	analysis, ok := h.Playback.Analyzed(ctx, version.ID)
+	return ok && playback.HLS(analysis)
 }
 
 // livePlaylist serves the playlists of a channel converted by FFmpeg: the
@@ -1049,7 +1305,9 @@ func (h *Handler) liveSegment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err != nil {
-		h.remuxError(w, r, req.remux, err)
+		if h.remuxError(w, r, req.remux, err) {
+			h.streamFailed(r, req.user, req.item, req.remux.Device)
+		}
 		return
 	}
 	defer file.Close()

@@ -35,8 +35,12 @@ func (s *Service) Archives(ctx context.Context, source accounts.ID) (map[string]
 		return nil, err
 	}
 	result, err, _ := s.flight.Do("archives "+source.String(), func() (any, error) {
-		rows, err := s.db.Query(ctx, `SELECT id, days FROM (SELECT l.id, `+archiveSQL+` AS days `+channelJoins+`
-			WHERE l.addon_id = $1 AND i.live_tv AND `+shownSQL+`) a WHERE days IS NOT NULL`, source)
+		// archiveSQL, set-based: one pass over the source's streams rather
+		// than a sub-plan per channel.
+		rows, err := s.db.Query(ctx, `SELECT DISTINCT ON (l.id) l.id, e.catchup_days `+channelJoins+`
+			JOIN iptv_streams s ON s.addon_id = l.addon_id AND s.channel_id = l.id AND s.enabled
+			JOIN iptv_entries e ON e.addon_id = s.addon_id AND e.key = s.key AND e.catchup <> '' AND e.catchup_days > 0
+			WHERE l.addon_id = $1 AND i.live_tv AND `+shownSQL+` ORDER BY l.id, `+streamOrder, source)
 		if err != nil {
 			return nil, err
 		}
@@ -173,14 +177,15 @@ func (s *Service) replayStreams(ctx context.Context, source accounts.ID, key str
 	var name, stream, kind, template, zone, sourceKind string
 	var days int
 	var headers map[string]string
+	var agent streamAgent
 	err := s.db.QueryRow(ctx, `SELECT coalesce(l.name, l.provider_name), e.url, e.headers, e.catchup, e.catchup_days, e.catchup_source,
-		i.timezone, a.kind
+		i.timezone, a.kind, i.user_agent
 		FROM iptv_lineup l JOIN iptv_sources i ON i.addon_id = l.addon_id JOIN addons a ON a.id = l.addon_id
 		JOIN iptv_categories c ON c.id = coalesce(l.moved_to, l.category_id)
 		JOIN iptv_streams s ON s.addon_id = l.addon_id AND s.channel_id = l.id AND s.enabled
 		JOIN iptv_entries e ON e.addon_id = s.addon_id AND e.key = s.key AND e.catchup <> '' AND e.catchup_days > 0
 		WHERE l.addon_id = $1 AND l.id = $2 AND i.live_tv AND `+shownSQL+` ORDER BY `+streamOrder+` LIMIT 1`, source, channel).
-		Scan(&name, &stream, &headers, &kind, &days, &template, &zone, &sourceKind)
+		Scan(&name, &stream, &headers, &kind, &days, &template, &zone, &sourceKind, &agent.own)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -201,8 +206,7 @@ func (s *Service) replayStreams(ctx context.Context, source accounts.ID, key str
 		return nil, nil
 	}
 	result := stremio.Stream{Name: name, Description: "Replay", URL: address}
-	if len(headers) > 0 {
-		result.BehaviorHints.ProxyHeaders = &stremio.ProxyHeaders{Request: headers}
-	}
+	agent.browser = browsed(sourceKind)
+	agent.apply(&result, headers)
 	return []stremio.Stream{result}, nil
 }

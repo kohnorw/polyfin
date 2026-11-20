@@ -12,8 +12,9 @@ import (
 
 // The DHT (BEP 5) is only read: Polyfin looks a torrent's peers up as a
 // read-only node (BEP 43), answers no query and announces nothing, as no
-// peer can connect in. Polyfin names no bootstrap node: a lookup starts
-// from the nodes the addon's sources name and those peers tell (PORT).
+// peer can connect in. A lookup starts from the nodes the addon's sources
+// name, the engine's bootstrap nodes (see BootstrapNodes), and those peers
+// tell (PORT).
 const (
 	// dhtParallel is how many queries a lookup has out at once,
 	// dhtQueries how many it sends at most, and dhtWait how long one
@@ -21,8 +22,11 @@ const (
 	dhtParallel = 4
 	dhtQueries  = 64
 	dhtWait     = 3 * time.Second
-	// dhtKeep is how many of the closest nodes a lookup follows.
+	// dhtKeep is how many of the closest nodes a lookup follows, and
+	// dhtKept how many of those that answered it returns, for the next
+	// lookup to start from.
 	dhtKeep = 16
+	dhtKept = 8
 )
 
 type dhtNode struct {
@@ -32,10 +36,16 @@ type dhtNode struct {
 }
 
 // lookupPeers looks hash up on the DHT from the nodes starts, and sends the
-// peers found to found until the lookup ends or ctx is done.
-func lookupPeers(ctx context.Context, conn PacketConn, hash Hash, starts []string, found func([]netip.AddrPort)) error {
+// peers found to found until the lookup ends or ctx is done: then no query
+// is sent, and the answer awaited is given up at once. Of the nodes an
+// answer names, only those public says are on the internet are asked. It
+// returns the addresses of the nodes that answered, the closest to hash
+// first, dhtKept at most: the next lookup starts from them, nearer the
+// nodes that keep the torrent's peers than the starting nodes are.
+func lookupPeers(ctx context.Context, conn PacketConn, hash Hash, starts []string, public func(netip.Addr) bool,
+	found func([]netip.AddrPort)) ([]string, error) {
 	if len(starts) == 0 {
-		return errors.New("no DHT node to start from")
+		return nil, errors.New("no DHT node to start from")
 	}
 	var self Hash
 	_, _ = rand.Read(self[:])
@@ -48,7 +58,18 @@ func lookupPeers(ctx context.Context, conn PacketConn, hash Hash, starts []strin
 			nodes = append(nodes, &dhtNode{address: address})
 		}
 	}
+	stop := context.AfterFunc(ctx, func() { _ = conn.SetReadDeadline(time.Now()) })
+	defer stop()
 	pending := map[string]*dhtNode{}
+	var answered []*dhtNode
+	closest := func() []string {
+		slices.SortStableFunc(answered, func(a, b *dhtNode) int { return closer(hash, a.id, b.id) })
+		addresses := make([]string, 0, min(len(answered), dhtKept))
+		for _, n := range answered[:min(len(answered), dhtKept)] {
+			addresses = append(addresses, n.address)
+		}
+		return addresses
+	}
 	sent := 0
 	var txid uint16
 	buffer := make([]byte, 4096)
@@ -65,6 +86,9 @@ func lookupPeers(ctx context.Context, conn PacketConn, hash Hash, starts []strin
 			if next == nil {
 				break
 			}
+			if ctx.Err() != nil {
+				return closest(), ctx.Err()
+			}
 			next.asked = true
 			txid++
 			t := string([]byte{byte(txid >> 8), byte(txid)})
@@ -77,16 +101,20 @@ func lookupPeers(ctx context.Context, conn PacketConn, hash Hash, starts []strin
 			sent++
 		}
 		if len(pending) == 0 {
-			return ctx.Err()
+			return closest(), ctx.Err()
 		}
 		deadline := time.Now().Add(dhtWait)
 		if d, ok := ctx.Deadline(); ok && d.Before(deadline) {
 			deadline = d
 		}
 		_ = conn.SetReadDeadline(deadline)
+		// Checked once the deadline is set: a ctx done later sets it to now.
+		if ctx.Err() != nil {
+			return closest(), ctx.Err()
+		}
 		n, from, err := conn.ReadFrom(buffer)
 		if ctx.Err() != nil {
-			return ctx.Err()
+			return closest(), ctx.Err()
 		}
 		if err != nil {
 			// Those that did not answer in time are given up.
@@ -104,11 +132,14 @@ func lookupPeers(ctx context.Context, conn PacketConn, hash Hash, starts []strin
 		delete(pending, str(message, "t"))
 		reply := dict(message, "r")
 		copy(node.id[:], str(reply, "id"))
+		answered = append(answered, node)
 		var peers []netip.AddrPort
 		for _, value := range list(reply, "values") {
 			if raw, ok := value.(string); ok {
 				for _, peer := range compactPeers([]byte(raw), 4) {
-					if !seen[peer] {
+					// An answer adds maxAnswerPeers peers at most, and
+					// the lookup maxLookupPeers.
+					if !seen[peer] && len(peers) < maxAnswerPeers && len(seen) < maxLookupPeers {
 						seen[peer] = true
 						peers = append(peers, peer)
 					}
@@ -123,7 +154,7 @@ func lookupPeers(ctx context.Context, conn PacketConn, hash Hash, starts []strin
 			var id Hash
 			copy(id[:], compact[:20])
 			for _, address := range compactPeers(compact[20:26], 4) {
-				if a := address.String(); !known[a] && address != from {
+				if a := address.String(); !known[a] && address != from && public(address.Addr()) {
 					known[a] = true
 					nodes = append(nodes, &dhtNode{id: id, address: a})
 				}

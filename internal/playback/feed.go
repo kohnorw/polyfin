@@ -2,6 +2,7 @@ package playback
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -16,6 +17,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/iptv"
 	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/relayed"
 )
 
 const (
@@ -24,9 +26,15 @@ const (
 	// behind is dropped rather than holding the others back.
 	feedBuffer = 6 << 20
 	// feedJoin is how far back in what it keeps a reader joining a running
-	// feed starts: at the first keyframe since (see tsIndex), or there on a
-	// packet when its keyframes are not known.
+	// feed starts at least: at the first keyframe since (see tsIndex), or
+	// there on a packet when its keyframes are not known.
 	feedJoin = 3 << 20
+	// feedLookback is how far back, in the stream's own time, a reader
+	// joining a running feed may start before feedJoin: at the oldest
+	// keyframe kept within feedLookback of the latest one, as long as
+	// feedSlack of the ring is left before the feed overwrites it.
+	feedLookback = 6 * time.Second
+	feedSlack    = 1 << 20
 	// keyframeWait is how much of an MPEG-TS stream is read for its first
 	// keyframe before readers start without one.
 	keyframeWait = 2 << 20
@@ -47,8 +55,8 @@ type liveTimes struct {
 	// stall ends a feed that received nothing for that long: its readers
 	// see the stream end, and FFmpeg reads it again.
 	stall time.Duration
-	// A source must answer within answer, and send its first sniffSize
-	// bytes within body.
+	// A source must answer, and send its first sniffSize bytes, within
+	// answer of the request; its bytes have body at least once it answered.
 	answer, body time.Duration
 	// slotWait is how long an open refused right after Polyfin closed
 	// another stream of the same source is tried again: providers count a
@@ -58,8 +66,14 @@ type liveTimes struct {
 
 // defaultLiveTimes are the times of live streams; tests shorten them.
 // Providers that redirect to the stream take a few seconds to answer, more
-// when busy.
-var defaultLiveTimes = liveTimes{grace: 20 * time.Second, stall: 10 * time.Second, answer: 10 * time.Second, body: 3 * time.Second,
+// when busy; proxies that share a provider's stream between apps answer
+// once they hold a buffer of it, which a low bitrate channel fills in ten
+// seconds or more, or once they gave up a silent stream for the next one.
+// answer is as long as apps wait for PlaybackInfo, which waits for the
+// first bytes then analyzes them (liveProbeCap at most): the Android apps'
+// client gives a request 30 seconds in all, and Swiftfin gives up after 20
+// seconds without a byte, which PlaybackInfo's spaces keep from happening.
+var defaultLiveTimes = liveTimes{grace: 20 * time.Second, stall: 10 * time.Second, answer: 20 * time.Second, body: 3 * time.Second,
 	slotWait: 5 * time.Second}
 
 // timingLocked returns the times of the service's live streams. The
@@ -82,6 +96,10 @@ const (
 	LiveRefused = "refused"
 	// LiveTimeout is a source from which nothing came in time.
 	LiveTimeout = "timeout"
+	// LiveDRM is a stream that needs a DRM Polyfin does not support, and
+	// LiveKeys one its list's ClearKey keys do not decrypt (see dash.go).
+	LiveDRM  = "drm"
+	LiveKeys = "keys"
 )
 
 var (
@@ -101,9 +119,11 @@ var (
 	ErrTunersInUse error = tunersInUse{}
 	// ErrSlowReader reports a reader that fell behind what a feed keeps.
 	ErrSlowReader = errors.New("a reader fell behind the live stream")
-	// errManifest reports a stream that is an HLS playlist, which has no
-	// feed: its files are relayed one by one.
-	errManifest = errors.New("the stream is an HLS playlist")
+	// errManifest reports a stream that is an HLS playlist or a DASH
+	// manifest, which has no feed: its files are relayed one by one.
+	// errDASH is a DASH manifest's.
+	errManifest = errors.New("the stream is an HLS playlist or a DASH manifest")
+	errDASH     = fmt.Errorf("%w: a DASH manifest", errManifest)
 )
 
 // tunersInUse is ErrTunersInUse: an ErrSlotsInUse, and an ErrLiveRefused.
@@ -117,10 +137,25 @@ func (tunersInUse) Is(target error) bool { return target == ErrSlotsInUse }
 
 func (tunersInUse) Unwrap() error { return ErrLiveRefused }
 
+// errUnavailable is an ErrLiveRefused answered by a plain 503, without
+// HDHomeRun's error 805.
+var errUnavailable error = unavailable{}
+
+// unavailable is errUnavailable.
+type unavailable struct{}
+
+func (unavailable) Error() string { return ErrLiveRefused.Error() }
+
+func (unavailable) Unwrap() error { return ErrLiveRefused }
+
 // LiveFailure classifies an error of a live stream: LiveDead, LiveRefused,
-// LiveTimeout, or "" for none of these.
+// LiveTimeout, LiveDRM, LiveKeys, or "" for none of these.
 func LiveFailure(err error) string {
 	switch {
+	case errors.Is(err, ErrLiveDRM):
+		return LiveDRM
+	case errors.Is(err, ErrLiveKeys):
+		return LiveKeys
 	case errors.Is(err, ErrLiveRefused):
 		return LiveRefused
 	case errors.Is(err, ErrLiveTimeout), errors.Is(err, context.DeadlineExceeded):
@@ -150,6 +185,32 @@ type liveState struct {
 	health      func(ctx context.Context, version library.Version, failure string)
 	// times are the times of live streams, defaultLiveTimes when unset.
 	times liveTimes
+	// opens counts the occupants opened (see openingLocked).
+	opens uint64
+	// awaiting, when set, hears each makeRoom about to wait for the
+	// connections of feeds closing, for tests.
+	awaiting func(closing []*feed)
+}
+
+// opening is when an occupant took its source's connection: at, by the
+// clock, and n, the order it did among the service's occupants, which
+// tells apart two the clock gives the same time, as Windows' does within
+// one of its ticks.
+type opening struct {
+	at time.Time
+	n  uint64
+}
+
+// compare orders openings from the first to the last.
+func (o opening) compare(other opening) int {
+	return cmp.Or(o.at.Compare(other.at), cmp.Compare(o.n, other.n))
+}
+
+// openingLocked is the opening of an occupant opening now. The caller
+// holds st.mu.
+func (st *liveState) openingLocked() opening {
+	st.opens++
+	return opening{at: time.Now(), n: st.opens}
 }
 
 // LiveSources sets how many streams a source may play at once
@@ -164,18 +225,25 @@ func (s *Service) LiveSources(connections func(ctx context.Context, source accou
 	s.feeds.connections, s.feeds.health = connections, health
 }
 
-// report tells LiveSources' health how a stream answered.
+// report tells LiveSources' health how a stream answered. A tuner's plain
+// 503 is busy, as its error 805 is: proxies acting as a tuner answer so
+// once their connections are all in use. A start stopped or replaced as it
+// opened (context.Canceled) tells nothing of the stream, and is not told.
 func (s *Service) report(ctx context.Context, version library.Version, err error) {
 	s.feeds.mu.Lock()
-	health := s.feeds.health
+	health, connections := s.feeds.health, s.feeds.connections
 	s.feeds.mu.Unlock()
-	if health == nil {
+	if health == nil || errors.Is(err, context.Canceled) {
 		return
 	}
 	failure := LiveFailure(err)
 	switch {
 	case errors.Is(err, ErrSlotsInUse), errors.Is(err, ErrTunersBusy):
 		failure = iptv.TunerFailureBusy
+	case errors.Is(err, errUnavailable) && connections != nil:
+		if limit, err := connections(ctx, version.Origin.Addon); err == nil && limit.Tuners {
+			failure = iptv.TunerFailureBusy
+		}
 	case err != nil && failure == "":
 		failure = LiveDead
 	}
@@ -200,7 +268,7 @@ type feed struct {
 	s       *Service
 	version library.Version
 	source  accounts.ID
-	opened  time.Time
+	opened  opening
 	times   liveTimes
 	// closed is closed once the connection to the source is.
 	closed chan struct{}
@@ -221,6 +289,9 @@ type feed struct {
 	// evicted is why the feed was ended for another stream of its source
 	// (see evict), nil while it was not.
 	evicted error
+	// closing is set once close found no reader: the feed takes none
+	// from then on (see join).
+	closing bool
 	// index finds the stream's keyframes and tables as it arrives.
 	index tsIndex
 }
@@ -285,7 +356,7 @@ func (s *Service) openFeed(ctx context.Context, version library.Version) (*feedR
 			f = nil
 		}
 		if f == nil {
-			f = &feed{s: s, version: version, source: version.Origin.Addon, opened: time.Now(), times: st.timingLocked(),
+			f = &feed{s: s, version: version, source: version.Origin.Addon, opened: st.openingLocked(), times: st.timingLocked(),
 				ready: make(chan struct{}), closed: make(chan struct{}), buf: make([]byte, feedBuffer), changed: make(chan struct{}),
 				readers: map[*feedReader]bool{}, index: newTSIndex()}
 			st.feeds[version.ID] = f
@@ -305,7 +376,8 @@ func (s *Service) openFeed(ctx context.Context, version library.Version) (*feedR
 			r.Close()
 			return nil, f.err
 		}
-		// A feed evicted between its opening and this join is opened again.
+		// A feed that ended, or was closed or evicted, since it was found
+		// is opened again.
 		if r == nil {
 			continue
 		}
@@ -329,11 +401,11 @@ func (f *feed) finished() bool {
 }
 
 // join adds a reader, placed on its first read (see place); nil when the
-// feed ended.
+// feed ended, or is closing.
 func (f *feed) join(ctx context.Context, user accounts.ID) *feedReader {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	if f.done && f.received > 0 || f.evicted != nil {
+	if f.done && f.received > 0 || f.closing || f.evicted != nil {
 		return nil
 	}
 	r := &feedReader{f: f, user: user, recording: recordingOf(ctx), ctx: ctx, from: f.received}
@@ -345,18 +417,24 @@ func (f *feed) join(ctx context.Context, user accounts.ID) *feedReader {
 	return r
 }
 
-// place sets where a reader starts, f.mu held: an MPEG-TS stream at its
-// first keyframe within feedJoin of where the reader joined, after its PAT
-// and PMT, so that a reader joining at any time, the first included,
-// decodes from its first bytes, and has a few seconds to read at once:
-// FFmpeg cuts its first segment from them without waiting for the
-// stream's next keyframe.
+// place sets where a reader starts, f.mu held: an MPEG-TS stream at a
+// keyframe, after its PAT and PMT, so that a reader joining at any time,
+// the first included, decodes from its first bytes, and has a few seconds
+// to read at once: FFmpeg cuts its first segments from them without
+// waiting for the stream's next keyframes, and the first live playlist
+// has its lead sooner (see hls.Manager.LivePlaylist). The keyframe is the
+// oldest the feed keeps within feedLookback of the latest one, when the
+// stream's times are known, else the first within feedJoin of where the
+// reader joined, whichever comes first.
 // It reports false while the first keyframe is awaited, keyframeWait at
 // most; a stream of no keyframe known starts feedJoin back, on a packet.
 func (r *feedReader) place() bool {
 	f := r.f
 	oldest := max(f.received-int64(len(f.buf)), 0)
 	if at, prefix, ok := f.index.start(oldest, max(r.from-feedJoin, oldest)); ok {
+		if kept, ok := f.index.kept(max(f.received-int64(len(f.buf))+feedSlack, 0)); ok && kept < at {
+			at = kept
+		}
 		r.pos, r.prefix, r.placed = at, prefix, true
 		return true
 	}
@@ -453,19 +531,34 @@ func (r *feedReader) Close() error {
 }
 
 // close ends the feed and its connection, which its source counts until it
-// is closed (see makeRoom).
+// is closed (see makeRoom). It decides under both locks, so that a reader
+// joining as the grace runs out either keeps the feed, or finds it closing
+// and opens the stream again.
 func (f *feed) close() {
+	st := &f.s.feeds
+	st.mu.Lock()
 	f.mu.Lock()
 	if len(f.readers) > 0 && f.evicted == nil {
 		f.mu.Unlock()
+		st.mu.Unlock()
 		return
 	}
+	f.closing = true
 	f.mu.Unlock()
-	st := &f.s.feeds
-	st.mu.Lock()
 	if st.feeds[f.version.ID] == f {
 		delete(st.feeds, f.version.ID)
 	}
+	st.closingLocked(f)
+	st.mu.Unlock()
+	if f.cancel != nil {
+		f.cancel()
+	}
+	f.finish(nil)
+}
+
+// closingLocked counts a feed among those closing, until its connection
+// is closed (see makeRoom). The caller holds st.mu.
+func (st *liveState) closingLocked(f *feed) {
 	select {
 	case <-f.closed:
 	default:
@@ -474,11 +567,6 @@ func (f *feed) close() {
 		}
 		st.closing[f] = true
 	}
-	st.mu.Unlock()
-	if f.cancel != nil {
-		f.cancel()
-	}
-	f.finish(nil)
 }
 
 // evict closes a feed for another channel's stream: its readers end with
@@ -553,6 +641,14 @@ func (f *feed) open(user accounts.ID, recording bool) {
 			time.Sleep(time.Second)
 		}
 	}
+	if err != nil && ctx.Err() != nil {
+		// The feed was closed as it opened: its readers left, or another
+		// stream took its connection. That tells nothing of the stream.
+		err = fmt.Errorf("the stream was closed as it opened: %w", context.Canceled)
+		if evicted := f.evictedBy(); evicted != nil {
+			err = fmt.Errorf("%w: %w", evicted, err)
+		}
+	}
 	if errors.Is(err, errManifest) {
 		f.s.feeds.mu.Lock()
 		f.s.feeds.manifests[f.version.ID] = true
@@ -568,6 +664,11 @@ func (f *feed) open(user accounts.ID, recording bool) {
 	}
 	f.write(head)
 	close(f.ready)
+	if _, known := f.s.analyses.Get(f.version.ID); known {
+		// A stream analyzed before is not analyzed again, which would tell
+		// how it answered: it played once it answered with a live stream.
+		f.s.report(ctx, f.version, nil)
+	}
 	defer body.Close()
 	stall := time.AfterFunc(f.times.stall, cancel)
 	defer stall.Stop()
@@ -587,6 +688,12 @@ func (f *feed) open(user accounts.ID, recording bool) {
 			case errors.Is(err, io.EOF):
 				err = nil
 			}
+			// The connection closes as open returns: the source counts it
+			// until then, while the readers read what the feed kept.
+			st := &f.s.feeds
+			st.mu.Lock()
+			st.closingLocked(f)
+			st.mu.Unlock()
 			f.finish(err)
 			f.close()
 			return
@@ -599,6 +706,15 @@ func (f *feed) evictedBy() error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.evicted
+}
+
+// evictedBy is why the reader's feed was evicted, nil if it was not or
+// there is no reader.
+func (r *feedReader) evictedBy() error {
+	if r == nil {
+		return nil
+	}
+	return r.f.evictedBy()
 }
 
 // write adds bytes to the ring, indexes them, and wakes the readers.
@@ -642,7 +758,7 @@ func (s *Service) closeIdle(f *feed) bool {
 // Hold).
 type occupant interface {
 	// since is when it took the connection.
-	since() time.Time
+	since() opening
 	// unread reports whether no one uses it: it only lingers for its
 	// grace.
 	unread() bool
@@ -657,7 +773,7 @@ type occupant interface {
 	evict(cause error)
 }
 
-func (f *feed) since() time.Time { return f.opened }
+func (f *feed) since() opening { return f.opened }
 
 func (f *feed) unread() bool {
 	f.mu.Lock()
@@ -714,10 +830,11 @@ func (s *Service) makeRoom(ctx context.Context, source accounts.ID, self occupan
 		inUse = ErrTunersInUse
 	}
 	st.mu.Lock()
+	awaiting := st.awaiting
 	var open []occupant
 	var closing []*feed
 	for _, other := range st.feeds {
-		if other != self && other.source == source && !other.finished() {
+		if other != self && other.source == source && !other.finished() && !st.closing[other] {
 			open = append(open, other)
 		}
 	}
@@ -735,6 +852,9 @@ func (s *Service) makeRoom(ctx context.Context, source accounts.ID, self occupan
 	if len(open)+len(closing) < limit {
 		return false, nil
 	}
+	if len(closing) > 0 && awaiting != nil {
+		awaiting(closing)
+	}
 	for _, other := range closing {
 		other.awaitClosed()
 	}
@@ -742,7 +862,7 @@ func (s *Service) makeRoom(ctx context.Context, source accounts.ID, self occupan
 	if len(open) < limit {
 		return freed, nil
 	}
-	slices.SortFunc(open, func(a, b occupant) int { return a.since().Compare(b.since()) })
+	slices.SortFunc(open, func(a, b occupant) int { return a.since().compare(b.since()) })
 	idle := func(other occupant) bool { return other.unread() }
 	mine := func(other occupant) bool { return other.onlyFor(user) }
 	if tuner {
@@ -770,15 +890,17 @@ func (s *Service) makeRoom(ctx context.Context, source accounts.ID, self occupan
 }
 
 // sniff opens a live stream and checks it is one before anything reads
-// it: the source must answer within times.answer with a success, and its
-// first sniffSize bytes (times.body to come) must start an HLS playlist
-// (errManifest, the connection closed), MPEG-TS packets or an MP4 box.
-// It returns the body and the bytes already read of it.
+// it: the source must answer, and send its first sniffSize bytes, within
+// times.answer (its bytes have times.body at least once it answered), and
+// they must start an HLS playlist (errManifest, the connection closed), a
+// DASH manifest (errDASH, the same), MPEG-TS packets or an MP4 box. It
+// returns the body and the bytes already read of it.
 func (s *Service) sniff(ctx context.Context, version library.Version, times liveTimes) (io.ReadCloser, []byte, error) {
 	header := http.Header{}
-	for name, value := range version.Headers {
+	for name, value := range version.RequestHeaders() {
 		header.Set(name, value)
 	}
+	asked := time.Now()
 	answerCtx, cancelAnswer := context.WithCancel(ctx)
 	answered := time.AfterFunc(times.answer, cancelAnswer)
 	response, err := s.opener.Open(answerCtx, http.MethodGet, version.URL, header, version.Confined)
@@ -798,12 +920,12 @@ func (s *Service) sniff(ctx context.Context, version library.Version, times live
 	}
 	// The connection lives on with ctx; answerCtx only bounded the wait.
 	stopAfter := context.AfterFunc(ctx, cancelAnswer)
-	var body io.ReadCloser = &closer{ReadCloser: response.Body, done: func() { stopAfter(); cancelAnswer() }}
+	var body io.ReadCloser = &closer{ReadCloser: s.countReceived(version.ID, response.Body), done: func() { stopAfter(); cancelAnswer() }}
 	if err := statusFailure(response); err != nil {
 		body.Close()
 		return nil, nil, err
 	}
-	head, rest, err := readHead(body, times.body)
+	head, rest, err := s.readHead(body, max(times.body, times.answer-time.Since(asked)))
 	if err != nil {
 		body.Close()
 		return nil, nil, err
@@ -813,6 +935,10 @@ func (s *Service) sniff(ctx context.Context, version library.Version, times live
 	if bytes.HasPrefix(trimmed, []byte("#EXTM3U")) {
 		body.Close()
 		return nil, nil, errManifest
+	}
+	if dashStart(head) {
+		body.Close()
+		return nil, nil, errDASH
 	}
 	mediaType, _, _ := mime.ParseMediaType(response.Header.Get("Content-Type"))
 	switch mediaType {
@@ -855,8 +981,9 @@ func statusFailure(response *http.Response) error {
 		return nil
 	case status == http.StatusServiceUnavailable && strings.HasPrefix(strings.TrimSpace(response.Header.Get("X-HDHomeRun-Error")), "805"):
 		return fmt.Errorf("%w: HTTP %d", ErrTunersBusy, status)
-	case status == http.StatusUnauthorized, status == http.StatusForbidden, status == http.StatusTooManyRequests,
-		status == 458, status == http.StatusServiceUnavailable:
+	case status == http.StatusServiceUnavailable:
+		return fmt.Errorf("%w: HTTP %d", errUnavailable, status)
+	case status == http.StatusUnauthorized, status == http.StatusForbidden, status == http.StatusTooManyRequests, status == 458:
 		return fmt.Errorf("%w: HTTP %d", ErrLiveRefused, status)
 	case status >= 500:
 		return fmt.Errorf("%w: HTTP %d", ErrLiveTimeout, status)
@@ -868,8 +995,9 @@ func statusFailure(response *http.Response) error {
 // readHead reads the first sniffSize bytes of a body, waiting wait at
 // most: fewer is a short body when the body ended, a timeout when fewer
 // than sniffLeast came. It returns the body to read on, which first gives
-// what a read under way when the time ran out brings.
-func readHead(body io.ReadCloser, wait time.Duration) ([]byte, io.ReadCloser, error) {
+// what a read under way when the time ran out brings. A panic of a read
+// is logged and ends the body as a failed read does.
+func (s *Service) readHead(body io.ReadCloser, wait time.Duration) ([]byte, io.ReadCloser, error) {
 	head := make([]byte, sniffSize)
 	results := make(chan readResult, 1)
 	got := 0
@@ -877,14 +1005,16 @@ func readHead(body io.ReadCloser, wait time.Duration) ([]byte, io.ReadCloser, er
 	defer timeout.Stop()
 	for got < sniffSize {
 		go func(at int) {
-			n, err := body.Read(head[at:])
-			results <- readResult{n, err}
+			var r readResult
+			defer func() { results <- r }()
+			defer s.panicked(&r.err, "Reading the first bytes of a feed ended on a panic")
+			r.n, r.err = body.Read(head[at:])
 		}(got)
 		select {
 		case r := <-results:
 			got += r.n
 			if r.err != nil {
-				if got >= sniffLeast || bytes.HasPrefix(head[:got], []byte("#EXTM3U")) {
+				if got >= sniffLeast || bytes.HasPrefix(head[:got], []byte("#EXTM3U")) || dashStart(head[:got]) {
 					return head[:got:got], body, nil
 				}
 				return nil, nil, fmt.Errorf("%w: %d bytes before the end", ErrLiveDead, got)
@@ -997,6 +1127,7 @@ func (s *Service) ServeFeed(w http.ResponseWriter, r *http.Request, version libr
 		return err
 	}
 	defer reader.Close()
+	relayed.Sandbox(w.Header())
 	w.Header().Set("Content-Type", "video/mp2t")
 	w.Header().Set("Cache-Control", "no-store")
 	w.WriteHeader(http.StatusOK)
@@ -1044,8 +1175,11 @@ type tsIndex struct {
 	// indicated is set once the video's packets mark random access points
 	// with the adaptation field's indicator: NAL units are no longer read.
 	indicated bool
-	// keys are the random access points within the ring, oldest first.
-	keys []int64
+	// keys are the random access points within the ring, oldest first,
+	// and times their presentation times, in 90 kHz units, -1 when their
+	// packet does not tell it.
+	keys  []int64
+	times []int64
 }
 
 func newTSIndex() tsIndex {
@@ -1128,7 +1262,51 @@ func (x *tsIndex) add(at int64, data []byte, oldest int64) {
 	for drop < len(x.keys) && x.keys[drop] < oldest {
 		drop++
 	}
-	x.keys = x.keys[drop:]
+	x.keys, x.times = x.keys[drop:], x.times[drop:]
+}
+
+// kept returns the oldest keyframe at or after from within feedLookback of
+// the latest one, by their presentation times; false when either time is
+// not known, or there is none.
+func (x *tsIndex) kept(from int64) (int64, bool) {
+	if x.off || len(x.keys) == 0 || x.times[len(x.times)-1] < 0 {
+		return 0, false
+	}
+	latest := x.times[len(x.times)-1]
+	lookback := int64(feedLookback / time.Second * ptsClock)
+	for i, at := range x.keys {
+		// Presentation times wrap around at 33 bits.
+		if at >= from && x.times[i] >= 0 && (latest-x.times[i])&ptsWrap <= lookback {
+			return at, true
+		}
+	}
+	return 0, false
+}
+
+// The clock of MPEG-TS presentation times, and the mask of their 33 bits.
+const (
+	ptsClock = 90000
+	ptsWrap  = 1<<33 - 1
+)
+
+// key records a keyframe at position at, its time told by the payload of
+// its packet when it starts a PES.
+func (x *tsIndex) key(at int64, start bool, payload []byte) {
+	pts := int64(-1)
+	if start {
+		pts = pesTime(payload)
+	}
+	x.keys, x.times = append(x.keys, at), append(x.times, pts)
+}
+
+// pesTime returns the presentation time a PES header gives, in 90 kHz
+// units, -1 without one.
+func pesTime(payload []byte) int64 {
+	if len(payload) < 14 || payload[0] != 0 || payload[1] != 0 || payload[2] != 1 || payload[7]&0x80 == 0 {
+		return -1
+	}
+	p := payload[9:14]
+	return int64(p[0]>>1&7)<<30 | int64(p[1])<<22 | int64(p[2]>>1)<<15 | int64(p[3])<<7 | int64(p[4]>>1)
 }
 
 // packet indexes one packet, which starts at position at.
@@ -1136,7 +1314,7 @@ func (x *tsIndex) packet(at int64, p []byte) {
 	if p[0] != 0x47 {
 		// Lost packet boundaries: readers start as if no keyframe were known.
 		x.off = true
-		x.keys = nil
+		x.keys, x.times = nil, nil
 		return
 	}
 	pid := int(p[1]&0x1f)<<8 | int(p[2])
@@ -1159,11 +1337,11 @@ func (x *tsIndex) packet(at int64, p []byte) {
 	case pid == x.video && x.video >= 0:
 		if adaptation := p[3]&0x20 != 0; adaptation && p[4] > 0 && p[5]&0x40 != 0 {
 			x.indicated = true
-			x.keys = append(x.keys, at)
+			x.key(at, start, payload)
 			return
 		}
 		if start && !x.indicated && pesKeyframe(payload, x.videoType) {
-			x.keys = append(x.keys, at)
+			x.key(at, start, payload)
 		}
 	}
 }

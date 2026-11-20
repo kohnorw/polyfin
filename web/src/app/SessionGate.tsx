@@ -1,5 +1,6 @@
-import { HouseIcon } from '@phosphor-icons/react'
+import { ArrowLeftIcon } from '@phosphor-icons/react'
 import { useQuery } from '@tanstack/react-query'
+import { useLayoutEffect } from 'react'
 import { Outlet, ScrollRestoration } from 'react-router'
 import { fetchSession, fetchStatus, queryKeys } from '@/api'
 import LoginRoute from '@/features/auth/LoginRoute'
@@ -7,15 +8,20 @@ import SetupRoute from '@/features/auth/SetupRoute'
 import { ServerStatus } from '@/features/home/ServerStatus'
 import { errorMessage } from '@/format'
 import { useI18n } from '@/i18n'
-import { ButtonLink, InlineError, Spinner } from '@/ui'
-import { PageLayout } from './PageLayout'
+import { keepInterfaceSize } from '@/interfaceSize'
+import { webPlayerInPlace, webPlayerLink } from '@/jellyfinApps'
+import { InlineError, Spinner } from '@/ui'
+import { DeadEnd } from './DeadEnd'
 import { useSessionUser } from './session'
 import { AppShell, PublicShell } from './Shell'
 
 function Loading() {
   const { t } = useI18n()
   return (
-    <p role="status" className="flex items-center gap-2.5 text-control text-ink-3">
+    <p
+      role="status"
+      className="flex items-center justify-center gap-3 py-16 text-control text-ink-2"
+    >
       <Spinner />
       {t.common.loading}
     </p>
@@ -25,7 +31,9 @@ function Loading() {
 /**
  * Decides what the whole app shows: setup while no administrator exists, sign-in without a
  * session, and the requested page otherwise. The URL is left untouched so that signing in
- * lands on the page that was asked for.
+ * lands on the page that was asked for. Opened from the web player or inside a Jellyfin app,
+ * sign-in also offers the way back to the web player, the only one after Sign out or when the
+ * web player's sign-in is refused here, as for an account with two-step sign-in.
  */
 export function SessionGate() {
   const { t } = useI18n()
@@ -35,14 +43,20 @@ export function SessionGate() {
     refetchInterval: 10_000,
   })
   const setupRequired = status.data?.setupRequired
+  // Asked together with the status, not after it: before setup, it answers no session.
   const session = useQuery({
     queryKey: queryKeys.session,
     queryFn: ({ signal }) => fetchSession(signal),
-    enabled: setupRequired === false,
     // Read again when the tab comes back after 30 s: a profile picture or a name changed in an
     // app shows on the account button.
     staleTime: 30_000,
   })
+  // The account's interface size, once the session says it, before the frame that shows it; signed
+  // out, the page keeps the last one this browser used.
+  const interfaceSize = session.data?.interfaceSize
+  useLayoutEffect(() => {
+    if (interfaceSize !== undefined) keepInterfaceSize(interfaceSize)
+  }, [interfaceSize])
 
   if (status.data === undefined) {
     return <PublicShell>{status.error === null ? <Loading /> : <ServerStatus />}</PublicShell>
@@ -71,6 +85,17 @@ export function SessionGate() {
     return (
       <PublicShell>
         <LoginRoute />
+        {status.data.webClient === true && webPlayerInPlace() && (
+          <p className="mt-8 text-center">
+            <a
+              {...webPlayerLink(true)}
+              className="focus-lit inline-flex h-13 items-center gap-2.5 rounded-control px-5.5 text-control font-[620] text-ink-2 [--lift:1.05] hover:bg-s1 hover:text-ink"
+            >
+              <ArrowLeftIcon size="1.3125rem" aria-hidden="true" />
+              {t.nav.backToWebPlayer}
+            </a>
+          </p>
+        )}
       </PublicShell>
     )
   }
@@ -88,13 +113,11 @@ export function AdminOnly() {
   const user = useSessionUser()
   if (!user.isAdministrator) {
     return (
-      <PageLayout title={t.forbidden.title} lede={t.forbidden.description}>
-        <div>
-          <ButtonLink to="/" icon={HouseIcon}>
-            {t.forbidden.home}
-          </ButtonLink>
-        </div>
-      </PageLayout>
+      <DeadEnd
+        title={t.forbidden.title}
+        description={t.forbidden.description}
+        home={t.forbidden.home}
+      />
     )
   }
   return <Outlet />

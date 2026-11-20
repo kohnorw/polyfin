@@ -1,7 +1,7 @@
 // Command polyfin-desktop is Polyfin Desktop: Polyfin without Docker, on
 // Windows, macOS and Linux. An icon in the tray, or the menu bar on macOS,
 // starts the database and the server in the background, shows whether
-// they run, opens the admin app, the web client and the log folder, and
+// they run, opens the admin app, the web player and the log folder, and
 // quits, stopping them. See docs/desktop.md.
 //
 // With -headless it runs without the icon, the browser and the login
@@ -106,7 +106,7 @@ func run(headless, background bool) error {
 		out = io.MultiWriter(logFile, os.Stderr)
 	}
 	logger := slog.New(slog.NewTextHandler(out, nil))
-	logLibraries(logger)
+	trayRefused := logLibraries(logger)
 
 	release, err := app.Lock(folders.Lock())
 	if errors.Is(err, app.ErrRunning) {
@@ -121,12 +121,18 @@ func run(headless, background bool) error {
 		return err
 	}
 	defer release()
-	// polyfin-desktop -quit asks this app to quit.
+	// polyfin-desktop -quit asks this app to quit, and the admin app to
+	// install the update it offers.
 	quitRequested, stopListening, err := app.ListenQuit(folders)
 	if err != nil {
 		return err
 	}
 	defer stopListening()
+	installRequested, stopInstallListening, err := app.ListenInstall(folders)
+	if err != nil {
+		return err
+	}
+	defer stopInstallListening()
 
 	manifest, err := toolsManifest()
 	if err != nil {
@@ -153,16 +159,28 @@ func run(headless, background bool) error {
 		}
 	}
 	logger.Info("Polyfin Desktop starts", "version", version, "data", folders.Data, "install", install.Dir)
+	asked := requests{quit: quitRequested, install: installRequested}
+	var relaunch *exec.Cmd
 	if headless {
-		return runHeadless(options, logger, quitRequested)
+		relaunch = runHeadless(options, logger, asked)
+	} else {
+		relaunch = runTray(options, logger, asked, trayRefused)
 	}
-	relaunch := runTray(options, logger, quitRequested)
+	stopInstallListening()
 	stopListening()
 	release()
 	if relaunch != nil {
 		return startAfterQuit(relaunch)
 	}
 	return nil
+}
+
+// requests are what other programs ask the app: polyfin-desktop -quit to
+// quit, and the server, for the admin app, to install the update the app
+// offers, by its version.
+type requests struct {
+	quit    <-chan struct{}
+	install <-chan string
 }
 
 // importSecretKey stores the key of file in place of the data folder's,
@@ -208,8 +226,10 @@ func toolsManifest() (tools.Manifest, error) {
 }
 
 // runHeadless runs until an interrupt, or a request to quit, then stops
-// everything.
-func runHeadless(options app.Options, logger *slog.Logger, quitRequested <-chan struct{}) error {
+// everything. An install the admin app asks for is installed as the
+// tray's Install Polyfin <version> does: it returns what to start once the
+// app has quit, nil when nothing is.
+func runHeadless(options app.Options, logger *slog.Logger, asked requests) *exec.Cmd {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	var mu sync.Mutex
@@ -224,23 +244,88 @@ func runHeadless(options app.Options, logger *slog.Logger, quitRequested <-chan 
 	}
 	a := app.New(options)
 	a.Start()
-	select {
-	case <-ctx.Done():
-		logger.Info("Quitting")
-	case <-quitRequested:
-		logger.Info("Quitting, as polyfin-desktop -quit asked")
+	for {
+		select {
+		case <-ctx.Done():
+			logger.Info("Quitting")
+		case <-asked.quit:
+			logger.Info("Quitting, as polyfin-desktop -quit asked")
+		case version := <-asked.install:
+			if !offers(a, version, logger) {
+				continue
+			}
+			// A failure is logged, and Polyfin runs on.
+			relaunch, err := a.InstallUpdate(ctx)
+			if err != nil {
+				continue
+			}
+			quit(a)
+			logger.Info("Polyfin Desktop quit to start the new version")
+			return relaunch
+		case previous := <-a.RolledBack():
+			quit(a)
+			logger.Info("Polyfin Desktop quit to start the previous version")
+			return previous
+		}
+		quit(a)
+		logger.Info("Polyfin Desktop quit")
+		return nil
 	}
-	quit(a)
-	logger.Info("Polyfin Desktop quit")
-	return nil
+}
+
+// offers tells whether the app offers version while Polyfin runs, as the
+// tray's Install Polyfin <version> shows it, for an install the admin app
+// asks: one of another version, or while Polyfin does not run, is
+// ignored.
+func offers(a *app.App, version string, logger *slog.Logger) bool {
+	s := a.Status()
+	if s.Offer == nil || s.Offer.Version != version || s.Phase != app.Running {
+		logger.Warn("The admin app asked to install a version that is not offered now", "version", version)
+		return false
+	}
+	logger.Info("Installing the new version, as the admin app asked", "version", version)
+	return true
 }
 
 // logLibraries sends what libraries write with the standard log package,
 // such as the tray's errors, to the app's log as warnings: an app without
-// a console has nowhere else to show them.
-func logLibraries(logger *slog.Logger) {
-	slog.SetDefault(logger)
+// a console has nowhere else to show them. The channel it returns is
+// closed once the tray's library writes that it gave up on the icon.
+func logLibraries(logger *slog.Logger) <-chan struct{} {
+	h := &libraryHandler{Handler: logger.Handler(), refused: make(chan struct{}), once: &sync.Once{}}
+	slog.SetDefault(slog.New(h))
 	slog.SetLogLoggerLevel(slog.LevelWarn)
+	return h.refused
+}
+
+// trayRefusals begin the lines the tray's library writes on Windows when
+// it cannot make the icon. It then returns before the icon's onReady, and
+// never tries again: the icon will not show.
+var trayRefusals = []string{"systray error: unable to init instance:", "systray error: unable to create menu:"}
+
+// libraryHandler passes the libraries' lines on, and closes refused at the
+// first of trayRefusals.
+type libraryHandler struct {
+	slog.Handler
+	refused chan struct{}
+	once    *sync.Once
+}
+
+func (h *libraryHandler) Handle(ctx context.Context, r slog.Record) error {
+	for _, refusal := range trayRefusals {
+		if strings.HasPrefix(r.Message, refusal) {
+			h.once.Do(func() { close(h.refused) })
+		}
+	}
+	return h.Handler.Handle(ctx, r)
+}
+
+func (h *libraryHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	return &libraryHandler{Handler: h.Handler.WithAttrs(attrs), refused: h.refused, once: h.once}
+}
+
+func (h *libraryHandler) WithGroup(name string) slog.Handler {
+	return &libraryHandler{Handler: h.Handler.WithGroup(name), refused: h.refused, once: h.once}
 }
 
 // quit stops the server and the database, waiting for them.
@@ -276,8 +361,8 @@ func requestQuit() int {
 	return 1
 }
 
-// startAfterQuit starts the new app, or the installer, once this one
-// let its data folder go.
+// startAfterQuit starts the new app, or the system's package installer,
+// once this one let its data folder go.
 func startAfterQuit(cmd *exec.Cmd) error {
 	if err := cmd.Start(); err != nil {
 		return err

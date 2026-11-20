@@ -2,6 +2,7 @@ package playback
 
 import (
 	"math/bits"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -26,6 +27,15 @@ type Options struct {
 	// EnableDirectPlay false refuses direct play, with DirectPlayError when
 	// nothing else would refuse it.
 	EnableDirectPlay bool
+	// DirectPlayOff tells that the app itself asked for no direct play,
+	// as the Jellyfin app for Android does after playback errors, with
+	// EnableDirectPlay false. The direct-play check still runs, as in
+	// Jellyfin 12.4 (StreamBuilder.GetVideoDirectPlayProfile, L1392-L1426):
+	// a source that would have played as it is gets DirectPlayError beside
+	// the reasons its conversion has, and one that would not gets the
+	// reasons the check found. Polyfin's own refusals, such as a disc's,
+	// leave it false and skip the check.
+	DirectPlayOff bool
 	// EnableDirectStream changes nothing on its own: Jellyfin 12.2 answers
 	// the same whether it is set or not.
 	EnableDirectStream bool
@@ -47,13 +57,6 @@ type Options struct {
 	Progressive bool
 	// Can is what the installed FFmpeg converts with.
 	Can Capabilities
-	// SubtitleExtraction is Jellyfin's EnableSubtitleExtraction, its
-	// transcoder's CanExtractSubtitles: a transcode gives the text tracks
-	// inside the file as files or in HLS, extracted while the app waits.
-	SubtitleExtraction bool
-	// InfiniteStream is Jellyfin's MediaSourceInfo.IsInfiniteStream: a live
-	// stream's subtitles are not converted to files.
-	InfiniteStream bool
 }
 
 // MediaSource is a version as the decision sees it.
@@ -77,6 +80,10 @@ type Decision struct {
 	// direct play is refused. They are empty when the app cannot transcode
 	// either, since Jellyfin reports them nowhere then.
 	Reasons []string
+	// DirectPlayOff is set when the app turned direct play off for a
+	// source that would have played as it is (see Options.DirectPlayOff):
+	// DirectPlayError is then among the Reasons.
+	DirectPlayOff bool
 	// AudioStreamIndex is the chosen audio track, -1 if none.
 	AudioStreamIndex int
 	// SubtitleStreamIndex is the chosen subtitle track, -1 if none.
@@ -96,6 +103,14 @@ type Decision struct {
 	Progressive bool
 	Video       *VideoConversion
 	Audio       *AudioConversion
+	// Caps are what the app's profile allows the video converted, which
+	// the TranscodingUrl carries (see AppCaps); Limit, when the profile's
+	// bitrate cap is below what the bitrate limit leaves the video, the
+	// limit the conversion counts with: that cap with the audio sent, as
+	// HLS requests read the two back. Both are zero when the video is not
+	// converted.
+	Caps  AppCaps
+	Limit int64
 }
 
 // Streamed reports whether Polyfin streams the source, copied or
@@ -203,11 +218,13 @@ func (r reason) names() []string {
 // refused for another reason, as Jellyfin does. Codec, container and
 // subtitle requirements apply to the whole source; of the direct-play
 // profiles, the one with the fewest failures, first in order, gives the
-// container and codec reasons.
+// container and codec reasons. A source whose bitrate is not known, as a
+// live HLS stream's, counts against the bitrate limit as the usual
+// bitrate of its height (see countedBitrate).
 func Decide(profile *DeviceProfile, source MediaSource, options Options) Decision {
-	d := decider{profile: profile, source: source, options: options}
+	d := decider{profile: profile, source: source}
 	d.locate(options)
-	decision := Decision{AudioStreamIndex: -1, SubtitleStreamIndex: -1, Transcoding: d.transcoding()}
+	decision := Decision{AudioStreamIndex: -1, SubtitleStreamIndex: -1, Transcoding: d.transcoding(options.Progressive)}
 	if d.played != nil {
 		decision.AudioStreamIndex = d.played.Index
 	}
@@ -223,18 +240,24 @@ func Decide(profile *DeviceProfile, source MediaSource, options Options) Decisio
 	if limit <= 0 && profile.MaxStreamingBitrate != nil {
 		limit = *profile.MaxStreamingBitrate
 	}
-	if limit > 0 && source.Bitrate > limit {
+	if limit > 0 && d.countedBitrate() > limit {
 		reasons |= containerBitrateExceedsLimit
 	}
 	var matched *DirectPlayProfile
-	if options.EnableDirectPlay && reasons == 0 {
+	// refused is set when the app turned direct play off for a source that
+	// would have played as it is.
+	refused := false
+	if (options.EnableDirectPlay || options.DirectPlayOff) && reasons == 0 {
 		var why reason
 		matched, why = d.directPlay()
 		reasons |= why
+		if !options.EnableDirectPlay {
+			refused, matched = matched != nil, nil
+		}
 	}
 	tall := d.taller(options.MaxHeight)
 	if tall {
-		matched, reasons = nil, reasons|videoResolutionNotSupported
+		matched, refused, reasons = nil, false, reasons|videoResolutionNotSupported
 	}
 	decision.DirectPlay = matched != nil
 	if decision.DirectPlay {
@@ -242,13 +265,21 @@ func Decide(profile *DeviceProfile, source MediaSource, options Options) Decisio
 	} else {
 		decision.Container = singleContainer(source.Container, nil, profile.DirectPlayProfiles)
 		if t := decision.Transcoding; t != nil {
-			streamed, video, audio := d.stream(t, options, limit, reasons&containerBitrateExceedsLimit != 0 || tall)
+			reasons |= d.transcodeReasons(t)
+			caps := d.appCaps(t, reasons)
+			streamed, video, audio, played := d.stream(t, options, limit, reasons&containerBitrateExceedsLimit != 0 || tall, caps)
 			decision.HLS, decision.Progressive = streamed && strings.EqualFold(t.Protocol, "hls"), streamed && !strings.EqualFold(t.Protocol, "hls")
 			decision.Video, decision.Audio = video, audio
-			reasons |= d.transcodeReasons(t)
-			if reasons == 0 {
-				reasons = directPlayError
+			if video != nil {
+				decision.Caps = caps
+				if played != limit {
+					decision.Limit = played
+				}
 			}
+			if reasons == 0 || refused {
+				reasons |= directPlayError
+			}
+			decision.DirectPlayOff = refused
 			decision.Reasons = reasons.names()
 		}
 	}
@@ -262,18 +293,37 @@ func Decide(profile *DeviceProfile, source MediaSource, options Options) Decisio
 			decision.Subtitles = map[int]SubtitleDelivery{}
 		}
 		if t := decision.Transcoding; !decision.DirectPlay && t != nil {
-			decision.Subtitles[stream.Index] = subtitleDelivery(profile.SubtitleProfiles, stream, true, t.Container, t.Protocol, options)
+			decision.Subtitles[stream.Index] = subtitleDelivery(profile.SubtitleProfiles, stream, true, t.Container, t.Protocol)
 		} else {
-			decision.Subtitles[stream.Index] = subtitleDelivery(profile.SubtitleProfiles, stream, false, source.Container, "", options)
+			decision.Subtitles[stream.Index] = subtitleDelivery(profile.SubtitleProfiles, stream, false, source.Container, "")
 		}
 	}
 	return decision
 }
 
+// countedBitrate is the bitrate the source counts as against a bitrate
+// limit: its own, else the usual bitrate of its height, which converted
+// video gets when its source's is not known (see rungs): 10 Mb/s for
+// 1080p. Jellyfin 12.4's StreamBuilder.IsBitrateLimitExceeded (lines
+// 1655-1679) never limits a remote source, and counts a local one whose
+// bitrate it does not know as 40 Mb/s: Polyfin limits every source, so
+// that a lower quality picked during a play converts a live stream too.
+func (d *decider) countedBitrate() int64 {
+	if d.source.Bitrate > 0 || d.video == nil {
+		return d.source.Bitrate
+	}
+	class := sizeClass(*d.video)
+	for _, r := range rungs {
+		if r.height == class {
+			return r.usual
+		}
+	}
+	return 0
+}
+
 // decider holds what a decision looks at.
 type decider struct {
 	profile *DeviceProfile
-	options Options
 	source  MediaSource
 	video   *MediaStream
 	// played is the audio track that plays: asked for, flagged default or
@@ -346,8 +396,8 @@ func (d *decider) taller(height int) bool {
 func (d *decider) directPlay() (*DirectPlayProfile, reason) {
 	shared := d.codecReasons(d.source.Container) | d.containerReasons()
 	if d.subtitle != nil {
-		switch subtitleDelivery(d.profile.SubtitleProfiles, d.subtitle, false, d.source.Container, "", d.options).Method {
-		case "Embed", "External", "Drop":
+		switch subtitleDelivery(d.profile.SubtitleProfiles, d.subtitle, false, d.source.Container, "").Method {
+		case "Embed", "External":
 		default:
 			shared |= subtitleCodecNotSupported
 		}
@@ -435,8 +485,11 @@ func (d *decider) containerReasons() reason {
 
 // transcoding picks the video TranscodingProfile for streaming: the first
 // that keeps the video, preferably meeting its codec profiles, then the
-// first that keeps the audio that plays.
-func (d *decider) transcoding() *TranscodingProfile {
+// first that keeps the audio that plays. Profiles Polyfin cannot stream,
+// http ones unless progressive is allowed (see stream), rank after every
+// other: an app whose best fit is a progressive file then plays over its
+// HLS profile instead of not at all.
+func (d *decider) transcoding(progressive bool) *TranscodingProfile {
 	var best *TranscodingProfile
 	bestRank := 0
 	for i := range d.profile.TranscodingProfiles {
@@ -445,6 +498,9 @@ func (d *decider) transcoding() *TranscodingProfile {
 			continue
 		}
 		rank := 0
+		if _, oneFile := hls.ParseFormat(candidate.Container); !strings.EqualFold(candidate.Protocol, "hls") && !(progressive && oneFile) {
+			rank += 8
+		}
 		if d.video != nil {
 			switch {
 			case !listHas(candidate.VideoCodec, d.video.Codec):
@@ -464,16 +520,131 @@ func (d *decider) transcoding() *TranscodingProfile {
 }
 
 // transcodeReasons are what transcoding with t cannot keep: a video codec
-// it does not take, and audio that is not taken or not flagged.
+// it does not take, and audio that is not taken, not carried by its HLS
+// segments, or not flagged.
 func (d *decider) transcodeReasons(t *TranscodingProfile) reason {
 	var why reason
 	if d.video != nil && !listHas(t.VideoCodec, d.video.Codec) {
 		why |= videoCodecNotSupported
 	}
-	if d.hasAudio && (d.checked == nil || !listHas(t.AudioCodec, d.checked.Codec)) {
+	if d.hasAudio && (d.checked == nil || !streamCarries(t, d.checked.Codec)) {
 		why |= audioCodecNotSupported
 	}
 	return why
+}
+
+// hlsVideoCodecs are the video codecs Jellyfin streams over HLS.
+var hlsVideoCodecs = []string{"h264", "hevc", "vp9", "av1"}
+
+// videoReasonBits are Jellyfin's VideoReasons: those about the video.
+const videoReasonBits = videoCodecNotSupported | videoResolutionNotSupported | anamorphicVideoNotSupported | interlacedVideoNotSupported |
+	videoBitDepthNotSupported | videoBitrateNotSupported | videoFramerateNotSupported | videoLevelNotSupported | refFramesNotSupported |
+	videoRangeTypeNotSupported | videoProfileNotSupported
+
+// appCaps are what the app's profile allows video converted with t, as
+// Jellyfin's StreamBuilder applies its conditions to what it converts to
+// (BuildStreamVideoItem, ApplyTranscodingConditions): the conditions of
+// the Video codec profiles naming one of the codecs t converts to, over
+// HLS those Jellyfin streams so, in t's container, whose ApplyConditions
+// the source meets, the first profile prevailing; then, when the video
+// does not play as it is or the source is above the bitrate limit (in
+// reasons), those of t itself. Width, Height, VideoBitrate and
+// VideoFramerate cap whatever the codec; VideoLevel and VideoProfile
+// apply to the codec of the profile naming them, never in t's own. Equals
+// sets the value and LessThanEqual lowers it, whether the condition is
+// required or not; other comparisons, and values that are not numbers
+// where numbers are read, are left out, as Jellyfin leaves them.
+func (d *decider) appCaps(t *TranscodingProfile, reasons reason) AppCaps {
+	var caps AppCaps
+	hlsStream := strings.EqualFold(t.Protocol, "hls")
+	var codecs []string
+	for codec := range strings.SplitSeq(t.VideoCodec, ",") {
+		if codec = strings.ToLower(strings.TrimSpace(codec)); codec != "" && (!hlsStream || slices.Contains(hlsVideoCodecs, codec)) {
+			codecs = append(codecs, codec)
+		}
+	}
+	s := d.subject()
+	for i := len(d.profile.CodecProfiles) - 1; i >= 0; i-- {
+		profile := &d.profile.CodecProfiles[i]
+		container := profile.Container
+		if hlsStream && strings.EqualFold(container, "hls") {
+			container = profile.SubContainer
+		}
+		if profile.Type != "Video" || !listMeets(container, t.Container) || !s.holdAll(profile.ApplyConditions) {
+			continue
+		}
+		for _, codec := range codecs {
+			if listHas(profile.Codec, codec) {
+				caps.apply(profile.Conditions, codec)
+			}
+		}
+	}
+	if reasons&(videoReasonBits|containerBitrateExceedsLimit) != 0 {
+		caps.apply(t.Conditions, "")
+	}
+	return caps
+}
+
+// apply applies conditions to caps, those about a codec's own properties
+// only for codec, when there is one.
+func (c *AppCaps) apply(conditions []ProfileCondition, codec string) {
+	for _, condition := range conditions {
+		value := strings.TrimSpace(condition.Value)
+		if value == "" || condition.Condition != "Equals" && condition.Condition != "LessThanEqual" && condition.Condition != "EqualsAny" {
+			continue
+		}
+		lower := func(current, n int64) int64 {
+			if condition.Condition == "Equals" || current <= 0 {
+				return n
+			}
+			return min(current, n)
+		}
+		n, err := strconv.ParseInt(value, 10, 64)
+		number := err == nil && condition.Condition != "EqualsAny"
+		switch condition.Property {
+		case "Width":
+			if number {
+				c.Width = int(lower(int64(c.Width), n))
+			}
+		case "Height":
+			if number {
+				c.Height = int(lower(int64(c.Height), n))
+			}
+		case "VideoBitrate":
+			if number {
+				c.Bitrate = lower(c.Bitrate, n)
+			}
+		case "VideoFramerate":
+			if rate, err := strconv.ParseFloat(value, 64); err == nil && condition.Condition != "EqualsAny" {
+				if condition.Condition == "Equals" || c.FrameRate <= 0 {
+					c.FrameRate = rate
+				} else {
+					c.FrameRate = min(c.FrameRate, rate)
+				}
+			}
+		case "VideoLevel":
+			if number && codec != "" {
+				if c.Levels == nil {
+					c.Levels = map[string]int{}
+				}
+				c.Levels[codec] = int(lower(int64(c.Levels[codec]), n))
+			}
+		case "VideoProfile":
+			if codec != "h264" || condition.Condition == "LessThanEqual" {
+				continue
+			}
+			var allowed []string
+			for choice := range strings.SplitSeq(value, "|") {
+				if choice = strings.ToLower(strings.ReplaceAll(choice, " ", "")); choice != "" {
+					allowed = append(allowed, choice)
+				}
+			}
+			if c.H264Profiles != nil {
+				allowed = slices.DeleteFunc(allowed, func(p string) bool { return !slices.Contains(c.H264Profiles, p) })
+			}
+			c.H264Profiles = allowed
+		}
+	}
 }
 
 // stream decides whether Polyfin can stream the source with t, over HLS,
@@ -481,60 +652,129 @@ func (d *decider) transcodeReasons(t *TranscodingProfile) reason {
 // and how the video and the audio that plays then reach the app. The video
 // is copied when t takes its codec, the codec profiles of its container
 // accept it with the codec tag a remux writes, and the source fits the
-// bitrate limit; else it is converted. The audio is copied when t takes
-// its codec and channels and the codec profiles accept it, as the only
-// audio, so never a secondary track; else it is converted to a codec t
-// takes.
-func (d *decider) stream(t *TranscodingProfile, options Options, limit int64, mustConvert bool) (bool, *VideoConversion, *AudioConversion) {
+// bitrate limit; else it is converted, within what the limit leaves once
+// the audio sent is taken off (see SentAudioBitrate). The audio is copied
+// when t takes its codec and channels, its HLS segments carry the codec,
+// and the codec profiles accept it, as the only audio, so never a
+// secondary track, and, when the video is converted under a limit, when
+// it fits the audio's share of the limit (see streamAudio); else it is
+// converted to a codec t takes and its segments carry. Converted
+// video keeps within caps, what the app's profile allows (see appCaps);
+// a bitrate cap below what the limit leaves the video becomes the limit,
+// with the audio sent, which the audio is then decided under too: the
+// HLS requests, which see only the bitrates the TranscodingUrl gives, so
+// decide the same. played is the limit the conversion counts with.
+func (d *decider) stream(t *TranscodingProfile, options Options, limit int64, mustConvert bool, caps AppCaps) (bool, *VideoConversion, *AudioConversion, int64) {
 	// Streamed as one file, the video goes out as fragmented MP4 or
 	// MPEG-TS, the containers hls.ParseFormat reads.
 	_, oneFile := hls.ParseFormat(t.Container)
 	hlsStream, progressive := strings.EqualFold(t.Protocol, "hls"), strings.EqualFold(t.Protocol, "http") && options.Progressive && oneFile
 	if !hlsStream && !progressive || d.video == nil {
-		return false, nil, nil
+		return false, nil, nil, limit
 	}
 	s := subject{video: d.video, codecTag: RemuxTag(d.video.Codec, t.Container)}
+	convertVideo := options.ConvertVideo || mustConvert || !listHas(t.VideoCodec, d.video.Codec) || d.remuxFails("Video", d.video, t.Container, s)
+	audio, audioStreams := d.streamAudio(t, options, limit, convertVideo, s)
+	played := limit
 	var video *VideoConversion
-	if options.ConvertVideo || mustConvert || !listHas(t.VideoCodec, d.video.Codec) || d.remuxFails("Video", d.video, t.Container, s) {
+	if convertVideo {
+		// Each round can only lower the audio sent: two settle it.
+		for range 3 {
+			sent := SentAudioBitrate(d.played, audio)
+			if caps.Bitrate <= 0 || played > 0 && VideoLimit(played, sent) <= caps.Bitrate {
+				break
+			}
+			played = caps.Bitrate + sent
+			audio, audioStreams = d.streamAudio(t, options, played, true, s)
+		}
+		if played != limit {
+			played = caps.Bitrate + SentAudioBitrate(d.played, audio)
+		}
 		// Converted video is scaled down to the lower of the heights it is
 		// capped at, which never prevents a conversion.
-		limits := Limits{Bitrate: limit, Video: VideoLimit(limit, d.played), Group: options.MaxHeight, Server: options.ConversionHeight}
-		limits.ByUser = options.UserBitrate > 0 && limit > 0 && limit >= options.UserBitrate
+		limits := Limits{Bitrate: played, Video: VideoLimit(played, SentAudioBitrate(d.played, audio)), Group: options.MaxHeight,
+			Server: options.ConversionHeight, App: caps}
+		if caps.Bitrate > 0 {
+			limits.Video = min(limits.Video, caps.Bitrate)
+		}
+		limits.ByUser = options.UserBitrate > 0 && played > 0 && played >= options.UserBitrate
 		if video = ConvertVideo(t.VideoCodec, limits, *d.video, options.Can); video == nil {
-			return false, nil, nil
+			return false, nil, nil, limit
 		}
 	}
+	return audioStreams, video, audio, played
+}
+
+// streamAudio decides how the audio that plays reaches the app streamed
+// with t under a bitrate limit, 0 for none: copied (nil, true), converted
+// (its conversion, true), or not at all (nil, false) when t takes no codec
+// Polyfin encodes. Over HLS, only a codec the segments carry is copied or
+// converted to (see StreamAudioCodecs). With the video converted under a
+// limit, a track whose bitrate is above the audio's share of the limit
+// (see audioShare) is converted, as Jellyfin's encoder refuses to copy a
+// track above the audio bitrate it counts, that share at most: copied, it
+// would leave the video too little. It is copied all the same when t
+// takes no codec Polyfin encodes. A track copied with the video fits the
+// limit with it.
+func (d *decider) streamAudio(t *TranscodingProfile, options Options, limit int64, convertVideo bool, s subject) (*AudioConversion, bool) {
 	audio := d.played
 	if audio == nil {
-		return true, video, nil
+		return nil, true
 	}
 	s.audio = audio
 	channelsTaken := true
 	if most, err := strconv.Atoi(t.MaxAudioChannels); err == nil && audio.Channels != nil && *audio.Channels > most {
 		channelsTaken = false
 	}
-	if !options.ConvertAudio && channelsTaken && listHas(t.AudioCodec, audio.Codec) && !d.remuxFails("VideoAudio", audio, t.Container, s) {
-		return true, video, nil
+	copyable := !options.ConvertAudio && channelsTaken && streamCarries(t, audio.Codec) && !d.remuxFails("VideoAudio", audio, t.Container, s)
+	heavy := convertVideo && limit > 0 && audio.BitRate != nil && *audio.BitRate > audioShare(limit)
+	if copyable && !heavy {
+		return nil, true
 	}
-	channels := 0
+	source := AudioSource{Codec: audio.Codec, ChannelLayout: audio.ChannelLayout}
 	if audio.Channels != nil {
-		channels = *audio.Channels
+		source.Channels = *audio.Channels
 	}
-	conversion := ConvertAudio(t.AudioCodec, t.MaxAudioChannels, channels, audio.ChannelLayout, options.Can.Tuning)
-	return conversion != nil, video, conversion
+	if audio.SampleRate != nil {
+		source.SampleRate = *audio.SampleRate
+	}
+	conversion := ConvertAudio(StreamAudioCodecs(t), t.MaxAudioChannels, source, limit, options.Can.Tuning)
+	if conversion == nil && copyable {
+		return nil, true
+	}
+	return conversion, conversion != nil
+}
+
+// SentAudioBitrate is the bitrate of the audio sent for played, the audio
+// track that plays: its conversion's when it is converted to a lossy
+// codec, else the track's own, copied or converted without loss. A track
+// whose bitrate is not known counts as Jellyfin's StreamBuilder counts
+// it, as lossy audio of its channels (see audioBitrateFor). Zero means no
+// audio.
+func SentAudioBitrate(played *MediaStream, conversion *AudioConversion) int64 {
+	switch {
+	case conversion != nil && conversion.Bitrate > 0:
+		return conversion.Bitrate
+	case played == nil:
+		return 0
+	case played.BitRate != nil && *played.BitRate > 0:
+		return *played.BitRate
+	}
+	channels := 2
+	if played.Channels != nil && *played.Channels > 0 {
+		channels = *played.Channels
+	}
+	return audioBitrateFor(channels, 0)
 }
 
 // VideoLimit is what a bitrate limit leaves the video, as Jellyfin writes
-// it in a TranscodingUrl: the limit less the source bitrate of the audio
-// that plays. Zero means no limit.
-func VideoLimit(limit int64, audio *MediaStream) int64 {
+// it in a TranscodingUrl: the limit less the bitrate of the audio sent
+// (see SentAudioBitrate). Zero means no limit.
+func VideoLimit(limit, audioBitrate int64) int64 {
 	if limit <= 0 {
 		return 0
 	}
-	if audio != nil && audio.BitRate != nil {
-		limit -= *audio.BitRate
-	}
-	return max(limit, 1)
+	return max(limit-audioBitrate, 1)
 }
 
 // remuxFails reports whether a codec profile of a type refuses stream in a
@@ -590,147 +830,79 @@ func singleContainer(source string, matched *DirectPlayProfile, profiles []Direc
 }
 
 // subtitleDelivery is how stream reaches the app, when direct playing
-// container or when transcoding to container over protocol, as Jellyfin
-// 12.4's StreamBuilder.GetSubtitleProfile chooses it:
-//   - embedded, in its own format, then in another text format it converts
-//     to, when it may be (see canConsiderEmbed);
+// container or when transcoding to container over protocol:
+//   - embedded in the stream, in its own format, then in another text
+//     format, unless the stream is a sidecar or the output cannot carry it;
 //   - as a file or in the HLS playlist (HLS only when transcoding), in its
-//     own format, then converted to another text format; a track inside
-//     the file goes out so while transcoding only when the server extracts
-//     subtitles on the fly (Options.SubtitleExtraction), or is PGS or
-//     VobSub; VobSub goes out as a file only extracted as Matroska, to a
-//     profile naming "mks" among its containers;
+//     own format, then converted to another text format;
 //   - otherwise burned into the video.
-func subtitleDelivery(profiles []SubtitleProfile, stream *MediaStream, transcode bool, container, protocol string, options Options) SubtitleDelivery {
-	if canConsiderEmbed(stream, transcode, protocol, container) {
-		for convert := range 2 {
-			for i := range profiles {
-				p := &profiles[i]
-				if !supportsLanguage(p, stream.Language) || p.Method != "Embed" || !listMeets(p.Container, container) ||
-					transcode && !embedsSubtitles(container) {
-					continue
-				}
-				if convert == 0 && stream.IsTextSubtitleStream == textSubtitle(p.Format) && strings.EqualFold(p.Format, stream.Codec) ||
-					convert == 1 && stream.IsTextSubtitleStream && convertible(stream, p.Format) {
-					return SubtitleDelivery{Method: p.Method, Format: p.Format}
-				}
+//
+// A VobSub file is a pair, an .idx and a .sub file, which no app takes as
+// one file: Jellyfin 12.2 gives VobSub as a file only extracted as
+// Matroska (.mks), and burns such a pair in.
+func subtitleDelivery(profiles []SubtitleProfile, stream *MediaStream, transcode bool, container, protocol string) SubtitleDelivery {
+	language := stream.Language
+	if language == "" {
+		language = "und"
+	}
+	embeddable := !stream.IsExternal && (!transcode || (!strings.EqualFold(protocol, "hls") && embedsSubtitles(container)))
+	for convert := range 2 {
+		if !embeddable {
+			break
+		}
+		for i := range profiles {
+			p := &profiles[i]
+			if p.Method != "Embed" || !listHas(p.Language, language) || !listMeets(p.Container, container) || stream.IsTextSubtitleStream != textSubtitle(p.Format) {
+				continue
+			}
+			if strings.EqualFold(p.Format, stream.Codec) || (convert == 1 && stream.IsTextSubtitleStream && convertible(stream.Codec, p.Format)) {
+				return SubtitleDelivery{Method: p.Method, Format: p.Format}
 			}
 		}
 	}
-	for _, allowConversion := range [...]bool{false, true} {
-		if p := externalSubtitleProfile(profiles, stream, transcode, options, allowConversion); p != nil {
-			return SubtitleDelivery{Method: p.Method, Format: p.Format}
+	for convert := range 2 {
+		for i := range profiles {
+			p := &profiles[i]
+			switch {
+			case p.Method == "External" && stream.IsTextSubtitleStream == textSubtitle(p.Format) && !(stream.IsExternal && strings.EqualFold(stream.Codec, "DVDSUB")):
+			case p.Method == "Hls" && transcode && stream.IsTextSubtitleStream:
+			default:
+				continue
+			}
+			if !listHas(p.Language, language) {
+				continue
+			}
+			if strings.EqualFold(p.Format, stream.Codec) || (convert == 1 && stream.IsTextSubtitleStream && stream.SupportsExternalStream && convertible(stream.Codec, p.Format)) {
+				return SubtitleDelivery{Method: p.Method, Format: p.Format}
+			}
 		}
 	}
 	return SubtitleDelivery{Method: "Encode", Format: stream.Codec}
 }
 
-// externalSubtitleProfile is Jellyfin 12.4's
-// StreamBuilder.GetExternalSubtitleProfile.
-func externalSubtitleProfile(profiles []SubtitleProfile, stream *MediaStream, transcode bool, options Options, allowConversion bool) *SubtitleProfile {
-	for i := range profiles {
-		p := &profiles[i]
-		if p.Method != "External" && p.Method != "Hls" || p.Method == "Hls" && !transcode || !supportsLanguage(p, stream.Language) {
-			continue
-		}
-		if !stream.IsExternal && transcode && !options.SubtitleExtraction && !pgsSubtitle(stream) && !vobSubSubtitle(stream) {
-			continue
-		}
-		mks := vobSubMksProfile(p, stream)
-		if !(p.Method == "External" && (mks || !vobSubMksDelivery(p) && stream.IsTextSubtitleStream == textSubtitle(p.Format)) ||
-			p.Method == "Hls" && stream.IsTextSubtitleStream) {
-			continue
-		}
-		if mks || strings.EqualFold(stream.Codec, p.Format) {
-			return p
-		}
-		if !allowConversion || options.InfiniteStream {
-			continue
-		}
-		if stream.IsTextSubtitleStream && stream.SupportsExternalStream && convertible(stream, p.Format) {
-			return p
-		}
-	}
-	return nil
-}
-
-// canConsiderEmbed is Jellyfin 12.4's
-// StreamBuilder.CanConsiderEmbedSubtitle: a file may be embedded only in a
-// transcode to Matroska that is not HLS; a track inside the file, unless
-// transcoding over HLS.
-func canConsiderEmbed(stream *MediaStream, transcode bool, protocol, container string) bool {
-	if stream.IsExternal {
-		return transcode && !strings.EqualFold(protocol, "hls") && embedsSubtitles(container)
-	}
-	return !transcode || !strings.EqualFold(protocol, "hls")
-}
-
-// supportsLanguage is Jellyfin's SubtitleProfile.SupportsLanguage.
-func supportsLanguage(p *SubtitleProfile, language string) bool {
-	if p.Language == "" {
-		return true
-	}
-	if language == "" {
-		language = "und"
-	}
-	return listMeets(p.Language, language)
-}
-
-// vobSubMksDelivery is Jellyfin 12.4's IsVobSubMksDeliveryProfile: a VobSub
-// profile whose containers name "mks".
-func vobSubMksDelivery(p *SubtitleProfile) bool {
-	return vobSubFormat(p.Format) && strings.TrimSpace(p.Container) != "" && listMeets(p.Container, "mks")
-}
-
-// vobSubMksProfile is Jellyfin 12.4's IsVobSubMksProfile: VobSub goes out
-// as a file only extracted as Matroska, as FFmpeg cannot write an .idx and
-// .sub pair.
-func vobSubMksProfile(p *SubtitleProfile, stream *MediaStream) bool {
-	return vobSubMksDelivery(p) && vobSubSubtitle(stream) && !stream.IsExternal
-}
-
-// embedsSubtitles is Jellyfin's IsSubtitleEmbedSupported: a transcode to
-// Matroska keeps subtitle tracks, one to MPEG-TS or MP4 does not.
+// embedsSubtitles reports whether a transcode to container keeps subtitle
+// tracks.
 func embedsSubtitles(container string) bool {
-	if container == "" || listMeets("ts,mpegts,mp4", container) {
-		return false
-	}
 	return listMeets("mkv,matroska", container)
 }
 
-// textSubtitle is Jellyfin's MediaStream.IsTextFormat: a subtitle format
-// that is not pictures. MicroDVD shares VobSub's .sub extension but is
-// text.
+// textSubtitle reports whether a subtitle format is text, not images.
 func textSubtitle(format string) bool {
-	return containsFold(format, "microdvd") ||
-		!containsFold(format, "pgs") && !containsFold(format, "dvdsub") && !containsFold(format, "vobsub") && !containsFold(format, "dvbsub") &&
-			!strings.EqualFold(format, "sup") && !strings.EqualFold(format, "sub")
+	for _, image := range [...]string{"pgs", "dvd", "dvbsub"} {
+		if containsFold(format, image) {
+			return false
+		}
+	}
+	return !strings.EqualFold(format, "sub") && !strings.EqualFold(format, "sup") && !strings.EqualFold(format, "dvb_subtitle")
 }
 
-// vobSubFormat is Jellyfin's MediaStream.IsVobSubFormat.
-func vobSubFormat(format string) bool {
-	return containsFold(format, "dvdsub") || containsFold(format, "vobsub")
-}
-
-// pgsSubtitle is Jellyfin's MediaStream.IsPgsSubtitleStream.
-func pgsSubtitle(stream *MediaStream) bool {
-	return stream.Type == "Subtitle" && (stream.Codec != "" || stream.IsExternal) &&
-		(containsFold(stream.Codec, "pgs") || strings.EqualFold(stream.Codec, "sup"))
-}
-
-// vobSubSubtitle is Jellyfin's MediaStream.IsVobSubSubtitleStream.
-func vobSubSubtitle(stream *MediaStream) bool {
-	return stream.Type == "Subtitle" && (stream.Codec != "" || stream.IsExternal) && vobSubFormat(stream.Codec)
-}
-
-// convertible is Jellyfin's MediaStream.SupportsSubtitleConversionTo: a
-// text subtitle converts to another text format, ASS and SSA styling
-// excepted, both ways.
-func convertible(stream *MediaStream, to string) bool {
+// convertible reports whether a text subtitle converts from one format to
+// another; ASS and SSA styling is never converted.
+func convertible(from, to string) bool {
 	styled := func(format string) bool {
 		return strings.EqualFold(format, "ass") || strings.EqualFold(format, "ssa")
 	}
-	return stream.IsTextSubtitleStream && !styled(stream.Codec) && !styled(to)
+	return !styled(from) && !styled(to)
 }
 
 func containsFold(s, substr string) bool {

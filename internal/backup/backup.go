@@ -11,9 +11,11 @@
 package backup
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"log/slog"
 	"os"
@@ -32,19 +34,36 @@ import (
 	"github.com/moodiness/polyfin/internal/secrets"
 )
 
-// StaleAfter is the age past which the last backup made is a problem while
-// backups are on: two daily runs missed.
-const StaleAfter = 48 * time.Hour
+// MinStaleAfter is the youngest age at which the last backup made is a
+// problem while backups are on: two daily runs missed.
+const MinStaleAfter = 48 * time.Hour
 
-// nameLayout is the time in a backup's name, polyfin-YYYYMMDD-HHMMSS.dump.
+// StaleAfter is the age past which the last backup made is a problem
+// while backups are on, for a schedule whose longest gap between two runs
+// is gap (see tasks.LongestGap): two runs missed, never under
+// MinStaleAfter.
+func StaleAfter(gap time.Duration) time.Duration {
+	return max(MinStaleAfter, 2*gap)
+}
+
+// TaskKey is the key of the backup task.
+const TaskKey = "BackUpDatabase"
+
+// DefaultTime is when the backup task runs every day by default, from
+// midnight in the server's time zone.
+const DefaultTime = 4 * time.Hour
+
+// nameLayout is the time in a backup's name, polyfin-YYYYMMDD-HHMMSS.dump,
+// or polyfin-YYYYMMDD-HHMMSS.dump.enc for an encrypted one.
 const nameLayout = "20060102-150405"
 
-// backupName matches the backups Polyfin makes every day, the only files
-// it deletes to keep the newest; partialName matches a backup being
-// written, which a crash may leave, a before-restore one too.
+// backupName matches the backups Polyfin makes every day, plain or
+// encrypted, the only files it deletes to keep the newest; partialName
+// matches a backup being written, which a crash may leave, a
+// before-restore one too.
 var (
-	backupName  = regexp.MustCompile(`^polyfin-\d{8}-\d{6}\.dump$`)
-	partialName = regexp.MustCompile(`^\.polyfin-\d{8}-\d{6}(-before-restore)?\.dump\.partial$`)
+	backupName  = regexp.MustCompile(`^polyfin-\d{8}-\d{6}\.dump(\.enc)?$`)
+	partialName = regexp.MustCompile(`^\.polyfin-\d{8}-\d{6}(-before-restore)?\.dump(\.enc)?\.partial$`)
 )
 
 // maxErrorBytes bounds what is kept of pg_dump's error output: its last
@@ -77,9 +96,18 @@ type Config struct {
 	// Secrets seals the destinations' passwords and keys; nil stores them
 	// as they are.
 	Secrets *secrets.Box
-	// Settings gives BackupHour and BackupsKept, read when they are used.
+	// Settings gives BackupsKept and BackupPassphrase, read
+	// when they are used: a passphrase encrypts the backups.
 	Settings func() accounts.Settings
-	Logger   *slog.Logger
+	// PassphraseUnreadable reports whether the settings hold a passphrase
+	// the current key cannot decrypt, which BackupPassphrase then reads as
+	// not set: backups fail rather than be written unencrypted. Nil is
+	// never.
+	PassphraseUnreadable func() bool
+	// SetupFolder is the folder a backup sent from the setup page is
+	// written to, backups being off then (see PrepareSetupUpload).
+	SetupFolder string
+	Logger      *slog.Logger
 }
 
 // Service makes the backups.
@@ -91,6 +119,8 @@ type Service struct {
 	// restore included, which so never waits on a destination.
 	runs  sync.Mutex
 	dumps sync.Mutex
+	// unlocks keeps scrypt, which takes 128 MiB, to one key at a time.
+	unlocks sync.Mutex
 	// idle is how long a destination may move no byte (see
 	// DefaultIdleTimeout).
 	idle time.Duration
@@ -132,16 +162,6 @@ func (s *Service) PgDump() string {
 	return s.cfg.PgDump
 }
 
-// Hour is the hour of the server's time zone the database is backed up at
-// every day, the settings' BackupHour; -1 while backups are off, which
-// leaves the daily task to be run by hand.
-func (s *Service) Hour() int {
-	if !s.Available() {
-		return -1
-	}
-	return s.cfg.Settings().BackupHour
-}
-
 // Status is how backups went.
 type Status struct {
 	// RanAt is when the last run started, nil before the first; Error is
@@ -157,12 +177,12 @@ type Status struct {
 
 // Problem reports whether an administrator should look at backups, at
 // now: the last run failed, or the last backup made is older than
-// StaleAfter. Before the first run there is none.
-func (st Status) Problem(now time.Time) bool {
+// staleAfter (see StaleAfter). Before the first run there is none.
+func (st Status) Problem(now time.Time, staleAfter time.Duration) bool {
 	if st.RanAt == nil {
 		return false
 	}
-	return st.Error != "" || st.MadeAt == nil || now.Sub(*st.MadeAt) > StaleAfter
+	return st.Error != "" || st.MadeAt == nil || now.Sub(*st.MadeAt) > staleAfter
 }
 
 // Status reads how the last backup went.
@@ -236,26 +256,72 @@ func (s *Service) dumpAndPrune(ctx context.Context, dir string) (string, int64, 
 	return name, size, deleted, err
 }
 
+// ErrUnreadablePassphrase fails a backup while the settings hold a backup
+// passphrase the current key cannot decrypt: it is not written
+// unencrypted.
+var ErrUnreadablePassphrase = errors.New("the backup passphrase cannot be decrypted with POLYFIN_SECRET_KEY: " +
+	"enter it again under Settings › Backups, or set the key it was saved with")
+
 // dump writes a backup started at started into dir, its name ending with
-// suffix, and returns its name and size.
+// suffix, and returns its name and size. While the settings hold a backup
+// passphrase, pg_dump's output is encrypted with it as it is written, and
+// the name ends with .dump.enc.
 func (s *Service) dump(ctx context.Context, dir string, started time.Time, suffix string) (string, int64, error) {
-	name := "polyfin-" + started.Format(nameLayout) + suffix + ".dump"
-	final := filepath.Join(dir, name)
-	if _, err := os.Lstat(final); !errors.Is(err, fs.ErrNotExist) {
-		return "", 0, fmt.Errorf("%s already exists", name)
+	if s.cfg.PassphraseUnreadable != nil && s.cfg.PassphraseUnreadable() {
+		return "", 0, ErrUnreadablePassphrase
 	}
+	passphrase := s.cfg.Settings().BackupPassphrase
+	base := "polyfin-" + started.Format(nameLayout) + suffix + ".dump"
+	name := base
+	if passphrase != "" {
+		name += encryptedExtension
+	}
+	// A backup of the same second, plain or encrypted, stays.
+	for _, existing := range []string{base, base + encryptedExtension} {
+		if _, err := os.Lstat(filepath.Join(dir, existing)); !errors.Is(err, fs.ErrNotExist) {
+			return "", 0, fmt.Errorf("%s already exists", existing)
+		}
+	}
+	final := filepath.Join(dir, name)
 	removePartials(dir, s.cfg.Logger)
 	conninfo, password, err := splitPassword(s.cfg.DatabaseURL)
 	if err != nil {
 		return "", 0, err
 	}
 	partial := filepath.Join(dir, "."+name+".partial")
-	cmd := exec.CommandContext(ctx, s.cfg.PgDump, "--format=custom", "--no-password", "--file="+partial, "--dbname="+conninfo)
+	args := []string{"--format=custom", "--no-password"}
+	var sealed *sealedFile
+	if passphrase == "" {
+		// The file is Polyfin's own from its first byte: pg_dump, which
+		// would make it for whoever the umask lets read, opens and
+		// empties the one it finds, whose mode stays. It is given the
+		// file's name, not the file as its standard output: there it
+		// appends the table of contents it rewrites once the data is
+		// written, instead of writing it over the first.
+		if err := createEmpty(partial); err != nil {
+			return "", 0, err
+		}
+		args = append(args, "--file="+partial)
+	} else if sealed, err = createSealed(partial, passphrase); err != nil {
+		return "", 0, err
+	}
+	cmd := exec.CommandContext(ctx, s.cfg.PgDump, append(args, "--dbname="+conninfo)...)
 	cmd.Env = environment(os.Environ(), password)
+	if sealed != nil {
+		// pg_dump writes to its standard output, which is encrypted on
+		// its way to the file: the dump is never on disk unencrypted.
+		cmd.Stdout = sealed
+	}
 	output := &tail{}
 	cmd.Stderr = output
 	cmd.WaitDelay = 10 * time.Second
-	if err := cmd.Run(); err != nil {
+	err = cmd.Run()
+	if sealed != nil {
+		if closeErr := sealed.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	if err != nil {
 		_ = os.Remove(partial)
 		message := strings.TrimSpace(string(output.data))
 		if password != "" {
@@ -282,6 +348,55 @@ func (s *Service) dump(ctx context.Context, dir string, started time.Time, suffi
 	}
 	syncDir(dir)
 	return name, info.Size(), nil
+}
+
+// createEmpty creates the file at path, empty and readable only by its
+// owner; it fails when there is one already.
+func createEmpty(path string) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	return f.Close()
+}
+
+// sealedFile is a new file an encrypted backup is written to.
+type sealedFile struct {
+	file     *os.File
+	buffered *bufio.Writer
+	io.WriteCloser
+}
+
+// createSealed creates the file at path, readable only by its owner, and
+// returns what encrypts with passphrase what is written to it. Close
+// seals the last chunk, and writes the file to disk.
+func createSealed(path, passphrase string) (*sealedFile, error) {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	buffered := bufio.NewWriterSize(f, chunkSize+16)
+	encrypter, err := newEncrypter(buffered, passphrase)
+	if err != nil {
+		_ = f.Close()
+		_ = os.Remove(path)
+		return nil, err
+	}
+	return &sealedFile{file: f, buffered: buffered, WriteCloser: encrypter}, nil
+}
+
+func (s *sealedFile) Close() error {
+	err := s.WriteCloser.Close()
+	if err == nil {
+		err = s.buffered.Flush()
+	}
+	if err == nil {
+		err = s.file.Sync()
+	}
+	if closeErr := s.file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 // record saves how the run started at started went: a failure keeps the

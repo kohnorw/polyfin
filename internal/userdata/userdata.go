@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -68,7 +69,15 @@ type Counts struct {
 
 // Store keeps user data in PostgreSQL.
 type Store struct {
-	db *pgxpool.Pool
+	db db
+}
+
+// db is a pool, or a transaction in tests that count the rows a change
+// writes.
+type db interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+	Exec(ctx context.Context, sql string, arguments ...any) (pgconn.CommandTag, error)
+	Query(ctx context.Context, sql string, args ...any) (pgx.Rows, error)
 }
 
 // New returns a store backed by db.
@@ -152,6 +161,28 @@ func (s *Store) EpisodeCounts(ctx context.Context, user accounts.ID, parents []a
 	return result, err
 }
 
+// SeriesLastPlayed returns, for each series in series, when the user last
+// played one of its episodes they played through, as Jellyfin's
+// SeriesDatePlayed sort reads it; series without one are missing.
+func (s *Store) SeriesLastPlayed(ctx context.Context, user accounts.ID, series []accounts.ID) (map[accounts.ID]time.Time, error) {
+	result := make(map[accounts.ID]time.Time, len(series))
+	if len(series) == 0 {
+		return result, nil
+	}
+	rows, err := s.db.Query(ctx, `SELECT series_id, max(last_played_at) FROM user_data
+		WHERE user_id = $1 AND series_id = ANY($2) AND played AND last_played_at IS NOT NULL GROUP BY series_id`, user, series)
+	if err != nil {
+		return nil, err
+	}
+	var id accounts.ID
+	var at time.Time
+	_, err = pgx.ForEachRow(rows, []any{&id, &at}, func() error {
+		result[id] = at.UTC()
+		return nil
+	})
+	return result, err
+}
+
 // Resumable lists the items with a resume point, most recently played
 // first; those never started come last.
 func (s *Store) Resumable(ctx context.Context, user accounts.ID) ([]Entry, error) {
@@ -175,12 +206,79 @@ func (s *Store) Played(ctx context.Context, user accounts.ID) ([]Entry, error) {
 		ORDER BY last_played_at DESC NULLS LAST, item_id`, user)
 }
 
-// Episodes lists the data of the episodes the user played or started, of
-// every series, most recently played first.
+// Touched lists the data of every item the user played, started, rated
+// or marked as a favorite, most recently played first: what taste
+// profiles are built from (see package taste).
+func (s *Store) Touched(ctx context.Context, user accounts.ID) ([]Entry, error) {
+	return s.entries(ctx, "SELECT "+columns+` FROM user_data
+		WHERE user_id = $1 AND (played OR favorite OR rating IS NOT NULL OR last_played_at IS NOT NULL OR position_ticks > 0)
+		ORDER BY last_played_at DESC NULLS LAST, item_id`, user)
+}
+
+// Episodes lists the data of the episodes the user played, started or
+// has a resume point in, of every series, most recently played first. An
+// episode started and stopped before the resume threshold is only dated.
 func (s *Store) Episodes(ctx context.Context, user accounts.ID) ([]Entry, error) {
 	return s.entries(ctx, "SELECT "+columns+` FROM user_data
-		WHERE user_id = $1 AND series_id IS NOT NULL AND (played OR position_ticks > 0)
+		WHERE user_id = $1 AND series_id IS NOT NULL AND (played OR position_ticks > 0 OR last_played_at IS NOT NULL)
 		ORDER BY last_played_at DESC NULLS LAST, item_id`, user)
+}
+
+// Watched is a series whose episodes a user played or started, with the
+// latest date they did.
+type Watched struct {
+	Series accounts.ID
+	Latest time.Time
+}
+
+// WatchedSeries lists the series one of whose episodes has a date, the
+// user having played or started it, the latest first: in the order their
+// first episode with a date comes in Episodes, its date the series'
+// latest. Only the series are read, not their episodes, in the order of
+// the index user_data_series_latest: no episode has a null date here, so
+// NULLS LAST changes nothing but lets the index give the order.
+func (s *Store) WatchedSeries(ctx context.Context, user accounts.ID) ([]Watched, error) {
+	rows, err := s.db.Query(ctx, `SELECT series_id, last_played_at FROM (
+			SELECT DISTINCT ON (series_id) series_id, last_played_at, item_id FROM user_data
+			WHERE user_id = $1 AND series_id IS NOT NULL AND last_played_at IS NOT NULL
+			ORDER BY series_id, last_played_at DESC NULLS LAST, item_id) latest
+		ORDER BY last_played_at DESC, item_id`, user)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Watched, error) {
+		var w Watched
+		err := row.Scan(&w.Series, &w.Latest)
+		w.Latest = w.Latest.UTC()
+		return w, err
+	})
+}
+
+// PlayedSeries lists the series one of whose episodes the user played, in
+// the order their first played episode comes in Episodes: the latest
+// played first, those played without a date last, ties by episode. Only
+// the series are read, not their episodes, in the order of the index
+// user_data_series_latest.
+func (s *Store) PlayedSeries(ctx context.Context, user accounts.ID) ([]accounts.ID, error) {
+	rows, err := s.db.Query(ctx, `SELECT series_id FROM (
+			SELECT DISTINCT ON (series_id) series_id, last_played_at, item_id FROM user_data
+			WHERE user_id = $1 AND series_id IS NOT NULL AND played
+			ORDER BY series_id, last_played_at DESC NULLS LAST, item_id) latest
+		ORDER BY last_played_at DESC NULLS LAST, item_id`, user)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, pgx.RowTo[accounts.ID])
+}
+
+// SeriesEpisodes is Episodes for the episodes of series only.
+func (s *Store) SeriesEpisodes(ctx context.Context, user accounts.ID, series []accounts.ID) ([]Entry, error) {
+	if len(series) == 0 {
+		return nil, nil
+	}
+	return s.entries(ctx, "SELECT "+columns+` FROM user_data
+		WHERE user_id = $1 AND series_id = ANY($2) AND (played OR position_ticks > 0 OR last_played_at IS NOT NULL)
+		ORDER BY last_played_at DESC NULLS LAST, item_id`, user, series)
 }
 
 // Change applies change to the data of each item, in one transaction, and
@@ -210,11 +308,15 @@ func (s *Store) ChangeEach(ctx context.Context, user accounts.ID, items []Item, 
 	var result []Data
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		// Rows are created first, so that concurrent changes of a new item
-		// wait for each other below.
+		// wait for each other below. Neither statement rewrites a row whose
+		// values stay the same: imports and app connections re-apply whole
+		// histories, mostly unchanged.
 		if _, err := tx.Exec(ctx, `INSERT INTO user_data (user_id, item_id, series_id, season_id)
 			SELECT $1, * FROM unnest($2::uuid[], $3::uuid[], $4::uuid[])
 			ON CONFLICT (user_id, item_id) DO UPDATE
-			SET series_id = coalesce(excluded.series_id, user_data.series_id), season_id = coalesce(excluded.season_id, user_data.season_id)`,
+			SET series_id = coalesce(excluded.series_id, user_data.series_id), season_id = coalesce(excluded.season_id, user_data.season_id)
+			WHERE excluded.series_id IS NOT NULL AND excluded.series_id IS DISTINCT FROM user_data.series_id
+				OR excluded.season_id IS NOT NULL AND excluded.season_id IS DISTINCT FROM user_data.season_id`,
 			user, ids, series, seasons); err != nil {
 			return err
 		}
@@ -260,7 +362,11 @@ func (s *Store) ChangeEach(ctx context.Context, user accounts.ID, items []Item, 
 				resume_removed_at = c.resume_removed_at
 			FROM unnest($2::uuid[], $3::bool[], $4::int[], $5::bigint[], $6::bigint[], $7::bool[], $8::float8[], $9::timestamptz[], $10::timestamptz[])
 				AS c (item_id, played, play_count, position_ticks, runtime_ticks, favorite, rating, last_played_at, resume_removed_at)
-			WHERE user_data.user_id = $1 AND user_data.item_id = c.item_id`,
+			WHERE user_data.user_id = $1 AND user_data.item_id = c.item_id
+				AND (user_data.played, user_data.play_count, user_data.position_ticks, user_data.runtime_ticks, user_data.favorite,
+					user_data.rating, user_data.last_played_at, user_data.resume_removed_at)
+				IS DISTINCT FROM (c.played, c.play_count, c.position_ticks, c.runtime_ticks, c.favorite,
+					c.rating, c.last_played_at, c.resume_removed_at)`,
 			user, ids, played, counts, positions, runtimes, favorites, ratings, lastPlayed, resumeRemoved)
 		return err
 	})
@@ -283,10 +389,7 @@ type Move struct {
 // moves: the item it comes from loses it once an item it goes to records
 // as recent a play.
 func (s *Store) Follow(ctx context.Context, moves []Move, thresholds Thresholds) error {
-	var from []accounts.ID
-	for _, move := range moves {
-		from = append(from, move.From...)
-	}
+	from := movedFrom(moves)
 	if len(from) == 0 {
 		return nil
 	}
@@ -298,6 +401,27 @@ func (s *Store) Follow(ctx context.Context, moves []Move, thresholds Thresholds)
 	if err != nil {
 		return err
 	}
+	return s.follow(ctx, users, moves, thresholds)
+}
+
+// FollowOf is Follow for what user did alone: the moves of a user's own
+// library, which leave every other user's data where it is.
+func (s *Store) FollowOf(ctx context.Context, user accounts.ID, moves []Move, thresholds Thresholds) error {
+	return s.follow(ctx, []accounts.ID{user}, moves, thresholds)
+}
+
+// movedFrom are the items the moves come from.
+func movedFrom(moves []Move) []accounts.ID {
+	var from []accounts.ID
+	for _, move := range moves {
+		from = append(from, move.From...)
+	}
+	return from
+}
+
+// follow is Follow for the data of users.
+func (s *Store) follow(ctx context.Context, users []accounts.ID, moves []Move, thresholds Thresholds) error {
+	from := movedFrom(moves)
 	for _, user := range users {
 		kept, err := s.Get(ctx, user, from)
 		if err != nil {

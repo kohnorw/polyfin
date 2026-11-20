@@ -1,6 +1,7 @@
 package jellyfin
 
 import (
+	"context"
 	"math/rand/v2"
 	"net/http"
 	"slices"
@@ -10,6 +11,7 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/taste"
 )
 
 // The user's root folder, item counts and suggestions: what Jellyfin
@@ -75,8 +77,8 @@ func (h *Handler) rootChildren(w http.ResponseWriter, r *http.Request, user acco
 // firstPages reads the first page of each of the user's libraries, as
 // their home screen does. A library whose addon does not answer is left
 // out.
-func (h *Handler) firstPages(r *http.Request, user accounts.User) ([]library.Page, error) {
-	libraries, err := h.Library.Libraries(r.Context(), user)
+func (h *Handler) firstPages(ctx context.Context, user accounts.User) ([]library.Page, error) {
+	libraries, err := h.Library.Libraries(ctx, user)
 	if err != nil {
 		return nil, err
 	}
@@ -84,8 +86,9 @@ func (h *Handler) firstPages(r *http.Request, user accounts.User) ([]library.Pag
 	var g errgroup.Group
 	g.SetLimit(4)
 	for i, l := range libraries {
-		g.Go(func() error {
-			page, err := h.Library.Children(r.Context(), user, l.ID, 0, defaultPageSize, "")
+		g.Go(func() (err error) {
+			defer recoverInto(h.Logger, &err, "A library's first page ended on a panic", "library", l.ID.String())
+			page, err := h.Library.Children(ctx, user, l.ID, 0, defaultPageSize, "")
 			if err != nil {
 				h.Logger.Debug("A library could not be read", "library", l.ID.String(), "error", err)
 				return nil
@@ -95,7 +98,7 @@ func (h *Handler) firstPages(r *http.Request, user accounts.User) ([]library.Pag
 		})
 	}
 	_ = g.Wait()
-	return pages, r.Context().Err()
+	return pages, ctx.Err()
 }
 
 // ItemCounts is Jellyfin's count of the items of each type in a user's
@@ -214,7 +217,8 @@ func (h *Handler) itemCounts(w http.ResponseWriter, r *http.Request) {
 
 // suggestions are items picked at random among the user's libraries, of
 // the types and media types asked, as Jellyfin suggests them: here among
-// the first page of each library.
+// the first page of each library. Above the confidence gate of the user's
+// taste profile, the titles it ranks first come first (see taste.go).
 func (h *Handler) suggestions(w http.ResponseWriter, r *http.Request) {
 	b := bindErrors{}
 	start, limit := b.paging(r, -1)
@@ -223,26 +227,22 @@ func (h *Handler) suggestions(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	pages, err := h.firstPages(r, user)
-	if err != nil {
-		h.browseError(w, r, err)
-		return
-	}
 	types, media := listQuery(r, "type"), listQuery(r, "mediaType")
 	matches := func(list []string, value string) bool {
 		return len(list) == 0 || slices.ContainsFunc(list, func(v string) bool { return strings.EqualFold(v, value) })
 	}
-	seen := map[accounts.ID]bool{}
-	var pool []library.Item
-	for _, page := range pages {
-		for _, item := range page.Items {
-			if !seen[item.ID] && matches(types, itemTypes[item.Kind]) && matches(media, mediaType(item.Kind)) {
-				seen[item.ID] = true
-				pool = append(pool, item)
-			}
-		}
+	libraries, err := h.suggestionCandidates(r.Context(), user, func(item library.Item) bool {
+		return matches(types, itemTypes[item.Kind]) && matches(media, mediaType(item.Kind))
+	})
+	if err != nil {
+		h.browseError(w, r, err)
+		return
 	}
+	pool := slices.Concat(libraries...)
 	rand.Shuffle(len(pool), func(i, j int) { pool[i], pool[j] = pool[j], pool[i] })
+	// Above the confidence gate, the user's taste orders them, the titles
+	// it ranks the same in a random order.
+	pool = taste.Order(h.tasteProfile(r.Context(), user), pool, taste.TitleOf)
 	from := min(max(start, 0), len(pool))
 	to := len(pool)
 	if limit >= 0 {
@@ -258,4 +258,107 @@ func (h *Handler) suggestions(w http.ResponseWriter, r *http.Request) {
 		total = len(pool)
 	}
 	writeJSON(w, http.StatusOK, QueryResult{Items: items, TotalRecordCount: total, StartIndex: max(start, 0)})
+}
+
+// suggestionCandidates is, for each of the user's libraries, the titles
+// keep keeps on its first page, in the catalog's order, each title in the
+// first library that has it.
+func (h *Handler) suggestionCandidates(ctx context.Context, user accounts.User, keep func(library.Item) bool) ([][]library.Item, error) {
+	pages, err := h.firstPages(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[accounts.ID]bool{}
+	libraries := make([][]library.Item, 0, len(pages))
+	for _, page := range pages {
+		var titles []library.Item
+		for _, item := range page.Items {
+			if !seen[item.ID] && keep(item) {
+				seen[item.ID] = true
+				titles = append(titles, item)
+			}
+		}
+		if len(titles) > 0 {
+			libraries = append(libraries, titles)
+		}
+	}
+	return libraries, nil
+}
+
+// topPickWindow is how many of a library's next titles each round of
+// topPicks picks among.
+const topPickWindow = 2
+
+// topPicks orders the libraries' titles, each in its catalog's order, round
+// by round: each round, the libraries in a new random order each give one of
+// their next topPickWindow titles at random. A library's first titles, its
+// most popular in a popular catalog, come first, the libraries mixed, and
+// the picks vary between calls. It takes the libraries' slices over.
+func topPicks(libraries [][]library.Item) []library.Item {
+	var picks []library.Item
+	for {
+		libraries = slices.DeleteFunc(libraries, func(titles []library.Item) bool { return len(titles) == 0 })
+		if len(libraries) == 0 {
+			return picks
+		}
+		rand.Shuffle(len(libraries), func(i, j int) { libraries[i], libraries[j] = libraries[j], libraries[i] })
+		for i, titles := range libraries {
+			n := rand.IntN(min(topPickWindow, len(titles)))
+			picks = append(picks, titles[n])
+			libraries[i] = slices.Delete(titles, n, n+1)
+		}
+	}
+}
+
+// randomTitles reports whether a listing without a folder asks for titles
+// at random, as jellyfin-web's search page asks for its Suggestions before
+// anything is typed: through the folders, sorted at random, favorite and
+// liked titles first or not, of movies, series or music artists only.
+func randomTitles(r *http.Request) bool {
+	oneOf := func(names ...string) func(string) bool {
+		return func(value string) bool {
+			return slices.ContainsFunc(names, func(name string) bool { return strings.EqualFold(name, value) })
+		}
+	}
+	isNot := func(names ...string) func(string) bool {
+		in := oneOf(names...)
+		return func(value string) bool { return !in(value) }
+	}
+	recursive, _ := boolQuery(r, "recursive")
+	sorts, include := listQuery(r, "sortBy"), listQuery(r, "includeItemTypes")
+	return recursive && slices.ContainsFunc(sorts, oneOf("Random")) && !slices.ContainsFunc(sorts, isNot("Random", "IsFavoriteOrLiked")) &&
+		len(include) > 0 && !slices.ContainsFunc(include, isNot("Movie", "Series", "MusicArtist"))
+}
+
+// randomListing answers a listing of titles at random (see randomTitles)
+// with the top titles of the user's libraries (see topPicks), the user's
+// favorite and liked ones first when it sorts by them. Jellyfin picks at
+// random among everything, which a remote catalog cannot list: its first
+// titles are those it puts forward.
+func (h *Handler) randomListing(w http.ResponseWriter, r *http.Request, user accounts.User, start, limit int) {
+	libraries, err := h.suggestionCandidates(r.Context(), user, itemTypeFilter(r))
+	if err != nil {
+		h.browseError(w, r, err)
+		return
+	}
+	pool := topPicks(libraries)
+	from := min(max(start, 0), len(pool))
+	to := min(from+limit, len(pool))
+	// Sorting by favorites needs the state of every title, a page only
+	// that of its own.
+	liked := slices.ContainsFunc(listQuery(r, "sortBy"), func(key string) bool { return strings.EqualFold(key, "IsFavoriteOrLiked") })
+	described := pool[from:to]
+	if liked {
+		described = pool
+	}
+	state, err := h.userState(r.Context(), user, described)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	if liked {
+		slices.SortStableFunc(pool, func(a, b library.Item) int { return compareBy("IsFavoriteOrLiked", b, a, state) })
+	}
+	items := h.listDtos(r, user, pool[from:to], requestedFields(r), state)
+	writeJSON(w, http.StatusOK, QueryResult{Items: items, TotalRecordCount: len(pool), StartIndex: start})
 }

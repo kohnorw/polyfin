@@ -20,6 +20,7 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/playback"
 )
 
 const serverID = "0123456789abcdef0123456789abcdef"
@@ -83,6 +84,7 @@ const search = "M-SEARCH * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nMAN: \"ssdp
 // the description on the interface that reaches the device; one from a
 // public address is not, nor any while sharing is off.
 func TestSSDPSearchesAreAnsweredOnTheLocalNetworkOnly(t *testing.T) {
+	t.Parallel()
 	s, settings, applied := start(t, 0)
 	all := []byte(strings.Replace(search, "%s", "ssdp:all", 1))
 	answers := s.answer(all, netip.MustParseAddrPort("192.168.1.20:50000"))
@@ -136,6 +138,8 @@ func TestSSDPSearchesAreAnsweredOnTheLocalNetworkOnly(t *testing.T) {
 
 // A port another program holds never stops Polyfin: Status tells it, for
 // System › Health, until it is free.
+//
+//nolint:paralleltest // frees its port and takes it again: a parallel test could be given it meanwhile
 func TestATakenSSDPPortIsTold(t *testing.T) {
 	taken, err := net.ListenUDP("udp4", &net.UDPAddr{Port: 0})
 	if err != nil {
@@ -163,6 +167,7 @@ func TestATakenSSDPPortIsTold(t *testing.T) {
 // Devices are given the profile their headers or their announced model
 // match, added profiles first, else the generic one.
 func TestProfilesAreChosenByWhatDevicesSend(t *testing.T) {
+	t.Parallel()
 	headers := func(name, value string) http.Header {
 		h := http.Header{}
 		h.Set(name, value)
@@ -206,7 +211,29 @@ func TestProfilesAreChosenByWhatDevicesSend(t *testing.T) {
 	}
 }
 
+// A DLNA device gets its conversion as one MPEG-TS stream, not as HLS
+// segments: the audio codecs it takes in MPEG-TS are copied, MP2 among
+// them, as Jellyfin's DLNA streams copy them.
+func TestDLNAConversionsCopyTheAudioMPEGTSCarries(t *testing.T) {
+	t.Parallel()
+	tv, err := ParseProfile([]byte(`<Profile><Name>Hall TV</Name><DirectPlayProfiles><DirectPlayProfile container="mp4" type="Video" videoCodec="h264" audioCodec="aac" /></DirectPlayProfiles>
+		<TranscodingProfiles><TranscodingProfile container="ts" type="Video" videoCodec="h264" audioCodec="mp2,aac" context="Streaming" /></TranscodingProfiles></Profile>`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recording := playback.MediaSource{Container: "ts", Streams: []playback.MediaStream{
+		{Type: "Video", Index: 0, Codec: "mpeg2video", Width: new(720), Height: new(576)},
+		{Type: "Audio", Index: 1, Codec: "mp2", Channels: new(2), IsDefault: true},
+	}}
+	got := playback.Decide(tv.Playback(), recording, playback.Options{EnableDirectPlay: true, EnableDirectStream: true,
+		Can: playback.Capabilities{Encoders: []string{"libx264"}}})
+	if !got.HLS || got.Video == nil || got.Audio != nil {
+		t.Errorf("converted %v, video %+v, audio %+v; want the video converted and the MP2 copied", got.HLS, got.Video, got.Audio)
+	}
+}
+
 func TestTimeSeeksAreRead(t *testing.T) {
+	t.Parallel()
 	for header, want := range map[string]time.Duration{"npt=10.5-": 10500 * time.Millisecond, "npt=0:01:02.250-0:02:00": 62250 * time.Millisecond,
 		"npt=0-": 0, " npt=1:00:00.000-": time.Hour} {
 		if got, ok := parseTimeSeek(header); !ok || got != want {
@@ -224,6 +251,7 @@ func TestTimeSeeksAreRead(t *testing.T) {
 }
 
 func TestSOAPActionsAreRead(t *testing.T) {
+	t.Parallel()
 	action, err := readAction(strings.NewReader(`<?xml version="1.0"?><s:Envelope xmlns:s="http://schemas.xmlsoap.org/soap/envelope/"><s:Body>` +
 		`<u:Search xmlns:u="urn:schemas-upnp-org:service:ContentDirectory:1"><ContainerID>0</ContainerID>` +
 		`<SearchCriteria>dc:title contains "the &quot;sea&quot;"</SearchCriteria><StartingIndex>0</StartingIndex></u:Search></s:Body></s:Envelope>`))
@@ -240,6 +268,7 @@ func TestSOAPActionsAreRead(t *testing.T) {
 // those of another Polyfin server, are not taken for a device's: the
 // server would otherwise read its own description and record itself.
 func TestOwnAnnouncementsAreNotDevices(t *testing.T) {
+	t.Parallel()
 	s, _, _ := start(t, 0)
 	notify := func(nt, location, usn string) []byte {
 		return []byte("NOTIFY * HTTP/1.1\r\nHOST: 239.255.255.250:1900\r\nCACHE-CONTROL: max-age=1800\r\nLOCATION: " + location + "\r\nNT: " + nt +
@@ -283,6 +312,7 @@ func (l pagingLibrary) Children(_ context.Context, _ accounts.User, _ accounts.I
 // A StartingIndex as large as integers go reads past any container or
 // search: the end of the page asked of the library does not overflow.
 func TestHugeStartingIndexesAreClamped(t *testing.T) {
+	t.Parallel()
 	s, _, _ := start(t, 0)
 	asked := make(chan [2]int, 1)
 	s.options.Library = pagingLibrary{asked: asked}
@@ -310,6 +340,7 @@ func TestHugeStartingIndexesAreClamped(t *testing.T) {
 // gets a fault and the request ends. The clock is an hour behind, so that
 // the deadline has passed when the body is read.
 func TestSOAPBodiesAreReadWithinADeadline(t *testing.T) {
+	t.Parallel()
 	s, _, _ := startAt(t, 0, func() time.Time { return time.Now().Add(-time.Hour) })
 	returned := make(chan struct{})
 	handler := s.control(s.connectionManagerAction)
@@ -345,6 +376,7 @@ func TestSOAPBodiesAreReadWithinADeadline(t *testing.T) {
 // A device's description is read once at a time, whatever it announces
 // meanwhile, and not again for a while once read.
 func TestDeviceDescriptionsAreReadOnceAtATime(t *testing.T) {
+	t.Parallel()
 	var clock atomic.Pointer[time.Time]
 	now := time.Now()
 	clock.Store(&now)

@@ -3,7 +3,6 @@ package torrent
 import (
 	"bufio"
 	"bytes"
-	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
@@ -11,11 +10,12 @@ import (
 	"net"
 	"net/netip"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // The peer wire protocol (BEP 3), its extension protocol (BEP 10) and the
-// metadata exchange (BEP 9).
+// metadata exchange (BEP 9); peer exchange (BEP 11) is in pex.go.
 const (
 	msgChoke         = 0
 	msgUnchoke       = 1
@@ -101,10 +101,51 @@ type peer struct {
 	// when it does not; metadataSize the size it announced.
 	metadataID   int
 	metadataSize int
-	// requests are the blocks asked for and not received, with when.
-	requests map[block]time.Time
-	// asked are the blocks the peer asked for, served in order.
-	asked []block
+	// metadata is the peer's copy of the info dictionary being received,
+	// allocated at its first piece, metadataGot its pieces received, and
+	// metadataWant its size, 0 while the peer is not asked for it;
+	// metadataHeard is when it was asked, or last sent a piece of it, and
+	// metadataOver tells that the peer is not asked for it again on this
+	// connection (see torrent.askMetadata).
+	metadata      []byte
+	metadataGot   []bool
+	metadataWant  int
+	metadataHeard time.Time
+	metadataOver  bool
+	// extended tells that Polyfin sent the peer its extension handshake;
+	// pexCount counts the peer's ut_pex messages read since pexSince.
+	extended bool
+	pexSince time.Time
+	pexCount int
+	// requests are the blocks asked for and not received, numbered from
+	// seq in the order they were asked (see torrent.reask). reasked
+	// counts, for each block, the requests of it the peer dropped; past
+	// maxReasks, the peer is not asked for it again.
+	requests map[block]*request
+	seq      uint64
+	reasked  map[block]int
+	// heard is when the peer last sent a block asked, or was asked one
+	// while none was asked of it; pace is about how long it takes to send
+	// a block, once paced tells it sent one: a coarse clock, as Windows'
+	// may be, measures a fast block at 0; probed tells that it was probed
+	// for its silence since it last sent a block (see torrent.reask).
+	heard  time.Time
+	pace   time.Duration
+	paced  bool
+	probed bool
+	// received is when a byte of the peer's last arrived, in Unix
+	// nanoseconds: a block on its way is not silence.
+	received atomic.Int64
+	// joined is when the peer's connection was shaken; givenUp tells that
+	// it was closed as the peer sent none of the blocks asked.
+	joined  time.Time
+	givenUp bool
+	// used is when the peer last sent a block, or a piece of the info
+	// dictionary, that was kept: one of no use for long gives its place
+	// to a peer that waits (see torrent.relieve). good counts its blocks
+	// of pieces that passed their hash (see torrent.entrust).
+	used time.Time
+	good int
 
 	outMu  sync.Mutex
 	outbox [][]byte
@@ -122,8 +163,19 @@ type block struct {
 	length int64
 }
 
+// request is a block asked of a peer: its number among the peer's
+// requests, and when a block asked after it first arrived, as a peer that
+// serves requests in order does with those it keeps. again tells that it
+// was asked again for the peer's silence: the block may answer the first
+// request as well, so its arrival overtakes none.
+type request struct {
+	seq       uint64
+	overtaken time.Time
+	again     bool
+}
+
 func newPeer(t *torrent, conn net.Conn, address netip.AddrPort) *peer {
-	return &peer{t: t, conn: conn, address: address, choked: true, requests: map[block]time.Time{},
+	return &peer{t: t, conn: conn, address: address, choked: true, requests: map[block]*request{}, reasked: map[block]int{},
 		wake: make(chan struct{}, 1), closed: make(chan struct{})}
 }
 
@@ -192,14 +244,14 @@ func (p *peer) write() {
 		p.outbox, p.outBytes = nil, 0
 		p.outMu.Unlock()
 		for _, message := range messages {
-			if message[4] == msgPiece && len(message) > 13 {
+			if len(message) > 13 && message[4] == msgPiece {
 				// Shared bytes wait for the upload limit.
 				if err := p.t.engine.up.wait(p.t.ctx, int64(len(message)-13)); err != nil {
 					return
 				}
 				p.t.uploaded(int64(len(message) - 13))
 			}
-			_ = p.conn.SetWriteDeadline(time.Now().Add(idleTimeout))
+			_ = p.conn.SetWriteDeadline(time.Now().Add(p.t.engine.idleTimeout))
 			if _, err := w.Write(message); err != nil {
 				return
 			}
@@ -210,12 +262,23 @@ func (p *peer) write() {
 	}
 }
 
+// receiving reads a peer's connection, noting when its bytes arrive.
+type receiving struct{ p *peer }
+
+func (r receiving) Read(b []byte) (int, error) {
+	n, err := r.p.conn.Read(b)
+	if n > 0 {
+		r.p.received.Store(time.Now().UnixNano())
+	}
+	return n, err
+}
+
 // read reads the peer's messages until the connection ends.
 func (p *peer) read() error {
-	r := bufio.NewReaderSize(p.conn, 64<<10)
+	r := bufio.NewReaderSize(receiving{p}, 64<<10)
 	var header [4]byte
 	for {
-		_ = p.conn.SetReadDeadline(time.Now().Add(idleTimeout))
+		_ = p.conn.SetReadDeadline(time.Now().Add(p.t.engine.idleTimeout))
 		if _, err := io.ReadFull(r, header[:]); err != nil {
 			return err
 		}
@@ -243,13 +306,19 @@ func (p *peer) read() error {
 	}
 }
 
-// sendExtendedHandshake tells the peer the extensions Polyfin speaks, and
-// the size of the metadata when it shares it.
+// sendExtendedHandshake tells the peer the extensions Polyfin speaks:
+// peer exchange unless the torrent is private, and the size of the
+// metadata when it shares it. The lock is held.
 func (p *peer) sendExtendedHandshake(metadataSize int) {
-	d := map[string]any{"m": map[string]any{"ut_metadata": extMetadata}, "v": "Polyfin", "reqq": 250}
+	m := map[string]any{"ut_metadata": extMetadata}
+	if info := p.t.info; info == nil || !info.Private {
+		m["ut_pex"] = extPEX
+	}
+	d := map[string]any{"m": m, "v": "Polyfin", "reqq": 250}
 	if metadataSize > 0 {
 		d["metadata_size"] = metadataSize
 	}
+	p.extended = true
 	p.send(msgExtended, []byte{0}, encode(d))
 }
 
@@ -267,23 +336,4 @@ func readBlock(payload []byte) (block, bool) {
 	}
 	return block{piece: int(binary.BigEndian.Uint32(payload)), offset: int64(binary.BigEndian.Uint32(payload[4:])),
 		length: int64(binary.BigEndian.Uint32(payload[8:]))}, true
-}
-
-// dialPeer connects to a peer over route and shakes hands.
-func dialPeer(ctx context.Context, route Route, address netip.AddrPort, hash Hash, peerID [20]byte, dht bool) (net.Conn, bool, error) {
-	ctx, cancel := context.WithTimeout(ctx, handshakeTimeout)
-	defer cancel()
-	conn, err := route.Dial(ctx, address.String())
-	if err != nil {
-		return nil, false, err
-	}
-	deadline, _ := ctx.Deadline()
-	_ = conn.SetDeadline(deadline)
-	extensions, err := handshake(conn, hash, peerID, dht)
-	if err != nil {
-		conn.Close()
-		return nil, false, err
-	}
-	_ = conn.SetDeadline(time.Time{})
-	return conn, extensions, nil
 }

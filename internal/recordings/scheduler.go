@@ -358,24 +358,35 @@ func partPath(dir string, recording accounts.ID, n int) string {
 // record writes t's recording until its end: the stream is read again
 // after a while when it stops before.
 func (s *Service) record(ctx context.Context, t Timer, a *active) {
+	// The recording, its timer marked under way and the file it writes
+	// first show at once, when the transaction commits: whoever sees the
+	// recording under way finds its timer active and its stream.
 	var id accounts.ID
-	err := s.db.QueryRow(ctx, `INSERT INTO live_recordings (timer_id, series_timer_id, user_id, channel_id, program_id, name, overview,
-			genres, rating, image, start_at, end_at, season, episode, episode_title)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`,
-		t.ID, t.SeriesTimer, t.User, t.Channel, t.Program, t.Name, t.Overview, nonNil(t.Genres), t.Rating, t.Image, t.Start, t.End,
-		t.Season, t.Episode, t.EpisodeTitle).Scan(&id)
-	if err == nil {
-		_, err = s.db.Exec(ctx, "UPDATE live_timers SET status = 'InProgress' WHERE id = $1", t.ID)
-	}
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		err := tx.QueryRow(ctx, `INSERT INTO live_recordings (timer_id, series_timer_id, user_id, channel_id, program_id, name, overview,
+				genres, rating, image, start_at, end_at, season, episode, episode_title)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`,
+			t.ID, t.SeriesTimer, t.User, t.Channel, t.Program, t.Name, t.Overview, nonNil(t.Genres), t.Rating, t.Image, t.Start, t.End,
+			t.Season, t.Episode, t.EpisodeTitle).Scan(&id)
+		if err == nil {
+			_, err = tx.Exec(ctx, "UPDATE live_timers SET status = 'InProgress' WHERE id = $1", t.ID)
+		}
+		if err == nil {
+			s.mu.Lock()
+			a.recording, a.part = id, partPath(a.dir, id, 0)
+			s.mu.Unlock()
+		}
+		return err
+	})
 	if err != nil {
+		s.mu.Lock()
+		a.recording, a.part = accounts.ID{}, ""
+		s.mu.Unlock()
 		if ctx.Err() == nil {
 			s.logger.Warn("A recording could not start", "error", err)
 		}
 		return
 	}
-	s.mu.Lock()
-	a.recording = id
-	s.mu.Unlock()
 	s.logger.Info("A recording started", "recording", id.String(), "until", t.Until().Format(time.RFC3339))
 	until, cancel := context.WithDeadline(ctx, t.Until())
 	defer cancel()
@@ -438,7 +449,7 @@ func (s *Service) recordPart(ctx context.Context, t Timer, recording accounts.ID
 		if ctx.Err() != nil || size(path) > 0 || errors.Is(err, hls.ErrBusy) {
 			return err
 		}
-		s.logger.Info("A channel's stream could not be recorded", "addon", version.Addon, "error", err)
+		s.logger.Info("A channel's stream could not be recorded", "addon", version.AddonLog, "error", err)
 	}
 	return err
 }
@@ -676,8 +687,9 @@ func (s *Service) refreshSeries(ctx context.Context, st SeriesTimer) {
 		}
 	}
 	matched := []accounts.ID{}
+	country := s.users.Settings().RatingCountry
 	for _, item := range programs {
-		if !Matches(st, item, recorded, now) || !Allows(user, programKind, item.OfficialRating, item.Genres) {
+		if !Matches(st, item, recorded, now) || !Allows(user, country, programKind, item.ParentalRating(), item.Genres) {
 			continue
 		}
 		p := ProgrammeOf(item)

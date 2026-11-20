@@ -31,18 +31,27 @@ type fakeSource struct {
 	accepted map[string]bool
 	rotate   bool
 	fail     error
-	// reads are the secrets read with, signedOut those signed out.
+	// reads are the secrets read with, signedOut those signed out;
+	// signingOut is closed at the next sign-out, then replaced.
 	reads, signedOut []string
+	signingOut       chan struct{}
 	renewals         int
 	// signOutFails fails the sign-outs; hang has them wait for their
 	// context to end, and fail.
 	signOutFails, hang bool
+	// gate, when set, has the sign-outs tell entered, then wait for gate
+	// to close, failing if their context ends first.
+	gate, entered chan struct{}
+	// confined tells, by secret, how each read and sign-out with it was
+	// confined.
+	confined map[string][]bool
 }
 
 func (f *fakeSource) Reread(_ context.Context, signIn SignIn) (Account, SignIn, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.reads = append(f.reads, signIn.Secret)
+	f.confined[signIn.Secret] = append(f.confined[signIn.Secret], signIn.Confined)
 	if f.fail != nil {
 		return Account{}, signIn, f.fail
 	}
@@ -60,8 +69,16 @@ func (f *fakeSource) Reread(_ context.Context, signIn SignIn) (Account, SignIn, 
 
 func (f *fakeSource) SignOut(ctx context.Context, signIn SignIn) error {
 	f.mu.Lock()
-	hang, fails := f.hang, f.signOutFails
+	hang, fails, gate, entered := f.hang, f.signOutFails, f.gate, f.entered
 	f.mu.Unlock()
+	if gate != nil {
+		entered <- struct{}{}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-gate:
+		}
+	}
 	if hang {
 		<-ctx.Done()
 		return errors.New("the app does not answer")
@@ -72,6 +89,9 @@ func (f *fakeSource) SignOut(ctx context.Context, signIn SignIn) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.signedOut = append(f.signedOut, signIn.Secret)
+	f.confined[signIn.Secret] = append(f.confined[signIn.Secret], signIn.Confined)
+	close(f.signingOut)
+	f.signingOut = make(chan struct{})
 	return nil
 }
 
@@ -152,7 +172,7 @@ func newConnectionHarness(t *testing.T) connectionHarness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	source := &fakeSource{accepted: map[string]bool{}}
+	source := &fakeSource{accepted: map[string]bool{}, signingOut: make(chan struct{}), confined: map[string][]bool{}}
 	log := &lockedBuffer{}
 	imports := &atomic.Bool{}
 	imports.Store(true)
@@ -175,7 +195,7 @@ func newConnectionHarness(t *testing.T) connectionHarness {
 // and returns user's connection.
 func (h connectionHarness) connected(t *testing.T, by, user accounts.User, account Account, signIn SignIn, choice Choice) Connection {
 	t.Helper()
-	account.App, account.SignIn = "stremio", &signIn
+	account.App, account.SignIn, account.StayConnected = "stremio", &signIn, true
 	h.imported(t, by, user, account, choice)
 	h.idle(t)
 	return h.connectionOf(t, user)
@@ -224,11 +244,18 @@ func (h connectionHarness) importedNow(t *testing.T, user accounts.User) Connect
 // stored is what the database holds of user's connection to the fake app.
 func (h connectionHarness) stored(t *testing.T, user accounts.ID) (signIn string, owned bool) {
 	t.Helper()
-	if err := h.pool.QueryRow(t.Context(), "SELECT sign_in, owned FROM app_connections WHERE user_id = $1 AND app = 'stremio'", user).
-		Scan(&signIn, &owned); err != nil {
+	signIn, owned, _ = h.storedConfined(t, user)
+	return signIn, owned
+}
+
+// storedConfined is stored, with whether the connection is confined.
+func (h connectionHarness) storedConfined(t *testing.T, user accounts.ID) (signIn string, owned, confined bool) {
+	t.Helper()
+	if err := h.pool.QueryRow(t.Context(), "SELECT sign_in, owned, confined FROM app_connections WHERE user_id = $1 AND app = 'stremio'",
+		user).Scan(&signIn, &owned, &confined); err != nil {
 		t.Fatal(err)
 	}
-	return signIn, owned
+	return signIn, owned, confined
 }
 
 // aged moves the imports of every connection back by d, as if they ran d
@@ -274,9 +301,14 @@ func TestStayingConnectedKeepsTheSignInAndImportsAgain(t *testing.T) {
 		c.NextImport.Sub(c.LastImport.At) != 6*time.Hour {
 		t.Fatalf("the connection: %+v %+v", c, c.LastImport)
 	}
+	// The sign-in is sealed: it keeps the secret and the profile's ID, not
+	// its name. The sealed text, random, is not searched for a short word,
+	// which it holds by chance once in a while.
 	stored, owned := h.stored(t, alice.ID)
-	if !secrets.Sealed(stored) || strings.Contains(stored, secret) || strings.Contains(stored, "Kids") || !owned {
-		t.Errorf("the sign-in is stored as %q", stored)
+	opened, err := h.open(stored, owned, false)
+	if !secrets.Sealed(stored) || strings.Contains(stored, secret) || !owned || err != nil || opened.Secret != secret ||
+		opened.Profile != "2" || strings.Contains(fmt.Sprintf("%+v", opened), "Kids") {
+		t.Errorf("the sign-in is stored as %q, opened as %+v: %v", stored, opened, err)
 	}
 	if signedOut := h.source.signedOutSecrets(); len(signedOut) != 0 {
 		t.Errorf("signed out: %v", signedOut)
@@ -289,7 +321,7 @@ func TestStayingConnectedKeepsTheSignInAndImportsAgain(t *testing.T) {
 	if err != nil || len(installed) != 1 {
 		t.Fatalf("Alice's addons: %+v %v", installed, err)
 	}
-	if err := h.addons.Remove(t.Context(), addons.Personal(alice.ID), installed[0].ID); err != nil {
+	if _, err := h.addons.Remove(t.Context(), addons.Personal(alice.ID), installed[0].ID); err != nil {
 		t.Fatal(err)
 	}
 	h.source.set(func(f *fakeSource) {
@@ -307,7 +339,7 @@ func TestStayingConnectedKeepsTheSignInAndImportsAgain(t *testing.T) {
 	}
 	// The app renewed the secret: the renewed one is kept, and read with.
 	stored, _ = h.stored(t, alice.ID)
-	if signIn, err := h.open(stored, true); err != nil || signIn.Secret != "renewed-secret-b" || signIn.Profile != "2" {
+	if signIn, err := h.open(stored, true, false); err != nil || signIn.Secret != "renewed-secret-b" || signIn.Profile != "2" {
 		t.Errorf("the renewed sign-in: %+v %v", signIn, err)
 	}
 	h.importedNow(t, alice)
@@ -334,21 +366,23 @@ func TestStayingConnectedKeepsTheSignInAndImportsAgain(t *testing.T) {
 	}
 
 	// Alice signs in again: the new sign-in replaces the one refused,
-	// which Polyfin signs out, and the connection runs again.
+	// which Polyfin signs out in the background, and the connection runs
+	// again.
 	h.source.set(func(f *fakeSource) { f.accepted["signed-in-again"] = true })
 	c = h.connected(t, alice, alice, account, SignIn{Secret: "signed-in-again", Owned: true}, Choice{Profile: "2"})
 	if c.Problem != "" || c.LastImport == nil || c.LastImport.Problem != "" {
 		t.Errorf("signed in again: %+v", c)
 	}
-	if signedOut := h.source.signedOutSecrets(); !slices.Equal(signedOut, []string{"renewed-secret-c"}) {
+	if signedOut := h.waitSignedOut(t, 1); !slices.Equal(signedOut, []string{"renewed-secret-c"}) {
 		t.Errorf("signed out: %v", signedOut)
 	}
 
-	// Disconnecting signs out the session Polyfin opened, and forgets it.
+	// Disconnecting signs out, in the background, the session Polyfin
+	// opened, and forgets it.
 	if err := h.Disconnect(t.Context(), alice.ID, "stremio"); err != nil {
 		t.Fatal(err)
 	}
-	if signedOut := h.source.signedOutSecrets(); !slices.Equal(signedOut, []string{"renewed-secret-c", "signed-in-again"}) {
+	if signedOut := h.waitSignedOut(t, 2); !slices.Equal(signedOut, []string{"renewed-secret-c", "signed-in-again"}) {
 		t.Errorf("signed out: %v", signedOut)
 	}
 	if connections, err := h.Connections(t.Context(), alice); err != nil || len(connections) != 0 {
@@ -394,11 +428,7 @@ func TestPastedKeysAreNeverSignedOut(t *testing.T) {
 	h.Hold(bob.ID, Account{App: "stremio", SignIn: &SignIn{Secret: "pasted, never imported"}})
 	h.Hold(bob.ID, Account{App: "stremio", SignIn: &SignIn{Secret: "replaced", Owned: true}})
 	h.Hold(bob.ID, Account{App: "stremio", SignIn: &SignIn{Secret: "expired", Owned: true}})
-	deadline := time.Now().Add(5 * time.Second)
-	for len(h.source.signedOutSecrets()) < 2 && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if signedOut := h.source.signedOutSecrets(); !slices.Equal(signedOut, []string{"replaced", "expired"}) {
+	if signedOut := h.waitSignedOut(t, 2); !slices.Equal(signedOut, []string{"expired", "replaced"}) {
 		t.Errorf("signed out: %v", signedOut)
 	}
 }
@@ -406,11 +436,11 @@ func TestPastedKeysAreNeverSignedOut(t *testing.T) {
 func TestTheSettingPausesMembersConnections(t *testing.T) {
 	t.Parallel()
 	h := newConnectionHarness(t)
-	root, bob, carol := h.user(t, "root", true), h.user(t, "bob", false), h.user(t, "carol", false)
+	root, bob, carol, dave := h.user(t, "root", true), h.user(t, "bob", false), h.user(t, "carol", false), h.user(t, "dave", false)
 	account := Account{Profiles: []Profile{{ID: "1"}}}
 	h.source.set(func(f *fakeSource) {
 		f.account = account
-		f.accepted["root's"], f.accepted["bob's"], f.accepted["carol's"] = true, true, true
+		f.accepted["root's"], f.accepted["bob's"], f.accepted["carol's"], f.accepted["dave's"] = true, true, true, true
 	})
 	h.connected(t, root, root, account, SignIn{Secret: "root's", Owned: true}, Choice{Profile: "1"})
 	// An administrator connects Bob's account for him.
@@ -419,7 +449,12 @@ func TestTheSettingPausesMembersConnections(t *testing.T) {
 		t.Errorf("Bob's connection: %+v", c)
 	}
 	h.connected(t, carol, carol, account, SignIn{Secret: "carol's", Owned: true}, Choice{Profile: "1"})
+	h.connected(t, dave, dave, account, SignIn{Secret: "dave's", Owned: true}, Choice{Profile: "1"})
 	if _, err := h.pool.Exec(t.Context(), "UPDATE users SET is_disabled = true WHERE id = $1", carol.ID); err != nil {
+		t.Fatal(err)
+	}
+	// Dave's account reached the exact end an invite link gave it.
+	if _, err := h.pool.Exec(t.Context(), "UPDATE users SET ends_at = '2000-01-01 00:00Z' WHERE id = $1", dave.ID); err != nil {
 		t.Fatal(err)
 	}
 
@@ -432,7 +467,7 @@ func TestTheSettingPausesMembersConnections(t *testing.T) {
 	h.aged(t, 7*time.Hour)
 
 	// The setting off pauses Bob's connection, not the administrator's;
-	// a disabled user's never runs.
+	// a disabled user's never runs, nor an ended one's.
 	h.imports.Store(false)
 	if c := h.connectionOf(t, bob); !c.Paused || c.NextImport != nil {
 		t.Errorf("Bob's paused connection: %+v", c)
@@ -448,7 +483,7 @@ func TestTheSettingPausesMembersConnections(t *testing.T) {
 	h.imports.Store(true)
 	h.importDue()
 	h.idle(t)
-	if h.source.readsWith("bob's") != 1 || h.source.readsWith("carol's") != 0 {
+	if h.source.readsWith("bob's") != 1 || h.source.readsWith("carol's") != 0 || h.source.readsWith("dave's") != 0 {
 		t.Errorf("reads with the setting on: %v", h.source.reads)
 	}
 }
@@ -567,44 +602,41 @@ func TestTheLibraryLeavesTheWatchlistWhenNoListHoldsIt(t *testing.T) {
 		}
 		return []Profile{{ID: "1", Name: "Main", Entries: entries}}
 	}
-	// A one-off import brings 1 and 2; a connection 2, 3 and 4.
+	// A one-off import brings 1 and 2; a connection 2, 3, 4 and 5.
 	h.imported(t, alice, alice, Account{App: "stremio", Profiles: library(1, 2)}, Choice{Profile: "1"})
 	const secret = "kept-secret-0123456789abcdef"
 	h.source.set(func(f *fakeSource) { f.accepted[secret] = true })
-	c := h.connected(t, alice, alice, Account{Profiles: library(2, 3, 4)}, SignIn{Secret: secret}, Choice{Profile: "1"})
-	if c.LastImport == nil || c.LastImport.Watchlist != 2 {
+	c := h.connected(t, alice, alice, Account{Profiles: library(2, 3, 4, 5)}, SignIn{Secret: secret}, Choice{Profile: "1"})
+	if c.LastImport == nil || c.LastImport.Watchlist != 3 {
 		t.Errorf("first import of the connection: %+v", c.LastImport)
 	}
-	if got := h.watchlistOf(t, alice.ID); !slices.Equal(got, []accounts.ID{movie(4), movie(3), movie(2), movie(1)}) {
+	if got := h.watchlistOf(t, alice.ID); !slices.Equal(got, []accounts.ID{movie(5), movie(4), movie(3), movie(2), movie(1)}) {
 		t.Fatalf("watchlist: %v", got)
 	}
 
 	// Taken off the app's library, 3 leaves at the next import; 2 stays,
 	// as the one-off import brought it too.
-	h.source.set(func(f *fakeSource) { f.account = Account{Profiles: library(4)} })
+	h.source.set(func(f *fakeSource) { f.account = Account{Profiles: library(4, 5)} })
 	if c := h.importedNow(t, alice); c.LastImport == nil || c.LastImport.Watchlist != 0 || c.LastImport.Problem != "" {
 		t.Errorf("next import: %+v", c.LastImport)
 	}
-	if got := h.watchlistOf(t, alice.ID); !slices.Equal(got, []accounts.ID{movie(4), movie(2), movie(1)}) {
+	if got := h.watchlistOf(t, alice.ID); !slices.Equal(got, []accounts.ID{movie(5), movie(4), movie(2), movie(1)}) {
 		t.Fatalf("after the next import: %v", got)
 	}
-	// A one-off import's title leaves once started.
-	if _, err := h.data.Change(t.Context(), alice.ID, []userdata.Item{{ID: movie(1)}}, func(d *userdata.Data) { d.Played = true }); err != nil {
+	// Started, a title stays on the playlist.
+	if _, err := h.data.Change(t.Context(), alice.ID, []userdata.Item{{ID: movie(4)}}, func(d *userdata.Data) { d.Played = true }); err != nil {
 		t.Fatal(err)
-	}
-	if got := h.watchlistOf(t, alice.ID); !slices.Equal(got, []accounts.ID{movie(4), movie(2)}) {
-		t.Errorf("after one started: %v", got)
 	}
 	// No import set a favorite.
 	if favorites, err := h.data.Favorites(t.Context(), alice.ID); err != nil || len(favorites) != 0 {
 		t.Errorf("favorites: %+v %v", favorites, err)
 	}
-	// Disconnected, what the connection alone held leaves; the one-off
-	// import's title stays.
+	// Disconnected, what the connection alone held leaves but the title
+	// started; the one-off import's titles stay.
 	if err := h.Disconnect(t.Context(), alice.ID, "stremio"); err != nil {
 		t.Fatal(err)
 	}
-	if got := h.watchlistOf(t, alice.ID); !slices.Equal(got, []accounts.ID{movie(2)}) {
+	if got := h.watchlistOf(t, alice.ID); !slices.Equal(got, []accounts.ID{movie(4), movie(2), movie(1)}) {
 		t.Errorf("after disconnecting: %v", got)
 	}
 }
@@ -639,7 +671,7 @@ func TestTheFirstImportOfAConnectionGoneSavesNoLibrary(t *testing.T) {
 			alice := h.user(t, "alice", false)
 			const secret = "kept-secret-0123456789abcdef"
 			h.source.set(func(f *fakeSource) { f.accepted[secret] = true })
-			account := Account{App: "stremio", SignIn: &SignIn{Secret: secret, Owned: true}, Profiles: []Profile{{ID: "1", Entries: []Entry{
+			account := Account{App: "stremio", SignIn: &SignIn{Secret: secret, Owned: true}, StayConnected: true, Profiles: []Profile{{ID: "1", Entries: []Entry{
 				{Title: ref(t, "tt0000001", true, 0, 0), Watchlist: true}, {Title: ref(t, "tt0000002", true, 0, 0), Watchlist: true}}}}}
 			if _, err := h.Start(alice, alice, h.Hold(alice.ID, account), Choice{Profile: "1"}); err != nil {
 				t.Fatal(err)
@@ -694,5 +726,71 @@ func TestALibraryIsNotSavedForAConnectionGone(t *testing.T) {
 	}
 	if status := merge(); status.Watchlist != 0 || len(h.watchlistOf(t, alice.ID)) != 0 {
 		t.Errorf("disconnected: %+v %v", status, h.watchlistOf(t, alice.ID))
+	}
+}
+
+// A member's connection stays confined, as it was made, at each later
+// read and at its sign-out; an administrator's keeps its reach, made for
+// themselves or for a member.
+func TestAConnectionKeepsItsConfinement(t *testing.T) {
+	t.Parallel()
+	h := newConnectionHarness(t)
+	root, bob, carol := h.user(t, "root", true), h.user(t, "bob", false), h.user(t, "carol", false)
+	account := Account{Profiles: []Profile{{ID: "1"}}}
+	h.source.set(func(f *fakeSource) {
+		f.account, f.accepted["bob"], f.accepted["carol"], f.accepted["root"] = account, true, true, true
+	})
+	h.connected(t, bob, bob, account, SignIn{Secret: "bob", Owned: true, Confined: true}, Choice{Profile: "1"})
+	h.connected(t, root, carol, account, SignIn{Secret: "carol", Owned: true}, Choice{Profile: "1"})
+	h.connected(t, root, root, account, SignIn{Secret: "root", Owned: true}, Choice{Profile: "1"})
+	for _, user := range []accounts.User{bob, carol, root} {
+		h.importedNow(t, user)
+		if _, _, confined := h.storedConfined(t, user.ID); confined != (user.ID == bob.ID) {
+			t.Errorf("%s's connection stored confined: %v", user.Name, confined)
+		}
+		if err := h.Disconnect(t.Context(), user.ID, "stremio"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	h.waitSignedOut(t, 3)
+	h.source.mu.Lock()
+	defer h.source.mu.Unlock()
+	// The reads, then the sign-out.
+	for secret, want := range map[string]bool{"bob": true, "carol": false, "root": false} {
+		if got := h.source.confined[secret]; len(got) < 2 || slices.ContainsFunc(got, func(c bool) bool { return c != want }) {
+			t.Errorf("%s: confined %v, want %v", secret, got, want)
+		}
+	}
+}
+
+// Disconnecting signs out in the background: a client leaving as the
+// request runs leaves no session open.
+func TestDisconnectingSignsOutPastTheRequest(t *testing.T) {
+	t.Parallel()
+	h := newConnectionHarness(t)
+	bob := h.user(t, "bob", false)
+	account := Account{Profiles: []Profile{{ID: "1"}}}
+	h.source.set(func(f *fakeSource) { f.account, f.accepted["bob"] = account, true })
+	h.connected(t, bob, bob, account, SignIn{Secret: "bob", Owned: true}, Choice{Profile: "1"})
+
+	entered, gate := make(chan struct{}, 1), make(chan struct{})
+	h.source.set(func(f *fakeSource) { f.entered, f.gate = entered, gate })
+	ctx, cancel := context.WithCancel(t.Context())
+	disconnected := make(chan struct{})
+	go func() {
+		defer close(disconnected)
+		_ = h.Disconnect(ctx, bob.ID, "stremio")
+	}()
+	select {
+	case <-entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("never signed out")
+	}
+	// The client leaves while the sign-out runs.
+	cancel()
+	<-disconnected
+	close(gate)
+	if signedOut := h.waitSignedOut(t, 1); !slices.Equal(signedOut, []string{"bob"}) {
+		t.Errorf("signed out: %v", signedOut)
 	}
 }

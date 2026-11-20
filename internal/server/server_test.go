@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"testing/fstest"
+
+	"github.com/moodiness/polyfin/internal/basepath"
 )
 
 type database struct{ err error }
@@ -42,6 +44,7 @@ func get(h http.Handler, target string) *httptest.ResponseRecorder {
 }
 
 func TestAdminApplicationRouting(t *testing.T) {
+	t.Parallel()
 	h := handler(database{})
 	for _, tc := range []struct {
 		target string
@@ -73,6 +76,7 @@ func TestAdminApplicationRouting(t *testing.T) {
 }
 
 func TestRootAndBareAdminRedirectToTheApplication(t *testing.T) {
+	t.Parallel()
 	h := handler(database{})
 	for _, target := range []string{"/", "/admin"} {
 		response := get(h, target)
@@ -82,7 +86,31 @@ func TestRootAndBareAdminRedirectToTheApplication(t *testing.T) {
 	}
 }
 
+// Silo's TV apps send people to /activate, with the code in the QR code's
+// address: it leads to the admin app's Quick Connect page, with the code
+// when it is one. Under /jellyfin, the Jellyfin API answers.
+func TestActivateLeadsToQuickConnect(t *testing.T) {
+	t.Parallel()
+	h := handler(database{})
+	for target, want := range map[string]string{
+		"/activate":                "/admin/me/quick-connect",
+		"/activate?code=48217730":  "/admin/me/quick-connect?code=48217730",
+		"/activate?code=4821-7730": "/admin/me/quick-connect?code=48217730",
+		"/activate?code=%3Cb%3E":   "/admin/me/quick-connect",
+		"/activate?code=123456789": "/admin/me/quick-connect",
+	} {
+		response := get(h, target)
+		if response.Code != http.StatusFound || response.Header().Get("Location") != want {
+			t.Errorf("%s: got %d to %q, want %q", target, response.Code, response.Header().Get("Location"), want)
+		}
+	}
+	if got := get(h, "/jellyfin/activate").Body.String(); got != "jellyfin" {
+		t.Errorf("/jellyfin/activate served by %q", got)
+	}
+}
+
 func TestReadinessFollowsTheDatabase(t *testing.T) {
+	t.Parallel()
 	if code := get(handler(database{}), "/readyz").Code; code != http.StatusOK {
 		t.Errorf("ready database: /readyz = %d", code)
 	}
@@ -98,12 +126,15 @@ func TestReadinessFollowsTheDatabase(t *testing.T) {
 }
 
 func TestPathsReachTheirOwner(t *testing.T) {
+	t.Parallel()
 	h := handler(database{})
 	for target, want := range map[string]string{
-		"/admin/api/users":    "admin api",
-		"/admin/api/missing":  "admin api",
-		"/Users/Me":           "jellyfin",
-		"/System/Info/Public": "jellyfin",
+		"/admin/api/users":   "admin api",
+		"/admin/api/missing": "admin api",
+		// An addon's configure link, which needs no session.
+		"/admin/configure/token": "admin api",
+		"/Users/Me":              "jellyfin",
+		"/System/Info/Public":    "jellyfin",
 		// Without a web client, as before it.
 		"/web/index.html": "jellyfin",
 		"/web":            "jellyfin",
@@ -120,11 +151,13 @@ func TestPathsReachTheirOwner(t *testing.T) {
 // as the base of every request: Polyfin answers there as at the root, with
 // the path the routes know. The admin app and the probes stay at the root.
 func TestJellyfinBaseAnswersAsTheRoot(t *testing.T) {
+	t.Parallel()
 	api := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get("Authorization") == "" && r.URL.Path == "/Users/Me" {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
+		w.Header().Set("Base", basepath.Of(r))
 		_, _ = io.WriteString(w, "jellyfin "+r.URL.Path)
 	})
 	h := New(Options{
@@ -157,6 +190,15 @@ func TestJellyfinBaseAnswersAsTheRoot(t *testing.T) {
 		if response.Header().Get("Content-Security-Policy") != "" && strings.HasPrefix(want, "jellyfin") {
 			t.Errorf("%s: the admin app's Content-Security-Policy", target)
 		}
+		// The routes learn the base as the app wrote it, for the addresses
+		// they send back (see basepath).
+		wantBase := ""
+		if strings.HasPrefix(strings.ToLower(target), jellyfinBase+"/") {
+			wantBase = target[:len(jellyfinBase)]
+		}
+		if base := response.Header().Get("Base"); strings.HasPrefix(want, "jellyfin") && base != wantBase {
+			t.Errorf("%s: the API saw the base %q, want %q", target, base, wantBase)
+		}
 	}
 
 	request := httptest.NewRequest(http.MethodGet, "/jellyfin/Users/Me", nil)
@@ -167,7 +209,7 @@ func TestJellyfinBaseAnswersAsTheRoot(t *testing.T) {
 		t.Errorf("signed in, /jellyfin/Users/Me: %d %q", recorder.Code, recorder.Body)
 	}
 
-	if body := get(h, "/jellyfin/web/").Body.String(); !strings.Contains(body, `<script src="polyfin.js"></script>`) {
+	if body := get(h, "/jellyfin/web/").Body.String(); !strings.Contains(body, string(webScriptTag)) {
 		t.Errorf("/jellyfin/web/: %q, want the web client's page", body)
 	}
 	for target, want := range map[string]string{

@@ -28,14 +28,27 @@ type fakeAddon struct {
 	manifest stremio.Manifest
 	catalogs map[string][]stremio.Meta // "type/id" → every item
 	metas    map[string]stremio.Meta   // "type/id" → complete meta
-	streams  map[string][]stremio.Stream
-	pageSize int
+	// rawMetas, "type/id" → a complete meta as the addon writes it, answers
+	// before metas, for what stremio.Meta does not keep, such as links.
+	rawMetas map[string]string
+	// rawCatalogs, "type/id" → a catalog's metas as the addon writes them
+	// (a JSON array), answers before catalogs, on its first page only, for
+	// what stremio.Meta does not keep, such as moviedb_id.
+	rawCatalogs map[string]string
+	streams     map[string][]stremio.Stream
+	pageSize    int
+	// byPerson answers a search with the whole catalog, as a people search
+	// finds titles by someone's name rather than by theirs.
+	byPerson bool
 	// short shortens the page at a skip by that many items, as addons that
 	// filter their catalogs do.
 	short map[int]int
-	// metaGate, when set, holds every meta request until it is closed.
-	metaGate chan struct{}
-	// metaFails, when set, answers every meta request with a server error.
+	// metaGate, when set, holds every meta request until it is closed, or
+	// those of metaGateType only, when set.
+	metaGate     chan struct{}
+	metaGateType string
+	// metaFails, when set, answers every meta request with a server error;
+	// it is read under mu, so that a test can set it once the addon serves.
 	metaFails bool
 	// catalogGate, when set, holds every catalog request until it is
 	// closed, and gated, when set, is told of each request it holds; hold
@@ -77,6 +90,7 @@ func (a *fakeAddon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		a.mu.Lock()
 		items := a.catalogs[parts[1]+"/"+catalogID]
+		rawCatalog, isRawCatalog := a.rawCatalogs[parts[1]+"/"+catalogID]
 		gate, gated, hold := a.catalogGate, a.gated, a.hold
 		if hold != nil {
 			hold.arrived++
@@ -103,13 +117,20 @@ func (a *fakeAddon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 		}
-		if search := extra.Get("search"); search != "" {
+		if search := extra.Get("search"); search != "" && !a.byPerson {
 			items = slices.DeleteFunc(slices.Clone(items), func(m stremio.Meta) bool {
 				return !strings.Contains(strings.ToLower(m.Name), strings.ToLower(search))
 			})
 		}
 		if genre := extra.Get("genre"); genre != "" && genre != "None" {
 			items = slices.DeleteFunc(slices.Clone(items), func(m stremio.Meta) bool { return !slices.Contains(m.Genres, genre) })
+		}
+		if isRawCatalog {
+			if extra.Get("skip") != "" && extra.Get("skip") != "0" {
+				rawCatalog = "[]"
+			}
+			_, _ = io.WriteString(w, `{"metas":`+rawCatalog+`}`)
+			return
 		}
 		skip, _ := strconv.Atoi(extra.Get("skip"))
 		size := a.pageSize
@@ -120,7 +141,7 @@ func (a *fakeAddon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		to = max(from, to-a.short[skip])
 		_ = json.NewEncoder(w).Encode(map[string]any{"metas": items[from:to]})
 	case parts[0] == "meta" && len(parts) == 3:
-		if a.metaGate != nil {
+		if a.metaGate != nil && (a.metaGateType == "" || a.metaGateType == parts[1]) {
 			select {
 			case <-a.metaGate:
 			case <-r.Context().Done():
@@ -128,13 +149,19 @@ func (a *fakeAddon) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		id, _ := url.PathUnescape(parts[2])
-		if a.metaFails {
+		a.mu.Lock()
+		raw, isRaw := a.rawMetas[parts[1]+"/"+id]
+		meta, ok := a.metas[parts[1]+"/"+id]
+		fails := a.metaFails
+		a.mu.Unlock()
+		if fails {
 			http.Error(w, "failing", http.StatusInternalServerError)
 			return
 		}
-		a.mu.Lock()
-		meta, ok := a.metas[parts[1]+"/"+id]
-		a.mu.Unlock()
+		if isRaw {
+			_, _ = w.Write([]byte(`{"meta": ` + raw + `}`))
+			return
+		}
 		if !ok {
 			http.NotFound(w, r)
 			return
@@ -172,6 +199,13 @@ func titles(kind string, count int, genres ...string) []stremio.Meta {
 	return result
 }
 
+// The tests hash passwords at a small cost (see
+// accounts.LowerPasswordCostForTests): every env creates its users.
+func TestMain(m *testing.M) {
+	accounts.LowerPasswordCostForTests()
+	m.Run()
+}
+
 type env struct {
 	t       *testing.T
 	service *Service
@@ -199,7 +233,13 @@ func newEnv(t *testing.T) env {
 	// them on.
 	service.followUpDelays = nil
 	service.readAhead = false
-	return env{t: t, service: service, addons: store, users: users, admin: admin, member: member}
+	e := env{t: t, service: service, addons: store, users: users, admin: admin, member: member}
+	// Upstream's tests run with upstream's defaults: this fork's tests turn
+	// its own settings on (see specials_test.go).
+	e.setting(func(s *accounts.Settings) {
+		s.HideSpecials, s.ExactTitleMatch, s.HiddenReleases = false, false, []string{}
+	})
+	return e
 }
 
 // setting changes the server's settings.
@@ -548,6 +588,44 @@ func TestMergedTitlesKeepTheCatalogThatListedThem(t *testing.T) {
 	}
 }
 
+// The poster address template is the administrator's, which may point to
+// a server of the local network: the poster it gives a title of a user's
+// own addon is told templated, so that it is not confined to public
+// addresses as the addon's artwork is, and the addon's poster, which
+// stands in when the template's cannot be downloaded, stays confined.
+func TestTemplatedPostersAreToldTemplated(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	search := []stremio.Extra{{Name: "search", IsRequired: true}}
+	server := httptest.NewServer(&fakeAddon{manifest: stremio.Manifest{ID: "own", Name: "Own", Version: "1",
+		Resources: []stremio.Resource{{Name: "catalog"}}, Catalogs: []stremio.Catalog{{Type: "movie", ID: "mine", Name: "Mine", Extra: search}}}})
+	t.Cleanup(server.Close)
+	own, err := e.addons.Install(t.Context(), addons.Personal(e.member.ID), server.URL+"/manifest.json", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The member's own addon only reaches public addresses; its page comes
+	// from cache, as from an addon on a public host.
+	mine := stremio.Meta{ID: "tt0895001", Type: "movie", Name: "movie own", Poster: "http://192.168.1.2/poster.jpg"}
+	e.service.searchPages.Put(pageKey{own.ID, "movie", "mine", "", "movie", "", 0}, fetched[[]stremio.Meta]{[]stremio.Meta{mine}, time.Now()})
+	e.setting(func(s *accounts.Settings) { s.PosterTemplate = "http://192.168.1.3/{type}/{imdb_id}.jpg" })
+	found, err := e.service.Search(t.Context(), e.member, "movie", []Kind{KindMovie}, 10)
+	if got := names(found); err != nil || !slices.Equal(got, []string{"movie own"}) {
+		t.Fatalf("search: %v %v", got, err)
+	}
+	art, err := e.service.Artwork(t.Context(), found[0].ID, "Primary")
+	if err != nil || art.URL != "http://192.168.1.3/movie/tt0895001.jpg" || !art.Templated || art.URLConfined() ||
+		!art.Confined || art.Fallback != mine.Poster {
+		t.Errorf("the templated poster: %+v, confined %t, %v", art, art.URLConfined(), err)
+	}
+	// Without the template, the addon's poster is confined.
+	e.setting(func(s *accounts.Settings) { s.PosterTemplate = "" })
+	art, err = e.service.Artwork(t.Context(), found[0].ID, "Primary")
+	if err != nil || art.URL != mine.Poster || art.Templated || !art.URLConfined() {
+		t.Errorf("the addon's poster: %+v, %v", art, err)
+	}
+}
+
 func TestUsersOnlyReachTheirLibraries(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
@@ -607,7 +685,7 @@ func TestLibraryNamesTellCollisionsApart(t *testing.T) {
 		{"content types in French", "fr",
 			[]addons.Library{catalog("A", "movie", "Populaires"), catalog("A", "series", "Populaires"), catalog("A", "collection", "Populaires")},
 			[]string{"Populaires (Films)", "Populaires (Séries)", "Populaires (Collections)"}},
-		{"unknown languages fall back to English", "de",
+		{"unknown languages fall back to English", "nl",
 			[]addons.Library{catalog("A", "movie", "Top"), catalog("A", "series", "Top")},
 			[]string{"Top (Movies)", "Top (Shows)"}},
 		{"the same type from two addons gets the addon name", "fr",
@@ -625,6 +703,9 @@ func TestLibraryNamesTellCollisionsApart(t *testing.T) {
 		{"custom names given twice get their type", "en",
 			[]addons.Library{custom("A", "movie", "Popular", "Mine"), custom("A", "series", "Popular", "Mine")},
 			[]string{"Mine (Movies)", "Mine (Shows)"}},
+		{"a catalog with neither a name nor an id is named after its type", "en",
+			[]addons.Library{{AddonName: "A", Catalog: stremio.Catalog{Type: "movie"}}, {AddonName: "A", Catalog: stremio.Catalog{Type: "series", Name: "  "}, Genre: "Comedy"}},
+			[]string{"Movies", "Shows · Comedy"}},
 		{"custom names of the same type get their addon", "fr",
 			[]addons.Library{custom("A", "movie", "Popular", "Mine"), custom("B", "movie", "Popular", "Mine")},
 			[]string{"Mine (Films, A)", "Mine (Films, B)"}},

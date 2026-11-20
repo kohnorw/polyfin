@@ -71,6 +71,10 @@ func newFixture(t *testing.T) fixture {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Live TV is opt-in in this fork.
+	if user, err = store.UpdateUser(t.Context(), user.ID, accounts.UserChanges{LiveTv: new(true)}, nil); err != nil {
+		t.Fatal(err)
+	}
 	f := fixture{store: store, guide: &guide{}, user: user, dir: t.TempDir(), folder: &atomic.Pointer[string]{}, ended: &[]Ended{}}
 	f.folder.Store(&f.dir)
 	f.service = New(Config{DB: pool, Folder: func() string { return *f.folder.Load() }, Guide: f.guide, Recorder: recorder{}, Users: store,
@@ -102,6 +106,7 @@ var (
 // A series timer records the programmes of its title, on its channel at
 // its time of day, or on any channel, or at any time, as Jellyfin's do.
 func TestSeriesTimersMatchProgrammesByTitle(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	x, y := id(t, channelX), id(t, channelY)
 	st := SeriesTimer{Programme: Programme{Channel: x, Name: "The Show", Start: time.Date(2026, 10, 4, 20, 0, 0, 0, time.UTC)}}
@@ -135,6 +140,7 @@ func TestSeriesTimersMatchProgrammesByTitle(t *testing.T) {
 // A series timer records on the days it lists, in the server's time zone;
 // none, or all of them, is every day.
 func TestSeriesTimersKeepToTheirDays(t *testing.T) {
+	t.Parallel()
 	zone := time.FixedZone("UTC+2", 2*3600)
 	// Sunday 4 October 2026, noon in the server's time zone.
 	now := time.Date(2026, 10, 4, 12, 0, 0, 0, zone)
@@ -160,6 +166,7 @@ func TestSeriesTimersKeepToTheirDays(t *testing.T) {
 // the guide marks previously shown, and, unmarked, those airing an episode
 // it recorded, told by its numbers, else its title, else its description.
 func TestSeriesTimersRecordNewEpisodesOnly(t *testing.T) {
+	t.Parallel()
 	now := time.Date(2026, 10, 4, 12, 0, 0, 0, time.UTC)
 	x := id(t, channelX)
 	st := SeriesTimer{Programme: Programme{Channel: x, Name: "The Show"}, SeriesOptions: SeriesOptions{RecordAnyTime: true, RecordNewOnly: true}}
@@ -199,6 +206,7 @@ func TestSeriesTimersRecordNewEpisodesOnly(t *testing.T) {
 // Series timers make timers from the guide of the user who made them, and
 // keep those cancelled by hand cancelled.
 func TestSeriesTimersMakeTimersFromTheGuide(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t)
 	ctx := t.Context()
 	now := time.Now().UTC().Truncate(time.Minute)
@@ -258,6 +266,7 @@ func TestSeriesTimersMakeTimersFromTheGuide(t *testing.T) {
 // A recording a restart interrupted is kept, partial, and its timer
 // records the rest of the programme; one that wrote nothing is dropped.
 func TestRestartKeepsInterruptedRecordingsAsPartial(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t)
 	ctx := t.Context()
 	now := time.Now()
@@ -332,6 +341,7 @@ func TestRestartKeepsInterruptedRecordingsAsPartial(t *testing.T) {
 // Recordings older than the settings keep them go, with their files; none
 // go while the settings keep them forever.
 func TestOldRecordingsAreSwept(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t)
 	ctx := t.Context()
 	now := time.Now()
@@ -375,6 +385,7 @@ func TestOldRecordingsAreSwept(t *testing.T) {
 // available, and a timer due does not record; another folder is used at
 // once.
 func TestRecordingFollowsTheSettingsFolder(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t)
 	ctx := t.Context()
 	airing := program(t, "01000000000000000000000000000000", "Airing", id(t, channelX), time.Now().Add(-10*time.Minute))
@@ -405,10 +416,75 @@ func TestRecordingFollowsTheSettingsFolder(t *testing.T) {
 	}
 }
 
+// A recording shows under way together with its timer marked so and the
+// file it writes: held while it marks its timer, as a busy runner may
+// pause it between its writes, it is not seen yet; once seen, its timer
+// is active and its file can be streamed.
+func TestRecordingStartsWithItsTimer(t *testing.T) {
+	t.Parallel()
+	f := newFixture(t)
+	ctx := t.Context()
+	airing := program(t, "01000000000000000000000000000000", "Airing", id(t, channelX), time.Now().Add(-10*time.Minute))
+	timer, err := f.service.CreateTimer(ctx, f.user.ID, ProgrammeOf(airing), Options{KeepUntil: KeepUntil[0]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The timer's row is locked as an update of its status needs, not as
+	// the recording's reference to it does: the recorder waits on it once
+	// it marks the timer under way.
+	hold, err := f.service.db.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hold.Exec(ctx, "SELECT FROM live_timers WHERE id = $1 FOR NO KEY UPDATE", timer.ID); err != nil {
+		t.Fatal(err)
+	}
+	defer f.service.stopAndWait(timer.ID)
+	defer func() { _ = hold.Rollback(context.WithoutCancel(ctx)) }()
+	f.service.start(ctx, timer, f.dir)
+	for deadline, waiting := time.Now().Add(30*time.Second), 0; waiting == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("the recorder never waited on its timer")
+		}
+		if err := f.service.db.QueryRow(ctx, `SELECT count(*) FROM pg_stat_activity
+			WHERE datname = current_database() AND wait_event_type = 'Lock'`).Scan(&waiting); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if seen, err := f.service.Recordings(ctx); err != nil || len(seen) != 0 {
+		t.Errorf("a recording seen before its timer is under way: %+v %v", seen, err)
+	}
+
+	if err := hold.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	var seen []Recording
+	for deadline := time.Now().Add(30 * time.Second); len(seen) == 0; time.Sleep(10 * time.Millisecond) {
+		if time.Now().After(deadline) {
+			t.Fatal("no recording started")
+		}
+		if seen, err = f.service.Recordings(ctx); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if len(seen) != 1 || !seen[0].InProgress() || seen[0].Timer == nil || *seen[0].Timer != timer.ID {
+		t.Fatalf("the recording under way: %+v", seen)
+	}
+	if marked, err := f.service.Timer(ctx, timer.ID); err != nil || marked.Status != StatusInProgress {
+		t.Errorf("its timer: %s %v", marked.Status, err)
+	}
+	for _, id := range []accounts.ID{timer.ID, seen[0].ID} {
+		if part, _, ok := f.service.Active(id); !ok || part != partPath(f.dir, seen[0].ID, 0) {
+			t.Errorf("the file it writes, by %s: %q %v", id, part, ok)
+		}
+	}
+}
+
 // A series timer recording new episodes only remembers those it recorded
 // in full, past their recordings, and drops their other airings; an
 // episode recorded in part is recorded again.
 func TestSeriesTimersSkipEpisodesRecordedInFull(t *testing.T) {
+	t.Parallel()
 	f := newFixture(t)
 	ctx := t.Context()
 	now := time.Now().UTC().Truncate(time.Minute)
@@ -476,5 +552,20 @@ func TestSeriesTimersSkipEpisodesRecordedInFull(t *testing.T) {
 	}
 	if got := scheduled(); !slices.Equal(got, []string{"04"}) {
 		t.Errorf("timers once the recording is deleted: %v", got)
+	}
+}
+
+// Ratings are judged by the server's rating country: under Italy, VM18 is
+// for adults only, past a limit of 13, while VM14 passes a limit of 14.
+func TestAllowsJudgesByTheRatingCountry(t *testing.T) {
+	t.Parallel()
+	thirteen, fourteen := 13, 14
+	user := accounts.User{Parental: accounts.ParentalControl{MaxRating: &thirteen}}
+	if Allows(user, "IT", ProgramKind, "VM18", nil) {
+		t.Error("VM18 allowed under Italy for a limit of 13")
+	}
+	user.Parental.MaxRating = &fourteen
+	if !Allows(user, "IT", ProgramKind, "VM14", nil) {
+		t.Error("VM14 refused under Italy for a limit of 14")
 	}
 }

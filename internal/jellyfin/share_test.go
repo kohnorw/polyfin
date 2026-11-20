@@ -63,7 +63,7 @@ func (s shareSetup) link(t *testing.T, viewers int) (string, accounts.ID) {
 
 // noRedirects is a client that reports a redirect rather than following
 // it: no guest route ever sends one, to a source least of all.
-var noRedirects = &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+var noRedirects = &http.Client{Transport: testTransport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
 
 // guest sends a request as a guest's browser does, without credentials.
 func (s shareSetup) guest(t *testing.T, method, path string, body any) (int, string) {
@@ -259,7 +259,7 @@ func TestGuestsLeaveTheSharersResumePointAlone(t *testing.T) {
 	t.Parallel()
 	s := sharing(t)
 	if status, _ := s.call(http.MethodPost, "/Sessions/Playing/Stopped", app("tv", s.token),
-		map[string]any{"ItemId": s.movie, "PositionTicks": 36_000_000_000}); status != http.StatusNoContent {
+		map[string]any{"ItemId": s.movie, "PositionTicks": int64(36_000_000_000)}); status != http.StatusNoContent {
 		t.Fatalf("the sharer's report: %d", status)
 	}
 	resume := func() UserItemData {
@@ -284,6 +284,48 @@ func TestGuestsLeaveTheSharersResumePointAlone(t *testing.T) {
 	if after := resume(); after.PlaybackPositionTicks != before.PlaybackPositionTicks || after.Played != before.Played ||
 		after.PlayCount != before.PlayCount {
 		t.Errorf("the guest changed the sharer's data: %+v, was %+v", after, before)
+	}
+}
+
+// A guest resumes where the page kept their position: the page carries
+// the link's ID to keep it under, and the playback starts at the position
+// the page gives, within the title's runtime, which Home shows.
+func TestGuestsResumeWhereThePageKeptThem(t *testing.T) {
+	t.Parallel()
+	s := sharing(t)
+	token, id := s.link(t, 1)
+	if status, page := s.guest(t, http.MethodGet, "/share/"+token, nil); status != http.StatusOK ||
+		!strings.Contains(page, `data-link="`+id.String()+`"`) {
+		t.Fatalf("page: %d\n%s", status, page)
+	}
+	at := func(body any) time.Duration {
+		t.Helper()
+		status, data := s.guest(t, http.MethodPost, "/share/"+token+"/play", body)
+		var answer struct{ Session string }
+		if err := json.Unmarshal([]byte(data), &answer); status != http.StatusOK || err != nil {
+			t.Fatalf("play: %d %s", status, data)
+		}
+		defer s.guest(t, http.MethodPost, "/share/"+token+"/play/"+answer.Session+"/stop", nil)
+		for _, session := range s.handler.guestSessions(t.Context(), nil) {
+			if session.Playing.PlaySessionID == answer.Session {
+				return session.Playing.Position
+			}
+		}
+		t.Fatalf("no session %s", answer.Session)
+		return 0
+	}
+	// The guest's playback has not reported yet: its position runs from
+	// where it started, by less than a minute however slow the test.
+	if position := at(map[string]any{"position": 124.5}); position < 124500*time.Millisecond || position > 184500*time.Millisecond {
+		t.Errorf("resumed at %v, want 2m4.5s", position)
+	}
+	for _, body := range []any{nil, map[string]any{"position": -5}, map[string]any{"position": 3 * 3600}} {
+		if position := at(body); position > time.Minute {
+			t.Errorf("%v started at %v, want the start", body, position)
+		}
+	}
+	if status, _ := s.guest(t, http.MethodPost, "/share/"+token+"/play", "not an object"); status != http.StatusBadRequest {
+		t.Errorf("a body that is no object: %d", status)
 	}
 }
 

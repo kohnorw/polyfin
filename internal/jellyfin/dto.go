@@ -8,7 +8,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 )
 
-// The types below reproduce the JSON Jellyfin 12.2 returns, field for field.
+// The types below reproduce the JSON Jellyfin 12.4 returns, field for field.
 // Jellyfin omits null values; Go nil slices would encode as null, so every
 // list is initialized.
 
@@ -241,7 +241,7 @@ func newUserDto(user accounts.User, serverID string) UserDto {
 			BlockUnratedItems:               append([]string{}, user.Parental.BlockUnrated...),
 			EnableRemoteControlOfOtherUsers: user.RemoteControl,
 			EnableSharedDeviceControl:       true,
-			EnableRemoteAccess:              true,
+			EnableRemoteAccess:              user.RemoteAccess,
 			EnableLiveTvAccess:              user.LiveTv,
 			// Always off: apps draw their record buttons from it.
 			EnableLiveTvManagement: false,
@@ -253,6 +253,7 @@ func newUserDto(user accounts.User, serverID string) UserDto {
 			EnableContentDeletionFromFolders: []string{},
 			EnableContentDownloading:         user.ContentDownloading,
 			EnableSubtitleManagement:         user.SubtitleManagement,
+			EnableLyricManagement:            user.IsAdministrator, // see musicRoutes
 			EnableSyncTranscoding:            true,
 			EnableMediaConversion:            true,
 			EnabledDevices:                   []string{},
@@ -276,6 +277,17 @@ func newUserDto(user accounts.User, serverID string) UserDto {
 			RemoteClientBitrateLimit: user.MaxBitrate,
 		},
 	}
+}
+
+// otherUserDto describes user to someone who is neither the user nor an
+// administrator, the sign-in screen included: the name, the identifier and
+// the picture apps show. Apps expect the rest of a user to be there, so it
+// is a new account's: its policy and configuration, and no date. The
+// account's own role, limits, hours and activity are not told.
+func otherUserDto(user accounts.User, serverID string) UserDto {
+	return newUserDto(accounts.User{ID: user.ID, Name: user.Name, ImageTag: user.ImageTag,
+		VideoTranscoding: true, AudioTranscoding: true, ContentDownloading: true, LiveTv: true,
+		SyncPlay: accounts.SyncPlayCreateAndJoin, RemoteAccess: true}, serverID)
 }
 
 type PlayerStateInfo struct {
@@ -328,6 +340,33 @@ type SessionInfo struct {
 	// Handler.reportViewing).
 	UserPrimaryImageTag string       `json:",omitempty"`
 	NowViewingItem      *BaseItemDto `json:",omitempty"`
+	// TranscodingInfo tells what Polyfin sends of what the device plays
+	// over HLS or as one stream (see Handler.transcodingInfo).
+	TranscodingInfo *TranscodingInfo `json:",omitempty"`
+}
+
+// TranscodingInfo is Jellyfin's description of what a server sends of a
+// play it streams: the video and audio copied (direct) or converted, the
+// codecs and size sent, and why the version is not played as it is.
+// jellyfin-web's Playback Info reads it to say "Direct streaming", or
+// that the file is only repackaged, rather than "Transcoding". Framerate
+// and CompletionPercentage, which Jellyfin reads from FFmpeg's progress,
+// are left out.
+type TranscodingInfo struct {
+	AudioCodec    string
+	VideoCodec    string
+	Container     string
+	IsVideoDirect bool
+	IsAudioDirect bool
+	Bitrate       *int64 `json:",omitempty"`
+	Width         *int   `json:",omitempty"`
+	Height        *int   `json:",omitempty"`
+	AudioChannels *int   `json:",omitempty"`
+	// HardwareAccelerationType names the GPU converting the video as
+	// Jellyfin's enum does, none for the processor; it is left out for
+	// copied video, which nothing encodes.
+	HardwareAccelerationType string `json:",omitempty"`
+	TranscodeReasons         []string
 }
 
 // newSessionInfo describes a device's session. Like Jellyfin, it reports

@@ -5,12 +5,14 @@ import {
   ApiError,
   createNotificationTarget,
   deleteNotificationTarget,
+  fetchNotificationDeliveries,
   fetchNotifications,
   queryClient,
   queryKeys,
   testNotificationTarget,
   updateNotificationTarget,
   type NotificationDraft,
+  type NotificationDelivery,
   type NotificationEvent,
   type NotificationKind,
   type NotificationScope,
@@ -28,10 +30,13 @@ import {
   InlineError,
   Modal,
   Notice,
+  Row,
+  RowList,
   SecretField,
   Select,
   SkeletonRows,
   StatusPill,
+  Table,
   TextInput,
   useToast,
   type StatusTone,
@@ -77,7 +82,7 @@ export default function NotificationTargets({ scope }: { scope: NotificationScop
           {text.emptyHint[scope]}
         </EmptyState>
       ) : (
-        <ul className="overflow-hidden rounded-panel border border-line-2 bg-s1">
+        <RowList aria-label={text.title}>
           {targets.map((target) => (
             <TargetRow
               key={target.id}
@@ -86,7 +91,7 @@ export default function NotificationTargets({ scope }: { scope: NotificationScop
               onEdit={() => setEditing(target)}
             />
           ))}
-        </ul>
+        </RowList>
       )}
       <div>
         <Button icon={PlusIcon} onClick={() => setEditing('new')}>
@@ -135,13 +140,19 @@ function TargetRow({
   const text = t.notifications
   const toast = useToast()
   const [confirming, setConfirming] = useState(false)
+  const [logOpen, setLogOpen] = useState(false)
   const test = useMutation({
     mutationFn: () => testNotificationTarget(scope, target.id),
     onSuccess: (result) => {
       store(scope, result.target)
-      toast(result.delivered ? text.testDelivered(target.name) : text.testFailed(target.name), {
-        tone: result.delivered ? 'ok' : 'danger',
-      })
+      toast(
+        result.delivered
+          ? text.testDelivered(target.name)
+          : result.answer === null
+            ? text.testFailed(target.name)
+            : `${text.testFailed(target.name)} ${text.testAnswer(result.answer)}`,
+        { tone: result.delivered ? 'ok' : 'danger' },
+      )
     },
     onError: (error) => toast(errorMessage(t, error), { tone: 'danger' }),
   })
@@ -176,21 +187,12 @@ function TargetRow({
           : text.problem[target.problem]
   // What the target is: its address, or a Telegram target's chat; a Pushover target shows none.
   const detail = target.kind === 'telegram' ? target.chat : target.address
-  const headingId = useId()
   return (
-    <li
-      aria-labelledby={headingId}
-      className="grid grid-cols-[40px_minmax(0,1fr)_auto] items-start gap-x-4 px-[22px] py-5 max-sm:grid-cols-[40px_minmax(0,1fr)] max-sm:gap-x-3.5 max-sm:px-4 [&+&]:border-t [&+&]:border-line"
-    >
-      <IconTile letters={monograms[target.kind]} />
-      <div className="min-w-0">
-        <h3
-          id={headingId}
-          className="flex h-10 items-center text-[15px] font-semibold tracking-[-0.01em] text-ink"
-        >
-          {target.name}
-        </h3>
-        <p className="-mt-1.5 text-control break-words text-ink-2">
+    <Row
+      leading={<IconTile letters={monograms[target.kind]} />}
+      title={target.name}
+      meta={
+        <span className="min-w-0 break-words">
           {text.kinds[target.kind]}
           {detail !== '' && (
             <>
@@ -199,28 +201,34 @@ function TargetRow({
             </>
           )}
           {target.topic !== '' && <span className="font-mono">/{target.topic}</span>}
-        </p>
-        <p className="mt-1 text-small text-ink-3">
-          {target.events.length === 0
-            ? text.noEvents
-            : target.events.map((event) => text.eventNames[event]).join(', ')}
-          {' · '}
-          {target.lastSentAt === null ? (
-            text.nothingSent
-          ) : (
-            <>
-              {text.lastSent}
-              <time dateTime={target.lastSentAt} title={dateTime(target.lastSentAt, language)}>
-                {relativeTime(target.lastSentAt, language, t.time.justNow)}
-              </time>
-            </>
-          )}
-        </p>
-      </div>
-      <div className="flex h-10 items-center justify-end gap-1.5 max-sm:col-span-full max-sm:mt-3 max-sm:h-auto max-sm:flex-wrap">
-        <StatusPill tone={status.tone} className="max-sm:mr-auto">
-          {status.label}
-        </StatusPill>
+        </span>
+      }
+      trailing={<StatusPill tone={status.tone}>{status.label}</StatusPill>}
+    >
+      <p className="text-small break-words text-ink-2">
+        {target.events.length === 0
+          ? text.noEvents
+          : target.events.map((event) => text.eventNames[event]).join(', ')}
+        {target.perMinute !== null && ` · ${text.capped(target.perMinute)}`}
+        {target.groupMinutes !== null && ` · ${text.grouped(target.groupMinutes)}`}
+        {' · '}
+        {target.lastSentAt === null ? (
+          text.nothingSent
+        ) : (
+          <>
+            {text.lastSent}
+            <time dateTime={target.lastSentAt} title={dateTime(target.lastSentAt, language)}>
+              {relativeTime(target.lastSentAt, language, t.time.justNow)}
+            </time>
+          </>
+        )}
+      </p>
+      {problem !== null && (
+        <Notice tone={status.tone === 'danger' ? 'danger' : 'warn'} nested className="mt-4">
+          {problem}
+        </Notice>
+      )}
+      <div className="mt-4 flex flex-wrap gap-2">
         <Button
           variant="secondary"
           loading={test.isPending}
@@ -229,6 +237,9 @@ function TargetRow({
         >
           {test.isPending ? text.testing : text.test}
         </Button>
+        <Button variant="ghost" onClick={() => setLogOpen(true)}>
+          {text.deliveries.open}
+        </Button>
         <Button variant="ghost" onClick={onEdit}>
           {text.edit}
         </Button>
@@ -236,11 +247,6 @@ function TargetRow({
           {text.delete}
         </Button>
       </div>
-      {problem !== null && (
-        <div className="col-start-2 -col-end-1 mt-4 max-sm:col-span-full">
-          <Notice tone={status.tone === 'danger' ? 'danger' : 'warn'}>{problem}</Notice>
-        </div>
-      )}
       <ConfirmDialog
         open={confirming}
         onClose={() => {
@@ -256,7 +262,8 @@ function TargetRow({
       >
         {text.deleteBody}
       </ConfirmDialog>
-    </li>
+      {logOpen && <Deliveries scope={scope} target={target} onClose={() => setLogOpen(false)} />}
+    </Row>
   )
 }
 
@@ -284,6 +291,8 @@ function TargetModal({
   const toast = useToast()
   const formId = useId()
   const [kind, setKind] = useState<NotificationKind>(target?.kind ?? 'webhook')
+  // A Discord webhook pasted in a new Webhook target makes it a Discord one.
+  const [switched, setSwitched] = useState(false)
   const [name, setName] = useState(target?.name ?? '')
   // A webhook's or Discord target's secret address: undefined keeps the saved one.
   const [secretAddress, setSecretAddress] = useState<string | undefined>(undefined)
@@ -299,15 +308,20 @@ function TargetModal({
   const [userKey, setUserKey] = useState<string | undefined>(undefined)
   // A new target hears of everything but playbacks, a message each time anyone plays, guests'
   // plays through share links, and the month in review, which comes beside the weekly summary or
-  // in its place: those are chosen on purpose.
+  // in its place: those are chosen on purpose. Failed plays are told.
   const [chosen, setChosen] = useState<NotificationEvent[]>(
     target?.events ??
       events.filter(
         (event) =>
-          !event.startsWith('playback_') && event !== 'share_played' && event !== 'monthly_summary',
+          (!event.startsWith('playback_') || event === 'playback_failed') &&
+          event !== 'share_played' &&
+          event !== 'monthly_summary',
       ),
   )
   const [enabled, setEnabled] = useState(target?.enabled ?? true)
+  // Empty for no cap, and to send each message at once.
+  const [perMinute, setPerMinute] = useState(String(target?.perMinute ?? ''))
+  const [groupMinutes, setGroupMinutes] = useState(String(target?.groupMinutes ?? ''))
 
   const mutation = useMutation({
     mutationFn: (draft: NotificationDraft) =>
@@ -345,7 +359,13 @@ function TargetModal({
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    const draft: NotificationDraft = { name: name.trim(), events: chosen, enabled }
+    const draft: NotificationDraft = {
+      name: name.trim(),
+      events: chosen,
+      enabled,
+      perMinute: perMinute.trim() === '' ? 0 : Number(perMinute),
+      groupMinutes: groupMinutes.trim() === '' ? 0 : Number(groupMinutes),
+    }
     if (target === null) draft.kind = kind
     if (token !== undefined) draft.token = token.trim()
     switch (kind) {
@@ -413,8 +433,11 @@ function TargetModal({
             <Select
               value={kind}
               options={kinds.map((value) => ({ value, label: text.kinds[value] }))}
-              onValue={change(setKind)}
-              className="max-w-xs"
+              onValue={change((value: NotificationKind) => {
+                setKind(value)
+                setSwitched(false)
+              })}
+              className="max-w-[23.75rem]"
             />
           </Field>
         )}
@@ -435,7 +458,13 @@ function TargetModal({
             target={target}
             values={{ secretAddress, server, recipient, topic, chat, token, userKey }}
             set={{
-              secretAddress: change(setSecretAddress),
+              secretAddress: change((value: string | undefined) => {
+                setSecretAddress(value)
+                if (target === null && kind === 'webhook' && discordWebhook(value ?? '')) {
+                  setKind('discord')
+                  setSwitched(true)
+                }
+              }),
               server: change(setServer),
               recipient: change(setRecipient),
               topic: change(setTopic),
@@ -446,8 +475,15 @@ function TargetModal({
             errors={{ addressError, topicError, chatError, tokenError, userKeyError }}
           />
         )}
+        {kind === 'discord' && switched && <Notice tone="info">{text.discordSwitched}</Notice>}
+        {kind === 'webhook' &&
+          target !== null &&
+          (discordWebhook(secretAddress ?? '') ||
+            (secretAddress === undefined && discordHosts.includes(hostOf(target.address)))) && (
+            <Notice tone="info">{text.discordAsWebhook}</Notice>
+          )}
         <fieldset className="space-y-3">
-          <legend className="mb-1 text-[15px] font-medium text-ink">{text.events}</legend>
+          <legend className="mb-1 text-body font-semibold text-ink">{text.events}</legend>
           <p className="text-small text-ink-3">{text.eventsHelp[scope]}</p>
           {events.map((event) => (
             <Checkbox
@@ -464,6 +500,32 @@ function TargetModal({
             />
           ))}
         </fieldset>
+        <Field
+          label={text.perMinute}
+          help={text.perMinuteHelp}
+          error={fieldError(['invalid_per_minute'])}
+        >
+          <TextInput
+            value={perMinute}
+            onValue={change(setPerMinute)}
+            inputMode="numeric"
+            maxLength={2}
+            className="max-w-[9.5rem]"
+          />
+        </Field>
+        <Field
+          label={text.groupMinutes}
+          help={text.groupMinutesHelp}
+          error={fieldError(['invalid_group_minutes'])}
+        >
+          <TextInput
+            value={groupMinutes}
+            onValue={change(setGroupMinutes)}
+            inputMode="numeric"
+            maxLength={4}
+            className="max-w-[9.5rem]"
+          />
+        </Field>
         <Checkbox label={text.enabled} checked={enabled} onChange={change(setEnabled)} />
         {otherError && <Notice tone="danger">{otherError}</Notice>}
       </form>
@@ -633,4 +695,125 @@ function KindFields({
         />
       )
   }
+}
+
+/** The hosts of Discord's webhooks: its own, its former one, and their test builds'. */
+const discordHosts = [
+  'discord.com',
+  'discordapp.com',
+  'ptb.discord.com',
+  'canary.discord.com',
+  'ptb.discordapp.com',
+  'canary.discordapp.com',
+]
+
+/** The host of an address, '' when it is none. */
+function hostOf(address: string): string {
+  try {
+    return new URL(address.trim()).hostname.toLowerCase()
+  } catch {
+    return ''
+  }
+}
+
+/**
+ * Whether an address is a Discord webhook's, which Polyfin sends Discord's own message, as the
+ * server tells it (notifications.DiscordWebhook).
+ */
+function discordWebhook(address: string): boolean {
+  try {
+    const url = new URL(address.trim())
+    return (
+      url.protocol === 'https:' &&
+      discordHosts.includes(url.hostname.toLowerCase()) &&
+      url.pathname.startsWith('/api/webhooks/')
+    )
+  } catch {
+    return false
+  }
+}
+
+/** The tone of each outcome in Recent deliveries. */
+const outcomeTones: Record<NotificationDelivery['outcome'], StatusTone> = {
+  delivered: 'ok',
+  refused: 'danger',
+  rejected: 'warn',
+  failed: 'warn',
+  dropped: 'warn',
+  unreadable: 'danger',
+}
+
+/** A target's recent deliveries, newest first, in a floating panel. */
+function Deliveries({
+  scope,
+  target,
+  onClose,
+}: {
+  scope: NotificationScope
+  target: NotificationTarget
+  onClose: () => void
+}) {
+  const { language, t } = useI18n()
+  const text = t.notifications.deliveries
+  const deliveries = useQuery({
+    queryKey: [...queryKeys.notifications(scope), 'deliveries', target.id],
+    queryFn: ({ signal }) => fetchNotificationDeliveries(scope, target.id, signal),
+  })
+  return (
+    <Modal open onClose={onClose} title={text.title(target.name)} width={720}>
+      <div className="space-y-4 p-5">
+        <p className="text-small text-ink-3">{text.help}</p>
+        {deliveries.isPending ? (
+          <SkeletonRows rows={3} label={text.loading} />
+        ) : deliveries.isError ? (
+          <InlineError onRetry={() => void deliveries.refetch()} retrying={deliveries.isFetching}>
+            {errorMessage(t, deliveries.error)}
+          </InlineError>
+        ) : deliveries.data.length === 0 ? (
+          <p className="text-control text-ink-2">{text.empty}</p>
+        ) : (
+          <Table label={text.title(target.name)} minWidth={480} compact>
+            <thead>
+              <tr>
+                <th scope="col">{text.when}</th>
+                <th scope="col">{text.event}</th>
+                <th scope="col">{text.outcome}</th>
+              </tr>
+            </thead>
+            <tbody>
+              {deliveries.data.map((d) => (
+                <tr key={d.id}>
+                  <td className="whitespace-nowrap">
+                    <time dateTime={d.at}>{dateTime(d.at, language)}</time>
+                  </td>
+                  <td className="break-words">
+                    {d.type === 'test' ? text.test : d.title}
+                    {d.events > 1 && (
+                      <span className="block text-small text-ink-3">{text.grouped(d.events)}</span>
+                    )}
+                  </td>
+                  <td>
+                    <StatusPill tone={outcomeTones[d.outcome]}>
+                      {text.outcomes[d.outcome]}
+                    </StatusPill>
+                    {(d.status !== null || d.error !== null || d.attempts > 1) && (
+                      <span className="mt-1 block text-small break-words text-ink-3">
+                        {[
+                          d.status === null ? null : String(d.status),
+                          d.error,
+                          d.attempts > 1 ? text.attempts(d.attempts) : null,
+                        ]
+                          .filter((part) => part !== null)
+                          .join(' · ')}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        )}
+      </div>
+    </Modal>
+  )
 }

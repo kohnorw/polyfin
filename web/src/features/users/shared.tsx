@@ -1,6 +1,7 @@
-import { useEffect, useId, useState, type ReactNode } from 'react'
+import { useEffect, useMemo, useState, type ReactNode } from 'react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import {
+  ADMIN_APP,
   ApiError,
   fetchParentalRatings,
   queryClient,
@@ -13,22 +14,67 @@ import {
   type User,
   type UserPatch,
 } from '@/api'
+import { SubAreaContext } from '@/app/PageLayout'
 import { useSessionUser } from '@/app/session'
-import { useI18n } from '@/i18n'
-import { Switch, Tabs } from '@/ui'
+import { formatDate } from '@/format'
+import { useI18n, type Messages } from '@/i18n'
+import { RelativeTime, scaledPx, StatusPill, Tabs } from '@/ui'
 
-/** Users › Users and Users › Groups, above the two lists. */
-export function UsersTabs() {
+/** PageLayout claims the words; there is nothing to show above a page in their place. */
+const noClaim = () => () => {}
+
+/**
+ * The pages of Users › Users and Users › Groups: their PageLayout shows the sub-area words Users ·
+ * Groups under its title, as Content's and System's pages show theirs.
+ */
+export function UsersArea({ children }: { children: ReactNode }) {
   const { t } = useI18n()
+  const subArea = useMemo(
+    () => ({
+      words: (
+        <Tabs
+          label={t.groups.tabsLabel}
+          items={[
+            { id: 'users', label: t.users.title, to: '/users', end: true },
+            { id: 'groups', label: t.groups.title, to: '/users/groups', end: true },
+          ]}
+        />
+      ),
+      claim: noClaim,
+    }),
+    [t],
+  )
+  return <SubAreaContext value={subArea}>{children}</SubAreaContext>
+}
+
+/** The state of an account, as an icon and a word: Active, Disabled, Ended or Blocked until… */
+export function UserState({ user }: { user: User }) {
+  const { t, language } = useI18n()
+  if (user.isDisabled) return <StatusPill tone="muted">{t.users.disabled}</StatusPill>
+  if (user.ended) return <StatusPill tone="muted">{t.users.ended}</StatusPill>
+  if (user.blockedUntil !== null) {
+    return (
+      <StatusPill tone="warn">
+        {t.users.blockedUntil(clockTime(user.blockedUntil, language))}
+      </StatusPill>
+    )
+  }
+  return <StatusPill tone="ok">{t.users.active}</StatusPill>
+}
+
+/**
+ * A user's last activity and its app: "Last activity: 3 minutes ago · Jellyfin Android TV", or
+ * "Last activity: Never". The admin app's own name reads in the language of the page.
+ */
+export function LastActivity({ user }: { user: User }) {
+  const { t } = useI18n()
+  if (user.lastActivityAt === null) return <>{`${t.users.lastActivityLabel} ${t.common.never}`}</>
+  const app = user.lastActivityApp === ADMIN_APP ? t.users.adminApp : user.lastActivityApp
   return (
-    <Tabs
-      label={t.groups.tabsLabel}
-      items={[
-        { id: 'users', label: t.users.title, to: '/users', end: true },
-        { id: 'groups', label: t.groups.title, to: '/users/groups', end: true },
-      ]}
-      className="mb-8 max-md:mb-6"
-    />
+    <>
+      {t.users.lastActivityLabel} <RelativeTime iso={user.lastActivityAt} />
+      {app !== '' && ` · ${app}`}
+    </>
   )
 }
 
@@ -55,7 +101,10 @@ export function userSaved(updated: User, selfId: string) {
   void queryClient.invalidateQueries({ queryKey: queryKeys.users })
   void queryClient.invalidateQueries({ queryKey: queryKeys.userDevices(updated.id) })
   void queryClient.invalidateQueries({ queryKey: queryKeys.groups })
-  if (updated.id === selfId) void queryClient.invalidateQueries({ queryKey: queryKeys.session })
+  if (updated.id === selfId) {
+    void queryClient.invalidateQueries({ queryKey: queryKeys.session })
+    void queryClient.invalidateQueries({ queryKey: queryKeys.ownWebTheme })
+  }
 }
 
 /** A PATCH mutation for one user that keeps the list (and our own session) up to date. */
@@ -93,6 +142,20 @@ export function clockTime(iso: string, language: string) {
   )
 }
 
+/**
+ * When the account ends, as "October 20, 2026": its date, or for the exact end an invite link set,
+ * its date and time in the reader's time zone, "November 9, 2026 at 18:40"; null for never.
+ */
+export function accountEnd(user: User, t: Messages, language: string): string | null {
+  if (user.endsAt !== null) {
+    const date = new Intl.DateTimeFormat(language, { dateStyle: 'long' }).format(
+      new Date(user.endsAt),
+    )
+    return t.users.endMoment(date, clockTime(user.endsAt, language))
+  }
+  return user.endsOn === null ? null : formatDate(user.endsOn, language)
+}
+
 /** A quality group as people name video of that height: 4K, else its lines, 1080p. */
 export function qualityGroupName(group: Exclude<QualityGroup, 0>) {
   return group === 2160 ? '4K' : `${group}p`
@@ -112,6 +175,23 @@ export function groupRatings(ratings: ParentalRating[]): RatingGroup[] {
     }
   }
   return groups
+}
+
+/**
+ * The groups with the limit itself added in its place, named by `ageName`, when no group matches
+ * it: a limit set under another rating country, or by an app, stays shown as it is.
+ */
+export function withLimit(
+  groups: RatingGroup[],
+  control: Pick<ParentalControl, 'maxRating' | 'maxSubRating'>,
+  ageName: (age: number) => string,
+): RatingGroup[] {
+  const { maxRating, maxSubRating } = control
+  if (maxRating === null) return groups
+  if (groups.some((g) => g.score === maxRating && g.subScore === maxSubRating)) return groups
+  const at = groups.findIndex((g) => g.score > maxRating)
+  const limit = { name: ageName(maxRating), score: maxRating, subScore: maxSubRating }
+  return at === -1 ? [...groups, limit] : [...groups.slice(0, at), limit, ...groups.slice(at)]
 }
 
 /** The group matching the limit exactly, else the last one whose score fits under it. */
@@ -137,12 +217,12 @@ export function useParentalRatings(enabled = true) {
 }
 
 /** "Up to PG-13" when the user has a rating limit, once the ratings are known. */
-export function useRatingLimit(parentalControl: ParentalControl): string | null {
+function useRatingLimit(parentalControl: ParentalControl): string | null {
   const { t } = useI18n()
   const limited = parentalControl.maxRating !== null
   const ratings = useParentalRatings(limited)
   if (!limited || ratings.data === undefined) return null
-  const groups = groupRatings(ratings.data)
+  const groups = withLimit(groupRatings(ratings.data), parentalControl, t.users.ratingAge)
   const group = groups[selectedGroup(groups, parentalControl)]
   return group === undefined ? null : t.users.ratingLimit(group.name)
 }
@@ -154,54 +234,13 @@ export function useRestrictions(user: User): string[] {
   const words: string[] = []
   if (user.isHidden) words.push(t.users.hidden)
   if (rating !== null) words.push(rating)
-  if (!user.transcoding) words.push(t.users.noTranscoding)
+  if (!user.videoTranscoding && !user.audioTranscoding) words.push(t.users.noTranscoding)
+  else if (!user.videoTranscoding) words.push(t.users.noVideoTranscoding)
+  else if (!user.audioTranscoding) words.push(t.users.noAudioTranscoding)
   if (!user.downloads) words.push(t.users.noDownloads)
   if (!user.personalAddons) words.push(t.users.noPersonalAddons)
   if (user.qualityGroup !== 0) words.push(qualityGroupName(user.qualityGroup))
   return words
-}
-
-/**
- * One setting of a panel: its title and help on the left, a switch on the right (like the
- * settings rows of the mockup).
- */
-export function SwitchRow({
-  title,
-  help,
-  checked,
-  onChange,
-  disabled,
-}: {
-  title: string
-  help?: ReactNode
-  checked: boolean
-  onChange: (checked: boolean) => void
-  disabled?: boolean
-}) {
-  const titleId = useId()
-  const helpId = useId()
-  return (
-    <div className="flex items-start justify-between gap-6 py-4 not-first:border-t not-first:border-line">
-      <div className="min-w-0">
-        <p id={titleId} className="text-control font-medium text-ink">
-          {title}
-        </p>
-        {help !== undefined && (
-          <p id={helpId} className="mt-1 text-small text-ink-3">
-            {help}
-          </p>
-        )}
-      </div>
-      <Switch
-        checked={checked}
-        onChange={onChange}
-        labelledBy={titleId}
-        describedById={help !== undefined ? helpId : undefined}
-        disabled={disabled}
-        className="mt-0.5"
-      />
-    </div>
-  )
 }
 
 /**
@@ -213,12 +252,13 @@ export function useSectionInView(ids: readonly string[], ready: boolean) {
   const key = ids.join(' ')
   useEffect(() => {
     if (!ready) return
-    const sections = key
-      .split(' ')
-      .map((id) => document.getElementById(id))
-      .filter((el): el is HTMLElement => el !== null)
+    const ids = key.split(' ')
     function update() {
-      const line = 140
+      // Looked up each time: a section drawn again (after a save or a reset) is a new element.
+      const sections = ids
+        .map((id) => document.getElementById(id))
+        .filter((el): el is HTMLElement => el !== null)
+      const line = scaledPx(140)
       let found = sections[0]?.id
       for (const section of sections) {
         if (section.getBoundingClientRect().top <= line) found = section.id

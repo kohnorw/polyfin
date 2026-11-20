@@ -199,19 +199,24 @@ type ImportedResume struct {
 	At                time.Time
 }
 
-// What ImportResume did with a resume point.
+// What ImportResume did with a resume point: ResumeKept keeps Polyfin's
+// data, which is played, newer, or took the item off Continue Watching
+// since; ResumeSet sets the point, ResumePlayed marks the item played, and
+// ResumeDropped drops a point before the resume threshold, or without a
+// runtime to place it in.
 const (
 	ResumeKept = iota
 	ResumeSet
 	ResumePlayed
+	ResumeDropped
 )
 
 // ImportResume adds a resume point another service keeps, under
 // thresholds: none for a played item, nor when Polyfin's is newer, nor
 // when the user took the item off Continue Watching since it was set
 // (see RemoveResume); past the played threshold the item is played,
-// before the resume one nothing is kept. It reports ResumeKept, ResumeSet
-// or ResumePlayed.
+// before the resume one nothing is kept. It reports ResumeKept, ResumeSet,
+// ResumePlayed or ResumeDropped.
 func (d *Data) ImportResume(p ImportedResume, thresholds Thresholds) int {
 	if d.Played || d.Position > 0 && d.LastPlayed != nil && !d.LastPlayed.Before(p.At) ||
 		d.ResumeRemoved != nil && !d.ResumeRemoved.Before(p.At) {
@@ -232,7 +237,7 @@ func (d *Data) ImportResume(p ImportedResume, thresholds Thresholds) int {
 		return ResumePlayed
 	case runtime <= 0 || float64(position)/float64(runtime)*100 < float64(thresholds.Resume):
 		// Without a runtime there is no position to resume from.
-		return ResumeKept
+		return ResumeDropped
 	}
 	d.Position, d.Runtime = position, runtime
 	d.LastPlayed = new(p.At.UTC())
@@ -242,15 +247,20 @@ func (d *Data) ImportResume(p ImportedResume, thresholds Thresholds) int {
 // Follow adds what the user did with another item, from, as an import
 // adds another service's: a played mark is added, with the larger play
 // count; a resume point is kept when it is newer than the item's own (see
-// ImportResume); a favorite is set. Nothing the item records is taken
-// back (see Store.Follow for what from loses).
+// ImportResume), and one Polyfin kept without a runtime, which an import
+// would drop, is kept as it is: it is a position in the same file; a
+// favorite is set. Nothing the item records is taken back (see
+// Store.Follow for what from loses).
 func (d *Data) Follow(from Data, thresholds Thresholds) {
 	switch {
 	case from.Played:
 		d.ImportPlayed(from.LastPlayed)
 		d.PlayCount = max(d.PlayCount, from.PlayCount)
 	case from.givesResume():
-		d.ImportResume(ImportedResume{Position: from.Position, Runtime: from.Runtime, At: *from.LastPlayed}, thresholds)
+		resume := ImportedResume{Position: from.Position, Runtime: from.Runtime, At: *from.LastPlayed}
+		if d.ImportResume(resume, thresholds) == ResumeDropped && from.Runtime <= 0 && d.Runtime <= 0 {
+			d.Position, d.LastPlayed = from.Position, new(from.LastPlayed.UTC())
+		}
 	}
 	if from.Favorite {
 		d.Favorite = true

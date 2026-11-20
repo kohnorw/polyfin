@@ -108,6 +108,106 @@ func TestLocalFilesAreVersions(t *testing.T) {
 	}
 }
 
+// An MPEG-TS file has no keyframe index: over HLS, its segments are cut
+// every few seconds, which needs its video converted, even H.264 the
+// browser takes. Its name says so for jellyfin-web, as PlaybackInfo
+// plays it, and that a user who may not have video converted cannot play
+// it; an app that plays MPEG-TS as it is plays it so.
+func TestLocalMPEGTSVersionsAreNamedAsTheyPlay(t *testing.T) {
+	t.Parallel()
+	needsEncoders(t)
+	var folders *localfiles.Service
+	s := newProbingServer(t, 10, "ffprobe-not-installed", func(o *Options, pool *pgxpool.Pool) {
+		folders = localfiles.New(pool, addons.New(pool, stremio.NewClient("test")), o.Library, slog.New(slog.NewTextHandler(io.Discard, nil)),
+			o.Accounts.Settings, nil)
+		t.Cleanup(folders.Close)
+		o.Library.UseLocal(folders)
+		folders.UseFiles(o.Playback.LocalFiles(folders.Open), o.Playback.LocalInputs(folders))
+	})
+	p := playingOn(t, s)
+	// MPEG-TS packets, which hold no index; their tracks are the
+	// analysis's.
+	packets := make([]byte, 188*64)
+	for i := 0; i < len(packets); i += 188 {
+		packets[i] = 0x47
+	}
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "Movie (2008) 1080p.ts"), packets, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	folder, err := folders.Add(t.Context(), localfiles.NewFolder{Name: "Shelf", Path: dir, Kind: localfiles.KindMovies})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := folders.Scan(t.Context(), folder.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := folders.Link(t.Context(), folder.ID, "Movie (2008) 1080p.ts", "tt1000"); err != nil {
+		t.Fatal(err)
+	}
+	var movie BaseItemDto
+	p.get(t, "/Users/"+p.user.ID.String()+"/Items/"+p.movie, p.token, &movie)
+	i := slices.IndexFunc(*movie.MediaSources, func(s MediaSourceInfo) bool { return strings.HasPrefix(s.Name, "Shelf") })
+	if i < 0 {
+		t.Fatalf("media sources: %+v", movie.MediaSources)
+	}
+	local := (*movie.MediaSources)[i]
+	analysis := media.Analysis{Format: "mpegts", Duration: 20 * time.Second, Bitrate: 2_000_000,
+		Streams: []media.Stream{
+			{Index: 0, Type: "video", Codec: "h264", Profile: "High", Level: 40, Width: 1920, Height: 1080, FrameRate: 25, AverageRate: 25, PixelFormat: "yuv420p", BitDepth: 8},
+			{Index: 1, Type: "audio", Codec: "aac", Default: true, Channels: 2, SampleRate: 48000, ChannelLayout: "stereo"},
+		}}
+	data, _ := json.Marshal(analysis)
+	if _, err := p.pool.Exec(t.Context(), "INSERT INTO media_analyses (version_id, analysis) VALUES ($1, $2)", local.Id, data); err != nil {
+		t.Fatal(err)
+	}
+	named := func(answer playbackAnswer) (MediaSourceInfo, bool) {
+		i := slices.IndexFunc(answer.MediaSources, func(s MediaSourceInfo) bool { return s.Id == local.Id })
+		if i < 0 {
+			return MediaSourceInfo{}, false
+		}
+		return answer.MediaSources[i], true
+	}
+	details := func() string {
+		t.Helper()
+		var dto BaseItemDto
+		p.get(t, "/Users/"+p.user.ID.String()+"/Items/"+p.movie, p.token, &dto)
+		for _, source := range *dto.MediaSources {
+			if source.Id == local.Id {
+				return source.Name
+			}
+		}
+		t.Fatalf("media sources: %+v", dto.MediaSources)
+		return ""
+	}
+
+	chrome := p.ask(t, p.token, p.movie, p.profile(t, "jellyfin-web-12.4-chrome"), map[string]any{"MediaSourceId": local.Id})
+	source, ok := named(chrome)
+	if !ok || source.Name != local.Name+" (converted)" || !strings.Contains(source.TranscodingUrl, "allowVideoStreamCopy=false") {
+		t.Errorf("jellyfin-web: %q %s", source.Name, source.TranscodingUrl)
+	}
+	if got := details(); got != local.Name+" (converted)" {
+		t.Errorf("item details for jellyfin-web: %q", got)
+	}
+	androidTV := p.ask(t, p.token, p.movie, p.profile(t, "androidtv"), map[string]any{"MediaSourceId": local.Id})
+	if source, ok := named(androidTV); !ok || source.Name != local.Name+" (direct play)" || !source.SupportsDirectPlay {
+		t.Errorf("Android TV: %q %+v", source.Name, source)
+	}
+	if got := details(); got != local.Name+" (direct play)" {
+		t.Errorf("item details for Android TV: %q", got)
+	}
+	if _, err := p.store.UpdateUser(t.Context(), p.user.ID, accounts.UserChanges{VideoTranscoding: new(false)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	refused := p.ask(t, p.token, p.movie, p.profile(t, "jellyfin-web-12.4-chrome"), map[string]any{"MediaSourceId": local.Id})
+	if source, ok := named(refused); ok {
+		t.Errorf("offered without video conversion: %+v", source)
+	}
+	if got := details(); got != local.Name+" (cannot play here)" {
+		t.Errorf("item details without video conversion: %q", got)
+	}
+}
+
 // goneStreamAddon serves the movie tt1000 with one stream, whose host
 // answers 404, as a link gone for good.
 func goneStreamAddon(t *testing.T) string {
@@ -320,16 +420,10 @@ func TestLocalDiscsAreNamedAfterTheirFolder(t *testing.T) {
 	}
 }
 
-// localDisc is a test server, its ffprobe at ffprobe, with a local folder
+// localDiscOn is a test server, its ffprobe at ffprobe, with a local folder
 // holding the disc populate puts in it, at "Movie (2008)", which is linked
-// to the movie, and the disc's media source in the movie's details.
-func localDisc(t *testing.T, ffprobe string, populate func(at string)) (playbackSetup, MediaSourceInfo) {
-	t.Helper()
-	return localDiscOn(t, ffprobe, populate, false)
-}
-
-// localDiscOn is localDisc, the folder served as a WebDAV share when share
-// is set.
+// to the movie, and the disc's media source in the movie's details; the
+// folder is served as a WebDAV share when share is set.
 func localDiscOn(t *testing.T, ffprobe string, populate func(at string), share bool) (playbackSetup, MediaSourceInfo) {
 	t.Helper()
 	var folders *localfiles.Service
@@ -661,7 +755,7 @@ func frameTimes(t *testing.T, ffprobe, file string) (times []float64, codec stri
 // HLS on jellyfin-web with its H.264 video copied (see playsCopiedFor).
 func playsCopied(t *testing.T, p playbackSetup, local MediaSourceInfo, ffmpeg, ffprobe string) {
 	t.Helper()
-	playsCopiedFor(t, p, p.movie, local, 190, []string{"Video h264 ", "Audio ac3 "}, ffmpeg, ffprobe)
+	playsCopiedFor(t, p, p.movie, local, 190, []string{"Subtitle subrip fra", "Video h264 ", "Audio ac3 "}, ffmpeg, ffprobe)
 }
 
 // playsCopiedFor checks that a Blu-ray disc's title, item's media source
@@ -724,7 +818,7 @@ func TestLocalDVDsPlayOverHLS(t *testing.T) {
 	p, local := localDVD(t, ffprobe)
 	source := playDisc(t, p, local, 8*time.Second)
 	// The movie's subtitle file, then the title's tracks.
-	if got := tracks(source); !slices.Equal(got, []string{"Video mpeg2video ", "Audio ac3 eng", "Audio ac3 fra", "Subtitle DVDSUB eng"}) {
+	if got := tracks(source); !slices.Equal(got, []string{"Subtitle subrip fra", "Video mpeg2video ", "Audio ac3 eng", "Audio ac3 fra", "Subtitle DVDSUB eng"}) {
 		t.Errorf("tracks: %q", got)
 	}
 	frames, start := playedFrames(t, p, ffmpeg, ffprobe, source.TranscodingUrl)
@@ -787,7 +881,6 @@ func TestLocalSubtitleFilesAreTracks(t *testing.T) {
 		folders.UseFiles(o.Playback.LocalFiles(folders.Open), o.Playback.LocalInputs(folders))
 	})
 	p := playingOn(t, s)
-	p.frenchSubtitle(t)
 	file, err := os.ReadFile(filepath.Join("..", "container", "testdata", "forced.mkv"))
 	if err != nil {
 		t.Fatal(err)
@@ -881,10 +974,10 @@ func TestLocalSubtitleFilesAreTracks(t *testing.T) {
 		}
 		return body
 	}
-	if got := subtitle("3", "vtt"); got != "WEBVTT\n\n00:00:01.000 --> 00:00:02.500\nDéjà vu, “cool”" {
+	if got := subtitle("3", "vtt"); got != "WEBVTT\n\n00:00:01.000 --> 00:00:02.500\nDéjà vu, “cool”\n" {
 		t.Errorf("as WebVTT: %q", got)
 	}
-	if got := subtitle("3", "srt"); got != "1\r\n00:00:01,000 --> 00:00:02,500\r\nDéjà vu, “cool”\r\n" {
+	if got := subtitle("3", "srt"); got != "1\n00:00:01,000 --> 00:00:02,500\nDéjà vu, “cool”\n" {
 		t.Errorf("as SubRip: %q", got)
 	}
 	if got := subtitle("2", "ass"); !strings.Contains(got, `{\i1}[door creaks]{\i0}`) || !strings.Contains(got, "Style: Default,Arial,20") {
@@ -930,7 +1023,6 @@ func localPictureFiles(t *testing.T, ffprobe string, video []byte) (playbackSetu
 		folders.UseFiles(o.Playback.LocalFiles(folders.Open), o.Playback.LocalInputs(folders))
 	})
 	p := playingOn(t, s)
-	p.frenchSubtitle(t)
 	rectangle := testsubtitles.Rectangle{CanvasWidth: 320, CanvasHeight: 180, X: 60, Y: 120, Width: 200, Height: 40,
 		Shown: [][2]time.Duration{{time.Second, 3 * time.Second}, {5 * time.Second, 7 * time.Second}}}
 	pgs := rectangle.PGS()
@@ -1025,11 +1117,7 @@ func TestLocalPictureSubtitleFilesAreTracks(t *testing.T) {
 	}
 	addonFile := track{"subrip", "French - SUBRIP - External", false, false, true, "External", "vtt"}
 	pgsFile := track{"PGSSUB", "English - Forced - PGSSUB - External", true, false, false, "External", "pgssub"}
-	vobSub := track{"DVDSUB", "English - Hearing Impaired - DVDSUB - External", false, true, false, "Encode", ""}
-	if os.Getenv("POLYFIN_TEST_FFMPEG") == "" {
-		// Nothing can burn it in: it is left out.
-		vobSub.delivery = "Drop"
-	}
+	vobSub := track{"DVDSUB", "English - Hearing Impaired - DVDSUB - External", false, true, false, "Drop", ""}
 	if got := files(pictureInfo(t, p, local, pictureProfile(t, p), -1)); !slices.Equal(got, []track{addonFile, pgsFile, vobSub}) {
 		t.Errorf("the files, for an app that draws PGS: %+v", got)
 	}
@@ -1152,6 +1240,7 @@ func localImageOn(t *testing.T, ffprobe, name string, share bool) (playbackSetup
 func TestLocalDiscImagesPlay(t *testing.T) {
 	t.Parallel()
 	t.Run("dvd", func(t *testing.T) {
+		t.Parallel()
 		ffmpeg, ffprobe := discFFmpeg(t, "-demuxers", "dvdvideo")
 		p, local := localImage(t, ffprobe, "dvd")
 		var version BaseItemDto
@@ -1159,7 +1248,7 @@ func TestLocalDiscImagesPlay(t *testing.T) {
 			t.Errorf("the image's version: %q %+v", version.Path, local)
 		}
 		source := playDisc(t, p, local, 8*time.Second)
-		if got := tracks(source); !slices.Equal(got, []string{"Video mpeg2video ", "Audio ac3 eng", "Audio ac3 fra", "Subtitle DVDSUB eng"}) {
+		if got := tracks(source); !slices.Equal(got, []string{"Subtitle subrip fra", "Video mpeg2video ", "Audio ac3 eng", "Audio ac3 fra", "Subtitle DVDSUB eng"}) {
 			t.Errorf("tracks: %q", got)
 		}
 		frames, start := playedFrames(t, p, ffmpeg, ffprobe, source.TranscodingUrl)
@@ -1168,11 +1257,13 @@ func TestLocalDiscImagesPlay(t *testing.T) {
 		}
 	})
 	t.Run("bluray", func(t *testing.T) {
+		t.Parallel()
 		ffmpeg, ffprobe := discFFmpeg(t, "-protocols", "bluray")
 		p, local := localImage(t, ffprobe, "bluray")
 		playsCopied(t, p, local, ffmpeg, ffprobe)
 	})
 	t.Run("bluray-udf", func(t *testing.T) {
+		t.Parallel()
 		ffmpeg, ffprobe := discFFmpeg(t, "-protocols", "bluray")
 		p, local := localImage(t, ffprobe, "bluray-udf")
 		playsCopied(t, p, local, ffmpeg, ffprobe)
@@ -1187,11 +1278,13 @@ func TestShareBluRaysPlayCopied(t *testing.T) {
 	t.Parallel()
 	ffmpeg, ffprobe := discFFmpeg(t, "-demuxers", "mpegts")
 	t.Run("folder", func(t *testing.T) {
+		t.Parallel()
 		p, local := localBluRayOn(t, ffprobe, true)
 		playsCopied(t, p, local, ffmpeg, ffprobe)
 	})
 	for _, name := range []string{"bluray", "bluray-udf"} {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			p, local := localImageOn(t, ffprobe, name, true)
 			playsCopied(t, p, local, ffmpeg, ffprobe)
 		})
@@ -1206,14 +1299,15 @@ func TestShareBluRaysPlayCopied(t *testing.T) {
 func TestShareDVDsPlayOverHLS(t *testing.T) {
 	t.Parallel()
 	ffmpeg, ffprobe := discFFmpeg(t, "-demuxers", "mpeg")
-	for name, open := range map[string]func() (playbackSetup, MediaSourceInfo){
-		"folder": func() (playbackSetup, MediaSourceInfo) { return localDVDOn(t, ffprobe, true) },
-		"image":  func() (playbackSetup, MediaSourceInfo) { return localImageOn(t, ffprobe, "dvd", true) },
+	for name, open := range map[string]func(*testing.T) (playbackSetup, MediaSourceInfo){
+		"folder": func(t *testing.T) (playbackSetup, MediaSourceInfo) { return localDVDOn(t, ffprobe, true) },
+		"image":  func(t *testing.T) (playbackSetup, MediaSourceInfo) { return localImageOn(t, ffprobe, "dvd", true) },
 	} {
 		t.Run(name, func(t *testing.T) {
-			p, local := open()
+			t.Parallel()
+			p, local := open(t)
 			source := playDisc(t, p, local, 8*time.Second)
-			if got := tracks(source); !slices.Equal(got, []string{"Video mpeg2video ", "Audio ac3 eng", "Audio ac3 fra", "Subtitle DVDSUB eng"}) {
+			if got := tracks(source); !slices.Equal(got, []string{"Subtitle subrip fra", "Video mpeg2video ", "Audio ac3 eng", "Audio ac3 fra", "Subtitle DVDSUB eng"}) {
 				t.Errorf("tracks: %q", got)
 			}
 			frames, start := playedFrames(t, p, ffmpeg, ffprobe, source.TranscodingUrl)

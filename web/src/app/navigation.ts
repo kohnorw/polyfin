@@ -23,12 +23,12 @@ import {
   ShareNetworkIcon,
   ShieldCheckIcon,
   SlidersHorizontalIcon,
+  StackIcon,
   StethoscopeIcon,
   TelevisionSimpleIcon,
   UserCircleIcon,
   UsersIcon,
   type Icon,
-  PaintBrushIcon,
 } from '@phosphor-icons/react'
 import type { Messages } from '@/i18n'
 
@@ -53,6 +53,7 @@ export const contentPages: readonly NavPage[] = [
   { id: 'sources', to: '/sources', label: (t) => t.nav.sources, icon: PuzzlePieceIcon },
   { id: 'libraries', to: '/libraries', label: (t) => t.nav.libraries, icon: FilmStripIcon },
   { id: 'live-tv', to: '/live-tv', label: (t) => t.nav.liveTv, icon: TelevisionSimpleIcon },
+  { id: 'versions', to: '/versions', label: (t) => t.nav.versions, icon: StackIcon },
 ]
 
 export const systemPages: readonly NavPage[] = [
@@ -85,7 +86,6 @@ export const settingsSections = [
   { id: 'backups', key: 'backups', icon: ArchiveIcon },
   { id: 'notifications', key: 'notifications', icon: BellIcon },
   { id: 'web-player', key: 'webPlayer', icon: BrowserIcon },
-  { id: 'branding', key: 'branding', icon: PaintBrushIcon },
   { id: 'diagnostics', key: 'diagnostics', icon: StethoscopeIcon },
 ] as const satisfies readonly {
   id: string
@@ -110,7 +110,7 @@ export const adminSections: readonly NavSection[] = [
   {
     id: 'content',
     to: '/sources',
-    match: ['/sources', '/libraries', '/live-tv'],
+    match: ['/sources', '/libraries', '/live-tv', '/versions'],
     label: (t) => t.nav.content,
     icon: PuzzlePieceIcon,
     pages: contentPages,

@@ -21,10 +21,9 @@ type Reader struct {
 	// guarded by the source's lock: closed, waiting is the block waited
 	// for, -1 for none, and from and last the blocks a run of sequential
 	// reads started at and last read.
-	closed      bool
-	waiting     int64
-	from, last  int64
-	sequentials int64
+	closed     bool
+	waiting    int64
+	from, last int64
 }
 
 // window is the read-ahead window of a streaming reader: the blocks from
@@ -72,11 +71,12 @@ func (r *Reader) Close() {
 	}
 }
 
-// Size returns the size of the source, reaching it if needed. A source that
-// does not announce it is read to its end.
+// Size returns the size of the source, reaching it if needed: where its
+// host's answers stop, when they stop short of the size it tells (see
+// cutShort). A source that does not announce it is read to its end.
 func (r *Reader) Size(ctx context.Context) (int64, error) {
 	for block := int64(0); ; block++ {
-		if size, known := r.s.knownSize(); known {
+		if size, known := r.s.extent(); known {
 			return size, nil
 		}
 		if err := r.s.wait(ctx, r, block); err != nil && !errors.Is(err, io.EOF) {
@@ -92,7 +92,7 @@ func (r *Reader) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
 	n := 0
 	for refetched := false; n < len(p); {
 		position := off + int64(n)
-		if size, known := s.knownSize(); known && position >= size {
+		if size, known := s.extent(); known && position >= size {
 			return n, io.EOF
 		}
 		block := position / blockSize
@@ -100,20 +100,23 @@ func (r *Reader) ReadAt(ctx context.Context, p []byte, off int64) (int, error) {
 			return n, err
 		}
 		end := (block + 1) * blockSize
-		if size, known := s.knownSize(); known {
+		if size, known := s.extent(); known {
 			end = min(end, size)
 		}
 		part := p[n:min(len(p), n+int(end-position))]
 		index := block / s.cache.chunkBlocks
 		read, err := s.readChunk(index, part, position-index*s.cache.chunkBlocks*blockSize)
 		if errors.Is(err, fs.ErrNotExist) && !refetched {
-			// The chunk was evicted between the wait and the read: fetch it
-			// again, once.
-			s.forget(index)
+			// The chunk was evicted between the wait and the read, or its
+			// file removed from outside: fetch it again, once.
+			s.cache.lose(s, index)
 			refetched = true
 			continue
 		}
 		n += read
+		first := s.firstRead(block, read)
+		s.cache.misses.Add(int64(first))
+		s.cache.hits.Add(int64(read - first))
 		if err != nil && (!errors.Is(err, io.EOF) || read < len(part)) {
 			return n, err
 		}
@@ -158,9 +161,9 @@ func (s *Source) newest() *Reader {
 }
 
 // missingAhead reports whether a block of the read-ahead window is not
-// cached yet. The source's lock is held.
+// cached yet, while the source is read ahead. The source's lock is held.
 func (s *Source) missingAhead() bool {
-	if s.window.owner == nil {
+	if s.window.owner == nil || !s.readsAhead() {
 		return false
 	}
 	for block := s.window.cursor; block < s.window.horizon && !s.pastEnd(block); block++ {

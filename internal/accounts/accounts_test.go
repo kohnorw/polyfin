@@ -12,6 +12,18 @@ import (
 	"github.com/moodiness/polyfin/internal/testdb/migrated"
 )
 
+// serverPasswordCost is the hashes' cost the package starts with, the
+// server's, before TestMain lowers it.
+var serverPasswordCost argonCost
+
+// The tests hash passwords at a small cost (see
+// LowerPasswordCostForTests).
+func TestMain(m *testing.M) {
+	serverPasswordCost = passwordCost
+	LowerPasswordCostForTests()
+	m.Run()
+}
+
 func newStore(t *testing.T) *Store {
 	t.Helper()
 	pool := migrated.New(t)
@@ -41,6 +53,7 @@ func signedIn(ctx context.Context, store *Store, token string) bool {
 }
 
 func TestAuthenticateMatchesNamesWithoutCaseAndHidesDisabledAccounts(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	alice := mustCreate(t, store, NewUser{Name: "Alice", Password: "correct horse"})
@@ -68,6 +81,7 @@ func TestAuthenticateMatchesNamesWithoutCaseAndHidesDisabledAccounts(t *testing.
 }
 
 func TestUserNamesAreUniqueWithoutCaseAndValidated(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	mustCreate(t, store, NewUser{Name: "Alice", Password: "correct horse"})
@@ -88,6 +102,7 @@ func TestUserNamesAreUniqueWithoutCaseAndValidated(t *testing.T) {
 }
 
 func TestCreateUsersCreatesAllOrNone(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	// Two names that differ by case only: the second is taken.
@@ -110,6 +125,7 @@ func TestCreateUsersCreatesAllOrNone(t *testing.T) {
 }
 
 func TestSettingsRoundTripAndRefuseUnknownLanguages(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	if got := store.Settings(); got.Language != "en" || !got.PrepareAhead ||
@@ -138,7 +154,7 @@ func TestSettingsRoundTripAndRefuseUnknownLanguages(t *testing.T) {
 	if got := reopened.Settings(); !reflect.DeepEqual(got, want) {
 		t.Errorf("settings after reopening: %+v, want %+v", got, want)
 	}
-	for _, language := range []string{"", "de", "FR", "fr-FR"} {
+	for _, language := range []string{"", "nl", "FR", "fr-FR", "pt", "pt-br"} {
 		changed := want
 		changed.Language = language
 		if _, err := store.UpdateSettings(ctx, changed); !errors.Is(err, ErrInvalidLanguage) {
@@ -150,7 +166,42 @@ func TestSettingsRoundTripAndRefuseUnknownLanguages(t *testing.T) {
 	}
 }
 
+// The rating country defaults to the US, is kept in upper case, and is one
+// Polyfin has ratings of: anything else is refused and changes nothing.
+func TestSettingsRatingCountry(t *testing.T) {
+	t.Parallel()
+	store := newStore(t)
+	ctx := t.Context()
+	if got := store.Settings().RatingCountry; got != "US" || store.RatingCountry() != "US" {
+		t.Errorf("default rating country: %q, store %q", got, store.RatingCountry())
+	}
+	choices := SettingsBounds()["ratingCountry"].Choices
+	if !slices.Contains(choices, any("IT")) || !slices.Contains(choices, any("US")) || slices.Contains(choices, any("XX")) {
+		t.Errorf("rating country choices: %v", choices)
+	}
+	changed := store.Settings()
+	changed.RatingCountry = "it"
+	saved, err := store.UpdateSettings(ctx, changed)
+	if err != nil || saved.RatingCountry != "IT" {
+		t.Fatalf("rating country it: %q %v", saved.RatingCountry, err)
+	}
+	if store.Settings().RatingCountry != "IT" || store.RatingCountry() != "IT" {
+		t.Errorf("stored rating country: %q, store %q", store.Settings().RatingCountry, store.RatingCountry())
+	}
+	for _, country := range []string{"XX", ""} {
+		refused := store.Settings()
+		refused.RatingCountry = country
+		if _, err := store.UpdateSettings(ctx, refused); !errors.Is(err, ErrInvalidRatingCountry) {
+			t.Errorf("rating country %q: got %v", country, err)
+		}
+	}
+	if store.RatingCountry() != "IT" {
+		t.Errorf("a refused rating country changed it to %q", store.RatingCountry())
+	}
+}
+
 func TestSettingsKeepCatalogLimitsInRange(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	for _, tc := range []struct {
@@ -190,6 +241,7 @@ func TestSettingsKeepCatalogLimitsInRange(t *testing.T) {
 }
 
 func TestContentSettingsDefaultRoundTripAndStayInRange(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	defaults := store.Settings()
@@ -260,7 +312,8 @@ func TestContentSettingsDefaultRoundTripAndStayInRange(t *testing.T) {
 }
 
 func TestSetupStoresTheAdministratorsLanguage(t *testing.T) {
-	for _, tc := range []struct{ given, want string }{{"fr", "fr"}, {"en", "en"}, {"de", "en"}, {"", "en"}} {
+	t.Parallel()
+	for _, tc := range []struct{ given, want string }{{"fr", "fr"}, {"en", "en"}, {"de", "de"}, {"pt-BR", "pt-BR"}, {"nl", "en"}, {"", "en"}} {
 		store := newStore(t)
 		if _, err := store.CreateFirstAdministrator(t.Context(), "admin", "correct horse", tc.given); err != nil {
 			t.Fatal(err)
@@ -287,6 +340,7 @@ func TestSetupStoresTheAdministratorsLanguage(t *testing.T) {
 }
 
 func TestTheLastEnabledAdministratorIsProtected(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	admin, err := store.CreateFirstAdministrator(ctx, "admin", "correct horse", "")
@@ -325,6 +379,7 @@ func TestTheLastEnabledAdministratorIsProtected(t *testing.T) {
 }
 
 func TestSigningInAgainFromADeviceReplacesOnlyItsToken(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	alice := mustCreate(t, store, NewUser{Name: "alice", Password: "correct horse"})
@@ -357,6 +412,7 @@ func TestSigningInAgainFromADeviceReplacesOnlyItsToken(t *testing.T) {
 }
 
 func TestNewPasswordSignsOutEverywhereExceptTheCurrentSession(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	alice := mustCreate(t, store, NewUser{Name: "alice", Password: "correct horse"})
@@ -387,6 +443,7 @@ func TestNewPasswordSignsOutEverywhereExceptTheCurrentSession(t *testing.T) {
 // Every way a device can be signed out tells of it, once, with the
 // devices it signed out only.
 func TestSignedOutDevicesAreToldOf(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	var told [][]ID
@@ -443,7 +500,85 @@ func TestSignedOutDevicesAreToldOf(t *testing.T) {
 	expect("deleting", bobTV)
 }
 
+// An account signed out everywhere, by a new password, whoever set it, or
+// by being disabled, is told of once to everyone who asked, with or
+// without a device signed in. Another change of the account is not, nor a
+// device signed out alone, nor a password change refused.
+func TestAccountsSignedOutEverywhereAreToldOf(t *testing.T) {
+	t.Parallel()
+	store := newStore(t)
+	ctx := t.Context()
+	var told, also []ID
+	store.OnSignOutEverywhere(func(user ID) { told = append(told, user) })
+	store.OnSignOutEverywhere(func(user ID) { also = append(also, user) })
+	expect := func(what string, want ...ID) {
+		t.Helper()
+		if !slices.Equal(told, want) || !slices.Equal(also, want) {
+			t.Errorf("%s: told of %v and %v, want %v", what, told, also, want)
+		}
+		told, also = nil, nil
+	}
+	alice := mustCreate(t, store, NewUser{Name: "alice", Password: "correct horse"})
+	bob := mustCreate(t, store, NewUser{Name: "bob", Password: "correct horse"})
+	expect("creating accounts")
+
+	// No device is signed in yet.
+	if err := store.ChangePassword(ctx, alice.ID, "correct horse", "battery staple", nil); err != nil {
+		t.Fatal(err)
+	}
+	expect("alice's own password change", alice.ID)
+	if err := store.ChangePassword(ctx, alice.ID, "wrong horse", "another staple", nil); !errors.Is(err, ErrWrongPassword) {
+		t.Fatalf("a password change with a wrong current password: %v", err)
+	}
+	expect("a password change refused")
+
+	token, tv, _ := store.SignInDevice(ctx, alice.ID, device("tv"))
+	_, phone, _ := store.SignInDevice(ctx, alice.ID, device("phone"))
+	if err := store.ChangePasswordFromDevice(ctx, alice.ID, "battery staple", "correct horse", phone.ID); err != nil {
+		t.Fatal(err)
+	}
+	expect("a password change from a device", alice.ID)
+	if signedIn(ctx, store, token) {
+		t.Errorf("the TV %v is signed in after the password change", tv.ID)
+	}
+	next := "another horse entirely"
+	if _, err := store.UpdateUser(ctx, alice.ID, UserChanges{Password: &next}, nil); err != nil {
+		t.Fatal(err)
+	}
+	expect("an administrator's new password", alice.ID)
+	_, pin, err := store.RequestPasswordReset(ctx, "alice")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expect("asking for a reset PIN")
+	if _, err := store.RedeemPasswordResetPIN(ctx, pin.PIN); err != nil {
+		t.Fatal(err)
+	}
+	expect("a password reset", alice.ID)
+
+	if _, err := store.UpdateUser(ctx, alice.ID, UserChanges{IsHidden: new(true)}, nil); err != nil {
+		t.Fatal(err)
+	}
+	expect("hiding")
+	token, _, _ = store.SignInDevice(ctx, bob.ID, device("tv"))
+	if err := store.SignOutDevice(ctx, token); err != nil {
+		t.Fatal(err)
+	}
+	expect("a device signing out")
+	for _, what := range []string{"disabling", "disabling again"} {
+		if _, err := store.UpdateUser(ctx, bob.ID, UserChanges{IsDisabled: new(true)}, nil); err != nil {
+			t.Fatal(err)
+		}
+		if what == "disabling" {
+			expect(what, bob.ID)
+		} else {
+			expect(what)
+		}
+	}
+}
+
 func TestAdminSessionsExpireAndRenew(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	alice := mustCreate(t, store, NewUser{Name: "alice", Password: "correct horse"})
@@ -467,6 +602,7 @@ func TestAdminSessionsExpireAndRenew(t *testing.T) {
 }
 
 func TestPasswordHashes(t *testing.T) {
+	t.Parallel()
 	hash := hashPassword("correct horse")
 	if ok, err := verifyPassword("correct horse", hash); !ok || err != nil {
 		t.Fatalf("right password refused: %v", err)
@@ -479,5 +615,28 @@ func TestPasswordHashes(t *testing.T) {
 	}
 	if _, err := verifyPassword("x", "$argon2id$v=19$m=1,t=1,p=1$bad"); err == nil {
 		t.Fatal("malformed hash accepted")
+	}
+}
+
+// The server hashes passwords at OWASP's cost, 19 MiB, two passes and one
+// lane, whatever the tests' cost; hashes at either cost verify, each at
+// its own.
+func TestTheServerHashesAtOWASPsCost(t *testing.T) {
+	t.Parallel()
+	server := hashAt(serverPasswordCost, "correct horse")
+	if !strings.HasPrefix(server, "$argon2id$v=19$m=19456,t=2,p=1$") {
+		t.Errorf("the server's hash: %s", server)
+	}
+	tests := hashPassword("correct horse")
+	if strings.HasPrefix(tests, "$argon2id$v=19$m=19456,t=2,p=1$") {
+		t.Errorf("the tests hash at the server's cost: %s", tests)
+	}
+	for _, hash := range []string{server, tests} {
+		if ok, err := verifyPassword("correct horse", hash); !ok || err != nil {
+			t.Errorf("%s: the right password is refused: %v", hash, err)
+		}
+		if ok, _ := verifyPassword("correct horsf", hash); ok {
+			t.Errorf("%s: a wrong password is accepted", hash)
+		}
 	}
 }

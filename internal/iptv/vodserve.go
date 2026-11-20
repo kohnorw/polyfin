@@ -180,9 +180,9 @@ type storedTitle struct {
 	address *string
 	// kind, manifestAddress and manifest are the source's kind, address
 	// (holding its credentials) and name; confined keeps its requests on
-	// public addresses.
-	kind, manifestAddress, manifest string
-	confined                        bool
+	// public addresses; userAgent is the one its administrator set.
+	kind, manifestAddress, manifest, userAgent string
+	confined                                   bool
 }
 
 // scanTitle reads a title of titleColumns, then extra columns.
@@ -324,9 +324,10 @@ func (s *Service) catalogWindow(ctx context.Context, source accounts.ID, catalog
 func (s *Service) title(ctx context.Context, source accounts.ID, typ, key string) (storedTitle, error) {
 	var t storedTitle
 	err := scanTitle(s.db.QueryRow(ctx, `SELECT `+titleColumns+`, a.kind, a.manifest_url, a.manifest->>'name',
-		a.owner_id IS NOT NULL AND NOT coalesce(u.is_administrator, false)
-		FROM iptv_titles t JOIN iptv_sources i ON i.addon_id = t.addon_id JOIN addons a ON a.id = t.addon_id LEFT JOIN users u ON u.id = a.owner_id
-		WHERE t.addon_id = $1 AND t.type = $2 AND t.key = $3 AND `+shownTitle, source, typ, key), &t, &t.kind, &t.manifestAddress, &t.manifest, &t.confined)
+		`+addons.ConfinedSQL("a")+`, i.user_agent
+		FROM iptv_titles t JOIN iptv_sources i ON i.addon_id = t.addon_id JOIN addons a ON a.id = t.addon_id
+		WHERE t.addon_id = $1 AND t.type = $2 AND t.key = $3 AND `+shownTitle, source, typ, key), &t, &t.kind, &t.manifestAddress, &t.manifest, &t.confined,
+		&t.userAgent)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return storedTitle{}, stremio.ErrNotFound
 	}
@@ -335,26 +336,32 @@ func (s *Service) title(ctx context.Context, source accounts.ID, typ, key string
 
 // titleMeta describes a title a source shows: its list data, completed by
 // its details when they are known or the request opens it (see Opening),
-// and, for a series, its episodes.
+// and, for a series, its episodes: the description kept (see
+// descriptions.go), unless opening the title asks its provider for its
+// details.
 func (s *Service) titleMeta(ctx context.Context, source accounts.ID, typ, key string) (stremio.Meta, error) {
+	kept, err := s.description(ctx, source, typ, key)
+	if err != nil {
+		return stremio.Meta{}, err
+	}
+	if !IsOpening(ctx) || !kept.fetchDue(s.now()) {
+		return kept.meta(source), nil
+	}
 	t, err := s.title(ctx, source, typ, key)
 	if err != nil {
 		return stremio.Meta{}, err
 	}
-	meta := listingMeta(source, t.Title)
-	d, err := s.details(ctx, source, t, IsOpening(ctx))
+	d, err := s.details(ctx, source, t, true)
 	if err != nil {
 		return stremio.Meta{}, err
 	}
-	if d != nil {
-		d.apply(source, t.Title, &meta)
-	}
+	var videos []stremio.Video
 	if typ == typeSeries && t.kind != addons.KindXtream {
-		if meta.Videos, err = s.m3uEpisodes(ctx, source, key); err != nil {
+		if videos, err = s.m3uEpisodes(ctx, source, key); err != nil {
 			return stremio.Meta{}, err
 		}
 	}
-	return meta, nil
+	return describedTitle(source, t.Title, t.kind, d, videos), nil
 }
 
 // m3uEpisodes lists an M3U series' episodes.
@@ -487,12 +494,13 @@ func (s *Service) details(ctx context.Context, source accounts.ID, t storedTitle
 	}
 	result, err, _ := s.flight.Do("details "+source.String()+" "+t.Type+" "+t.Key, func() (any, error) {
 		account := accountOf(t.kind, t.manifestAddress)
+		account.UserAgent = t.userAgent
 		action := "get_vod_info&vod_id=" + url.QueryEscape(t.Key)
 		if t.Type == typeSeries {
 			action = "get_series_info&series_id=" + url.QueryEscape(t.Key)
 		}
 		var fetched *details
-		err := download(ctx, s.requester(), account.api(action), t.confined, maxDetailSize, func(body io.Reader) error {
+		err := download(ctx, s.requester().as(account), account.api(action), t.confined, maxDetailSize, func(body io.Reader) error {
 			var err error
 			if t.Type == typeSeries {
 				fetched, err = parseSeriesInfo(body)
@@ -507,6 +515,9 @@ func (s *Service) details(ctx context.Context, source accounts.ID, t storedTitle
 		_, err = s.db.Exec(ctx, `INSERT INTO iptv_details (addon_id, type, key, version, fetched_at, details) VALUES ($1, $2, $3, $4, $5, $6)
 			ON CONFLICT (addon_id, type, key) DO UPDATE SET version = excluded.version, fetched_at = excluded.fetched_at, details = excluded.details`,
 			source, t.Type, t.Key, t.Version, s.now(), fetched)
+		if err == nil {
+			s.descriptions.forget(source, t.Type, t.Key)
+		}
 		return fetched, err
 	})
 	if err != nil {
@@ -693,18 +704,17 @@ func (a Account) vodURL(kind, id, extension string) string {
 }
 
 // vodStream is a movie's or episode's one stream, named after its source
-// and the quality its name gives.
-func vodStream(sourceName, quality, address string, headers map[string]string) stremio.Stream {
-	stream := stremio.Stream{Name: sourceName, Description: quality, URL: address}
-	if len(headers) > 0 {
-		stream.BehaviorHints.ProxyHeaders = &stremio.ProxyHeaders{Request: headers}
-	}
+// and the quality its name gives, requested with the headers its list
+// gives and its source's User-Agent (see streamAgent).
+func (t storedTitle) vodStream(quality, address string, headers map[string]string) stremio.Stream {
+	stream := stremio.Stream{Name: t.manifest, Description: quality, URL: address}
+	streamAgent{own: t.userAgent, browser: browsed(t.kind)}.apply(&stream, headers)
 	return stream
 }
 
 // vodStreams lists the stream of a movie or an episode a source shows: an
-// Xtream account's file, whose episode needs its series' details (asked
-// when unknown: playing opens it), or an M3U entry's address.
+// Xtream account's file, whose episode needs its series' details (see
+// episodeDetails), or an M3U entry's address.
 func (s *Service) vodStreams(ctx context.Context, source accounts.ID, id string) ([]stremio.Stream, error) {
 	if key, ok := strings.CutPrefix(id, "vod:"); ok {
 		t, err := s.title(ctx, source, typeMovie, key)
@@ -715,7 +725,7 @@ func (s *Service) vodStreams(ctx context.Context, source accounts.ID, id string)
 			return nil, err
 		}
 		if t.kind != addons.KindXtream {
-			return []stremio.Stream{vodStream(t.manifest, t.Quality, t.URL, t.Headers)}, nil
+			return []stremio.Stream{t.vodStream(t.Quality, t.URL, t.Headers)}, nil
 		}
 		extension := t.Extension
 		if extension == "" {
@@ -723,7 +733,7 @@ func (s *Service) vodStreams(ctx context.Context, source accounts.ID, id string)
 				extension = d.Extension
 			}
 		}
-		return []stremio.Stream{vodStream(t.manifest, t.Quality, accountOf(t.kind, t.manifestAddress).vodURL("movie", key, extension), nil)}, nil
+		return []stremio.Stream{t.vodStream(t.Quality, accountOf(t.kind, t.manifestAddress).vodURL("movie", key, extension), nil)}, nil
 	}
 	rest, ok := strings.CutPrefix(id, "ep:")
 	series, key, found := strings.Cut(rest, ":")
@@ -748,9 +758,9 @@ func (s *Service) vodStreams(ctx context.Context, source accounts.ID, id string)
 		if err != nil {
 			return nil, err
 		}
-		return []stremio.Stream{vodStream(t.manifest, quality, address, headers)}, nil
+		return []stremio.Stream{t.vodStream(quality, address, headers)}, nil
 	}
-	d, err := s.details(ctx, source, t, true)
+	d, err := s.episodeDetails(ctx, source, t)
 	if err != nil || d == nil {
 		return nil, err
 	}
@@ -759,15 +769,29 @@ func (s *Service) vodStreams(ctx context.Context, source accounts.ID, id string)
 		return nil, nil
 	}
 	e := d.Episodes[index]
-	return []stremio.Stream{vodStream(t.manifest, e.Quality, accountOf(t.kind, t.manifestAddress).vodURL("series", key, e.Extension), nil)}, nil
+	return []stremio.Stream{t.vodStream(e.Quality, accountOf(t.kind, t.manifestAddress).vodURL("series", key, e.Extension), nil)}, nil
+}
+
+// episodeDetails returns the details of series t, which hold the files of
+// its episodes: those of its description kept (see descriptions.go),
+// under the same check of its source's version, while they are fresh,
+// else details', which asks the provider for them when they are unknown,
+// of another version of the series, or old: playing opens it. A listing
+// of episodes needs their streams, one episode at a time, and would
+// otherwise read and decode the series' details, every episode of them,
+// for each one.
+func (s *Service) episodeDetails(ctx context.Context, source accounts.ID, t storedTitle) (*details, error) {
+	if kept, err := s.description(ctx, source, typeSeries, t.Key); err == nil && kept.title.Version == t.Version && !kept.fetchDue(s.now()) {
+		return kept.details, nil
+	}
+	return s.details(ctx, source, t, true)
 }
 
 // Enrichment reports whether a source describes its titles through the
-// server's metadata addons.
+// server's metadata addons, read once for a request marked by CheckOnce.
 func (s *Service) Enrichment(ctx context.Context, source accounts.ID) bool {
-	var on bool
-	_ = s.db.QueryRow(ctx, "SELECT enrichment FROM iptv_sources WHERE addon_id = $1", source).Scan(&on)
-	return on
+	state, err := s.sourceState(ctx, source)
+	return err == nil && state.enrichment
 }
 
 // VODCounts count a source's titles: movies and series in its lists,

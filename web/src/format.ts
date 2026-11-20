@@ -3,9 +3,13 @@ import type { Messages } from '@/i18n'
 
 type ErrorCode = keyof Messages['errors']
 
-/** Maps an API error code to localized text; unknown codes fall back to a generic message. */
+/**
+ * Maps an API error code to localized text; unknown codes fall back to a generic message. A
+ * WireGuard configuration refused tells its line, key and reason.
+ */
 export function errorMessage(t: Messages, error: unknown): string {
   if (error instanceof ApiError) {
+    if (error.wireGuard !== null) return t.settings.torrents.wireGuardInvalid(error.wireGuard)
     return Object.hasOwn(t.errors, error.code)
       ? t.errors[error.code as ErrorCode]
       : t.errors.generic
@@ -18,6 +22,19 @@ export function errorMessage(t: Messages, error: unknown): string {
 /** Localized name of a Stremio type or resource; values without a translation are shown as sent. */
 export function stremioLabel(labels: Readonly<Record<string, string>>, value: string): string {
   return Object.hasOwn(labels, value) ? labels[value] : value
+}
+
+/** The type of a home-videos folder's catalog, which Polyfin names, not Stremio. */
+const homeVideoType = 'polyfin.homevideo'
+
+/**
+ * Localized name of a catalog's type: a Stremio type, or a home-videos folder's, named as the
+ * folder's kind is; others are shown as sent.
+ */
+export function catalogTypeLabel(t: Messages, type: string): string {
+  return type === homeVideoType
+    ? t.localFolders.kinds.homevideos
+    : stremioLabel(t.stremioTypes, type)
 }
 
 /**
@@ -39,6 +56,17 @@ export function languageOptions(
       const name = names.of(code) ?? code
       return { value: code, label: name.charAt(0).toLocaleUpperCase(language) + name.slice(1) }
     })
+    .sort((a, b) => a.label.localeCompare(b.label, language))
+}
+
+/** ISO 3166 country codes ("IT") as choices named in the reader's language ("Italie"), by name. */
+export function countryOptions(
+  codes: readonly string[],
+  language: string,
+): { value: string; label: string }[] {
+  const names = new Intl.DisplayNames([language], { type: 'region', fallback: 'code' })
+  return codes
+    .map((code) => ({ value: code, label: names.of(code) ?? code }))
     .sort((a, b) => a.label.localeCompare(b.label, language))
 }
 

@@ -45,7 +45,7 @@ func (h *Handler) serveFile(w http.ResponseWriter, r *http.Request, attachment b
 		validationProblem(w, map[string][]string{"itemId": {notValid(r.PathValue("itemId"))}})
 		return
 	}
-	user, grant, ok := h.streamAccess(r)
+	user, grant, ok := h.streamAccess(r, servedSignedIn)
 	if !ok {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
@@ -76,11 +76,19 @@ func (h *Handler) serveFile(w http.ResponseWriter, r *http.Request, attachment b
 		h.internalError(w, r, err)
 		return
 	}
+	// Jellyfin refuses to download an item that is no file, a folder or a
+	// series, as a request it cannot process (BaseItem.CanDownload is
+	// false but for videos, audio, books and photos): no addon is asked
+	// for streams of it.
+	if !hasSources(item.Kind) {
+		processingError(w, http.StatusBadRequest)
+		return
+	}
 	wanted := opened
 	if opened == item.ID {
 		wanted = grant.Version
 		if wanted == (accounts.ID{}) {
-			wanted = h.firstWorkingVersion(r.Context(), user, item)
+			wanted = h.firstWorkingVersion(h.mediaContext(r, servedSignedIn, user), user, item)
 		}
 	}
 	version, err := h.Library.Version(r.Context(), user, item.ID, wanted)
@@ -97,38 +105,51 @@ func (h *Handler) serveFile(w http.ResponseWriter, r *http.Request, attachment b
 	// are never converted. Without one, the title is refused as downloads
 	// are without the permission.
 	if !user.FitsGroup(h.versionHeight(r.Context(), version)) {
-		h.Logger.Info("A download taller than the user's quality group was refused", "addon", version.Addon)
+		h.Logger.Info("A download taller than the user's quality group was refused", "addon", version.AddonLog)
 		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	// An app that may not be told where the version comes from gets it
+	// through Polyfin (see keptFromSource), and no playlist to save: its
+	// lines would be its source's addresses.
+	kept := h.keptFromSource(r, user, version)
+	if kept && h.namesSource(w, r, version, false) {
 		return
 	}
 	name := h.downloadName(r, item, version)
 	delivery := playback.Delivery{
 		// A player that authenticates with a header might send it to the
 		// source too: relay instead of redirecting it.
-		Relay:       grant.Relay || strings.Contains(r.Header.Get("Authorization"), "Token="),
+		Relay:       kept || grant.Relay || strings.Contains(r.Header.Get("Authorization"), "Token="),
 		ContentType: mimeTypes[containerOfName(name)],
 	}
 	if attachment {
 		delivery.Attachment = name
 	}
 	if err := h.Playback.Serve(w, r, version, delivery); err != nil && r.Context().Err() == nil {
-		h.Logger.Warn("A download could not be served", "addon", version.Addon, "error", err)
+		h.Logger.Warn("A download could not be served", "addon", version.AddonLog, "error", err)
 	}
 }
 
 // firstWorkingVersion is the version a title's own identifier stands for:
 // its first as the user is offered them (see offered), those that failed
-// lately left out, else the title's identifier, which stands for its
-// first. PlaybackInfo and item details name that version after the title,
-// so every request naming the title's identifier as a media source finds
-// its version here, never in the addons' order, whose first may have
+// lately left out, and past the torrents that did not start lately, as a
+// play picking no version passes them over (see tryable); else the
+// title's identifier, which stands for its first. PlaybackInfo names the
+// version it chooses after the title when it is the first, so every
+// request naming the title's identifier as a media source finds a version
+// that may play here, never in the addons' order, whose first may have
 // failed and be left out of the answers.
 func (h *Handler) firstWorkingVersion(ctx context.Context, user accounts.User, item library.Item) accounts.ID {
 	versions, err := h.Library.Versions(ctx, user, item.ID)
 	if err != nil {
 		return item.ID
 	}
-	if versions = h.offered(ctx, user, versions); len(versions) > 0 {
+	versions = h.offered(ctx, user, item, versions)
+	if i := slices.IndexFunc(versions, func(v library.Version) bool { return !h.didNotStart(v) }); i >= 0 {
+		return versions[i].ID
+	}
+	if len(versions) > 0 {
 		return versions[0].ID
 	}
 	return item.ID

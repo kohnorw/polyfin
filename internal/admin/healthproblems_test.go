@@ -12,6 +12,7 @@ import (
 	"slices"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
@@ -141,14 +142,14 @@ func TestHealthProblemsAreThoseTheHealthPageShows(t *testing.T) {
 		{Key: "secrets:unreadable", Severity: notifications.SeverityError,
 			Text: "1 clé enregistrée ne peut pas être déchiffrée avec POLYFIN_SECRET_KEY et compte comme absente.", Page: "/system/health#secrets"},
 		{Key: "folder:" + folder.ID, Severity: notifications.SeverityError,
-			Text: "Shelf : Polyfin ne peut pas lire ce dossier local. Vérifiez qu’il est monté et lisible par l’utilisateur 65532.",
+			Text: "Shelf\u202f: Polyfin ne peut pas lire ce dossier local. Vérifiez qu’il est monté et lisible par l’utilisateur 65532.",
 			Page: "/sources/shared/" + folder.ID},
-		{Key: "addon:" + own.ID.String(), Severity: notifications.SeverityWarning, Text: "Own TV (Addons de sam) : est sur un réseau local",
+		{Key: "addon:" + own.ID.String(), Severity: notifications.SeverityWarning, Text: "Own TV (Addons de sam)\u202f: est sur un réseau local",
 			Page: "/system/health#addons"},
 		{Key: "secrets:plaintext", Severity: notifications.SeverityWarning,
 			Text: "Les clés et jetons sont enregistrés sans chiffrement. Définissez POLYFIN_SECRET_KEY pour les chiffrer.",
 			Page: "/system/health#secrets"},
-		{Key: "task:Refresh", Severity: notifications.SeverityWarning, Text: "La tâche « Actualiser des choses » a échoué.",
+		{Key: "task:Refresh", Severity: notifications.SeverityWarning, Text: "La tâche «\u202fActualiser des choses\u202f» a échoué.",
 			Page: "/system/schedule"},
 	}
 	if !slices.Equal(told, wantTold) {
@@ -163,6 +164,16 @@ func TestHealthProblemsAreThoseTheHealthPageShows(t *testing.T) {
 		return p.Key == "secrets:plaintext"
 	}) {
 		t.Errorf("with a key: %+v", told)
+	}
+
+	// Without a key, before any secret is stored: whatever is saved next
+	// is stored as is, which the warning tells beforehand.
+	noneYet := *options
+	noneYet.Health.Secrets = func(context.Context) (secrets.Report, error) { return secrets.Report{}, nil }
+	if told, _ := HealthProblems(noneYet)(t.Context()); !slices.ContainsFunc(told, func(p notifications.Problem) bool {
+		return p.Key == "secrets:plaintext"
+	}) {
+		t.Errorf("without a key, none stored yet: %+v", told)
 	}
 
 	down.Store(true)
@@ -199,26 +210,44 @@ func TestUnwatchedFolderText(t *testing.T) {
 	}{
 		{"watch_limit", "", "en", "Movies: Polyfin cannot watch this local folder for changes: the system’s limit of watched folders is reached. " +
 			"It is still scanned on its schedule. Raise fs.inotify.max_user_watches on the host."},
-		{"watch_limit", "", "fr", "Movies : Polyfin ne peut pas surveiller les changements de ce dossier local : la limite de dossiers surveillés du système est atteinte. " +
+		{"watch_limit", "", "fr", "Movies\u202f: Polyfin ne peut pas surveiller les changements de ce dossier local\u202f: la limite de dossiers surveillés du système est atteinte. " +
 			"Il est toujours analysé selon sa planification. Augmentez fs.inotify.max_user_watches sur l’hôte."},
 		{"instance_limit", "", "en", "Movies: Polyfin cannot watch this local folder for changes: the system’s limit of watchers or of open files is reached. " +
 			"It is still scanned on its schedule. Raise fs.inotify.max_user_instances on the host, or the container’s limit of open files."},
 		{"open_files_limit", "", "en", "Movies: Polyfin cannot watch this local folder for changes: the system’s limit of open files is reached, " +
 			"as macOS watches each folder and file through one. It is still scanned on its schedule. Raise kern.maxfilesperproc and kern.maxfiles with sysctl."},
-		{"open_files_limit", "", "fr", "Movies : Polyfin ne peut pas surveiller les changements de ce dossier local : la limite de fichiers ouverts du système est atteinte, " +
+		{"open_files_limit", "", "fr", "Movies\u202f: Polyfin ne peut pas surveiller les changements de ce dossier local\u202f: la limite de fichiers ouverts du système est atteinte, " +
 			"macOS surveillant chaque dossier et fichier par l’un d’eux. Il est toujours analysé selon sa planification. Augmentez kern.maxfilesperproc et kern.maxfiles avec sysctl."},
 		{"failed", "", "en", "Movies: Polyfin cannot watch this local folder for changes. It is still scanned on its schedule."},
 		{"unreachable", "webdav", "en", "Movies: Polyfin cannot watch this network share for changes: it cannot be reached. " +
 			"It is scanned on its schedule, and again once it answers."},
-		{"unreachable", "smb", "fr", "Movies : Polyfin ne peut pas surveiller les changements de ce partage réseau : il est injoignable. " +
+		{"unreachable", "smb", "fr", "Movies\u202f: Polyfin ne peut pas surveiller les changements de ce partage réseau\u202f: il est injoignable. " +
 			"Il est analysé selon sa planification, et de nouveau dès qu’il répond."},
 		{"refused", "smb", "en", "Movies: Polyfin cannot watch this network share for changes: it refuses Polyfin’s user or password. " +
 			"Check them, and enter them again."},
-		{"failed", "webdav", "fr", "Movies : Polyfin ne peut pas surveiller les changements de ce partage réseau. Il est toujours analysé selon sa planification."},
+		{"failed", "webdav", "fr", "Movies\u202f: Polyfin ne peut pas surveiller les changements de ce partage réseau. Il est toujours analysé selon sa planification."},
 	} {
 		p := healthProblemJSON{Code: problemFolderUnwatched, Name: "Movies", Failure: c.failure, Share: c.share}
 		if got := p.text(c.language); got != c.want {
 			t.Errorf("%s %s in %s:\n%s\nwant\n%s", c.failure, c.share, c.language, got, c.want)
+		}
+	}
+}
+
+// A host answering an error file is told with what to check: the account
+// at that service, or the service itself.
+func TestHostErrorFileText(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, time.November, 7, 20, 40, 0, 0, time.Local)
+	p := healthProblemJSON{Code: problemHostErrorFile, Host: "files.example", At: &at}
+	for language, want := range map[string]string{
+		"en": "The host files.example answers an error file instead of the videos, since 20:40. " +
+			"This often means the account at that service needs attention (a password change, a subscription, a limit reached), or that the service is down: check it on its site.",
+		"fr": "L’hôte files.example répond par un fichier d’erreur au lieu des vidéos, depuis 20:40. " +
+			"Cela signifie souvent que le compte auprès de ce service demande votre attention (un changement de mot de passe, un abonnement, une limite atteinte), ou que le service est en panne\u202f: vérifiez-le sur son site.",
+	} {
+		if got := p.text(language); got != want {
+			t.Errorf("in %s:\n%s\nwant\n%s", language, got, want)
 		}
 	}
 }

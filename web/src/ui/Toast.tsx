@@ -3,7 +3,7 @@ import { createContext, use, useCallback, useRef, useState, type ReactNode } fro
 import { useI18n } from '@/i18n'
 import { cx } from './cx'
 
-export type ToastTone = 'ok' | 'info' | 'danger'
+type ToastTone = 'ok' | 'info' | 'danger'
 
 export type ToastOptions = {
   /** `ok` for a saved change (the default), `info` for a neutral note, `danger` for a failure. */
@@ -30,7 +30,11 @@ export function useToast(): ToastContextValue {
 }
 
 const icons = { ok: CheckCircleIcon, info: InfoIcon, danger: WarningCircleIcon }
-const iconColors = { ok: 'text-ok', info: 'text-link', danger: 'text-danger' }
+const bubbles = {
+  ok: 'bg-ok/14 text-ok',
+  info: 'bg-link/14 text-link',
+  danger: 'bg-danger/14 text-danger',
+}
 
 /** Holds the toasts of the app; `main.tsx` mounts it once around the router. */
 export function ToastProvider({ children }: { children: ReactNode }) {
@@ -56,31 +60,35 @@ export function ToastProvider({ children }: { children: ReactNode }) {
     <ToastContext value={show}>
       {children}
       <section
-        aria-label={t.ui.notifications}
+        aria-label={t.ui.messages}
         aria-live="polite"
-        className="pointer-events-none fixed inset-x-0 bottom-6 z-[60] flex flex-col items-center gap-2 px-4"
+        className="pointer-events-none fixed inset-x-0 bottom-7 z-[60] flex flex-col items-center gap-2.5 px-3"
       >
         {toasts.map((toast) => {
           const Glyph = icons[toast.tone]
           return (
             <div
               key={toast.id}
-              className="pointer-events-auto flex max-w-[min(520px,100%)] animate-rise items-center gap-3 rounded-row bg-s3 py-2.5 pr-2 pl-3.5 text-control text-ink shadow-pop"
+              className="pointer-events-auto flex max-w-[min(35rem,100%)] animate-rise items-center gap-3.5 rounded-row py-2.5 pr-2.5 pl-3 text-body text-ink raised"
             >
-              <Glyph
-                size={18}
+              <span
                 aria-hidden="true"
-                className={cx('shrink-0', iconColors[toast.tone])}
-              />
+                className={cx(
+                  'inline-grid size-11 shrink-0 place-items-center rounded-full',
+                  bubbles[toast.tone],
+                )}
+              >
+                <Glyph size="1.375rem" />
+              </span>
               <span className="min-w-0 flex-1">{toast.message}</span>
               <button
                 type="button"
                 aria-label={t.ui.dismiss}
                 title={t.ui.dismiss}
                 onClick={() => dismiss(toast.id)}
-                className="inline-grid size-7 shrink-0 cursor-pointer place-items-center rounded-md text-ink-3 transition-colors duration-160 hover:bg-ink/8 hover:text-ink"
+                className="inline-grid size-11 shrink-0 cursor-pointer place-items-center rounded-[0.875rem] text-ink-2 focus-lit hover:bg-s2 hover:text-ink"
               >
-                <XIcon size={14} aria-hidden="true" />
+                <XIcon size="1.25rem" aria-hidden="true" />
               </button>
             </div>
           )

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"path/filepath"
 	"runtime"
@@ -10,13 +11,21 @@ import (
 	"sync"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
+	"github.com/moodiness/polyfin/internal/config"
+	"github.com/moodiness/polyfin/internal/database"
 	"github.com/moodiness/polyfin/internal/discovery"
 	"github.com/moodiness/polyfin/internal/diskspace"
 	"github.com/moodiness/polyfin/internal/dlna"
 	"github.com/moodiness/polyfin/internal/forwarded"
 	"github.com/moodiness/polyfin/internal/hls"
 	"github.com/moodiness/polyfin/internal/https"
+	"github.com/moodiness/polyfin/internal/jellyfin"
+	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/playback"
 	"github.com/moodiness/polyfin/internal/secrets"
 	"github.com/moodiness/polyfin/internal/source"
 	"github.com/moodiness/polyfin/internal/stremio"
@@ -30,15 +39,47 @@ import (
 type HealthSources struct {
 	// Addons tells how the requests to the addons went (stremio.Client).
 	Addons *stremio.Client
-	// Cache keeps the sources being played, CacheDir holds it.
-	Cache    *source.Cache
-	CacheDir string
+	// SearchesLeaveOut tells whether the searches leave out a search
+	// catalog of an addon for now, as it did not answer a search in time
+	// (library.Service.SearchesLeaveOut); nil tells none.
+	SearchesLeaveOut func(addon accounts.ID) bool
+	// StreamsTimingOut tells, while the background requests to an
+	// addon's server pause as it did not answer requests for streams in
+	// time, when the pause ends (library.Service.StreamsTimingOut); nil
+	// tells none.
+	StreamsTimingOut func(addon addons.Addon) (time.Time, bool)
+	// Cache keeps the sources being played. Folders are the folders of
+	// the run, which keep it, the segments and the cache, those the
+	// settings chose that could not be written into at start among them.
+	Cache   *source.Cache
+	Folders config.Folders
 	// Encoder runs the remuxes and conversions.
 	Encoder *hls.Manager
+	// NVIDIADriver tells the NVIDIA driver version NVENC needs, when the
+	// GPU's driver is older (hls.Manager.NVIDIADriver), empty otherwise;
+	// nil tells nothing.
+	NVIDIADriver func() string
+	// OlderDriverFFmpeg tells how the FFmpeg for NVIDIA drivers older than
+	// 610 stands (hls.Manager.OlderDriverFFmpeg); nil tells nothing.
+	OlderDriverFFmpeg func() hls.OlderDriverStatus
+	// MoveDataDirTo is set when the data folder (Options.DataDir) is the
+	// default one of earlier versions, in the system's temporary folder,
+	// kept as it was there (config.Config.MoveDataDirTo): the folder its
+	// files are to be moved to.
+	MoveDataDirTo string
+	// DataFolderFault is set when another account of the system can
+	// change the data folder an administrator chose: another user owns
+	// it, or its group or others can write into it
+	// (config.PrepareDataFolder).
+	DataFolderFault *config.DataFolderFault
 	// Thumbnails makes the scrubbing thumbnails and chapter images.
 	Thumbnails *thumbnails.Service
 	// DatabaseSize measures the database.
 	DatabaseSize func(context.Context) (int64, error)
+	// Collation reads how the database's collation version stands
+	// (database.ReadCollation): Health warns while it changed. Nil tells
+	// nothing.
+	Collation func(context.Context) (database.Collation, error)
 	// Started is when the server started.
 	Started time.Time
 	// SecretKey tells whether POLYFIN_SECRET_KEY is set, and Secrets reads
@@ -59,8 +100,41 @@ type HealthSources struct {
 	DLNA func() dlna.Status
 	// HTTPS tells how HTTPS stands; nil tells nothing.
 	HTTPS func() https.Status
-	// Torrents plays the torrent streams; nil tells nothing.
-	Torrents *torrent.Engine
+	// MissingLanguages lists the languages of the picture subtitle tracks
+	// left unread for want of their data; nil lists none.
+	// DownloadLanguage downloads the data of one, a Tesseract code, as
+	// Health's Download button asks (playback.Service.DownloadLanguage);
+	// nil downloads none.
+	MissingLanguages func(context.Context) []playback.MissingLanguage
+	DownloadLanguage func(ctx context.Context, language string) error
+	// Torrents plays the torrent streams (torrent.Engine); nil tells
+	// nothing.
+	Torrents Torrents
+	// Images keeps the artwork relayed, resized and drawn for apps
+	// (jellyfin.Handler); nil tells nothing.
+	Images ImageCache
+	// Artwork tells how the artwork downloads fared in the last hour
+	// (jellyfin.Handler.ArtworkStatus); nil tells nothing.
+	Artwork func() jellyfin.ArtworkStatus
+	// People tells how people's lookups on TMDB stand
+	// (library.Service.PeopleStatus); nil tells nothing.
+	People func(context.Context) (library.PeopleStatus, error)
+}
+
+// ImageCache keeps the images relayed, resized and drawn for apps, and can
+// be emptied (see jellyfin.Handler.ClearImageCache).
+type ImageCache interface {
+	ImageCache() jellyfin.ImageCacheUsage
+	ClearImageCache() jellyfin.ImageCacheUsage
+}
+
+// Torrents is what Health tells of the torrent streams (see
+// torrent.Engine): their route and what runs, the bytes their pieces take,
+// and the bytes shared.
+type Torrents interface {
+	Status(ctx context.Context) torrent.Status
+	Usage() int64
+	Uploaded() int64
 }
 
 type healthJSON struct {
@@ -68,6 +142,8 @@ type healthJSON struct {
 	Process   processJSON  `json:"process"`
 	Database  databaseJSON `json:"database"`
 	Cache     *cacheJSON   `json:"cache"`
+	// Images is what the image cache keeps, null when unknown.
+	Images *imageCacheJSON `json:"images"`
 	// Torrents is how torrent streams play, null while they are off.
 	Torrents   *torrentHealthJSON   `json:"torrents"`
 	Disks      []diskJSON           `json:"disks"`
@@ -91,6 +167,161 @@ type healthJSON struct {
 	// Ratings is how the lookups of titles' ratings on MDBList stand,
 	// null while no key is saved.
 	Ratings *ratingsHealthJSON `json:"ratings"`
+	// Artwork is how the artwork downloads fared in the last hour, and
+	// People how people's lookups on TMDB stand, each null when unknown.
+	Artwork *artworkHealthJSON `json:"artwork"`
+	People  *peopleHealthJSON  `json:"people"`
+}
+
+// artworkHealthJSON is how the artwork downloads fared in the last hour:
+// Failed of them failed, by kind ("not_found", "rate_limited", "timeout",
+// "server_error", "other") and by host, most first; Waiting are the hosts
+// that asked to wait, asked nothing until then, and Spared those that
+// showed they were overloaded, asked less at once until then. Only host
+// names are told, never an address.
+type artworkHealthJSON struct {
+	Failed  int               `json:"failed"`
+	Kinds   map[string]int    `json:"kinds"`
+	Hosts   []artworkHostJSON `json:"hosts"`
+	Waiting []artworkWaitJSON `json:"waiting"`
+	Spared  []artworkWaitJSON `json:"spared"`
+}
+
+type artworkHostJSON struct {
+	Host   string `json:"host"`
+	Failed int    `json:"failed"`
+}
+
+type artworkWaitJSON struct {
+	Host  string    `json:"host"`
+	Until time.Time `json:"until"`
+}
+
+// artworkHostsShown bounds the hosts Health tells the failures of.
+const artworkHostsShown = 10
+
+// artworkHealth describes how the artwork downloads fared, nil when
+// unknown.
+func (h *handler) artworkHealth() *artworkHealthJSON {
+	if h.Health.Artwork == nil {
+		return nil
+	}
+	status := h.Health.Artwork()
+	result := &artworkHealthJSON{Failed: status.Failed, Kinds: status.Kinds, Hosts: []artworkHostJSON{},
+		Waiting: []artworkWaitJSON{}, Spared: []artworkWaitJSON{}}
+	for _, host := range status.Hosts[:min(artworkHostsShown, len(status.Hosts))] {
+		result.Hosts = append(result.Hosts, artworkHostJSON{Host: host.Host, Failed: host.Failed})
+	}
+	for _, host := range status.Waiting {
+		result.Waiting = append(result.Waiting, artworkWaitJSON{Host: host.Host, Until: host.Until})
+	}
+	for _, host := range status.Spared {
+		result.Spared = append(result.Spared, artworkWaitJSON{Host: host.Host, Until: host.Until})
+	}
+	return result
+}
+
+// peopleHealthJSON is how people's lookups on TMDB stand: KeySaved while
+// the settings hold a TMDB key; the people TMDB found (Found) and did not
+// (NotFound), those whose last lookup failed (Failing), the lookups
+// waiting or under way (Waiting), and TMDB's last 429 since the start,
+// LimitedAt, null for none, with the seconds its Retry-After asked then,
+// LimitWait, 0 for none.
+type peopleHealthJSON struct {
+	KeySaved  bool       `json:"keySaved"`
+	Found     int        `json:"found"`
+	NotFound  int        `json:"notFound"`
+	Failing   int        `json:"failing"`
+	Waiting   int        `json:"waiting"`
+	LimitedAt *time.Time `json:"limitedAt"`
+	LimitWait int        `json:"limitWait"`
+}
+
+// peopleHealth describes how people's lookups on TMDB stand, nil when
+// unknown or the database cannot tell.
+func (h *handler) peopleHealth(ctx context.Context) *peopleHealthJSON {
+	if h.Health.People == nil {
+		return nil
+	}
+	status, err := h.Health.People(ctx)
+	if err != nil {
+		return nil
+	}
+	result := &peopleHealthJSON{KeySaved: status.Enabled, Found: status.Found, NotFound: status.NotFound, Failing: status.Failing,
+		Waiting: status.Waiting, LimitWait: int(status.LimitWait.Seconds())}
+	if !status.LimitedAt.IsZero() {
+		result.LimitedAt = new(status.LimitedAt.UTC().Truncate(time.Second))
+	}
+	return result
+}
+
+// secretsKeptFor is how long the report of the stored secrets is kept,
+// at most: it decrypts every one of them, and Health and its problems
+// are polled every few seconds. A secret stored (see secrets.Changes)
+// or an administrator's write drops it at once; the key only changes
+// with a restart. The limit catches what neither tells, such as a
+// connection a task removes.
+const secretsKeptFor = 5 * time.Minute
+
+// secretsCache keeps the report of the stored secrets: the one read at
+// at, while secrets.Changes told changes, before the forgotten-th write
+// (see forgetSecrets).
+type secretsCache struct {
+	mu        sync.Mutex
+	valid     bool
+	report    secrets.Report
+	at        time.Time
+	changes   uint64
+	forgotten uint64
+}
+
+// secretsReport tells how the stored secrets stand, as Health.Secrets
+// does, from the report kept while it holds (see secretsKeptFor).
+func (h *handler) secretsReport(ctx context.Context) (secrets.Report, error) {
+	c := &h.secrets
+	c.mu.Lock()
+	changes, forgotten := secrets.Changes(), c.forgotten
+	if c.valid && c.changes == changes && h.now().Before(c.at.Add(secretsKeptFor)) {
+		report := c.report
+		c.mu.Unlock()
+		return report, nil
+	}
+	c.mu.Unlock()
+	report, err := h.Health.Secrets(ctx)
+	if err != nil {
+		return secrets.Report{}, err
+	}
+	c.mu.Lock()
+	if c.forgotten == forgotten {
+		c.valid, c.report, c.at, c.changes = true, report, h.now(), changes
+	}
+	c.mu.Unlock()
+	return report, nil
+}
+
+// forgetSecrets drops the report of the stored secrets: a secret may
+// have changed.
+func (h *handler) forgetSecrets() {
+	c := &h.secrets
+	c.mu.Lock()
+	c.valid = false
+	c.forgotten++
+	c.mu.Unlock()
+}
+
+// forgetSecretsOnWrites has next's requests that may write, all but GET,
+// HEAD and OPTIONS, drop the report of the stored secrets once they end:
+// they may have removed or replaced one, which no Seal tells when it
+// removes. Requests that change nothing drop it only sooner than needed.
+func (h *handler) forgetSecretsOnWrites(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		next.ServeHTTP(w, r)
+		switch r.Method {
+		case http.MethodGet, http.MethodHead, http.MethodOptions:
+		default:
+			h.forgetSecrets()
+		}
+	})
 }
 
 // proxyNameJSON is a host name of Known proxies and the addresses it
@@ -171,36 +402,114 @@ type processJSON struct {
 	Memory     uint64 `json:"memory"`
 	Heap       uint64 `json:"heap"`
 	Goroutines int    `json:"goroutines"`
+	// LastCrash is the server's last crash, as the next start found it,
+	// null when it never crashed since crashes are kept.
+	LastCrash *crashJSON `json:"lastCrash"`
+}
+
+// crashJSON is a crash of the server: when it happened, and the first
+// lines of its trace, redacted.
+type crashJSON struct {
+	At    time.Time `json:"at"`
+	Trace string    `json:"trace"`
 }
 
 type databaseJSON struct {
 	Reachable bool `json:"reachable"`
+	// Busy is true when a check waited out its deadline for a connection,
+	// every one being in use: what it would tell is left out.
+	Busy bool `json:"busy"`
 	// Size is in bytes, null when it could not be read.
 	Size *int64 `json:"size"`
 }
 
+// cacheJSON is what the source cache keeps: Used bytes against its Limit,
+// Sources being read and Kept holding blocks, and Hits and Misses, the
+// bytes read since the start that were read before or kept from before
+// the start, and those read for the first time since they were fetched,
+// which give its hit ratio; Days is how long it keeps blocks across
+// restarts, 0 for not at all.
 type cacheJSON struct {
 	Used    int64 `json:"used"`
 	Limit   int64 `json:"limit"`
 	Sources int   `json:"sources"`
+	Kept    int   `json:"kept"`
+	Hits    int64 `json:"hits"`
+	Misses  int64 `json:"misses"`
+	Days    int   `json:"days"`
 	// Torrents is the part of Used the pieces of torrents take.
 	Torrents int64 `json:"torrents"`
 }
 
-// torrentHealthJSON is how torrent streams play: their route, "interface"
-// or "proxy", empty for none, Name the network interface's name or the
-// SOCKS5 proxy's address, the torrents playing, their peers, and the bytes
-// shared since the server started.
+// imageCacheJSON is what the image cache keeps, or what clearing it freed:
+// Files images on disk, of Used bytes, which Limit bounds, and
+// MemoryImages in memory, of MemoryBytes bytes.
+type imageCacheJSON struct {
+	Files        int   `json:"files"`
+	Used         int64 `json:"used"`
+	Limit        int64 `json:"limit"`
+	MemoryImages int   `json:"memoryImages"`
+	MemoryBytes  int64 `json:"memoryBytes"`
+}
+
+func newImageCacheJSON(u jellyfin.ImageCacheUsage) *imageCacheJSON {
+	return &imageCacheJSON{Files: u.Files, Used: u.Bytes, Limit: u.Limit, MemoryImages: u.MemoryImages, MemoryBytes: u.MemoryBytes}
+}
+
+// clearImageCache empties the image cache, and answers what it freed.
+func (h *handler) clearImageCache(w http.ResponseWriter, r *http.Request) {
+	if h.Health.Images == nil {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	writeJSON(w, http.StatusOK, newImageCacheJSON(h.Health.Images.ClearImageCache()))
+}
+
+// torrentHealthJSON is how torrent streams play: their route, "interface",
+// "proxy" or "wireguard", empty for none, Name the network interface's
+// name, the SOCKS5 proxy's address or the WireGuard server, the torrents
+// playing, their peers, those of them reached over uTP, and the bytes
+// shared since the server started. Over a WireGuard tunnel, Addresses are
+// the tunnel's addresses and LastHandshake when its last handshake was,
+// null for none yet. Outages are those of the route the plays went on
+// through lately, oldest first (see recentOutages).
 type torrentHealthJSON struct {
-	Route    string `json:"route"`
-	Name     string `json:"name"`
-	Playing  int    `json:"playing"`
-	Peers    int    `json:"peers"`
-	Uploaded int64  `json:"uploaded"`
+	Route         string              `json:"route"`
+	Name          string              `json:"name"`
+	Addresses     []string            `json:"addresses,omitempty"`
+	LastHandshake *time.Time          `json:"lastHandshake,omitempty"`
+	Playing       int                 `json:"playing"`
+	AtOnce        int                 `json:"atOnce"`
+	Peers         int                 `json:"peers"`
+	UTPPeers      int                 `json:"utpPeers"`
+	Uploaded      int64               `json:"uploaded"`
+	Outages       []torrentOutageJSON `json:"outages,omitempty"`
+}
+
+// torrentOutageJSON is an outage of the route a play went on through: At,
+// when the route stopped answering, and Seconds, how long until it
+// answered again.
+type torrentOutageJSON struct {
+	At      time.Time `json:"at"`
+	Seconds int       `json:"seconds"`
+}
+
+// recentOutages are the outages of the route set the plays survived that
+// ended within routeStoppedFor of now, oldest first: one of a route set
+// before tells nothing of this one.
+func recentOutages(status torrent.Status, now time.Time) []torrentOutageJSON {
+	var recent []torrentOutageJSON
+	for _, outage := range status.Outages {
+		if outage.Route == status.Route && now.Sub(outage.At.Add(outage.For)) < routeStoppedFor {
+			recent = append(recent, torrentOutageJSON{At: outage.At, Seconds: int(outage.For.Round(time.Second) / time.Second)})
+		}
+	}
+	return recent
 }
 
 // diskJSON is the disk one of the server's folders is on: Folder is
-// "cache", "recordings" or "backups".
+// "cache", "conversion", "reading" (the files being read), "recordings"
+// or "backups".
 type diskJSON struct {
 	Folder string `json:"folder"`
 	Path   string `json:"path"`
@@ -210,6 +519,18 @@ type diskJSON struct {
 	Mount string `json:"mount"`
 	// Low tells whether the disk is short of room: a problem Health shows.
 	Low bool `json:"low"`
+}
+
+// measuredFolders are the folders whose disks Health measures, by name:
+// those of the run (see config.Folders.Disks), then the recordings' and
+// the backups', each empty while not in use.
+func (h *handler) measuredFolders() []struct{ name, path string } {
+	var folders []struct{ name, path string }
+	for _, disk := range h.Health.Folders.Disks() {
+		folders = append(folders, struct{ name, path string }{disk.Name, disk.Path})
+	}
+	return append(folders, struct{ name, path string }{"recordings", h.Recordings.Dir()},
+		struct{ name, path string }{"backups", h.Backups.Dir()})
 }
 
 type transcoderJSON struct {
@@ -228,6 +549,10 @@ type transcoderJSON struct {
 	// the original's.
 	MaxHeight int  `json:"maxHeight"`
 	Enabled   bool `json:"enabled"`
+	// OlderDriverFFmpeg tells how the FFmpeg for NVIDIA drivers older than
+	// 610 stands while NVENC waits for it, or failed with it; null when it
+	// is used (Hardware.OlderDrivers) or not needed.
+	OlderDriverFFmpeg *olderDriverJSON `json:"olderDriverFFmpeg"`
 }
 
 type hardwareJSON struct {
@@ -237,18 +562,90 @@ type hardwareJSON struct {
 	ToneMapping bool     `json:"toneMapping"`
 	// QVBR tells whether a VAAPI GPU takes a quality factor.
 	QVBR bool `json:"qvbr"`
+	// OlderDrivers tells the GPU encodes with the FFmpeg for NVIDIA
+	// drivers older than 610, not with the one Polyfin ships.
+	OlderDrivers bool `json:"olderDrivers"`
+	// HDR is where HDR titles are tone mapped and why, null when the GPU
+	// does not tone map.
+	HDR *hdrPathJSON `json:"hdr"`
 }
 
-func newHardwareJSON(hw *hls.Hardware) *hardwareJSON {
-	return &hardwareJSON{Method: hw.Method, Device: hw.Device, Encoders: hw.Encoders, ToneMapping: hw.ToneMapping, QVBR: hw.QVBR}
+// newHardwareJSON describes hw, on which HDR goes as path says, unless the
+// settings turn tone mapping on the GPU off (gpuToneMapping).
+func newHardwareJSON(hw *hls.Hardware, path hls.HDRPath, gpuToneMapping bool) *hardwareJSON {
+	return &hardwareJSON{Method: hw.Method, Device: hw.Device, Encoders: hw.Encoders, ToneMapping: hw.ToneMapping, QVBR: hw.QVBR,
+		OlderDrivers: hw.FFmpeg != "", HDR: newHDRPathJSON(path, gpuToneMapping)}
 }
 
+// hdrPathJSON is where the HDR titles a GPU tone maps are tone mapped:
+// Path "gpu" or "processor", Height the height the GPU tone maps them up
+// to, 0 for any, and Reason why: one of hls's HDR reasons, or "turnedOff"
+// when the settings turn tone mapping on the GPU off. GPUSpeed, LowSpeed
+// and ProcessorSpeed are the timings it follows, made at startup and again
+// when the server is quiet, the best of the last 7 days kept, in times
+// real time, 0 when not timed (see hls.HDRPath).
+type hdrPathJSON struct {
+	Path           string  `json:"path"`
+	Height         int     `json:"height"`
+	Reason         string  `json:"reason"`
+	GPUSpeed       float64 `json:"gpuSpeed"`
+	LowSpeed       float64 `json:"lowSpeed"`
+	ProcessorSpeed float64 `json:"processorSpeed"`
+}
+
+// newHDRPathJSON describes path, nil for a GPU that does not tone map.
+func newHDRPathJSON(path hls.HDRPath, gpuToneMapping bool) *hdrPathJSON {
+	if path.Reason == "" {
+		return nil
+	}
+	result := &hdrPathJSON{Path: "gpu", Height: path.Height, Reason: path.Reason, GPUSpeed: path.GPUSpeed, LowSpeed: path.LowSpeed,
+		ProcessorSpeed: path.ProcessorSpeed}
+	switch {
+	case !gpuToneMapping:
+		result.Path, result.Height, result.Reason = "processor", 0, "turnedOff"
+	case path.Processor:
+		result.Path = "processor"
+	}
+	return result
+}
+
+// olderDriverJSON is the FFmpeg for NVIDIA drivers older than 610 while
+// NVENC waits for it, State "downloading", or could not use it: "failed"
+// to download it, or "unusable" when NVENC failed with it too, Error
+// telling why.
+type olderDriverJSON struct {
+	State string `json:"state"`
+	Error string `json:"error,omitempty"`
+}
+
+// newOlderDriverJSON is how the FFmpeg for older NVIDIA drivers stands,
+// nil when it is used or not needed.
+func newOlderDriverJSON(encoder *hls.Manager) *olderDriverJSON {
+	status := encoder.OlderDriverFFmpeg()
+	if status.State == "" || status.State == "used" {
+		return nil
+	}
+	return &olderDriverJSON{State: status.State, Error: status.Error}
+}
+
+// thumbnailHealthJSON is how the thumbnails stand: whether the settings
+// turn them on, the queue, the paused hosts, and the files of local
+// folders by their last result.
 type thumbnailHealthJSON struct {
-	Enabled     bool             `json:"enabled"`
-	Waiting     int              `json:"waiting"`
-	QueueLength int              `json:"queueLength"`
-	Working     bool             `json:"working"`
-	PausedHosts []pausedHostJSON `json:"pausedHosts"`
+	Enabled     bool                     `json:"enabled"`
+	Waiting     int                      `json:"waiting"`
+	QueueLength int                      `json:"queueLength"`
+	Working     bool                     `json:"working"`
+	PausedHosts []pausedHostJSON         `json:"pausedHosts"`
+	Local       localThumbnailHealthJSON `json:"local"`
+}
+
+// localThumbnailHealthJSON counts the files of local folders whose images
+// were made, cannot be made, or failed, by their last result.
+type localThumbnailHealthJSON struct {
+	Made   int `json:"made"`
+	Cannot int `json:"cannot"`
+	Failed int `json:"failed"`
 }
 
 type pausedHostJSON struct {
@@ -273,10 +670,26 @@ type addonHealthJSON struct {
 	ResponseTime int64 `json:"responseTime"`
 	Requests     int   `json:"requests"`
 	Failures     int   `json:"failures"`
+	// CatalogsWaitUntil is when the wait the addon's server asked for ends,
+	// its catalog pages not asked for until then; nil when none runs.
+	// Failure is rate_limited meanwhile.
+	CatalogsWaitUntil *time.Time `json:"catalogsWaitUntil"`
 }
 
 // softwareEncoders are the CPU encoders conversions use.
 var softwareEncoders = []string{"libx264", "libx265", "aac", "libfdk_aac", "ac3", "eac3", "libopus", "flac"}
+
+// busy reports whether err is a database check's deadline passing while
+// every connection of the database's pool was in use: the database
+// answers others, too busy to answer the check in time.
+func (h *handler) busy(err error) bool {
+	pool, ok := h.Database.(interface{ Stat() *pgxpool.Stat })
+	if !ok || !errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	stat := pool.Stat()
+	return stat.AcquiredConns() >= stat.MaxConns()
+}
 
 // health describes how the server's parts fare, from what they record:
 // nothing is requested outside the server.
@@ -288,34 +701,93 @@ func (h *handler) health(w http.ResponseWriter, r *http.Request) {
 	result.Process = processJSON{Version: h.Version, GoVersion: runtime.Version(), StartedAt: h.Health.Started,
 		Memory: memory.Sys, Heap: memory.HeapAlloc, Goroutines: runtime.NumGoroutine()}
 
-	ctx, cancel := context.WithTimeout(r.Context(), readyWait)
-	defer cancel()
-	result.Database.Reachable = h.Database.Ping(ctx) == nil
-	if result.Database.Reachable && h.Health.DatabaseSize != nil {
-		if size, err := h.Health.DatabaseSize(ctx); err == nil {
-			result.Database.Size = &size
+	// Each of the database's checks has its own deadline, as has the
+	// torrent route's, below, since a WireGuard tunnel whose server does
+	// not answer waits out the whole of it for a handshake. A check that
+	// waits out its deadline for a connection, every one of the pool being
+	// in use, finds the database busy: the checks after it are left out,
+	// and the answer says so rather than fail.
+	check := func(run func(context.Context) error) error {
+		ctx, cancel := context.WithTimeout(r.Context(), readyWait)
+		defer cancel()
+		err := run(ctx)
+		if h.busy(err) {
+			result.Database.Busy = true
 		}
+		return err
+	}
+	err := check(h.Database.Ping)
+	result.Database.Reachable = err == nil || result.Database.Busy
+	open := func() bool { return err == nil && !result.Database.Busy }
+	if open() && h.Health.DatabaseSize != nil {
+		_ = check(func(ctx context.Context) error {
+			size, err := h.Health.DatabaseSize(ctx)
+			if err == nil {
+				result.Database.Size = &size
+			}
+			return err
+		})
+	}
+	if open() && h.Notifications != nil {
+		_ = check(func(ctx context.Context) error {
+			crash, err := h.Notifications.LastCrash(ctx)
+			if err == nil && crash != nil {
+				result.Process.LastCrash = &crashJSON{At: crash.At.UTC().Truncate(time.Second), Trace: crash.Trace}
+			}
+			return err
+		})
+	}
+	if open() {
+		var backup *backupJSON
+		failed := check(func(ctx context.Context) (err error) {
+			backup, err = h.backupStatus(ctx)
+			return err
+		})
+		if failed != nil && !result.Database.Busy {
+			h.internalError(w, r, failed)
+			return
+		}
+		result.Backup = backup
+	}
+	if result.Backup == nil && h.Backups.Available() {
+		result.Backup = &backupJSON{Folder: h.Backups.Dir()}
 	}
 
+	if h.Health.Images != nil {
+		result.Images = newImageCacheJSON(h.Health.Images.ImageCache())
+	}
 	if h.Health.Cache != nil {
-		used, sources, limit := h.Health.Cache.Usage()
-		result.Cache = &cacheJSON{Used: used, Limit: limit, Sources: sources}
+		usage := h.Health.Cache.Usage()
+		result.Cache = &cacheJSON{Used: usage.Used, Limit: usage.Limit, Sources: usage.Open, Kept: usage.Kept, Hits: usage.Hits,
+			Misses: usage.Misses, Days: h.Accounts.Settings().SourceCacheDays}
 		if h.Health.Torrents != nil {
 			result.Cache.Torrents = h.Health.Torrents.Usage()
 		}
 	}
 	if h.Health.Torrents != nil {
-		if status := h.Health.Torrents.Status(ctx); status.Enabled {
-			result.Torrents = &torrentHealthJSON{Playing: status.Playing, Peers: status.Peers, Uploaded: h.Health.Torrents.Uploaded()}
+		routeCtx, cancelRoute := context.WithTimeout(r.Context(), readyWait)
+		status := h.Health.Torrents.Status(routeCtx)
+		cancelRoute()
+		if status.Enabled {
+			result.Torrents = &torrentHealthJSON{Playing: status.Playing, AtOnce: status.AtOnce, Peers: status.Peers, UTPPeers: status.UTPPeers,
+				Uploaded: h.Health.Torrents.Uploaded(), Outages: recentOutages(status, h.now())}
 			switch settings := h.Accounts.Settings(); {
 			case settings.TorrentInterface != "":
 				result.Torrents.Route, result.Torrents.Name = "interface", settings.TorrentInterface
 			case settings.TorrentProxy != "":
 				result.Torrents.Route, result.Torrents.Name = "proxy", settings.TorrentProxy
+			case status.Tunnel != nil:
+				result.Torrents.Route, result.Torrents.Name = "wireguard", status.Tunnel.Endpoint
+				for _, prefix := range status.Tunnel.Addresses {
+					result.Torrents.Addresses = append(result.Torrents.Addresses, prefix.String())
+				}
+				if !status.Tunnel.LastHandshake.IsZero() {
+					result.Torrents.LastHandshake = &status.Tunnel.LastHandshake
+				}
 			}
 		}
 	}
-	for _, folder := range []struct{ name, path string }{{"cache", h.Health.CacheDir}, {"recordings", h.Recordings.Dir()}, {"backups", h.Backups.Dir()}} {
+	for _, folder := range h.measuredFolders() {
 		if folder.path == "" {
 			continue
 		}
@@ -325,23 +797,13 @@ func (h *handler) health(w http.ResponseWriter, r *http.Request) {
 		}
 		result.Disks = append(result.Disks, disk)
 	}
-	if result.Database.Reachable {
-		backup, err := h.backupStatus(ctx)
-		if err != nil {
-			h.internalError(w, r, err)
-			return
-		}
-		result.Backup = backup
-	} else if h.Backups.Available() {
-		result.Backup = &backupJSON{Folder: h.Backups.Dir()}
-	}
 
 	settings := h.Accounts.Settings()
 	result.WatchFolders = settings.WatchLocalFolders
 	if encoder := h.Health.Encoder; encoder != nil {
 		t := &transcoderJSON{Encoders: []string{}, MaxHeight: settings.MaxConversionHeight, Enabled: settings.Transcoding}
 		if hw := encoder.Hardware(); hw != nil {
-			t.Hardware = newHardwareJSON(hw)
+			t.Hardware = newHardwareJSON(hw, encoder.HDRPath(hw), settings.GPUToneMapping)
 		}
 		for _, name := range softwareEncoders {
 			if slices.Contains(encoder.Encoders(), name) {
@@ -349,6 +811,7 @@ func (h *handler) health(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		t.Conversions, t.Limit = encoder.Conversions()
+		t.OlderDriverFFmpeg = newOlderDriverJSON(encoder)
 		for _, running := range encoder.Running() {
 			if !running.Key.Converts {
 				t.Remuxes++
@@ -363,6 +826,11 @@ func (h *handler) health(w http.ResponseWriter, r *http.Request) {
 			QueueLength: status.QueueLength, Working: status.Working, PausedHosts: []pausedHostJSON{}}
 		for _, paused := range status.Paused {
 			th.PausedHosts = append(th.PausedHosts, pausedHostJSON{Host: paused.Host, Until: paused.Until})
+		}
+		var err error
+		if th.Local.Made, th.Local.Cannot, th.Local.Failed, err = h.Health.Thumbnails.LocalCounts(r.Context()); err != nil {
+			h.internalError(w, r, err)
+			return
 		}
 		result.Thumbnails = th
 	}
@@ -387,7 +855,7 @@ func (h *handler) health(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 				if folder.Share != "" {
-					result.Shares = append(result.Shares, shareHealthJSON{ID: addon.ID.String(), Name: addon.Manifest.Name, Share: folder.Share,
+					result.Shares = append(result.Shares, shareHealthJSON{ID: addon.ID.String(), Name: addon.Name(), Share: folder.Share,
 						Watch: folder.ShareWatch, Polled: folder.Polled, Unwatched: folder.Unwatched, PollMinutes: folder.PollMinutes})
 				}
 				continue
@@ -401,6 +869,13 @@ func (h *handler) health(w http.ResponseWriter, r *http.Request) {
 	}
 	result.Secrets = h.secretsHealth(r.Context())
 	result.Ratings = h.ratingsHealth()
+	result.Artwork = h.artworkHealth()
+	if open() {
+		_ = check(func(ctx context.Context) error {
+			result.People = h.peopleHealth(ctx)
+			return ctx.Err()
+		})
+	}
 	if release, ok := h.Health.Updates.Available(); ok {
 		result.Update = &updateJSON{Version: release.Version, URL: release.URL}
 	}
@@ -417,7 +892,7 @@ func (h *handler) health(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *handler) addonHealth(addon addons.Addon, owner *ownerJSON) addonHealthJSON {
-	result := addonHealthJSON{ID: addon.ID.String(), Owner: owner, Name: addon.Manifest.Name, Enabled: addon.Enabled,
+	result := addonHealthJSON{ID: addon.ID.String(), Owner: owner, Name: addon.Name(), Enabled: addon.Enabled,
 		RefreshedAt: addon.RefreshedAt}
 	if h.Health.Addons == nil {
 		return result
@@ -434,22 +909,27 @@ func (h *handler) addonHealth(addon addons.Addon, owner *ownerJSON) addonHealthJ
 	}
 	result.Failure, result.ResponseTime = health.Failure, health.ResponseTime.Milliseconds()
 	result.Requests, result.Failures = health.Requests, health.Failures
+	if !health.CatalogsWaitUntil.IsZero() {
+		result.CatalogsWaitUntil = new(health.CatalogsWaitUntil)
+	}
 	return result
 }
 
-// checkInterval is how often an addon may be checked by hand: one request
-// for its manifest, never more.
+// checkInterval is how often an addon may be checked by hand, one request
+// for its manifest, never more, and how often each of the server's
+// actions may be asked (see serverAction).
 const checkInterval = time.Minute
 
-// addonChecks remembers when each addon was last checked by hand.
-type addonChecks struct {
+// spacing remembers when each request was last allowed, by key: an
+// addon checked by hand, or one of the server's actions.
+type spacing struct {
 	mu   sync.Mutex
 	last map[string]time.Time
 }
 
-// allow reports whether id may be checked at now, and records it, or how
-// long until it may.
-func (c *addonChecks) allow(id string, now time.Time) (bool, time.Duration) {
+// allow reports whether the request of id may be allowed at now, and
+// records it, or how long until it may.
+func (c *spacing) allow(id string, now time.Time) (bool, time.Duration) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.last == nil {
@@ -502,9 +982,9 @@ func (h *handler) checkAddon(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusTooManyRequests, "too_soon")
 		return
 	}
-	// The request reaches what the addon's own requests may: a member's
-	// addon only public addresses. The answer is recorded whatever it is.
-	_, _ = h.Health.Addons.Manifest(r.Context(), found.ManifestURL, owner.Confined)
+	// The request reaches what the addon's own requests may (see
+	// addons.Addon.Confined). The answer is recorded whatever it is.
+	_, _ = h.Health.Addons.Manifest(r.Context(), found.ManifestURL, found.Confined(owner.Member))
 	writeJSON(w, http.StatusOK, h.addonHealth(*found, owner.Owner))
 }
 
@@ -515,12 +995,12 @@ type ownerJSON struct {
 }
 
 // ownedScope is a scope of addons with its owner: nil for the server's.
-// Confined is set for a user who is not an administrator, whose addons'
-// requests may only reach public addresses.
+// Member is set for a user who is not an administrator, whose addons'
+// requests may only reach public addresses (see addons.Member).
 type ownedScope struct {
-	Scope    addons.Scope
-	Owner    *ownerJSON
-	Confined bool
+	Scope  addons.Scope
+	Owner  *ownerJSON
+	Member bool
 }
 
 // ownedScopes lists the server's scope, then every user's own, by name:
@@ -533,8 +1013,9 @@ func (h *handler) ownedScopes(ctx context.Context) ([]ownedScope, error) {
 	scopes := make([]ownedScope, 0, len(users)+1)
 	scopes = append(scopes, ownedScope{Scope: addons.Shared()})
 	for _, user := range users {
-		scopes = append(scopes, ownedScope{Scope: addons.Personal(user.ID), Owner: &ownerJSON{ID: user.ID.String(), Name: user.Name},
-			Confined: !user.IsAdministrator})
+		scope := addons.Personal(user.ID)
+		scopes = append(scopes, ownedScope{Scope: scope, Owner: &ownerJSON{ID: user.ID.String(), Name: user.Name},
+			Member: addons.Member(scope, user.IsAdministrator)})
 	}
 	return scopes, nil
 }

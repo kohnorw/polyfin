@@ -16,17 +16,20 @@ import {
   ImportProgress,
   serverError,
 } from '@/features/users/JellyfinImport'
+import { allExtras, ExtrasChoice } from '@/features/users/ImportExtras'
 import { useI18n } from '@/i18n'
 import { Button, Field, Notice, Panel, PanelFooter, Segmented, TextInput, useToast } from '@/ui'
 import { LetterboxdForm, LetterboxdProgress } from './LetterboxdImport'
+import { PlexImportForm } from './PlexImport'
 
-type Kind = 'jellyfin' | 'emby' | 'letterboxd'
+type Kind = 'jellyfin' | 'emby' | 'plex' | 'letterboxd'
 
 /**
  * The signed-in user imports their own watch history from a Jellyfin or Emby server, signing in
- * there with their own name and password, which only live in this form's state, or from their
- * Letterboxd export file. Their latest import, running or ended, shows above the form; another
- * import running on the server, or into their account, refuses theirs.
+ * there with their own name and password, which only live in this form's state, from a Plex server,
+ * signing in to Plex on Plex's own page, or from their Letterboxd export file. Their latest import,
+ * running or ended, shows above the form; another import running on the server, or into their
+ * account, refuses theirs.
  */
 export default function ServerImport({ own }: { own: OwnImport }) {
   const { t } = useI18n()
@@ -37,6 +40,9 @@ export default function ServerImport({ own }: { own: OwnImport }) {
   const [address, setAddress] = useState('')
   const [name, setName] = useState('')
   const [password, setPassword] = useState('')
+  // A user who may not manage collections brings none: the choice is not offered.
+  const [extras, setExtras] = useState(allExtras)
+  const asked = { ...extras, collections: own.collections && extras.collections }
   const start = useMutation({
     mutationFn: startOwnImport,
     onSuccess: (started) => {
@@ -51,13 +57,20 @@ export default function ServerImport({ own }: { own: OwnImport }) {
   const current = own.import
   const running = current?.state === 'running'
   const kinds: readonly Kind[] = own.letterboxd
-    ? ['jellyfin', 'emby', 'letterboxd']
-    : ['jellyfin', 'emby']
+    ? ['jellyfin', 'emby', 'plex', 'letterboxd']
+    : ['jellyfin', 'emby', 'plex']
 
   const code = start.error instanceof ApiError ? start.error.code : null
-  const server = kind === 'letterboxd' ? 'jellyfin' : kind
-  const message = start.isError ? serverError(t, server, start.error) : undefined
-  const addressError = code !== null && addressCodes.includes(code) ? message : undefined
+  const server = kind === 'letterboxd' || kind === 'plex' ? 'jellyfin' : kind
+  // A member's server on a local network answers as their addons do; the words are the server's.
+  const privateNetwork = code === 'private_network'
+  const message = !start.isError
+    ? undefined
+    : privateNetwork
+      ? text.privateNetwork
+      : serverError(t, server, start.error)
+  const addressError =
+    code !== null && (privateNetwork || addressCodes.includes(code)) ? message : undefined
   const passwordError = code !== null && accountCodes.includes(code) ? message : undefined
   const otherError = start.isError && !addressError && !passwordError ? message : undefined
 
@@ -68,8 +81,8 @@ export default function ServerImport({ own }: { own: OwnImport }) {
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    if (kind === 'letterboxd') return
-    start.mutate({ kind, address: address.trim(), name: name.trim(), password })
+    if (kind === 'letterboxd' || kind === 'plex') return
+    start.mutate({ kind, address: address.trim(), name: name.trim(), password, ...asked })
   }
 
   const picker = (
@@ -113,9 +126,21 @@ export default function ServerImport({ own }: { own: OwnImport }) {
                 )
               }
             />
+          ) : kind === 'plex' ? (
+            <PlexImportForm
+              collections={own.collections}
+              header={picker}
+              onStarted={(started) => {
+                queryClient.setQueryData<OwnImport>(
+                  queryKeys.ownImport,
+                  (data) => data && { ...data, import: started },
+                )
+                toast(text.started)
+              }}
+            />
           ) : (
             <form onSubmit={submit} noValidate>
-              <div className="flex max-w-lg flex-col gap-5 px-6 py-6 max-sm:px-4">
+              <div className="flex max-w-[38rem] flex-col gap-4 px-5 max-md:px-4">
                 {picker}
                 <Field label={text.address} help={text.addressHelp} error={addressError}>
                   <TextInput
@@ -148,6 +173,11 @@ export default function ServerImport({ own }: { own: OwnImport }) {
                     autoComplete="off"
                   />
                 </Field>
+                <ExtrasChoice
+                  value={extras}
+                  onChange={(value) => change(() => setExtras(value))}
+                  collections={own.collections}
+                />
                 {otherError && (
                   <Notice tone="danger" live>
                     {otherError}

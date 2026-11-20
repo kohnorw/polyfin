@@ -14,6 +14,7 @@ import (
 )
 
 func TestReadNFO(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, text, imdb, tmdb string
 	}{
@@ -26,6 +27,16 @@ func TestReadNFO(t *testing.T) {
 		{"older elements", "<movie><imdbid>tt0063350</imdbid><tmdbid>10331</tmdbid></movie>", "tt0063350", "10331"},
 		{"unique identifiers first", `<movie><imdbid>tt0100258</imdbid><uniqueid type="imdb">tt0063350</uniqueid></movie>`, "tt0063350", ""},
 		{"a show's", `<tvshow><uniqueid type="TMDB"> 962 </uniqueid></tvshow>`, "", "962"},
+		// Jellyfin's NFO saver writes a show's IMDb identifier as <imdb_id>,
+		// its TVDB one as <id>, and no <uniqueid>.
+		{"a show's, as Jellyfin writes it", `<?xml version="1.0" encoding="utf-8" standalone="yes"?>
+<tvshow>
+  <title>The Lone Ranger</title>
+  <id>71166</id>
+  <imdb_id>tt0041038</imdb_id>
+  <tmdbid>1914</tmdbid>
+  <tvdbid>71166</tvdbid>
+</tvshow>`, "tt0041038", "1914"},
 		{"another encoding and a mark", "\xef\xbb\xbf<?xml version=\"1.0\" encoding=\"ISO-8859-1\"?>\n<movie><title>Caf\xe9</title>" +
 			"<uniqueid type=\"imdb\">TT0063350</uniqueid></movie>", "tt0063350", ""},
 		{"not the root's", `<movie><actor><uniqueid type="imdb">tt0100258</uniqueid></actor><set><tmdbid>5</tmdbid></set></movie>`, "", ""},
@@ -44,6 +55,7 @@ func TestReadNFO(t *testing.T) {
 }
 
 func TestReadNFOTitlePlotAndDate(t *testing.T) {
+	t.Parallel()
 	day := func(text string) *time.Time {
 		at, _ := time.Parse(time.DateOnly, text)
 		return &at
@@ -123,6 +135,7 @@ func (e env) matches(id accounts.ID) map[string]string {
 // the movie's, a disc's movie.nfo and a show's tvshow.nfo match their unit
 // when no link nor name does, before the search.
 func TestNFOFilesMatchTheirUnits(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	dir := t.TempDir()
 	at := time.Now()
@@ -231,6 +244,7 @@ func TestNFOFilesMatchTheirUnits(t *testing.T) {
 // its unit again at the next scan; removed, it leaves the unit to the
 // search. A folder gaining a second movie is no longer the first's own.
 func TestNFOChangesMatchAgain(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	addon, dir := e.folder(KindMovies, map[string]int{
 		"Mystery Reel.mkv":     10,
@@ -292,6 +306,7 @@ func TestNFOChangesMatchAgain(t *testing.T) {
 // A WebDAV folder's NFO files are listed with its folders and read only
 // once new or changed, as a local folder's.
 func TestShareNFOFiles(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	box, err := secrets.New(bytes.Repeat([]byte{7}, secrets.KeySize))
 	if err != nil {

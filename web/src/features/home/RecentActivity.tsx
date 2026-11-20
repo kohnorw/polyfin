@@ -1,5 +1,7 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useRef, useState, type RefObject } from 'react'
 import {
+  ArrowClockwiseIcon,
+  CloudArrowDownIcon,
   GearIcon,
   InfoIcon,
   KeyIcon,
@@ -21,14 +23,22 @@ import {
   WarningIcon,
   type Icon,
 } from '@phosphor-icons/react'
-import { useInfiniteQuery } from '@tanstack/react-query'
-import { fetchActivity, queryKeys, type ActivityEntry, type ActivityQuery } from '@/api'
+import { useInfiniteQuery, useQuery } from '@tanstack/react-query'
+import {
+  fetchActivity,
+  fetchStatus,
+  queryKeys,
+  type ActivityEntry,
+  type ActivityQuery,
+} from '@/api'
 import { dateTime, errorMessage, relativeTime } from '@/format'
 import { useI18n } from '@/i18n'
+import { webPlayerInPlace, webPlayerLink, webPlayerPath } from '@/jellyfinApps'
 import {
   Block,
   cx,
   EmptyState,
+  IconTile,
   InlineError,
   Segmented,
   Skeleton,
@@ -36,6 +46,7 @@ import {
   StatusPill,
   TextInput,
   TextLink,
+  useScrollFade,
 } from '@/ui'
 
 const pageSize = 25
@@ -66,10 +77,20 @@ const filters = {
       'GroupMemberAdded',
       'GroupMemberRemoved',
       'GroupMemberDetached',
+      'GroupMemberFollows',
     ],
   },
   server: {
-    types: ['ServerConfigurationUpdated', 'AddonInstalled', 'AddonUninstalled', 'SecretRevealed'],
+    types: [
+      'ServerConfigurationUpdated',
+      'AddonInstalled',
+      'AddonUninstalled',
+      'AddonUsedByChanged',
+      'AddonRenamed',
+      'SecretRevealed',
+      'ServerRestarted',
+      'ServerUpdateStarted',
+    ],
   },
   recordings: { types: ['RecordingScheduled', 'RecordingDeleted'] },
 } satisfies Record<string, Omit<ActivityQuery, 'limit'>>
@@ -95,6 +116,7 @@ const typeIcons: Record<string, Icon> = {
   GroupMemberAdded: UsersThreeIcon,
   GroupMemberRemoved: UsersThreeIcon,
   GroupMemberDetached: UsersThreeIcon,
+  GroupMemberFollows: UsersThreeIcon,
   ShareLinkCreated: LinkIcon,
   ShareLinkRevoked: LinkBreakIcon,
   ShareLinkExpired: LinkBreakIcon,
@@ -102,7 +124,11 @@ const typeIcons: Record<string, Icon> = {
   ServerConfigurationUpdated: GearIcon,
   AddonInstalled: PuzzlePieceIcon,
   AddonUninstalled: PuzzlePieceIcon,
+  AddonUsedByChanged: PuzzlePieceIcon,
+  AddonRenamed: PuzzlePieceIcon,
   SecretRevealed: KeyIcon,
+  ServerRestarted: ArrowClockwiseIcon,
+  ServerUpdateStarted: CloudArrowDownIcon,
   RecordingScheduled: RecordIcon,
   RecordingDeleted: RecordIcon,
 }
@@ -124,6 +150,12 @@ export function RecentActivity() {
     },
     refetchInterval: 15_000,
   })
+  const status = useQuery({
+    queryKey: queryKeys.status,
+    queryFn: ({ signal }) => fetchStatus(signal),
+  })
+  // The web player's links name the server; the API gives titles only while it is served.
+  const serverId = status.data?.serverId ?? null
   const entries = activity.data?.pages.flatMap((page) => page.items) ?? []
   const total = activity.data?.pages.at(-1)?.total ?? 0
   const needle = search.trim().toLocaleLowerCase(language)
@@ -137,6 +169,10 @@ export function RecentActivity() {
   const { hasNextPage, isFetchingNextPage, fetchNextPage } = activity
   const boxRef = useRef<HTMLDivElement>(null)
   const sentinelRef = useRef<HTMLDivElement>(null)
+  const filterRef = useRef<HTMLDivElement>(null)
+  useScrollFade(filterRef)
+  const listed = !activity.isPending && !activity.isError && shown.length > 0
+  const height = useListHeight(boxRef, listed)
   // The next page loads by itself once the end of the box comes near. Observing again after
   // each page makes a sentinel that is still in view (a short or filtered list) load the next.
   useEffect(() => {
@@ -159,8 +195,11 @@ export function RecentActivity() {
       aside={<TextLink to="/system/logs">{text.openLog}</TextLink>}
       className="scroll-mt-24"
     >
-      <div className="mb-3 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-        <div className="-mx-5 overflow-x-auto px-5 scrollbar-none md:mx-0 md:px-0">
+      <div className="mb-3 flex flex-col gap-2">
+        <div
+          ref={filterRef}
+          className="-mx-5 scroll-fade overflow-x-auto px-5 scrollbar-none md:mx-0 md:px-0"
+        >
           <Segmented
             size="sm"
             className="[&>button]:shrink-0 [&>button]:whitespace-nowrap"
@@ -181,19 +220,18 @@ export function RecentActivity() {
           onValue={setSearch}
           aria-label={text.search}
           placeholder={text.search}
-          className="lg:w-72"
         />
       </div>
       {activity.isPending ? (
-        <div role="status" aria-label={t.common.loading}>
+        <div role="status" aria-label={t.common.loading} className="flex flex-col gap-0.5">
           {[0, 1, 2, 3].map((row) => (
             <div
               key={row}
-              className="grid grid-cols-[76px_32px_minmax(0,1fr)] items-center gap-3 border-line py-3 not-first:border-t max-sm:grid-cols-[32px_minmax(0,1fr)]"
+              className="grid min-h-12 grid-cols-[4.5rem_1.875rem_minmax(0,1fr)] items-center gap-3 px-3 max-sm:grid-cols-[1.875rem_minmax(0,1fr)] max-sm:px-0"
             >
-              <Skeleton className="h-3 w-11 max-sm:hidden" />
-              <Skeleton className="size-[30px] rounded-[9px]" />
-              <Skeleton className="h-3.5 w-2/3" />
+              <Skeleton className="h-3.5 w-12 max-sm:hidden" />
+              <Skeleton className="size-7.5 rounded-full" />
+              <Skeleton className="h-4 w-2/3" />
             </div>
           ))}
         </div>
@@ -218,15 +256,19 @@ export function RecentActivity() {
           role="region"
           aria-label={text.listLabel}
           aria-busy={isFetchingNextPage}
-          className="-mx-2 max-h-[420px] overflow-y-auto overscroll-contain rounded-[10px] px-2 scrollbar-thin sm:max-h-[520px]"
+          style={height === undefined ? undefined : { height }}
+          className={cx(
+            'overflow-y-auto overscroll-contain rounded-row scrollbar-thin focus-lit-row',
+            height === undefined && 'max-h-[28.75rem] sm:max-h-[37.5rem]',
+          )}
         >
-          <ol>
+          <ol className="flex flex-col gap-0.5">
             {shown.map((entry) => (
-              <ActivityRow key={entry.id} entry={entry} />
+              <ActivityRow key={entry.id} entry={entry} serverId={serverId} />
             ))}
           </ol>
           {hasNextPage && (
-            <div ref={sentinelRef} className="flex h-12 items-center justify-center text-ink-3">
+            <div ref={sentinelRef} className="flex h-10 items-center justify-center text-ink-3">
               {isFetchingNextPage && (
                 <span role="status" className="flex items-center gap-2 text-small">
                   <Spinner />
@@ -238,7 +280,7 @@ export function RecentActivity() {
         </div>
       )}
       {activity.data !== undefined && (
-        <p className="mt-3 border-t border-line pt-3 text-small text-ink-3">
+        <p className="mt-4 text-small text-ink-3">
           {text.count(entries.length, total)} {text.autoRefresh}
         </p>
       )}
@@ -246,7 +288,55 @@ export function RecentActivity() {
   )
 }
 
-function ActivityRow({ entry }: { entry: ActivityEntry }) {
+/** Tailwind's sm, from which the list may be taller. */
+const wideQuery = '(min-width: 40rem)'
+/** The most the list shows, on a phone and from sm (its classes before measuring). */
+const phoneMax = 460
+const wideMax = 600
+
+/**
+ * The list's height: a list taller than its maximum ends after its last whole row, never in the
+ * middle of one. Measured again when the window or the list changes size; undefined while the
+ * list fits.
+ */
+function useListHeight(box: RefObject<HTMLElement | null>, listed: boolean): number | undefined {
+  const [height, setHeight] = useState<number>()
+  useEffect(() => {
+    const element = box.current
+    if (!listed || !element) return
+    const wide = window.matchMedia(wideQuery)
+    const measure = () => {
+      const limit = wide.matches ? wideMax : phoneMax
+      if (element.scrollHeight <= limit) {
+        setHeight(undefined)
+        return
+      }
+      // The bottom of the last row that shows whole within the limit.
+      const contentTop = element.getBoundingClientRect().top - element.scrollTop
+      let whole = 0
+      for (const row of element.querySelectorAll(':scope > ol > li')) {
+        const bottom = Math.ceil(row.getBoundingClientRect().bottom - contentTop)
+        if (bottom > limit) break
+        whole = bottom
+      }
+      setHeight(whole > 0 ? whole : limit)
+    }
+    measure()
+    const observer = new ResizeObserver(measure)
+    const list = element.firstElementChild
+    if (list) observer.observe(list)
+    window.addEventListener('resize', measure)
+    wide.addEventListener('change', measure)
+    return () => {
+      observer.disconnect()
+      window.removeEventListener('resize', measure)
+      wide.removeEventListener('change', measure)
+    }
+  }, [box, listed])
+  return height
+}
+
+function ActivityRow({ entry, serverId }: { entry: ActivityEntry; serverId: string | null }) {
   const { language, t } = useI18n()
   const text = t.dashboard.activity
   const date = new Date(entry.date)
@@ -259,35 +349,33 @@ function ActivityRow({ entry }: { entry: ActivityEntry }) {
         ? WarningIcon
         : (typeIcons[entry.type] ?? InfoIcon)
   return (
-    <li className="grid grid-cols-[76px_32px_minmax(0,1fr)_auto] items-center gap-3 border-line py-3 text-[14px] not-first:border-t max-sm:grid-cols-[32px_minmax(0,1fr)] max-sm:items-start">
+    <li className="grid min-h-12 grid-cols-[4.5rem_1.875rem_minmax(0,1fr)_auto] items-center gap-3 rounded-[0.625rem] px-3 py-1.5 text-body max-sm:grid-cols-[1.875rem_minmax(0,1fr)] max-sm:items-start max-sm:gap-2.5 max-sm:px-0">
       <time
         dateTime={entry.date}
         title={dateTime(entry.date, language)}
-        className="figures text-[12.5px] text-ink-3 max-sm:hidden"
+        className="figures text-right text-micro text-ink-3 max-sm:hidden"
       >
         {today
           ? new Intl.DateTimeFormat(language, { timeStyle: 'short' }).format(date)
           : relativeTime(entry.date, language, t.time.justNow)}
       </time>
-      <span
-        aria-hidden="true"
-        className={cx(
-          'grid size-[30px] place-items-center rounded-[9px] border',
-          entry.severity === 'Error'
-            ? 'border-danger/25 bg-danger/8 text-danger'
-            : entry.severity === 'Warning'
-              ? 'border-warn/20 bg-warn/10 text-warn'
-              : 'border-line bg-s2 text-ink-2',
-        )}
-      >
-        <Glyph size={16} />
-      </span>
+      <IconTile
+        icon={Glyph}
+        size="sm"
+        tone={
+          entry.severity === 'Error' ? 'danger' : entry.severity === 'Warning' ? 'warn' : 'neutral'
+        }
+      />
       <div className="min-w-0">
-        <p className="break-words text-ink">{entry.name}</p>
+        <p className="break-words text-ink">
+          <EntryName entry={entry} serverId={serverId} />
+        </p>
         {entry.shortOverview !== null && (
-          <p className="mt-0.5 break-words text-[13px] text-ink-3">{entry.shortOverview}</p>
+          <p className="break-words text-small text-ink-3 max-sm:text-micro">
+            {entry.shortOverview}
+          </p>
         )}
-        <p className="mt-0.5 flex flex-wrap items-center gap-x-3 text-[12.5px] text-ink-3 sm:hidden">
+        <p className="mt-0.5 flex flex-wrap items-center gap-x-3 text-micro text-ink-3 sm:hidden">
           <time dateTime={entry.date} title={dateTime(entry.date, language)} className="figures">
             {relativeTime(entry.date, language, t.time.justNow)}
           </time>
@@ -306,5 +394,27 @@ function ActivityRow({ entry }: { entry: ActivityEntry }) {
         )}
       </span>
     </li>
+  )
+}
+
+/**
+ * An entry's sentence, the title it holds a link to the title's page in the web player of the
+ * server serverId, in a new tab or in place as the web player's other links.
+ */
+function EntryName({ entry, serverId }: { entry: ActivityEntry; serverId: string | null }) {
+  const { name, title } = entry
+  if (title === null || serverId === null) return name
+  return (
+    <>
+      {name.slice(0, title.start)}
+      <a
+        {...webPlayerLink(webPlayerInPlace())}
+        href={`${webPlayerPath}#/details?${new URLSearchParams({ id: title.id, serverId })}`}
+        className="focus-lit rounded-control font-medium text-link underline decoration-link/40 underline-offset-4 hover:decoration-link"
+      >
+        {name.slice(title.start, title.end)}
+      </a>
+      {name.slice(title.end)}
+    </>
   )
 }

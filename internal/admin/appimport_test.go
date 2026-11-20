@@ -19,12 +19,22 @@ import (
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/userdata"
 	"github.com/moodiness/polyfin/internal/watchlist"
+	"github.com/moodiness/polyfin/internal/watchlist/watchlisttest"
 )
 
 // appImportAPI serves the admin API with imports from apps, the Stremio
 // accounts on a fake Stremio, and returns the library, the user data and
-// the addons they write to, the fake, and the watchlists.
+// the addons they write to, the fake, and the watchlists. Members reach
+// a Nuvio backend on the loopback.
 func appImportAPI(t *testing.T) (testAPI, *library.Service, *userdata.Store, *addons.Store, *stremiotest.Fake, *watchlist.Store) {
+	t.Helper()
+	return confinedAppImportAPI(t, nuviotest.Loopback())
+}
+
+// confinedAppImportAPI is appImportAPI, members' Nuvio requests sent with
+// confined.
+func confinedAppImportAPI(t *testing.T, confined *http.Client) (testAPI, *library.Service, *userdata.Store, *addons.Store,
+	*stremiotest.Fake, *watchlist.Store) {
 	t.Helper()
 	var lib *library.Service
 	var data *userdata.Store
@@ -34,28 +44,41 @@ func appImportAPI(t *testing.T) (testAPI, *library.Service, *userdata.Store, *ad
 	api := newTestAPI(t, 10, func(o *Options, deps testDeps) {
 		logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 		lib = library.New(deps.pool, deps.addons, deps.client, logger, o.Accounts.Settings)
-		data, installed, lists = userdata.New(deps.pool), deps.addons, watchlist.New(deps.pool)
-		o.AppImport = appimport.New(appimport.Options{Settings: o.Accounts.Settings, Titles: lib, UserData: data, Addons: deps.addons,
-			Logger: logger, Watchlist: lists})
-		t.Cleanup(o.AppImport.Close)
-		o.Nuvio = nuvio.New(nuvio.Options{Version: "1.2.3"})
+		data, installed, lists = userdata.New(deps.pool), deps.addons, watchlisttest.Store(deps.pool)
+		o.Nuvio = nuvio.New(nuvio.Options{Version: "1.2.3", Confined: confined})
 		o.Stremio = stremioimport.New(stremioimport.Options{Metas: stremiotest.SampleMetas(), Version: "1.2.3", API: fake.API,
 			Link: fake.Link})
+		o.AppImport = appimport.New(appimport.Options{Settings: o.Accounts.Settings, Titles: lib, UserData: data, Addons: deps.addons,
+			Logger: logger, Watchlist: lists, Sources: map[string]appimport.Source{nuvio.App: o.Nuvio, stremioimport.App: o.Stremio}})
+		t.Cleanup(o.AppImport.Close)
 	})
 	return api, lib, data, installed, fake, lists
 }
 
-// planned is the only title of user's watchlist, the movie imdb, as the
-// Watchlist view lists it, and they have no favorite: an app import puts
-// its library on the watchlist only.
-func planned(t *testing.T, lib *library.Service, data *userdata.Store, lists *watchlist.Store, user accounts.ID, imdb string) {
+// planned fails unless user's watchlist holds the titles refs find, in
+// any order, and they have no favorite: an app import puts its library
+// on the watchlist only.
+func planned(t *testing.T, lib *library.Service, data *userdata.Store, lists *watchlist.Store, user accounts.ID, refs ...library.TitleRef) {
 	t.Helper()
-	found, err := lib.Resolve(t.Context(), []library.TitleRef{{IMDb: imdb}})
-	if err != nil || len(found[0]) == 0 {
-		t.Fatalf("%s: %v %v", imdb, found, err)
+	found, err := lib.Resolve(t.Context(), refs)
+	if err != nil {
+		t.Fatalf("%v: %v", refs, err)
 	}
-	if got, err := lists.Titles(t.Context(), user); err != nil || len(got) != 1 || got[0] != found[0][0].ID {
+	want := map[accounts.ID]bool{}
+	for i, f := range found {
+		if len(f) == 0 {
+			t.Fatalf("%v: not found", refs[i])
+		}
+		want[f[0].ID] = true
+	}
+	got, err := lists.Titles(t.Context(), user)
+	if err != nil || len(got) != len(want) {
 		t.Errorf("watchlist: %v %v", got, err)
+	}
+	for _, id := range got {
+		if !want[id] {
+			t.Errorf("watchlist: %v, holding %s", got, id)
+		}
 	}
 	if favorites, err := data.Favorites(t.Context(), user); err != nil || len(favorites) != 0 {
 		t.Errorf("favorites: %+v %v", favorites, err)
@@ -139,26 +162,23 @@ func TestUsersImportTheirNuvioAccount(t *testing.T) {
 	}
 	done := appImportDone(t, bob, "/account/app-import")
 	// Played: the first movie, and S1E2; resumed: the second movie, S1E3
-	// and S2E1; on the watchlist: the first movie and the series, which
-	// are started, and the movie in the library only, which is added;
-	// not matched: one not found, one of another identifier.
-	if done["read"] != 9.0 || done["played"] != 2.0 || done["resumed"] != 3.0 || done["watchlist"] != 1.0 || done["unmatchedCount"] != 2.0 ||
+	// and S2E1; on the watchlist, which an import gives only what is left
+	// to watch: the series, whose episodes are not all played, and the
+	// movie in the library only; not the first movie, played; not
+	// matched: one not found, one of another identifier.
+	if done["read"] != 9.0 || done["played"] != 2.0 || done["resumed"] != 3.0 || done["watchlist"] != 2.0 || done["unmatchedCount"] != 2.0 ||
 		done["app"] != "nuvio" || done["user"].(map[string]any)["name"] != "bob" || done["startedBy"].(map[string]any)["name"] != "bob" {
 		t.Errorf("Bob's result: %v", done)
 	}
-	reasons := map[string]string{}
-	for _, u := range done["unmatched"].([]any) {
-		entry := u.(map[string]any)
-		reasons[entry["id"].(string)] = entry["reason"].(string)
-	}
-	if reasons["tmdb:999999"] != "not_found" || reasons["custom:1"] != "other_identifier" {
-		t.Errorf("unmatched: %v", done["unmatched"])
+	// The titles not found are kept by the import, not answered with it.
+	if _, listed := done["unmatched"]; listed {
+		t.Errorf("unmatched answered: %v", done["unmatched"])
 	}
 	bobID := api.userID("bob")
 	if !playedMovie(t, lib, data, bobID, "tt0000001") || playedMovie(t, lib, data, bobID, "tt0000009") {
 		t.Error("Bob's movies")
 	}
-	planned(t, lib, data, lists, bobID, "tt0000005")
+	planned(t, lib, data, lists, bobID, library.TitleRef{IMDb: "tt0000005"}, library.TitleRef{Series: true, IMDb: "tt0100"})
 	if backend.Open() != 0 {
 		t.Error("a Nuvio session is still open")
 	}
@@ -227,6 +247,24 @@ func TestAppImportsFollowTheirPermissions(t *testing.T) {
 	if status, _, _ := admin.call(http.MethodPut, "/settings", settings); status != http.StatusOK {
 		t.Fatalf("turning users' imports off: %d", status)
 	}
+	// Parental control keeps Bob to the server's addons: none is offered
+	// or may be chosen for him, and the refusal says why.
+	if _, err := api.store.UpdateUser(t.Context(), bobID, accounts.UserChanges{Parental: &accounts.ParentalControl{MaxRating: new(13)}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, body, _ := admin.call(http.MethodGet, userPath, nil); body["addonsAllowed"] != false || body["parentalControl"] != true {
+		t.Errorf("under parental control: %v", body)
+	}
+	if status, body, _ := admin.call(http.MethodPost, userPath, map[string]any{"key": read["key"], "profile": "1", "addons": []int{0}}); status != http.StatusForbidden ||
+		body["error"] != "parental_control_own_sources" {
+		t.Errorf("addons under parental control: %d %v", status, body)
+	}
+	if _, err := api.store.UpdateUser(t.Context(), bobID, accounts.UserChanges{Parental: &accounts.ParentalControl{}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, body, _ := admin.call(http.MethodGet, userPath, nil); body["addonsAllowed"] != true || body["parentalControl"] != false {
+		t.Errorf("once lifted: %v", body)
+	}
 	if status, body, _ := admin.call(http.MethodPost, userPath, map[string]any{"key": read["key"], "profile": "1", "addons": []int{0}}); status != http.StatusOK {
 		t.Fatalf("the administrator's import: %d %v", status, body)
 	}
@@ -249,6 +287,66 @@ func TestAppImportsFollowTheirPermissions(t *testing.T) {
 	if status, body, _ := bob.call(http.MethodPost, "/account/app-import", map[string]any{"key": "any", "profile": "1"}); status != http.StatusForbidden ||
 		body["error"] != "server_imports_disabled" {
 		t.Errorf("importing with the setting off: %d %v", status, body)
+	}
+}
+
+// The import tells, on a member's own route and an administrator's for
+// them, whether the server has POLYFIN_SECRET_KEY: the admin app notes,
+// next to Stay connected, that a sign-in kept would be stored unencrypted
+// only without it.
+func TestAppImportTellsWhetherSignInsKeptAreEncrypted(t *testing.T) {
+	t.Parallel()
+	for _, key := range []bool{false, true} {
+		api := newTestAPI(t, 10, func(o *Options, _ testDeps) {
+			o.Health.SecretKey = key
+			o.AppImport = appimport.New(appimport.Options{Settings: o.Accounts.Settings, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+			t.Cleanup(o.AppImport.Close)
+		})
+		admin, bob := api.signedIn("root", true), api.signedIn("bob", false)
+		for _, c := range []struct {
+			b    browser
+			path string
+		}{{bob, "/account/app-import"}, {admin, "/users/" + api.userID("bob").String() + "/app-import"}} {
+			if status, body, _ := c.b.call(http.MethodGet, c.path, nil); status != http.StatusOK || body["secretKey"] != key {
+				t.Errorf("with a key %v, %s: %d %v", key, c.path, status, body)
+			}
+		}
+	}
+}
+
+// A member's Nuvio backend is on a public address, as their addons are,
+// checked at each redirect; an administrator's may be on the local
+// network, for themselves or for a member.
+func TestAMembersNuvioBackendIsOnAPublicAddress(t *testing.T) {
+	t.Parallel()
+	backend := nuviotest.New(t)
+	backend.Set(func(b *nuviotest.Backend) {
+		b.Email, b.Password = "bob@example.com", "bob's password"
+		b.Backup = nuviotest.Backup(1, nuviotest.Sample("https://first.example/u/secret/manifest.json",
+			"https://second.example/u/other-secret"))
+	})
+	// front stands for a backend on a public address, redirecting to the
+	// one on the loopback.
+	front := nuviotest.Redirect(t, backend.URL)
+	api, _, _, _, _, _ := confinedAppImportAPI(t, nuviotest.Confined(t, front))
+	admin, bob := api.signedIn("root", true), api.signedIn("bob", false)
+	userPath := "/users/" + api.userID("bob").String() + "/app-import/nuvio"
+
+	for _, address := range []string{backend.URL, front} {
+		signIn := map[string]any{"backend": address, "email": "bob@example.com", "password": "bob's password"}
+		reached := len(backend.Requests())
+		if status, body, _ := bob.call(http.MethodPost, "/account/app-import/nuvio", signIn); status != http.StatusForbidden ||
+			body["error"] != "private_network" {
+			t.Errorf("Bob's backend at %s: %d %v", address, status, body)
+		}
+		if n := len(backend.Requests()); n != reached {
+			t.Errorf("Bob's backend at %s was reached %d times", address, n-reached)
+		}
+		for _, path := range []string{"/account/app-import/nuvio", userPath} {
+			if status, body, _ := admin.call(http.MethodPost, path, signIn); status != http.StatusOK {
+				t.Errorf("the administrator's backend at %s, %s: %d %v", address, path, status, body)
+			}
+		}
 	}
 }
 
@@ -362,27 +460,24 @@ func TestUsersImportTheirStremioAccount(t *testing.T) {
 	}
 	done := appImportDone(t, bob, "/account/app-import")
 	// Played: the first and the removed movie, and S1E1 to S1E3; resumed:
-	// the second movie and S2E1; on the watchlist: the first movie and the
-	// series, which are started, and the movie in the library only, which
-	// is added; reported: the series watched against an episode Polyfin's
-	// addons do not list, one of another identifier, one not found.
-	if done["read"] != 12.0 || done["played"] != 5.0 || done["resumed"] != 2.0 || done["watchlist"] != 1.0 || done["unmatchedCount"] != 3.0 {
+	// the second movie and S2E1; on the watchlist, which an import gives
+	// only what is left to watch: the series, whose S2E1 is in progress,
+	// and the movie in the library only; not the first movie, played;
+	// reported: the series watched against an episode Polyfin's addons do
+	// not list, one of another identifier, one not found.
+	if done["read"] != 12.0 || done["played"] != 5.0 || done["resumed"] != 2.0 || done["watchlist"] != 2.0 || done["unmatchedCount"] != 3.0 {
 		t.Errorf("Bob's result: %v", done)
 	}
-	reasons := map[string]string{}
-	for _, u := range done["unmatched"].([]any) {
-		entry := u.(map[string]any)
-		reasons[entry["id"].(string)] = entry["reason"].(string)
-	}
-	if reasons["tt0200"] != "episode_list" || reasons["custom:1"] != "other_identifier" || reasons["tmdb:999999"] != "not_found" {
-		t.Errorf("unmatched: %v", done["unmatched"])
+	// The titles not found are kept by the import, not answered with it.
+	if _, listed := done["unmatched"]; listed {
+		t.Errorf("unmatched answered: %v", done["unmatched"])
 	}
 	bobID := api.userID("bob")
 	if !playedMovie(t, lib, data, bobID, "tt0000001") || !playedMovie(t, lib, data, bobID, "tt0000003") ||
 		playedMovie(t, lib, data, bobID, "tt0000002") {
 		t.Error("Bob's movies")
 	}
-	planned(t, lib, data, lists, bobID, "tt0000005")
+	planned(t, lib, data, lists, bobID, library.TitleRef{IMDb: "tt0000005"}, library.TitleRef{Series: true, IMDb: "tt0100"})
 }
 
 func TestStremioImportsFollowTheirPermissions(t *testing.T) {
@@ -424,4 +519,121 @@ func TestStremioImportsFollowTheirPermissions(t *testing.T) {
 		done["played"] != 5.0 {
 		t.Errorf("the administrator's import: %v", done)
 	}
+}
+
+// profileOf is the profile named name of an account read.
+func profileOf(t *testing.T, read map[string]any, name string) map[string]any {
+	t.Helper()
+	profiles, _ := read["profiles"].([]any)
+	for _, p := range profiles {
+		if p.(map[string]any)["name"] == name {
+			return p.(map[string]any)
+		}
+	}
+	t.Fatalf("no profile %q: %v", name, read)
+	return nil
+}
+
+// fakeOpen waits for the sessions open on fake, a fake Stremio or Nuvio
+// backend, to be want, and fails unless they become so.
+func fakeOpen(t *testing.T, fake interface{ Open() int }, want int) {
+	t.Helper()
+	deadline := time.Now().Add(10 * time.Second)
+	for fake.Open() != want {
+		if time.Now().After(deadline) {
+			t.Fatalf("%d sessions open, not %d", fake.Open(), want)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+func TestUsersImportAStremioProfileItsPinOpens(t *testing.T) {
+	t.Parallel()
+	api, lib, data, installed, fake, _ := appImportAPI(t)
+	stremioSample(fake, "https://first.example/u/secret/manifest.json")
+	fake.Set(func(f *stremiotest.Fake) { f.Profiles = stremiotest.SampleProfiles(localAddon(t)) })
+	root, carol := api.signedIn("root", true), api.signedIn("carol", false)
+
+	status, read, _ := root.call(http.MethodPost, "/account/app-import/stremio/password",
+		map[string]any{"email": "bob@example.com", "password": "bob's password"})
+	if profiles, _ := read["profiles"].([]any); status != http.StatusOK || len(profiles) != 3 || read["stayConnected"] != false {
+		t.Fatalf("the account: %d %v", status, read)
+	}
+	noStremioSecret(t, read)
+	if main := profileOf(t, read, "Main"); main["locked"] != false || main["entries"] != 11.0 || len(main["addons"].([]any)) != 2 {
+		t.Errorf("Main: %v", main)
+	}
+	if kids := profileOf(t, read, "Kids"); kids["locked"] != false || kids["played"] != 1.0 || kids["resumes"] != 0.0 || kids["library"] != 1.0 ||
+		len(kids["addons"].([]any)) != 0 {
+		t.Errorf("Kids: %v", kids)
+	}
+	alice := profileOf(t, read, "Alice")
+	if alice["locked"] != true || alice["entries"] != 0.0 || len(alice["addons"].([]any)) != 0 {
+		t.Errorf("Alice locked: %v", alice)
+	}
+	// The account's session stays open while Alice's PIN is asked for.
+	fakeOpen(t, fake, 1)
+
+	// Alice's profile is imported once her PIN opens it, by its reader
+	// only.
+	start := map[string]any{"key": read["key"], "profile": alice["id"], "addons": []int{0}}
+	if status, body, _ := root.call(http.MethodPost, "/account/app-import", start); status != http.StatusBadRequest ||
+		body["error"] != "invalid_request" {
+		t.Errorf("importing Alice locked: %d %v", status, body)
+	}
+	unlock := map[string]any{"key": read["key"], "profile": alice["id"], "pin": "0000"}
+	if status, body, _ := root.call(http.MethodPost, "/account/app-import/stremio/unlock", unlock); status != http.StatusBadRequest ||
+		body["error"] != "stremio_pin_refused" {
+		t.Errorf("a wrong PIN: %d %v", status, body)
+	}
+	unlock["pin"] = stremiotest.SamplePin
+	if status, body, _ := carol.call(http.MethodPost, "/account/app-import/stremio/unlock", unlock); status != http.StatusConflict ||
+		body["error"] != "app_import_expired" {
+		t.Errorf("Carol opening it: %d %v", status, body)
+	}
+	unlock["profile"] = profileOf(t, read, "Kids")["id"]
+	if status, body, _ := root.call(http.MethodPost, "/account/app-import/stremio/unlock", unlock); status != http.StatusBadRequest ||
+		body["error"] != "invalid_request" {
+		t.Errorf("opening Kids, who has no PIN: %d %v", status, body)
+	}
+	unlock["profile"] = alice["id"]
+	status, opened, _ := root.call(http.MethodPost, "/account/app-import/stremio/unlock", unlock)
+	if status != http.StatusOK || opened["key"] != read["key"] {
+		t.Fatalf("Alice's PIN: %d %v", status, opened)
+	}
+	noStremioSecret(t, opened)
+	if raw, _ := json.Marshal(opened); holdsSecret(string(raw), stremiotest.SamplePin) {
+		t.Errorf("the answer holds the PIN: %s", raw)
+	}
+	alice = profileOf(t, opened, "Alice")
+	if offered := alice["addons"].([]any); alice["locked"] != false || alice["resumes"] != 1.0 || alice["entries"] != 1.0 || len(offered) != 1 ||
+		offered[0].(map[string]any)["name"] != "Alice's" {
+		t.Errorf("Alice opened: %v", alice)
+	}
+	if profileOf(t, opened, "Kids")["played"] != 1.0 {
+		t.Errorf("Kids: %v", opened)
+	}
+	fakeOpen(t, fake, 1)
+
+	if status, body, _ := root.call(http.MethodPost, "/account/app-import", start); status != http.StatusOK {
+		t.Fatalf("the import: %d %v", status, body)
+	}
+	done := appImportDone(t, root, "/account/app-import")
+	if done["profile"] != "Alice" || done["read"] != 1.0 || done["resumed"] != 1.0 || done["played"] != 0.0 {
+		t.Errorf("the import: %v", done)
+	}
+	rootID := api.userID("root")
+	found, err := lib.Resolve(t.Context(), []library.TitleRef{{IMDb: "tt0000003"}})
+	if err != nil || len(found[0]) == 0 {
+		t.Fatal(err)
+	}
+	if got, err := data.Get(t.Context(), rootID, []accounts.ID{found[0][0].ID}); err != nil || got[found[0][0].ID].Position != 40*time.Minute {
+		t.Errorf("Alice's resume point: %+v %v", got, err)
+	}
+	if addons, err := installed.Addons(t.Context(), addons.Personal(rootID)); err != nil || len(addons) != 1 {
+		t.Errorf("Alice's addon: %+v %v", addons, err)
+	}
+	// Imported once, without staying connected: every session is signed
+	// out.
+	fakeOpen(t, fake, 0)
 }

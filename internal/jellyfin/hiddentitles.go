@@ -67,7 +67,9 @@ func (h *Handler) removeResume(w http.ResponseWriter, r *http.Request) {
 
 // RemoveResume takes the item user opens by id off their Continue
 // Watching: its resume point goes, and nothing else, a series or a season
-// losing those of its episodes. The user's tracking services are told
+// losing those of its episodes. When the user chose it, the series of an
+// episode or a season, or the series itself, leaves their Next Up too (see
+// accounts.User.NextUpWithResume). The user's tracking services are told
 // nothing. library.ErrNotFound reports an item the user cannot open.
 func (h *Handler) RemoveResume(ctx context.Context, user accounts.User, id accounts.ID) error {
 	item, err := h.Library.Item(ctx, user, id)
@@ -83,7 +85,7 @@ func (h *Handler) RemoveResume(ctx context.Context, user accounts.User, id accou
 func (h *Handler) removeResumeOf(ctx context.Context, user accounts.User, item library.Item) error {
 	var targets []library.Item
 	switch item.Kind {
-	case library.KindSeries, library.KindSeason:
+	case library.KindSeries, library.KindSeason, library.KindFolder:
 		var err error
 		if targets, err = h.markTargets(ctx, user, item); err != nil {
 			return err
@@ -105,17 +107,34 @@ func (h *Handler) removeResumeOf(ctx context.Context, user accounts.User, item l
 		return err
 	}
 	targets = slices.DeleteFunc(targets, func(target library.Item) bool { return data[target.ID].Position <= 0 })
-	if len(targets) == 0 {
+	now := time.Now()
+	if len(targets) > 0 {
+		refs := make([]userdata.Item, 0, len(targets))
+		for _, target := range targets {
+			refs = append(refs, stored(target))
+		}
+		if _, err := h.UserData.ChangeEach(ctx, user.ID, refs, func(_ userdata.Item, d *userdata.Data) { d.RemoveResume(now) }); err != nil {
+			return err
+		}
+	}
+	series := accounts.ID{}
+	switch {
+	case !user.NextUpWithResume:
+	case item.Kind == library.KindSeries:
+		series = item.ID
+	case item.Kind == library.KindSeason || item.Kind == library.KindEpisode:
+		series = item.SeriesID
+	}
+	if series != (accounts.ID{}) {
+		// Even when nothing had a resume point: the user asked for the
+		// series to leave both rows.
+		if err := h.UserData.RemoveFromNextUp(ctx, user.ID, series, now); err != nil {
+			return err
+		}
+	} else if len(targets) == 0 {
 		return nil
 	}
-	refs := make([]userdata.Item, 0, len(targets))
-	for _, target := range targets {
-		refs = append(refs, stored(target))
-	}
-	now := time.Now()
-	if _, err := h.UserData.ChangeEach(ctx, user.ID, refs, func(_ userdata.Item, d *userdata.Data) { d.RemoveResume(now) }); err != nil {
-		return err
-	}
+	// An episode's or a season's series is told of by userDataChanged.
 	h.userDataChanged(user, append([]library.Item{item}, targets...))
 	return nil
 }
@@ -157,10 +176,13 @@ func (h *Handler) hideTitle(hidden bool) http.HandlerFunc {
 	}
 }
 
-// hiddenTarget returns the title hiding item hides: the movie, home video
-// or series itself, or the series of a season or an episode.
+// hiddenTarget returns the title hiding item hides: the movie, home video,
+// series or folder of videos itself, the series of a season or an
+// episode, or the folder of one of its videos.
 func (h *Handler) hiddenTarget(ctx context.Context, user accounts.User, item library.Item) (library.Item, error) {
 	switch {
+	case item.FolderID != accounts.ID{}:
+		return h.Library.Item(ctx, user, item.FolderID)
 	case library.Hideable(item.Kind):
 		return item, nil
 	case (item.Kind == library.KindSeason || item.Kind == library.KindEpisode) && item.SeriesID != accounts.ID{}:

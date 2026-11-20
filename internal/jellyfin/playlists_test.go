@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strings"
 	"testing"
 
 	"github.com/moodiness/polyfin/internal/accounts"
@@ -152,8 +153,10 @@ func TestPlaylistsAreBrowsedInTheirView(t *testing.T) {
 	t.Parallel()
 	s, token, views := browsing(t)
 	titles := titlesForPlaylists(t, s, token, views)
-	if _, ok := views["Playlists"]; ok {
-		t.Fatal("the Playlists view shows before any playlist exists")
+	// Every member has their Watchlist playlist from the start, so the
+	// Playlists view shows at once.
+	if _, ok := views["Playlists"]; !ok {
+		t.Fatalf("no Playlists view beside the Watchlist: %v", views)
 	}
 	second := s.createPlaylist(t, token, map[string]any{"Name": "b list", "Ids": []string{titles.ep1}})
 	first := s.createPlaylist(t, token, map[string]any{"Name": "A list", "Ids": []string{titles.movies[0], titles.movies[2]}})
@@ -177,7 +180,7 @@ func TestPlaylistsAreBrowsedInTheirView(t *testing.T) {
 	for _, path := range []string{"/Items?parentId=" + view.Id, "/Items?includeItemTypes=Playlist&recursive=true"} {
 		var page QueryResult
 		s.get(t, path, token, &page)
-		if got := itemNames(page.Items); !slices.Equal(got, []string{"A list", "b list"}) || page.TotalRecordCount != 2 {
+		if got := itemNames(page.Items); !slices.Equal(got, []string{"A list", "b list", "Watchlist"}) || page.TotalRecordCount != 3 {
 			t.Errorf("%s: %v", path, got)
 			continue
 		}
@@ -211,7 +214,7 @@ func TestPlaylistSharing(t *testing.T) {
 	t.Parallel()
 	s, token, views := browsing(t)
 	titles := titlesForPlaylists(t, s, token, views)
-	guest := s.user("guest", nil)
+	guest := s.user("guest", func(c *accounts.UserChanges) { c.IsHidden = new(false) })
 	guestToken := s.signIn("guest", "phone")
 	s.user("third", nil)
 	thirdToken := s.signIn("third", "laptop")
@@ -225,6 +228,10 @@ func TestPlaylistSharing(t *testing.T) {
 	s.expectStatus(t, http.StatusNotFound, http.MethodGet, "/Items/"+id, guestToken, nil)
 	s.expectStatus(t, http.StatusNotFound, http.MethodPost, "/Playlists/"+id+"/Items?ids="+titles.movies[1], guestToken, nil)
 	s.expectStatus(t, http.StatusNotFound, http.MethodDelete, "/Items/"+id, guestToken, nil)
+	// Once the guest deleted their own Watchlist, they see no playlist.
+	var held WatchlistDto
+	s.get(t, "/Polyfin/UserItems/Watchlist", guestToken, &held)
+	s.expectStatus(t, http.StatusNoContent, http.MethodDelete, "/Items/"+held.PlaylistId, guestToken, nil)
 	var guestViews QueryResult
 	s.get(t, "/UserViews", guestToken, &guestViews)
 	if slices.Contains(itemNames(guestViews.Items), "Playlists") {
@@ -278,6 +285,36 @@ func TestPlaylistSharing(t *testing.T) {
 	s.expectStatus(t, http.StatusNotFound, http.MethodGet, "/Playlists/"+id+"/Items", guestToken, nil)
 }
 
+// The owner of a playlist shares it only with a user they are told of:
+// sharing it with a user kept off the sign-in screen, or a disabled one,
+// is answered as with an identifier no user has. An administrator is told
+// of every user, and shares with any.
+func TestPlaylistSharingWithAHiddenUserAnswersAsWithAnUnknownOne(t *testing.T) {
+	t.Parallel()
+	s, token, views := browsing(t)
+	titles := titlesForPlaylists(t, s, token, views)
+	hidden := s.user("hidden", nil)
+	disabled := s.user("disabled", func(c *accounts.UserChanges) { c.IsHidden, c.IsDisabled = new(false), new(true) })
+	shown := s.user("shown", func(c *accounts.UserChanges) { c.IsHidden = new(false) })
+	s.user("admin", func(c *accounts.UserChanges) { c.IsAdministrator = new(true) })
+	adminToken := s.signIn("admin", "dashboard")
+	id := s.createPlaylist(t, token, map[string]any{"Name": "Mix", "Ids": []string{titles.movies[0]}})
+	for name, target := range map[string]string{"no user": strings.Repeat("ab", 16), "hidden": hidden.ID.String(), "disabled": disabled.ID.String()} {
+		status, body := s.call(http.MethodPost, "/Playlists/"+id+"/Users/"+target, app("tv", token), map[string]any{"CanEdit": false})
+		if status != http.StatusNotFound || string(body) != "\"User not found\"\n" {
+			t.Errorf("sharing with %s: %d %s", name, status, body)
+		}
+	}
+	s.expectStatus(t, http.StatusNoContent, http.MethodPost, "/Playlists/"+id+"/Users/"+shown.ID.String(), token, map[string]any{"CanEdit": false})
+	var listed []PlaylistUserPermissions
+	s.get(t, "/Playlists/"+id+"/Users", token, &listed)
+	if !slices.Equal(listed, []PlaylistUserPermissions{{UserId: shown.ID.String()}}) {
+		t.Errorf("playlist users: %+v", listed)
+	}
+	own := s.createPlaylist(t, adminToken, map[string]any{"Name": "Theirs", "Ids": []string{titles.movies[0]}})
+	s.expectStatus(t, http.StatusNoContent, http.MethodPost, "/Playlists/"+own+"/Users/"+hidden.ID.String(), adminToken, map[string]any{"CanEdit": false})
+}
+
 func TestOnlyPlaylistsCanBeDeleted(t *testing.T) {
 	t.Parallel()
 	s, token, views := browsing(t)
@@ -306,8 +343,7 @@ var playlistShapes = shapeRules{
 		"Path": {"*"}, "Container": {"*"},
 		// Metadata addons do not provide it.
 		"OriginalLanguage": {"*"},
-		// Jellyfin rates a playlist and draws its artwork from its titles;
-		// Polyfin does neither.
+		// Jellyfin rates a playlist from its titles; Polyfin does not.
 		"OfficialRating": {"playlists", "playlist-item"}, "PrimaryImageAspectRatio": {"playlist-item"},
 		// As in the views fixture: the size of a remote catalog is unknown,
 		// and Polyfin's libraries have no root folder.
@@ -315,8 +351,11 @@ var playlistShapes = shapeRules{
 	},
 	returned: map[string][]string{
 		// Polyfin gives the aspect ratio of artwork in every listing,
-		// without waiting for the field to be requested.
-		"PrimaryImageAspectRatio": {"playlist-items"},
+		// without waiting for the field to be requested. The recorded
+		// libraries and playlists had no image; Polyfin's libraries draw
+		// one once their titles are read (see browseShapes), and every
+		// playlist a mosaic of its titles at once.
+		"PrimaryImageAspectRatio": {"playlist-items", "views-with-playlists", "playlists"},
 	},
 }
 
@@ -328,7 +367,7 @@ func TestPlaylistResponsesMatchJellyfin(t *testing.T) {
 	s, token, views := browsing(t)
 	titles := titlesForPlaylists(t, s, token, views)
 	member, _ := s.store.Authenticate(t.Context(), "member", "correct horse")
-	viewer := s.user("viewer", nil)
+	viewer := s.user("viewer", func(c *accounts.UserChanges) { c.IsHidden = new(false) })
 	user := member.ID.String()
 	raw, err := os.ReadFile(filepath.Join("testdata", "jellyfin-12.2", "next-statuses.json"))
 	if err != nil {

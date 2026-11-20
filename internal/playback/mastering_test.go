@@ -11,6 +11,7 @@ import (
 	"github.com/moodiness/polyfin/internal/hls"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/media"
+	"github.com/moodiness/polyfin/internal/process"
 )
 
 // fakeFrameProbe is an ffprobe script answering a first frame with the
@@ -27,7 +28,7 @@ func fakeFrameProbe(t *testing.T, fails bool) (path string, runs func() int) {
 		script += `echo '{"frames": [{"stream_index": 0, "side_data_list": [{"side_data_type": "Mastering display metadata"}]}]}'` + "\n"
 	}
 	path = filepath.Join(dir, "ffprobe")
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+	if err := process.WriteExecutable(path, strings.NewReader(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return path, func() int {
@@ -41,6 +42,7 @@ func fakeFrameProbe(t *testing.T, fails bool) (path string, runs func() int) {
 // tone map it, and keeps the answer; a frame that cannot be read leaves
 // the version on the processor without being read again at once.
 func TestTheMasteringDisplayIsLearnedOnceForIntel(t *testing.T) {
+	t.Parallel()
 	intel := &hls.Hardware{Method: "vaapi", Device: "/dev/dri/renderD128", Encoders: []string{"h264_vaapi"}, ToneMapping: true}
 	nvidia := &hls.Hardware{Method: "cuda", Encoders: []string{"h264_nvenc"}, ToneMapping: true}
 	onCPU := func(hw *hls.Hardware) *VideoConversion {
@@ -88,6 +90,7 @@ func TestTheMasteringDisplayIsLearnedOnceForIntel(t *testing.T) {
 // A version read from its input has ffprobe read the input itself for its
 // first frame, as for its analysis (see LocalInputs).
 func TestTheMasteringDisplayOfAnInput(t *testing.T) {
+	t.Parallel()
 	skipWithoutShell(t)
 	intel := &hls.Hardware{Method: "vaapi", Device: "/dev/dri/renderD128", Encoders: []string{"h264_vaapi"}, ToneMapping: true}
 	conversion := &VideoConversion{Codec: "h264", Encoder: "h264_vaapi", ToneMap: true, ToneMapOnCPU: true, Hardware: intel}
@@ -97,7 +100,7 @@ func TestTheMasteringDisplayOfAnInput(t *testing.T) {
 	script := "#!/bin/sh\necho \"$@\" > " + args + "\n" +
 		`echo '{"frames": [{"stream_index": 0, "side_data_list": [{"side_data_type": "Mastering display metadata"}]}]}'` + "\n"
 	ffprobe := filepath.Join(dir, "ffprobe")
-	if err := os.WriteFile(ffprobe, []byte(script), 0o700); err != nil {
+	if err := process.WriteExecutable(ffprobe, strings.NewReader(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	s := newService(t, &fakeSource{}, ffprobe, nil)

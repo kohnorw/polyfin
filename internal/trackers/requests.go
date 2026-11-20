@@ -15,6 +15,8 @@ import (
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
+	"github.com/moodiness/polyfin/internal/pace"
+	"github.com/moodiness/polyfin/internal/redirect"
 )
 
 // maxReply bounds the bytes read from a service.
@@ -23,9 +25,51 @@ const maxReply = 1 << 20
 // simklApp is the app name Simkl is told, with Polyfin's version.
 const simklApp = "polyfin"
 
-// traktRedirect is the redirect URI of apps without a web page of their
-// own, which Trakt's token requests name.
-const traktRedirect = "urn:ietf:wg:oauth:2.0:oob"
+// The redirect URIs a Trakt app may be registered with: apps created
+// before October 2026, which have a client secret, were told the
+// out-of-band URI of apps without a web page of their own; the newer
+// Development apps take only localhost addresses, and are told
+// http://localhost.
+const (
+	traktOOBRedirect   = "urn:ietf:wg:oauth:2.0:oob"
+	traktLocalRedirect = "http://localhost"
+)
+
+// traktRedirect is the redirect URI a token refresh names. Trakt's spec
+// requires one, "the URI specified in your app settings", even for the
+// device flow, which never redirects: an app with a secret was registered
+// with the out-of-band URI, one without with http://localhost.
+func traktRedirect(settings accounts.Settings) string {
+	if settings.TraktClientSecret != "" {
+		return traktOOBRedirect
+	}
+	return traktLocalRedirect
+}
+
+// traktApp adds to body the client ID of the Trakt app settings name, and
+// its secret when one is saved: Trakt's spec makes the secret optional,
+// and apps created since October 2026 have none.
+func traktApp(settings accounts.Settings, body map[string]string) map[string]string {
+	body["client_id"] = settings.TraktClientID
+	if settings.TraktClientSecret != "" {
+		body["client_secret"] = settings.TraktClientSecret
+	}
+	return body
+}
+
+// traktAuth posts body as JSON to Trakt's OAuth endpoint path, on the
+// host Trakt's spec names for every /oauth call (auth.trakt.tv, required
+// from February 2027), with its API's headers. The body, which holds the
+// app's secret, a code or a refresh token, goes to no other host a
+// redirect names.
+func (s *Service) traktAuth(ctx context.Context, settings accounts.Settings, path string, body map[string]string) (reply, error) {
+	header := http.Header{}
+	header.Set("trakt-api-key", settings.TraktClientID)
+	header.Set("trakt-api-version", "2")
+	header.Set("Content-Type", "application/json")
+	data, _ := json.Marshal(body)
+	return s.call(redirect.SecretBody(ctx), http.MethodPost, s.authURLs[Trakt]+path, header, data)
+}
 
 // reply is a service's answer.
 type reply struct {
@@ -105,15 +149,50 @@ func (s *Service) api(ctx context.Context, service, token string, settings accou
 	if len(query) > 0 {
 		target += "?" + query.Encode()
 	}
-	return s.call(ctx, method, target, header, body)
+	if service == PublicMetaDB {
+		// PublicMetaDB's limit counts every request of the server's
+		// address: each takes its turn, and a 429 holds them all.
+		if err := s.publicMetaDBPace.Wait(ctx); err != nil {
+			return reply{}, err
+		}
+	}
+	if p := s.writePace(service, token, method); p != nil {
+		if err := p.Wait(ctx); err != nil {
+			return reply{}, err
+		}
+	}
+	r, err := s.call(ctx, method, target, header, body)
+	if service == PublicMetaDB && err == nil && r.status == http.StatusTooManyRequests {
+		s.publicMetaDBPace.Hold(max(retryAfter(r.header), time.Second))
+	}
+	return r, err
+}
+
+// writePace is the pace of the writes of token to service, nil when they
+// need none: Trakt and Simkl take one write a second from each user.
+func (s *Service) writePace(service, token, method string) *pace.Pace {
+	if method == http.MethodGet || service != Trakt && service != Simkl {
+		return nil
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	key := service + " " + token
+	p := s.writePaces[key]
+	if p == nil {
+		p = pace.New(s.timing.gaps[service])
+		s.writePaces[key] = p
+	}
+	return p
 }
 
 // form sends a form to an OAuth endpoint of Simkl, which takes them so.
+// The form, which holds a code or a refresh token, goes to no other host
+// a redirect names.
 func (s *Service) form(ctx context.Context, path string, values url.Values) (reply, error) {
 	header := http.Header{}
 	header.Set("Content-Type", "application/x-www-form-urlencoded")
 	query := url.Values{"client_id": {values.Get("client_id")}, "app-name": {simklApp}, "app-version": {s.version}}
-	return s.call(ctx, http.MethodPost, s.urls[Simkl]+path+"?"+query.Encode(), header, []byte(values.Encode()))
+	return s.call(redirect.SecretBody(ctx), http.MethodPost, s.urls[Simkl]+path+"?"+query.Encode(), header, []byte(values.Encode()))
 }
 
 // outcome is what came of a send.
@@ -131,12 +210,14 @@ const (
 )
 
 // result is what came of a send, how long to wait before sending again,
-// and the titles the service now counts watched.
+// and the titles the service now counts watched. full tells a change to
+// a watchlist refused as the list is full.
 type result struct {
 	outcome outcome
 	after   time.Duration
 	status  int
 	watched []accounts.ID
+	full    bool
 }
 
 // classify reads the status of a reply to a change.
@@ -323,6 +404,9 @@ func (s *Service) sendTo(ctx context.Context, service, token string, settings ac
 	case MyAnimeList:
 		return s.sendMyAnimeList(ctx, token, kind, ev)
 	}
+	if kind == kindListAdd || kind == kindListRemove {
+		return s.sendList(ctx, service, token, settings, kind, ev)
+	}
 	var (
 		path    string
 		payload any
@@ -390,14 +474,14 @@ func (s *Service) sendTo(ctx context.Context, service, token string, settings ac
 
 // mediaType is how PublicMetaDB names the kind of a title.
 func (t Title) mediaType() string {
-	if t.Episode {
+	if t.Episode || t.Series {
 		return "tv"
 	}
 	return "movie"
 }
 
-// sendPublicMetaDB sends a resume point or a change to the watch history
-// to PublicMetaDB.
+// sendPublicMetaDB sends a resume point, a change to the watch history or
+// one to the watchlist to PublicMetaDB.
 func (s *Service) sendPublicMetaDB(ctx context.Context, key string, settings accounts.Settings, kind string, ev event) result {
 	title := ev.Titles[0]
 	switch kind {
@@ -448,6 +532,8 @@ func (s *Service) sendPublicMetaDB(ctx context.Context, key string, settings acc
 			res.outcome = delivered
 		}
 		return res
+	case kindListAdd, kindListRemove:
+		return s.sendPublicMetaDBList(ctx, key, settings, kind, ev)
 	}
 	return result{outcome: refused}
 }
@@ -483,25 +569,39 @@ func (s *Service) publicMetaDBTMDB(ctx context.Context, key string, settings acc
 	if res := classify(PublicMetaDB, r); res.outcome != delivered {
 		return 0, res
 	}
+	if found := lookedUpTMDB(r.body, title.mediaType()); len(found) > 0 {
+		return found[0], result{}
+	}
+	// PublicMetaDB does not know the title.
+	return 0, result{outcome: refused, status: r.status}
+}
+
+// lookedUpTMDB reads the TMDB identifiers of mediaType ("movie", "tv")
+// that PublicMetaDB's reverse lookup gives, in its order.
+func lookedUpTMDB(body []byte, mediaType string) []int {
 	var answer struct {
 		Results []struct {
 			TMDB      int    `json:"tmdb_id"`
 			MediaType string `json:"media_type"`
 		} `json:"results"`
 	}
-	_ = json.Unmarshal(r.body, &answer)
-	for _, found := range answer.Results {
-		if found.TMDB > 0 && found.MediaType == title.mediaType() {
-			return found.TMDB, result{}
+	_ = json.Unmarshal(body, &answer)
+	var found []int
+	for _, result := range answer.Results {
+		if result.TMDB > 0 && result.MediaType == mediaType {
+			found = append(found, result.TMDB)
 		}
 	}
-	// PublicMetaDB does not know the title.
-	return 0, result{outcome: refused, status: r.status}
+	return found
 }
 
 // checkKey asks service whether key is valid, and returns the account name
 // it gives, empty when it gives none.
 func (s *Service) checkKey(ctx context.Context, service, key string) (string, error) {
+	// A user waits: no longer than for the answer, even for PublicMetaDB's
+	// turn.
+	ctx, cancel := context.WithTimeout(ctx, s.timing.request)
+	defer cancel()
 	var (
 		r   reply
 		err error

@@ -10,6 +10,7 @@ import (
 	"os/signal"
 	"runtime"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -24,16 +25,19 @@ import (
 const iconSize = 44
 
 // trayWait is how long the icon may take to show before the app says it
-// runs without it: the library shows it as Run starts, or never.
+// runs without it: the library shows it as Run starts, or never. When the
+// library says it gave up on the icon, the app says so at once.
 const trayWait = 30 * time.Second
 
 // runTray shows the icon and its menu until Quit Polyfin, an interrupt or
 // a request of polyfin-desktop -quit, starting Polyfin at once. It
-// returns what to start once the app has quit, after an update. Polyfin
-// starts and quits without waiting for the icon: when the system shows
-// none, such as a session without Windows' taskbar, the app logs an error
-// and runs on without it, until an interrupt or polyfin-desktop -quit.
-func runTray(options app.Options, logger *slog.Logger, quitRequested <-chan struct{}) *exec.Cmd {
+// returns what to start once the app has quit, after an update, which the
+// menu or the admin app installs. Polyfin starts and quits without
+// waiting for the icon: when the system shows none, such as a session
+// without Windows' taskbar, the app logs an error and runs on without it,
+// until an interrupt or polyfin-desktop -quit. refused is closed when the
+// tray's library gave up on the icon (logLibraries).
+func runTray(options app.Options, logger *slog.Logger, asked requests, refused <-chan struct{}) *exec.Cmd {
 	text := textsFor(desktop.Language())
 	changes := make(chan app.Status, 1)
 	options.Changed = func(s app.Status) {
@@ -63,6 +67,27 @@ func runTray(options app.Options, logger *slog.Logger, quitRequested <-chan stru
 				endTrayLoop()
 			}
 		})
+	}
+	// installUpdate installs the update offered, once at a time, then
+	// quits the app for the new version to start: for Install Polyfin
+	// <version>, of the menu or of the admin app. A failure is told in the
+	// menu, and Polyfin runs on.
+	var installing atomic.Bool
+	installUpdate := func() {
+		if !installing.CompareAndSwap(false, true) {
+			return
+		}
+		go func() {
+			cmd, err := a.InstallUpdate(context.Background())
+			if err != nil {
+				installing.Store(false)
+				return
+			}
+			relaunchMu.Lock()
+			relaunch = cmd
+			relaunchMu.Unlock()
+			quitApp()
+		}()
 	}
 	onReady := func() {
 		setIcon(false)
@@ -172,16 +197,7 @@ func runTray(options app.Options, logger *slog.Logger, quitRequested <-chan stru
 					}
 				case <-install.ClickedCh:
 					install.Hide()
-					go func() {
-						cmd, err := a.InstallUpdate(context.Background())
-						if err != nil {
-							return
-						}
-						relaunchMu.Lock()
-						relaunch = cmd
-						relaunchMu.Unlock()
-						quitApp()
-					}()
+					installUpdate()
 				case <-quitItem.ClickedCh:
 					status.SetTitle(text.stopping)
 					quitApp()
@@ -194,14 +210,32 @@ func runTray(options app.Options, logger *slog.Logger, quitRequested <-chan stru
 	go func() {
 		signals := make(chan os.Signal, 1)
 		signal.Notify(signals, os.Interrupt, syscall.SIGTERM)
-		select {
-		case <-signals:
-		case <-quitRequested:
-			logger.Info("Quitting, as polyfin-desktop -quit asked")
+		for {
+			select {
+			case <-signals:
+			case <-asked.quit:
+				logger.Info("Quitting, as polyfin-desktop -quit asked")
+			case version := <-asked.install:
+				// The admin app's Install Polyfin <version>, as the menu's.
+				if offers(a, version, logger) {
+					installUpdate()
+				}
+				continue
+			case previous := <-a.RolledBack():
+				// The new version did not start: the previous one starts
+				// once the app has quit.
+				logger.Info("Quitting to start the previous version")
+				relaunchMu.Lock()
+				relaunch = previous
+				relaunchMu.Unlock()
+			case <-quitting:
+				return
+			}
+			quitApp()
+			return
 		}
-		quitApp()
 	}()
-	go awaitTray(shown, quitting, time.After(trayWait), logger)
+	go awaitTray(shown, quitting, refused, time.After(trayWait), logger)
 	// macOS calls onExit as it terminates the app, at logout: Polyfin
 	// stops before it returns. Quit Polyfin ends Run without it.
 	onExit := func() {
@@ -253,17 +287,18 @@ func open(logger *slog.Logger, target string) {
 	}
 }
 
-// awaitTray waits for the icon, and logs an error when timeout comes
-// first: the app then runs on without it. It tells whether the icon
-// showed.
-func awaitTray(shown, quitting <-chan struct{}, timeout <-chan time.Time, logger *slog.Logger) bool {
+// awaitTray waits for the icon, and logs an error when the library gives
+// up on it, or when timeout comes first: the app then runs on without it.
+// It tells whether the icon showed.
+func awaitTray(shown, quitting, refused <-chan struct{}, timeout <-chan time.Time, logger *slog.Logger) bool {
 	select {
 	case <-shown:
 		return true
 	case <-quitting:
 		return false
+	case <-refused:
 	case <-timeout:
-		logger.Error("The tray icon could not be shown: Polyfin runs without it, and polyfin-desktop -quit quits it")
-		return false
 	}
+	logger.Error("The tray icon could not be shown: Polyfin runs without it, and polyfin-desktop -quit quits it")
+	return false
 }

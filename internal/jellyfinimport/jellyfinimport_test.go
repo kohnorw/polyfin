@@ -1,13 +1,16 @@
 package jellyfinimport
 
 import (
+	"crypto/sha1"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httptrace"
 	"strconv"
 	"strings"
 	"sync"
@@ -18,7 +21,11 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
+	"github.com/moodiness/polyfin/internal/appimport/nuvio/nuviotest"
+	"github.com/moodiness/polyfin/internal/collections"
+	"github.com/moodiness/polyfin/internal/importlinks"
 	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/playlists"
 	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/testdb/migrated"
 	"github.com/moodiness/polyfin/internal/userdata"
@@ -37,9 +44,16 @@ type fakeJellyfin struct {
 	requests []*http.Request
 	users    []map[string]any
 	// items are each user's items by filter (IsPlayed, IsResumable,
-	// IsFavorite); series, the identifiers of the series by their id.
-	items  map[string]map[string][]map[string]any
-	series map[string]map[string]string
+	// IsFavorite, Likes), or, without one, by type (BoxSet, Playlist);
+	// series, the identifiers of the series by their id, and orders their
+	// DisplayOrder; children, the titles of each collection by its id, or
+	// the episodes of each series, and entries, the entries of each
+	// playlist by its id.
+	items    map[string]map[string][]map[string]any
+	series   map[string]map[string]string
+	orders   map[string]string
+	children map[string][]map[string]any
+	entries  map[string][]map[string]any
 	// refused are the users whose items answer 401, as after the key was
 	// revoked; forbidden, those whose items answer 403, which the key may
 	// not read; hold, when set, holds every items request until closed.
@@ -73,7 +87,8 @@ func newFakeJellyfin(t *testing.T) *fakeJellyfin {
 	t.Helper()
 	f := &fakeJellyfin{items: map[string]map[string][]map[string]any{}, series: map[string]map[string]string{}, refused: map[string]bool{},
 		forbidden: map[string]bool{}, userKeys: map[string]string{}, passwords: map[string]string{}, barred: map[string]bool{},
-		signsInAs: map[string]string{}, sessions: map[string]string{}}
+		signsInAs: map[string]string{}, sessions: map[string]string{}, children: map[string][]map[string]any{},
+		entries: map[string][]map[string]any{}}
 	server := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(server.Close)
 	f.url = server.URL
@@ -190,8 +205,13 @@ func (f *fakeJellyfin) serve(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(map[string]any{"Id": owner, "Name": "Owner"})
-	case found && strings.HasSuffix(user, "/Items"):
+	case found && strings.HasSuffix(user, "/Items"), strings.HasPrefix(path, "/Playlists/") && strings.HasSuffix(path, "/Items"):
 		user = strings.TrimSuffix(user, "/Items")
+		playlist, inPlaylist := strings.CutPrefix(strings.TrimSuffix(path, "/Items"), "/Playlists/")
+		if inPlaylist {
+			// Jellyfin reads a playlist as the user UserId names.
+			user = query.Get("UserId")
+		}
 		if hold != nil {
 			f.mu.Unlock()
 			<-hold
@@ -212,11 +232,17 @@ func (f *fakeJellyfin) serve(w http.ResponseWriter, r *http.Request) {
 		if ids := query.Get("Ids"); ids != "" {
 			for _, id := range strings.Split(ids, ",") {
 				if providers, ok := f.series[id]; ok {
-					all = append(all, map[string]any{"Id": id, "Type": "Series", "ProviderIds": providers})
+					all = append(all, map[string]any{"Id": id, "Type": "Series", "ProviderIds": providers, "DisplayOrder": f.orders[id]})
 				}
 			}
+		} else if inPlaylist {
+			all = f.entries[playlist]
+		} else if parent := query.Get("ParentId"); parent != "" {
+			all = f.children[parent]
+		} else if filter := query.Get("Filters"); filter != "" {
+			all = f.items[user][filter]
 		} else {
-			all = f.items[user][query.Get("Filters")]
+			all = f.items[user][query.Get("IncludeItemTypes")]
 		}
 		start, _ := strconv.Atoi(query.Get("StartIndex"))
 		limit, err := strconv.Atoi(query.Get("Limit"))
@@ -282,15 +308,18 @@ func (f *fakeJellyfin) sent() []*http.Request {
 
 type harness struct {
 	*Service
-	pool  *pgxpool.Pool
-	store *accounts.Store
-	lib   *library.Service
-	data  *userdata.Store
-	f     *fakeJellyfin
+	pool   *pgxpool.Pool
+	store  *accounts.Store
+	lib    *library.Service
+	data   *userdata.Store
+	links  *importlinks.Store
+	addons *addons.Store
+	f      *fakeJellyfin
 }
 
 // newHarness is a service on a fresh database reading a fake Jellyfin
-// server two items a page, without waiting between requests.
+// server two items a page, without waiting between requests. Users who
+// are no administrators reach it on the loopback too.
 func newHarness(t *testing.T) harness {
 	t.Helper()
 	pool := migrated.New(t)
@@ -300,12 +329,41 @@ func newHarness(t *testing.T) harness {
 	}
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 	client := stremio.NewClient("test")
-	lib := library.New(pool, addons.New(pool, client), client, logger, store.Settings)
+	installed := addons.New(pool, client)
+	lib := library.New(pool, installed, client, logger, store.Settings)
 	data := userdata.New(pool)
-	s := New(Options{Settings: store.Settings, Titles: lib, UserData: data, Version: "1.2.3", Logger: logger})
+	links := importlinks.New(importlinks.Options{DB: pool, Settings: store.Settings, Titles: lib, UserData: data, Logger: logger})
+	s := New(Options{Settings: store.Settings, Titles: lib, UserData: data, Links: links, Version: "1.2.3", Logger: logger,
+		Collections: collections.New(pool), Playlists: playlists.New(pool), Confined: nuviotest.Loopback()})
 	s.timing.gap, s.timing.retryFirst, s.timing.pageSize = 0, time.Millisecond, 2
 	t.Cleanup(s.Close)
-	return harness{Service: s, pool: pool, store: store, lib: lib, data: data, f: newFakeJellyfin(t)}
+	return harness{Service: s, pool: pool, store: store, lib: lib, data: data, links: links, addons: installed, f: newFakeJellyfin(t)}
+}
+
+// kept lists what user's list of kind keeps of the titles imports did not
+// find.
+func (h harness) kept(t *testing.T, user accounts.ID, kind Kind) []importlinks.Row {
+	t.Helper()
+	rows, err := h.links.List(t.Context(), user, string(kind))
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
+}
+
+// keptReasons are the reasons of what user's list of kind keeps, by name,
+// an episode's as its series' with its numbers, "Series s1e2".
+func (h harness) keptReasons(t *testing.T, user accounts.ID, kind Kind) map[string]string {
+	t.Helper()
+	reasons := map[string]string{}
+	for _, row := range h.kept(t, user, kind) {
+		name := row.Name
+		if row.Kind == importlinks.KindEpisode {
+			name = fmt.Sprintf("%s s%de%d", name, row.Season, row.Episode)
+		}
+		reasons[name] = row.Reason
+	}
+	return reasons
 }
 
 func (h harness) user(t *testing.T, name string) accounts.User {
@@ -385,6 +443,7 @@ func at(text string) time.Time {
 }
 
 func TestUsersAreListedWithTheKeyAndFailuresTellWhy(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.f.users = []map[string]any{
 		{"Id": "a1", "Name": "Alice", "LastActivityDate": "2026-10-01T20:00:00.0000000Z", "Policy": map[string]any{"IsAdministrator": true}},
@@ -442,7 +501,34 @@ func TestUsersAreListedWithTheKeyAndFailuresTellWhy(t *testing.T) {
 	}
 }
 
+// A server's users are read even when another test closes its server right
+// as the connection of an answer without a body, Jellyfin's 400 to
+// /Users/Me for the server's key, goes back among the idle ones, before
+// the answer reaches the request (#958): httptest.Server.Close closes the
+// idle connections of http.DefaultTransport, and the service's transport
+// is its own. An administrator waits on that answer, which is tried once.
+func TestUsersAreReadWhileAnotherServerCloses(t *testing.T) {
+	t.Parallel()
+	s := New(Options{Version: "1.2.3", Logger: slog.New(slog.DiscardHandler)})
+	t.Cleanup(s.Close)
+	f := newFakeJellyfin(t)
+	// PutIdleConn runs in that window: a server closes there, and the
+	// request is given the time to see a closed connection.
+	ctx := httptrace.WithClientTrace(t.Context(), &httptrace.ClientTrace{PutIdleConn: func(err error) {
+		if err == nil {
+			httptest.NewServer(http.NotFoundHandler()).Close()
+			time.Sleep(2 * time.Millisecond)
+		}
+	}})
+	for range 10 {
+		if _, _, err := s.Users(ctx, to(f.url, Credentials{Key: goodKey})); err != nil {
+			t.Fatalf("users while another server closes: %v", err)
+		}
+	}
+}
+
 func TestWatchDataIsMatchedAndOnlyAddedTo(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	alice := h.user(t, "alice")
 	// A catalog listed a movie by its TMDB identifier, and a series by its
@@ -517,13 +603,11 @@ func TestWatchDataIsMatchedAndOnlyAddedTo(t *testing.T) {
 	if got.State != UserDone || got.Read != 14 || got.Played != 5 || got.Resumed != 2 || got.Favorites != 3 || got.UnmatchedCount != 3 {
 		t.Errorf("counts: %+v", got)
 	}
-	reasons := map[string]string{}
-	for _, u := range got.Unmatched {
-		reasons[u.Name] = u.Reason
-	}
-	if len(reasons) != 3 || reasons["Holiday"] != ReasonNoIdentifier || reasons["Unknown"] != ReasonNotFound ||
-		reasons["Episode e4"] != ReasonNoIdentifier {
-		t.Errorf("unmatched: %+v", got.Unmatched)
+	// The episode not numbered is counted, but not kept: no link could
+	// place it.
+	if reasons := h.keptReasons(t, alice.ID, Jellyfin); len(reasons) != 2 || reasons["Holiday"] != ReasonNoIdentifier ||
+		reasons["Unknown"] != ReasonNotFound {
+		t.Errorf("kept: %+v", reasons)
 	}
 
 	check := func(name string, ref library.TitleRef, want func(userdata.Data) bool) {
@@ -573,6 +657,7 @@ func TestWatchDataIsMatchedAndOnlyAddedTo(t *testing.T) {
 }
 
 func TestOneImportRunsAtATimeAndStops(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	alice, bob := h.user(t, "alice"), h.user(t, "bob")
 	h.f.items["jf-alice"] = map[string][]map[string]any{"IsPlayed": {movie("m1", "One", map[string]string{"Imdb": "tt0000001"},
@@ -627,6 +712,7 @@ func TestOneImportRunsAtATimeAndStops(t *testing.T) {
 // it with its owner's data whatever user is asked, which an import would
 // put in another user's account: only its owner is imported with it.
 func TestAUserKeyImportsOnlyItsOwnersWatchData(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	alice, bob := h.user(t, "alice"), h.user(t, "bob")
 	h.f.users = []map[string]any{{"Id": "jf-alice", "Name": "Alice"}, {"Id": "jf-bob", "Name": "Bob"}}
@@ -680,6 +766,7 @@ func TestAUserKeyImportsOnlyItsOwnersWatchData(t *testing.T) {
 // A user whose data the server does not let the key read fails alone, and
 // says so: the import goes on with the next users.
 func TestAUserTheKeyMayNotReadFailsAlone(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	alice, bob := h.user(t, "alice"), h.user(t, "bob")
 	h.f.items["jf-alice"] = map[string][]map[string]any{"IsPlayed": {movie("m1", "Alice's", map[string]string{"Imdb": "tt0000001"},
@@ -702,6 +789,7 @@ func TestAUserTheKeyMayNotReadFailsAlone(t *testing.T) {
 // password: even a server that answers a session with its own user's data
 // whatever user is asked gives each user theirs. Every session ends.
 func TestSigningInReadsEachUserAsThemselves(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	alice, bob, carol := h.user(t, "alice"), h.user(t, "bob"), h.user(t, "carol")
 	h.f.users = []map[string]any{{"Id": "jf-alice", "Name": "Alice", "Policy": map[string]any{"IsAdministrator": true}}, {"Id": "jf-bob", "Name": "Bob"},
@@ -771,6 +859,7 @@ func TestSigningInReadsEachUserAsThemselves(t *testing.T) {
 // sign-in that opens another user's session starts nothing, and says why;
 // the sessions opened meanwhile end.
 func TestASignInThatFailsStartsNothing(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.f.users = []map[string]any{{"Id": "jf-alice", "Name": "Alice", "Policy": map[string]any{"IsAdministrator": true}}, {"Id": "jf-bob", "Name": "Bob"},
 		{"Id": "jf-carol", "Name": "Carol"}, {"Id": "jf-dan", "Name": "Dan"}}
@@ -819,6 +908,7 @@ func TestASignInThatFailsStartsNothing(t *testing.T) {
 // from a server that lists every user to anyone: another user can neither
 // be signed in nor imported.
 func TestANonAdministratorConnectionListsOnlyItself(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	alice, bob := h.user(t, "alice"), h.user(t, "bob")
 	h.f.users = []map[string]any{{"Id": "jf-alice", "Name": "Alice", "Policy": map[string]any{"IsAdministrator": true}}, {"Id": "jf-bob", "Name": "Bob"}}
@@ -871,6 +961,7 @@ func TestANonAdministratorConnectionListsOnlyItself(t *testing.T) {
 // user with the session's data. A refused password starts nothing, and one
 // import runs at a time, the administrator's included.
 func TestAUserImportsOnlyTheirOwnWatchData(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	alice, bob := h.user(t, "alice"), h.user(t, "bob")
 	h.f.users = []map[string]any{{"Id": "jf-alice", "Name": "Alice", "Policy": map[string]any{"IsAdministrator": true}}, {"Id": "jf-bob", "Name": "Bob"}}
@@ -949,6 +1040,7 @@ func TestAUserImportsOnlyTheirOwnWatchData(t *testing.T) {
 // owner's data whatever user is asked. Signed in, each user is read signed
 // in as themselves.
 func TestEmbyIsReadWithItsHeaderAndUnderItsPath(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	h.f.emby = true
 	alice, bob := h.user(t, "alice"), h.user(t, "bob")
@@ -1015,6 +1107,7 @@ func TestEmbyIsReadWithItsHeaderAndUnderItsPath(t *testing.T) {
 // server asked as Emby, or an Emby server asked as Jellyfin, is told apart
 // from what it answers anyone, and is sent neither.
 func TestAServerOfAnotherKindIsSentNoKeyOrPassword(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	emby := newFakeJellyfin(t)
 	emby.emby = true
@@ -1049,7 +1142,9 @@ const plexToken = "plex-owners-token"
 // fakePlex answers as a Plex Media Server does, in JSON, to its owner's
 // token: its accounts, its library sections with their items and the
 // owner's data of them, and each account's playback history, a page at a
-// time.
+// time. Another account's own token for the server, one of states, reads
+// the library sections with that account's data instead, and neither the
+// accounts nor the history.
 type fakePlex struct {
 	url string
 
@@ -1061,11 +1156,22 @@ type fakePlex struct {
 	// shows, "4" episodes), and history each account's plays, by id.
 	items   map[string]map[string][]map[string]any
 	history map[string][]map[string]any
+	// states are other accounts' data of the items, by their token, then
+	// by rating key; machine is the server's machine identifier.
+	states  map[string]map[string]map[string]any
+	machine string
+	// collections are each section's collections, by its key, and
+	// children each collection's titles, by its rating key; playlists are
+	// each token's account's playlists, and entries each playlist's items,
+	// by its rating key.
+	collections, children, playlists, entries map[string][]map[string]any
 }
 
 func newFakePlex(t *testing.T) *fakePlex {
 	t.Helper()
-	f := &fakePlex{items: map[string]map[string][]map[string]any{}, history: map[string][]map[string]any{}}
+	f := &fakePlex{items: map[string]map[string][]map[string]any{}, history: map[string][]map[string]any{},
+		states: map[string]map[string]map[string]any{}, machine: "0a1b2c", collections: map[string][]map[string]any{},
+		children: map[string][]map[string]any{}, playlists: map[string][]map[string]any{}, entries: map[string][]map[string]any{}}
 	server := httptest.NewServer(http.HandlerFunc(f.serve))
 	t.Cleanup(server.Close)
 	f.url = server.URL
@@ -1087,10 +1193,12 @@ func (f *fakePlex) serve(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode(map[string]any{"MediaContainer": container})
 	}
 	if r.URL.Path == "/identity" {
-		answer(map[string]any{"machineIdentifier": "0a1b2c", "version": "1.42.2.10156"})
+		answer(map[string]any{"machineIdentifier": f.machine, "version": "1.42.2.10156"})
 		return
 	}
-	if r.Header.Get("X-Plex-Token") != plexToken {
+	token := r.Header.Get("X-Plex-Token")
+	state, other := f.states[token]
+	if token != plexToken && !other || other && (r.URL.Path == "/accounts" || r.URL.Path == "/status/sessions/history/all") {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
@@ -1102,7 +1210,17 @@ func (f *fakePlex) serve(w http.ResponseWriter, r *http.Request) {
 		if err != nil {
 			size = len(all)
 		}
-		part := all[min(start, len(all)):min(start+size, len(all))]
+		part := []map[string]any{}
+		for _, item := range all[min(start, len(all)):min(start+size, len(all))] {
+			// Plex names every item in its own scheme too, in guid, a
+			// string beside the Guid list whose key differs only by case;
+			// an older agent's item names its identifier there instead.
+			copied := maps.Clone(item)
+			if _, older := item["guid"]; !older {
+				copied["guid"] = fmt.Sprintf("plex://%s/%x", item["type"], sha1.Sum([]byte(fmt.Sprint(item["ratingKey"]))))
+			}
+			part = append(part, copied)
+		}
 		answer(map[string]any{"size": len(part), "totalSize": len(all), "offset": start, "Metadata": part})
 	}
 	section, inSection := strings.CutPrefix(r.URL.Path, "/library/sections/")
@@ -1115,19 +1233,39 @@ func (f *fakePlex) serve(w http.ResponseWriter, r *http.Request) {
 		answer(map[string]any{"size": len(f.sections), "Directory": f.sections})
 	case inSection && strings.HasSuffix(section, "/all"):
 		items := f.items[strings.TrimSuffix(section, "/all")][query.Get("type")]
-		if query.Get("includeGuids") != "1" {
-			// Plex leaves the identifiers out unless asked.
-			var bare []map[string]any
-			for _, item := range items {
-				copied := maps.Clone(item)
+		var shown []map[string]any
+		for _, item := range items {
+			copied := maps.Clone(item)
+			if query.Get("includeGuids") != "1" {
+				// Plex leaves the identifiers out unless asked.
 				delete(copied, "Guid")
-				bare = append(bare, copied)
 			}
-			items = bare
+			if other {
+				// Each account sees its own data of the items.
+				for _, field := range []string{"viewCount", "viewOffset", "lastViewedAt", "userRating"} {
+					delete(copied, field)
+				}
+				maps.Copy(copied, state[fmt.Sprint(item["ratingKey"])])
+			}
+			shown = append(shown, copied)
 		}
-		page(items)
+		page(shown)
 	case r.URL.Path == "/status/sessions/history/all":
 		page(f.history[query.Get("accountID")])
+	case inSection && strings.HasSuffix(section, "/collections"):
+		page(f.collections[strings.TrimSuffix(section, "/collections")])
+	case strings.HasPrefix(r.URL.Path, "/library/collections/") && strings.HasSuffix(r.URL.Path, "/children"):
+		page(f.children[strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/library/collections/"), "/children")])
+	case r.URL.Path == "/playlists":
+		var kind []map[string]any
+		for _, playlist := range f.playlists[token] {
+			if playlist["playlistType"] == query.Get("playlistType") {
+				kind = append(kind, playlist)
+			}
+		}
+		page(kind)
+	case strings.HasPrefix(r.URL.Path, "/playlists/") && strings.HasSuffix(r.URL.Path, "/items"):
+		page(f.entries[strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/playlists/"), "/items")])
 	default:
 		w.WriteHeader(http.StatusNotFound)
 	}
@@ -1148,6 +1286,7 @@ func guids(ids ...string) []map[string]any {
 // and dated. Episodes are found by their show's identifiers and their
 // numbers, and Plex is only read.
 func TestPlexImportsTheOwnersAndEachAccountsWatchData(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	p := newFakePlex(t)
 	owner, carol := h.user(t, "owner"), h.user(t, "carol")
@@ -1213,9 +1352,11 @@ func TestPlexImportsTheOwnersAndEachAccountsWatchData(t *testing.T) {
 	}
 	// The owner: two movies and an episode played (the home video is not
 	// found), a movie and an episode resumed.
-	if got := status.Users[0]; got.Played != 2 || got.Resumed != 2 || got.UnmatchedCount != 1 || got.Unmatched[0].Name != "Holiday" ||
-		got.Unmatched[0].Reason != ReasonNoIdentifier {
+	if got := status.Users[0]; got.Played != 2 || got.Resumed != 2 || got.UnmatchedCount != 1 {
 		t.Errorf("owner: %+v", got)
+	}
+	if reasons := h.keptReasons(t, owner.ID, Plex); len(reasons) != 1 || reasons["Holiday"] != ReasonNoIdentifier {
+		t.Errorf("owner's kept: %+v", reasons)
 	}
 	if got := status.Users[1]; got.Played != 2 || got.Resumed != 0 || got.UnmatchedCount != 0 {
 		t.Errorf("Carol: %+v", got)
@@ -1250,5 +1391,274 @@ func TestPlexImportsTheOwnersAndEachAccountsWatchData(t *testing.T) {
 		if r.Method != http.MethodGet || strings.Contains(r.URL.String(), plexToken) {
 			t.Errorf("Plex was sent %s %s", r.Method, r.URL)
 		}
+	}
+}
+
+// lockedBuffer collects what a logger writes from the import's goroutine.
+type lockedBuffer struct {
+	mu   sync.Mutex
+	text strings.Builder
+}
+
+func (b *lockedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.text.Write(p)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.text.String()
+}
+
+// An answer an import cannot read is logged with the path it came from and
+// why, never with its query or the token.
+func TestAnAnswerAnImportCannotReadIsLoggedWithItsPath(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	var logged lockedBuffer
+	h.logger = slog.New(slog.NewTextHandler(&logged, nil))
+	p := newFakePlex(t)
+	owner := h.user(t, "owner")
+	p.accounts = []map[string]any{{"id": 1, "key": "/accounts/1", "name": "Owner"}}
+	p.sections = []map[string]any{{"key": "1", "type": "movie", "title": "Movies"}}
+	p.items["1"] = map[string][]map[string]any{"1": {{"ratingKey": "11", "type": "movie", "title": "Unreadable", "year": "twenty"}}}
+	plex := Connection{Kind: Plex, Address: p.url, Credentials: Credentials{Key: plexToken}}
+	if _, err := h.Start(t.Context(), plex, accounts.User{}, func(Server, []User, SignIn) ([]Target, error) {
+		return []Target{{JellyfinID: "1", User: owner.ID, UserName: "owner"}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if status := h.ended(t); status.State != StateFailed || status.Problem != ProblemNotJellyfin {
+		t.Fatalf("import: %+v", status)
+	}
+	text := logged.String()
+	if !strings.Contains(text, "level=WARN") || !strings.Contains(text, "path=/library/sections/1/all") ||
+		!strings.Contains(text, "year") || strings.Contains(text, plexToken) || strings.Contains(text, "X-Plex-Container") {
+		t.Errorf("logged: %s", text)
+	}
+}
+
+// plexImported imports the Plex account id of p's server into user, with
+// its ratings, and waits for the import to end.
+func (h harness) plexImported(t *testing.T, p *fakePlex, id string, user accounts.User) UserStatus {
+	t.Helper()
+	plex := Connection{Kind: Plex, Address: p.url, Credentials: Credentials{Key: plexToken}, Extras: Extras{Ratings: true}}
+	if _, err := h.Start(t.Context(), plex, accounts.User{}, func(Server, []User, SignIn) ([]Target, error) {
+		return []Target{{JellyfinID: id, User: user.ID, UserName: user.Name}}, nil
+	}); err != nil {
+		t.Fatal(err)
+	}
+	status := h.ended(t)
+	if status.State != StateDone {
+		t.Fatalf("import: %+v", status)
+	}
+	return status.Users[0]
+}
+
+// smallPlex is a fake Plex server with its owner, Carol (account 5), and a
+// movie and a show section: two movies and a show of one episode, which
+// nobody watched.
+func smallPlex(t *testing.T) *fakePlex {
+	t.Helper()
+	p := newFakePlex(t)
+	p.accounts = []map[string]any{{"id": 1, "key": "/accounts/1", "name": "Owner"}, {"id": 5, "key": "/accounts/5", "name": "Carol"}}
+	p.sections = []map[string]any{{"key": "1", "type": "movie", "title": "Movies"}, {"key": "2", "type": "show", "title": "Shows"},
+		{"key": "3", "type": "artist", "title": "Music"}}
+	p.items["1"] = map[string][]map[string]any{"1": {
+		{"ratingKey": "11", "type": "movie", "title": "One", "year": 2019, "Guid": guids("imdb://tt0000011"), "duration": 6000000},
+		{"ratingKey": "12", "type": "movie", "title": "Two", "year": 2020, "Guid": guids("imdb://tt0000012"), "duration": 6000000},
+	}}
+	p.items["2"] = map[string][]map[string]any{
+		"2": {{"ratingKey": "20", "type": "show", "title": "A show", "Guid": guids("imdb://tt0100")}},
+		"4": {{"ratingKey": "21", "type": "episode", "title": "Pilot", "grandparentRatingKey": "20", "grandparentTitle": "A show",
+			"parentIndex": 1, "index": 1}},
+	}
+	return p
+}
+
+// An import that adds nothing to a user says why: the Plex owner has
+// nothing played or in progress, Plex lists no play of another account on
+// the server, the server has no library of movies or shows, or everything
+// read was already in Polyfin. What was read is counted, and logged at
+// Info for each user without the token or the server's address.
+func TestAPlexImportTellsWhatItReadAndWhyItAddedNothing(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	var logged lockedBuffer
+	h.logger = slog.New(slog.NewTextHandler(&logged, nil))
+	p := smallPlex(t)
+	carol := h.user(t, "carol")
+
+	owner := h.plexImported(t, p, "1", carol)
+	if owner.NothingAdded != NothingPlexOwner || owner.Sections != 2 || owner.Listed != 4 || owner.Read != 0 {
+		t.Errorf("the owner, nothing watched: %+v", owner)
+	}
+	none := h.plexImported(t, p, "5", carol)
+	if none.NothingAdded != NothingPlexNoHistory || none.Sections != 2 || none.Listed != 3 || none.History != 0 || none.Read != 0 {
+		t.Errorf("Carol, no play: %+v", none)
+	}
+
+	p.history["5"] = []map[string]any{
+		{"historyKey": "/status/sessions/history/2", "ratingKey": "11", "type": "movie", "title": "One", "viewedAt": at("2026-09-02T20:00:00Z").Unix(),
+			"accountID": 5},
+		{"historyKey": "/status/sessions/history/1", "ratingKey": "21", "type": "episode", "title": "Pilot", "grandparentKey": "/library/metadata/20",
+			"grandparentTitle": "A show", "parentIndex": 1, "index": 1, "viewedAt": at("2026-09-01T20:00:00Z").Unix(), "accountID": 5},
+		{"historyKey": "/status/sessions/history/0", "ratingKey": "31", "type": "track", "title": "A song", "viewedAt": at("2026-09-01T10:00:00Z").Unix(),
+			"accountID": 5},
+	}
+	first := h.plexImported(t, p, "5", carol)
+	if first.NothingAdded != "" || first.History != 3 || first.Read != 2 || first.Matched != 2 || first.Played != 2 || first.UpToDate != 0 {
+		t.Errorf("Carol's plays: %+v", first)
+	}
+	again := h.plexImported(t, p, "5", carol)
+	if again.NothingAdded != NothingUpToDate || again.Read != 2 || again.Matched != 2 || again.Played != 0 || again.UpToDate != 2 {
+		t.Errorf("Carol's plays again: %+v", again)
+	}
+
+	p.sections = []map[string]any{{"key": "3", "type": "artist", "title": "Music"}}
+	if music := h.plexImported(t, p, "1", carol); music.NothingAdded != NothingNoSections || music.Sections != 0 {
+		t.Errorf("a server of music only: %+v", music)
+	}
+
+	text := logged.String()
+	if !strings.Contains(text, `msg="An import read a user's watch data" kind=plex user=5 state=done owner=false signedIn=false sections=2 listed=3 history=0`) ||
+		!strings.Contains(text, "nothingAdded=plex_no_history") || !strings.Contains(text, "nothingAdded=up_to_date") ||
+		strings.Contains(text, plexToken) || strings.Contains(text, strings.TrimPrefix(p.url, "http://")) {
+		t.Errorf("logged: %s", text)
+	}
+}
+
+// Plex keeps the plays of a title deleted from its libraries without its
+// rating key: they are listed as no longer in Plex, once per title, not
+// left out unsaid. A play the history files under another account than
+// the one asked, as a server leaving the filter out would answer, is left
+// out.
+func TestPlexPlaysOfDeletedTitlesAreListedAndOtherAccountsLeftOut(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	p := smallPlex(t)
+	carol := h.user(t, "carol")
+	viewed := at("2026-09-01T20:00:00Z").Unix()
+	p.history["5"] = []map[string]any{
+		{"historyKey": "/status/sessions/history/5", "ratingKey": "11", "type": "movie", "title": "One", "viewedAt": viewed, "accountID": 5},
+		{"historyKey": "/status/sessions/history/4", "librarySectionID": "1", "type": "movie", "title": "Deleted", "viewedAt": viewed, "accountID": 5},
+		{"historyKey": "/status/sessions/history/3", "librarySectionID": "1", "type": "movie", "title": "Deleted", "viewedAt": viewed, "accountID": 5},
+		{"historyKey": "/status/sessions/history/2", "librarySectionID": "2", "type": "episode", "title": "Gone episode", "grandparentTitle": "Gone show",
+			"parentIndex": 2, "index": 3, "viewedAt": viewed, "accountID": 5},
+		{"historyKey": "/status/sessions/history/1", "ratingKey": "12", "type": "movie", "title": "Two", "viewedAt": viewed, "accountID": 7},
+	}
+	got := h.plexImported(t, p, "5", carol)
+	if got.Played != 1 || got.History != 5 || got.UnmatchedCount != 2 {
+		t.Fatalf("Carol: %+v", got)
+	}
+	// A deleted title, which Plex gives no identifier, is kept by its
+	// name, an episode by its series'.
+	kept := h.kept(t, carol.ID, Plex)
+	if len(kept) != 2 {
+		t.Fatalf("kept: %+v", kept)
+	}
+	movie, episode := kept[0], kept[1]
+	if movie.Name != "Deleted" || movie.Kind != importlinks.KindMovie || movie.Reason != ReasonNotInLibrary || !movie.Played ||
+		episode.Name != "Gone show" || episode.Kind != importlinks.KindEpisode || episode.Season != 2 || episode.Episode != 3 ||
+		episode.Reason != ReasonNotInLibrary || !episode.Played {
+		t.Errorf("kept: %+v %+v", movie, episode)
+	}
+	if d := h.dataOf(t, carol.ID, library.TitleRef{IMDb: "tt0000012"}); d.Played {
+		t.Errorf("another account's play: %+v", d)
+	}
+}
+
+// An item an older Plex agent matched has no Guid list: its guid names its
+// identifier, as the agent's scheme or behind the agent's own, with
+// ?lang=… after. An episode numbered in another of TheTVDB's episode orders
+// is listed as such rather than marked as another episode.
+func TestPlexReadsTheIdentifiersOfOlderAgents(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	p := smallPlex(t)
+	owner := h.user(t, "owner")
+	h.listed(t, "movie", "movie|tmdb:550", `{"meta":{"id":"tmdb:550","type":"movie","name":"Listed by TMDB"}}`)
+	h.listed(t, "series", "series|tvdb:81189", `{"meta":{"id":"tvdb:81189","type":"series","name":"Listed by TVDB"}}`)
+	h.listed(t, "episode", "episode|tvdb:81189:1:1", `{"seriesId":"tvdb:81189","video":{"id":"tvdb:81189:1:1","season":1,"episode":1}}`)
+	h.listed(t, "episode", "episode|tvdb:81189:1:2", `{"seriesId":"tvdb:81189","video":{"id":"tvdb:81189:1:2","season":1,"episode":2}}`)
+	watched := func(item map[string]any) map[string]any {
+		item["viewCount"], item["lastViewedAt"] = 1, at("2026-09-01T20:00:00Z").Unix()
+		return item
+	}
+	p.items["1"] = map[string][]map[string]any{"1": {
+		watched(map[string]any{"ratingKey": "11", "type": "movie", "title": "By IMDb", "guid": "com.plexapp.agents.imdb://tt0000011?lang=en"}),
+		watched(map[string]any{"ratingKey": "12", "type": "movie", "title": "By TMDB", "guid": "com.plexapp.agents.themoviedb://550?lang=en"}),
+		// Only an identifier right after :// is one.
+		watched(map[string]any{"ratingKey": "13", "type": "movie", "title": "Stray", "guid": "com.plexapp.agents.other://anidb-1?tmdb-550"}),
+	}}
+	p.items["2"] = map[string][]map[string]any{
+		"2": {
+			{"ratingKey": "20", "type": "show", "title": "Usual order", "guid": "com.plexapp.agents.thetvdb://81189?lang=en"},
+			{"ratingKey": "30", "type": "show", "title": "Packed", "guid": "com.plexapp.agents.other://tvdb-81189?lang=en"},
+			{"ratingKey": "40", "type": "show", "title": "Other order", "guid": "com.plexapp.agents.other://tvdb2-81189?lang=en"},
+		},
+		"4": {
+			watched(map[string]any{"ratingKey": "21", "type": "episode", "title": "Pilot", "grandparentRatingKey": "20", "parentIndex": 1, "index": 1,
+				"guid": "com.plexapp.agents.thetvdb://81189/1/1?lang=en"}),
+			watched(map[string]any{"ratingKey": "31", "type": "episode", "title": "Second", "grandparentRatingKey": "30", "parentIndex": 1, "index": 2,
+				"guid": "com.plexapp.agents.other://tvdb-81189/1/2?lang=en"}),
+			watched(map[string]any{"ratingKey": "41", "type": "episode", "title": "Third", "grandparentRatingKey": "40", "grandparentTitle": "Other order",
+				"parentIndex": 1, "index": 3, "guid": "com.plexapp.agents.other://tvdb2-81189/1/3?lang=en"}),
+		},
+	}
+	got := h.plexImported(t, p, "1", owner)
+	if got.Played != 4 || got.UnmatchedCount != 2 {
+		t.Fatalf("owner: %+v", got)
+	}
+	if reasons := h.keptReasons(t, owner.ID, Plex); len(reasons) != 2 || reasons["Stray"] != ReasonNoIdentifier ||
+		reasons["Other order s1e3"] != ReasonOtherEpisodeOrder {
+		t.Errorf("kept: %+v", reasons)
+	}
+	for name, ref := range map[string]library.TitleRef{"by IMDb": {IMDb: "tt0000011"}, "by TMDB": {TMDB: 550},
+		"usual order": {Episode: true, TVDB: 81189, Season: 1, Number: 1}, "packed": {Episode: true, TVDB: 81189, Season: 1, Number: 2}} {
+		if d := h.dataOf(t, owner.ID, ref); !d.Played {
+			t.Errorf("%s: %+v", name, d)
+		}
+	}
+}
+
+// The owner's resume point without a date cannot be told older or newer
+// than Polyfin's: it is counted as such rather than left out unsaid.
+func TestPlexCountsTheOwnersUndatedResumePoints(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	p := smallPlex(t)
+	owner := h.user(t, "owner")
+	p.items["1"]["1"][0]["viewOffset"] = 1800000
+	got := h.plexImported(t, p, "1", owner)
+	if got.Read != 1 || got.Matched != 1 || got.Undated != 1 || got.Resumed != 0 || got.NothingAdded != "" {
+		t.Errorf("owner: %+v", got)
+	}
+}
+
+// A Jellyfin user with nothing played, in progress or favorite is told so,
+// and a second import of a user is told that everything was already in
+// Polyfin.
+func TestAJellyfinImportTellsWhyItAddedNothing(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	alice, bob := h.user(t, "alice"), h.user(t, "bob")
+	h.f.items["jf-alice"] = map[string][]map[string]any{
+		"IsPlayed":    {movie("m1", "One", map[string]string{"Imdb": "tt0000001"}, map[string]any{"Played": true, "PlayCount": 1})},
+		"IsFavorite":  {movie("m1", "One", map[string]string{"Imdb": "tt0000001"}, map[string]any{"IsFavorite": true})},
+		"IsResumable": {movie("m2", "Two", map[string]string{"Imdb": "tt0000002"}, map[string]any{"PlaybackPositionTicks": int64(30 * time.Minute / tick)})},
+	}
+	targets := []Target{{JellyfinID: "jf-alice", User: alice.ID}, {JellyfinID: "jf-bob", User: bob.ID}}
+	status := h.imported(t, targets...)
+	if got := status.Users[0]; got.NothingAdded != "" || got.Read != 3 || got.Matched != 3 || got.Played != 1 || got.Favorites != 1 || got.Undated != 1 {
+		t.Errorf("Alice: %+v", got)
+	}
+	if got := status.Users[1]; got.NothingAdded != NothingPlayed || got.Read != 0 || got.Sections != 0 {
+		t.Errorf("Bob: %+v", got)
+	}
+	if got := h.imported(t, targets[0]).Users[0]; got.NothingAdded != NothingUpToDate || got.UpToDate != 2 {
+		t.Errorf("Alice again: %+v", got)
 	}
 }

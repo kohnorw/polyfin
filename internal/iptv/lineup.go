@@ -293,9 +293,13 @@ type Channel struct {
 	Number           *int
 	ProviderNumber   *int
 	FixedNumber      *int
-	GuideID          string
-	Mapping          *Mapping
-	Streams          []Stream
+	// GuideNumber is the provider's number as written, when it is not a
+	// whole one ("104.5") or the channel is a tuner's ("5.1"), "" otherwise:
+	// ProviderNumber is its whole part, and Number is it unless fixed.
+	GuideNumber string
+	GuideID     string
+	Mapping     *Mapping
+	Streams     []Stream
 	// ArchiveDays is how many days back the provider keeps the channel's
 	// past programmes, played from Replay; 0 for no archive.
 	ArchiveDays int
@@ -314,7 +318,7 @@ type ChannelFilter struct {
 const channelQuery = `SELECT l.id, l.item_id, coalesce(l.name, l.provider_name), l.provider_name, l.name IS NOT NULL,
 	coalesce(l.logo, l.provider_logo), l.provider_logo, l.description, c.id, coalesce(c.name, c.provider_name), l.category_id,
 	l.moved_to IS NOT NULL, l.enabled, ` + shownSQL + `,
-	coalesce(l.number, CASE WHEN i.numbering = 'provider' THEN l.provider_number END), l.provider_number, l.number, l.guide_id,
+	coalesce(l.number, CASE WHEN i.numbering = 'provider' THEN l.provider_number END), l.provider_number, l.number, l.provider_guide_number, l.guide_id,
 	m.manual, m.guide_id, m.xmltv_id, coalesce(gc.names[1], ''), coalesce(` + archiveSQL + `, 0), count(*) OVER ()
 	` + channelJoins + `
 	LEFT JOIN live_guide_maps m ON m.addon_id = l.addon_id AND m.catalog_type = 'tv' AND m.catalog_id = '` + catalogID + `' AND m.channel_id = l.item_id
@@ -340,7 +344,7 @@ func (s *Service) channels(ctx context.Context, source accounts.ID, filter strin
 		var xmltvID *string
 		var mappedName string
 		if err := row.Scan(&c.key, &c.ID, &c.Name, &c.ProviderName, &c.Renamed, &c.Logo, &c.ProviderLogo, &c.Description, &c.Category,
-			&c.CategoryName, &c.ProviderCategory, &c.Moved, &c.Enabled, &c.Shown, &c.Number, &c.ProviderNumber, &c.FixedNumber, &c.GuideID,
+			&c.CategoryName, &c.ProviderCategory, &c.Moved, &c.Enabled, &c.Shown, &c.Number, &c.ProviderNumber, &c.FixedNumber, &c.GuideNumber, &c.GuideID,
 			&manual, &guide, &xmltvID, &mappedName, &c.ArchiveDays, &total); err != nil {
 			return Channel{}, err
 		}
@@ -481,10 +485,9 @@ func (s *Service) UpdateChannel(ctx context.Context, scope addons.Scope, source,
 	if changes.Enabled != nil {
 		set("enabled", *changes.Enabled)
 	}
-	name := current.Name
 	if changes.Name != nil {
 		var value *string
-		name = current.ProviderName
+		name := current.ProviderName
 		if changes.Name.Value != nil {
 			trimmed := strings.TrimSpace(*changes.Name.Value)
 			if !printable(trimmed, 100) {
@@ -880,10 +883,12 @@ func (s *Service) Preview(ctx context.Context, scope addons.Scope, source accoun
 
 // previewedTitles are a source's titles of a type, for a preview.
 func (s *Service) previewedTitles(ctx context.Context, source accounts.ID, typ string, o Options) ([]Title, error) {
-	var kind, address string
+	var kind, address, agent string
 	var confined bool
-	if err := s.db.QueryRow(ctx, `SELECT a.kind, a.manifest_url, a.owner_id IS NOT NULL AND NOT coalesce(u.is_administrator, false)
-		FROM addons a LEFT JOIN users u ON u.id = a.owner_id WHERE a.id = $1`, source).Scan(&kind, &address, &confined); err != nil {
+	var network addons.Network
+	if err := s.db.QueryRow(ctx, `SELECT a.kind, a.manifest_url, `+addons.MemberSQL("a")+`, coalesce(a.network, ''), i.user_agent
+		FROM addons a JOIN iptv_sources i ON i.addon_id = a.id WHERE a.id = $1`, source).
+		Scan(&kind, &address, &confined, &network, &agent); err != nil {
 		return nil, err
 	}
 	on := typ == typeMovie && o.Movies || typ == typeSeries && o.Series
@@ -905,7 +910,9 @@ func (s *Service) previewedTitles(ctx context.Context, source accounts.ID, typ s
 	case on:
 		return storedTitles(ctx, s.db, source, typ)
 	default:
-		list, err := s.fetchCached(ctx, accountOf(kind, address), confined, previewPart(typ), true)
+		account := accountOf(kind, address)
+		account.UserAgent = agent
+		list, err := s.fetchCached(ctx, account, confined, network, previewPart(typ), true)
 		if err != nil {
 			return nil, err
 		}
@@ -925,7 +932,13 @@ func (s *Service) PreviewAccount(ctx context.Context, account Account, by, q str
 	if err != nil {
 		return 0, nil, err
 	}
-	list, err := s.fetchCached(ctx, accountOf(account.Kind, address), confined, previewPart(by), true)
+	agent, err := validUserAgent(account.UserAgent)
+	if err != nil {
+		return 0, nil, err
+	}
+	stored := accountOf(account.Kind, address)
+	stored.UserAgent = agent
+	list, err := s.fetchCached(ctx, stored, confined, "", previewPart(by), true)
 	if err != nil {
 		return 0, nil, err
 	}

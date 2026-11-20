@@ -2,7 +2,7 @@ import type { ReactNode } from 'react'
 import { cx } from './cx'
 
 /** Whether the device is an Apple one, whose shortcuts use ⌘ rather than Ctrl. */
-export const isApple = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent)
+const isApple = /Mac|iPhone|iPad|iPod/.test(navigator.platform || navigator.userAgent)
 
 /** The modifier of shortcuts as keys show it: "⌘" on Apple devices, "Ctrl" elsewhere. */
 export const modKey = isApple ? '⌘' : 'Ctrl'
@@ -15,7 +15,7 @@ export function Kbd({ children, className }: { children: ReactNode; className?: 
   return (
     <kbd
       className={cx(
-        'inline-flex h-5 min-w-5 items-center justify-center rounded-check border border-line-2 bg-s4 px-1.5 font-mono text-[11.5px] leading-none text-ink-2',
+        'inline-flex h-6.5 min-w-6.5 items-center justify-center rounded-[0.5rem] bg-ink/7 px-2 text-[0.875rem] leading-none font-semibold text-ink-3',
         className,
       )}
     >

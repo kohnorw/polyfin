@@ -1,7 +1,9 @@
 package stremio
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -10,13 +12,26 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"regexp"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"github.com/moodiness/polyfin/internal/logs"
+	"github.com/moodiness/polyfin/internal/relayed"
 )
 
 const (
+	// requestTimeout bounds a request for a manifest, a catalog page, a
+	// description, subtitles or artwork, and StreamTimeout a request for
+	// streams: an addon gathering other addons' streams answers once the
+	// slowest of them answered or its own limit for them ran out, often
+	// 15 seconds itself.
 	requestTimeout = 15 * time.Second
+	StreamTimeout  = 30 * time.Second
 	// Large configurations list hundreds of catalogs with their options.
 	maxResponseBytes = 8 << 20
 	maxRedirects     = 5
@@ -38,22 +53,50 @@ var (
 
 // Client fetches addon resources. Requests made on behalf of untrusted users
 // are confined to public internet addresses, checked when connecting so that
-// DNS answers and redirects cannot point them at the local network.
+// DNS answers and redirects cannot point them at the local network. The
+// requests made to a source that is itself on a local network reach local
+// addresses only, checked the same way (see newLocalClient).
 type Client struct {
 	userAgent string
 	trusted   *http.Client
 	confined  *http.Client
+	local     *http.Client
 	health    healthRecords
+	// timeout and streamTimeout are requestTimeout and StreamTimeout but
+	// in tests (see SetTimeouts), and bound bounds a request by them,
+	// context.WithTimeout but in tests (see SetTimeoutBound).
+	timeout, streamTimeout time.Duration
+	bound                  func(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc)
 }
 
 // NewClient returns a client identifying itself with the Polyfin version.
 func NewClient(version string) *Client {
 	return &Client{
-		userAgent: "Polyfin/" + version,
-		trusted:   newHTTPClient(false),
-		confined:  newHTTPClient(true),
-		health:    healthRecords{byAddon: map[string]*Health{}},
+		userAgent:     "Polyfin/" + version,
+		trusted:       newHTTPClient(false),
+		confined:      newHTTPClient(true),
+		local:         newLocalClient(),
+		health:        healthRecords{byAddon: map[string]*Health{}},
+		timeout:       requestTimeout,
+		streamTimeout: StreamTimeout,
+		bound:         context.WithTimeout,
 	}
+}
+
+// SetTimeouts replaces, before the client is used, how long a request is
+// given, and a request for streams. Tests shorten them; the server keeps
+// requestTimeout and StreamTimeout.
+func (c *Client) SetTimeouts(request, streams time.Duration) {
+	c.timeout, c.streamTimeout = request, streams
+}
+
+// SetTimeoutBound replaces, before the client is used, what bounds each
+// request by its timeout: context.WithTimeout, which the server keeps. A
+// test of an addon that does not answer, then does, gives one that bounds
+// no request once it answers, so that its answers are waited for however
+// long a busy machine takes.
+func (c *Client) SetTimeoutBound(bound func(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc)) {
+	c.bound = bound
 }
 
 // idleConnsPerHost is how many idle connections are kept to each host:
@@ -81,7 +124,7 @@ func newHTTPClient(confined bool) *http.Client {
 				return err
 			}
 			ip, err := netip.ParseAddr(host)
-			if err != nil || !public(ip) {
+			if err != nil || !Public(ip) {
 				return ErrPrivateNetwork
 			}
 			return nil
@@ -91,13 +134,8 @@ func newHTTPClient(confined bool) *http.Client {
 	}
 	transport.DialContext = dialer.DialContext
 	return &http.Client{
-		Transport: transport,
-		CheckRedirect: func(_ *http.Request, via []*http.Request) error {
-			if len(via) >= maxRedirects {
-				return errors.New("too many redirects")
-			}
-			return nil
-		},
+		Transport:     transport,
+		CheckRedirect: followRedirects,
 	}
 }
 
@@ -105,9 +143,62 @@ func newHTTPClient(confined bool) *http.Client {
 // from the internet.
 var cgnat = netip.MustParsePrefix("100.64.0.0/10")
 
-func public(ip netip.Addr) bool {
-	ip = ip.Unmap()
-	return ip.IsGlobalUnicast() && !ip.IsPrivate() && !cgnat.Contains(ip)
+// reserved are the other ranges that are not the internet's, although
+// they are neither private nor link-local: an address there leads nowhere
+// or, on some networks, to a host of the network itself.
+var reserved = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),        // this network
+	netip.MustParsePrefix("192.0.0.0/24"),     // protocol assignments
+	netip.MustParsePrefix("192.88.99.0/24"),   // 6to4 relays
+	netip.MustParsePrefix("198.18.0.0/15"),    // benchmarking
+	netip.MustParsePrefix("240.0.0.0/4"),      // reserved
+	netip.MustParsePrefix("168.63.129.16/32"), // a cloud platform's own services, as its virtual machines reach them
+	netip.MustParsePrefix("64:ff9b:1::/48"),   // NAT64 within a network
+	netip.MustParsePrefix("2001::/32"),        // Teredo
+	netip.MustParsePrefix("::ffff:0:0:0/96"),  // IPv4-translated
+	netip.MustParsePrefix("fec0::/10"),        // site-local
+}
+
+// The IPv6 prefixes whose addresses stand for an IPv4 address, which a
+// gateway of the network reaches for them: NAT64's well-known prefix and
+// IPv4-compatible addresses hold it in their last four bytes, 6to4
+// addresses after their prefix.
+var (
+	nat64          = netip.MustParsePrefix("64:ff9b::/96")
+	ipv4Compatible = netip.MustParsePrefix("::/96")
+	sixToFour      = netip.MustParsePrefix("2002::/16")
+)
+
+// Public reports whether ip is an address on the internet, which confined
+// requests may reach: not loopback, link-local, private, in the shared
+// address space of carrier-grade NAT, nor in a range reserved for
+// something else (see reserved). An IPv6 address that stands for an IPv4
+// address is public when that address is, so that a network reaching
+// IPv4 through NAT64 still reaches the internet. NAT64's prefix for use
+// within a network is refused whole: where it holds the IPv4 address
+// depends on the network. The ranges kept for documentation stay public:
+// they are not routed, so a request there reaches nothing.
+func Public(ip netip.Addr) bool {
+	// A prefix holds no address with a zone.
+	ip = ip.Unmap().WithZone("")
+	if ip.Is6() {
+		raw := ip.As16()
+		switch {
+		case nat64.Contains(ip), ipv4Compatible.Contains(ip):
+			ip = netip.AddrFrom4([4]byte(raw[12:]))
+		case sixToFour.Contains(ip):
+			ip = netip.AddrFrom4([4]byte(raw[2:6]))
+		}
+	}
+	if !ip.IsGlobalUnicast() || ip.IsPrivate() || cgnat.Contains(ip) {
+		return false
+	}
+	for _, prefix := range reserved {
+		if prefix.Contains(ip) {
+			return false
+		}
+	}
+	return true
 }
 
 // CheckPublic reports ErrPrivateNetwork when host is, or resolves to, an
@@ -116,7 +207,7 @@ func public(ip netip.Addr) bool {
 // address they connect to anyway.
 func CheckPublic(ctx context.Context, host string) error {
 	if ip, err := netip.ParseAddr(host); err == nil {
-		if !public(ip) {
+		if !Public(ip) {
 			return ErrPrivateNetwork
 		}
 		return nil
@@ -126,19 +217,23 @@ func CheckPublic(ctx context.Context, host string) error {
 		return nil
 	}
 	for _, ip := range ips {
-		if !public(ip) {
+		if !Public(ip) {
 			return ErrPrivateNetwork
 		}
 	}
 	return nil
 }
 
-// do sends a request with the client allowed for it. Errors never contain
+// do sends a request with the client allowed for it: the confined one, or
+// else the local one for a request to a source itself (see toSource), and
+// the one that reaches any address for the others. Errors never contain
 // the URL, which usually carries credentials.
 func (c *Client) do(request *http.Request, confined bool) (*http.Response, error) {
 	client := c.trusted
 	if confined {
 		client = c.confined
+	} else if isToSource(request.Context()) {
+		client = c.local
 	}
 	response, err := client.Do(request)
 	if err != nil {
@@ -154,10 +249,14 @@ func (c *Client) do(request *http.Request, confined bool) (*http.Response, error
 	return response, nil
 }
 
-// get downloads a resource of the addon manifestURL installs, and records
-// how its answer went (see Health).
-func (c *Client) get(ctx context.Context, manifestURL, target string, confined bool) ([]byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+// get downloads a resource of the addon manifestURL installs, within
+// timeout, and records how its answer went (see Health). The request is
+// one to the source itself: not confined, it reaches local addresses only.
+// A request timeout ended fails as the addon not answering within it (see
+// timedOut).
+func (c *Client) get(ctx context.Context, manifestURL, target string, confined bool, timeout time.Duration) ([]byte, error) {
+	parent := toSource(ctx)
+	ctx, cancel := c.bound(parent, timeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil {
@@ -168,18 +267,32 @@ func (c *Client) get(ctx context.Context, manifestURL, target string, confined b
 	started := time.Now()
 	response, err := c.do(request, confined)
 	if err != nil {
-		c.health.record(ctx, manifestURL, target, started, failureOf(ctx, err))
-		return nil, err
+		if !offNetwork(ctx, err) {
+			c.health.record(ctx, manifestURL, target, started, failureOf(ctx, err))
+		}
+		return nil, limitEnded(parent, ctx, timeout, err)
 	}
 	defer response.Body.Close()
 	if response.StatusCode != http.StatusOK {
-		c.health.record(ctx, manifestURL, target, started, failureOfStatus(response.StatusCode))
-		return nil, fmt.Errorf("%w: %w", ErrUnreachable, httpStatus(response.StatusCode))
+		// An addon asks to wait with a 429, or with a 503 that says how
+		// long (Retry-After), as IPTV providers do (see iptv.RateLimited).
+		wait, waits := parseRetryAfter(response.Header.Get("Retry-After"), time.Now())
+		waits = waits && (response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusServiceUnavailable)
+		failure := failureOfStatus(response.StatusCode)
+		if waits {
+			failure = FailureRateLimited
+		}
+		c.health.record(ctx, manifestURL, target, started, failure)
+		answer := answered{status: httpStatus(response.StatusCode), wait: wait, waits: waits}
+		if answer.refused() {
+			answer.reason = refusalReason(response)
+		}
+		return nil, answer
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxResponseBytes+1))
 	if err != nil {
 		c.health.record(ctx, manifestURL, target, started, failureOf(ctx, err))
-		return nil, fmt.Errorf("%w: %v", ErrUnreachable, err)
+		return nil, limitEnded(parent, ctx, timeout, fmt.Errorf("%w: %w", ErrUnreachable, err))
 	}
 	if len(body) > maxResponseBytes {
 		c.health.record(ctx, manifestURL, target, started, FailureInvalidResponse)
@@ -189,10 +302,151 @@ func (c *Client) get(ctx context.Context, manifestURL, target string, confined b
 	return body, nil
 }
 
+// timedOut is the error of a request the addon did not answer within the
+// time Polyfin gives it (see requestTimeout): its text names that limit,
+// as Health tells it, rather than the context's "deadline exceeded". It is
+// ErrUnreachable, as no resource came of it, context.DeadlineExceeded, and
+// the request's own error.
+type timedOut struct {
+	limit time.Duration
+	err   error
+}
+
+func (t timedOut) Error() string { return "addon did not answer within " + t.limit.String() }
+
+func (t timedOut) Unwrap() []error { return []error{ErrUnreachable, context.DeadlineExceeded, t.err} }
+
+// limitEnded returns err, the failure of a request on ctx, which get gave
+// limit within parent, as timedOut when that limit ended it. A request its
+// caller ended keeps its error, whatever ended the caller.
+func limitEnded(parent, ctx context.Context, limit time.Duration, err error) error {
+	if parent.Err() == nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return timedOut{limit: limit, err: err}
+	}
+	return err
+}
+
 // httpStatus is the status of an answer that is not a success.
 type httpStatus int
 
 func (s httpStatus) Error() string { return fmt.Sprintf("HTTP %d", int(s)) }
+
+// answered is the error of an addon's answer that is not a success. It is
+// ErrUnreachable to its callers, as no resource came of it, with its status
+// for StatusOf and, when the addon asked to wait, the wait for RetryAfter.
+// Its text tells what the addon answered, as Health names it, rather than
+// calling an addon that answered unreachable, and the reason the addon gave
+// for a refusal.
+type answered struct {
+	status httpStatus
+	wait   retryAfter
+	waits  bool
+	reason string
+}
+
+// refused reports an answer refusing the request: an HTTP error of the
+// client's but "not found" and "too many requests".
+func (a answered) refused() bool {
+	status := int(a.status)
+	return status >= 400 && status < 500 && status != http.StatusNotFound && status != http.StatusTooManyRequests
+}
+
+func (a answered) Error() string {
+	status := int(a.status)
+	switch {
+	case a.waits:
+		return fmt.Sprintf("addon asked to wait: %v, %v", a.status, a.wait)
+	case status == http.StatusTooManyRequests:
+		return fmt.Sprintf("addon asked to slow down: %v", a.status)
+	case status >= 500:
+		return fmt.Sprintf("addon failed: %v", a.status)
+	case a.refused() && a.reason != "":
+		return fmt.Sprintf("addon refused the request: %v (%s)", a.status, a.reason)
+	case a.refused():
+		return fmt.Sprintf("addon refused the request: %v", a.status)
+	}
+	return fmt.Sprintf("addon answered %v", a.status)
+}
+
+const (
+	// maxReasonBytes bounds what is read of a refusal's body.
+	maxReasonBytes = 4 << 10
+	// maxReasonLength bounds the reason a refusal gives, in characters.
+	maxReasonLength = 120
+)
+
+var (
+	// reasonAddresses matches URLs of any scheme in a refusal's reason.
+	reasonAddresses = regexp.MustCompile(`(?i)\b[a-z][a-z0-9+.\-]*://\S+`)
+	// reasonWords matches runs of characters that tokens and keys are made
+	// of; those long enough and holding a digit are taken for one.
+	reasonWords = regexp.MustCompile(`[A-Za-z0-9_\-.~+/=]{16,}`)
+)
+
+// refusalReason is the reason the body of a refusal gives: the "error" or
+// "message" of a JSON answer, or a short text, on one line, cut to
+// maxReasonLength, with what looks like an address, a token or a key
+// redacted, as the reason may repeat the request. It is empty when the
+// body gives none.
+func refusalReason(response *http.Response) string {
+	body, err := io.ReadAll(io.LimitReader(response.Body, maxReasonBytes+1))
+	if err != nil || len(body) == 0 {
+		return ""
+	}
+	var reason string
+	var fields struct {
+		Error   json.RawMessage `json:"error"`
+		Message json.RawMessage `json:"message"`
+	}
+	if json.Valid(body) {
+		if json.Unmarshal(body, &fields) != nil {
+			return ""
+		}
+		// An error may be an object with its own message.
+		var nested struct {
+			Message string `json:"message"`
+		}
+		switch {
+		case json.Unmarshal(fields.Error, &reason) == nil && strings.TrimSpace(reason) != "":
+		case json.Unmarshal(fields.Error, &nested) == nil && strings.TrimSpace(nested.Message) != "":
+			reason = nested.Message
+		case json.Unmarshal(fields.Message, &reason) == nil:
+		}
+	} else {
+		// A page, or a body too long to be a reason, says nothing short.
+		media, _, _ := strings.Cut(response.Header.Get("Content-Type"), ";")
+		media = strings.ToLower(strings.TrimSpace(media))
+		if len(body) > maxReasonBytes || (media != "text/plain" && media != "") || !utf8.Valid(body) {
+			return ""
+		}
+		reason = string(body)
+	}
+	reason = strings.Join(strings.Fields(strings.Map(func(r rune) rune {
+		if unicode.IsControl(r) || !unicode.IsPrint(r) {
+			return ' '
+		}
+		return r
+	}, reason)), " ")
+	reason = reasonAddresses.ReplaceAllString(reason, "<redacted>")
+	reason = reasonWords.ReplaceAllStringFunc(reason, func(word string) string {
+		if strings.ContainsAny(word, "0123456789") {
+			return "<redacted>"
+		}
+		return word
+	})
+	reason = logs.Redact(reason)
+	if runes := []rune(reason); len(runes) > maxReasonLength {
+		reason = strings.TrimSpace(string(runes[:maxReasonLength-1])) + "…"
+	}
+	return reason
+}
+
+func (a answered) Unwrap() []error {
+	if a.waits {
+		return []error{ErrUnreachable, a.status, a.wait}
+	}
+	return []error{ErrUnreachable, a.status}
+}
 
 // StatusOf returns the HTTP status of an answer that was not a success,
 // 0 when err is not one.
@@ -201,12 +455,53 @@ func StatusOf(err error) int {
 	return int(status)
 }
 
+// retryAfter is how long an addon that answered 429, or 503 with
+// Retry-After, asked to wait before it is asked again.
+type retryAfter time.Duration
+
+func (r retryAfter) Error() string { return "retry after " + time.Duration(r).String() }
+
+// RetryAfter returns how long the addon whose answer err is asked to wait,
+// by the Retry-After of its 429 or 503, or as long as is left of a wait
+// it asked for earlier (see AskedToWait); false when it did not say.
+func RetryAfter(err error) (time.Duration, bool) {
+	wait, ok := errors.AsType[retryAfter](err)
+	return time.Duration(wait), ok
+}
+
+// ErrAskedToWait reports a request that was not sent: the addon asked to
+// wait, and the wait has not ended.
+var ErrAskedToWait = errors.New("not asked: the addon asked to wait")
+
+// AskedToWait is the error of a request not sent to an addon that asked
+// to wait, with left of the wait to go: ErrAskedToWait, and left for
+// RetryAfter.
+func AskedToWait(left time.Duration) error {
+	return fmt.Errorf("%w, %w", ErrAskedToWait, retryAfter(left))
+}
+
+// parseRetryAfter reads a Retry-After header, in seconds or as a date, as
+// of now: a date past is no wait.
+func parseRetryAfter(value string, now time.Time) (retryAfter, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0, false
+	}
+	if seconds, err := strconv.Atoi(value); err == nil {
+		return retryAfter(time.Duration(max(seconds, 0)) * time.Second), true
+	}
+	if date, err := http.ParseTime(value); err == nil {
+		return retryAfter(max(date.Sub(now), 0)), true
+	}
+	return 0, false
+}
+
 // Fetch downloads a resource of an addon of another protocol than
 // Stremio's, through the same rules: bounded, confined when asked, its URL
 // kept out of errors, its outcome counted in the health of the addon of
 // manifestURL. An answer 404 is ErrNotFound.
 func (c *Client) Fetch(ctx context.Context, manifestURL, target string, confined bool) ([]byte, error) {
-	body, err := c.get(ctx, manifestURL, target, confined)
+	body, err := c.get(ctx, manifestURL, target, confined, c.timeout)
 	if status, ok := errors.AsType[httpStatus](err); ok && status == http.StatusNotFound {
 		return nil, fmt.Errorf("%w: HTTP 404", ErrNotFound)
 	}
@@ -231,10 +526,26 @@ func (c *Client) Open(ctx context.Context, method, target string, header http.He
 	return c.do(request, confined)
 }
 
+// Post sends body to an address a stream needs, as a ClearKey licence
+// request goes to its licence server, through the same rules as Open:
+// header is sent as given, and the response is returned whatever its
+// status, its body to be closed by the caller.
+func (c *Client) Post(ctx context.Context, target string, header http.Header, body []byte, confined bool) (*http.Response, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, target, bytes.NewReader(body))
+	if err != nil || (request.URL.Scheme != "https" && request.URL.Scheme != "http") {
+		return nil, fmt.Errorf("%w: invalid URL", ErrUnreachable)
+	}
+	maps.Copy(request.Header, header)
+	if request.Header.Get("User-Agent") == "" {
+		request.Header.Set("User-Agent", c.userAgent)
+	}
+	return c.do(request, confined)
+}
+
 // Manifest downloads and validates an addon manifest. confined restricts
 // the request to public addresses.
 func (c *Client) Manifest(ctx context.Context, manifestURL string, confined bool) (Manifest, error) {
-	body, err := c.get(ctx, manifestURL, manifestURL, confined)
+	body, err := c.get(ctx, manifestURL, manifestURL, confined, c.timeout)
 	if errors.Is(err, ErrInvalidResponse) {
 		return Manifest{}, fmt.Errorf("%w: %v", ErrInvalidManifest, err)
 	}
@@ -248,9 +559,14 @@ func (c *Client) Manifest(ctx context.Context, manifestURL string, confined bool
 const maxImageBytes = 15 << 20
 
 // Image downloads artwork referenced by an addon. Only image responses are
-// accepted, so an addon cannot make the server relay arbitrary content.
+// accepted, so an addon cannot make the server relay arbitrary content,
+// and of those only raster pictures, told by their bytes: the type
+// returned is the bytes', never the one their server gave. Anything else,
+// an SVG image among them, is ErrNoPicture. An artwork server that
+// answers 429, or 503, with a Retry-After asks to wait that long, which
+// RetryAfter reads from the error.
 func (c *Client) Image(ctx context.Context, target string, confined bool) ([]byte, string, error) {
-	ctx, cancel := context.WithTimeout(ctx, requestTimeout)
+	ctx, cancel := c.bound(ctx, c.timeout)
 	defer cancel()
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, target, nil)
 	if err != nil || (request.URL.Scheme != "https" && request.URL.Scheme != "http") {
@@ -265,14 +581,36 @@ func (c *Client) Image(ctx context.Context, target string, confined bool) ([]byt
 	defer response.Body.Close()
 	contentType := response.Header.Get("Content-Type")
 	if response.StatusCode != http.StatusOK || !strings.HasPrefix(contentType, "image/") {
+		wait, waits := parseRetryAfter(response.Header.Get("Retry-After"), time.Now())
+		if waits && (response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusServiceUnavailable) {
+			return nil, "", fmt.Errorf("%w: %w %s, %w", ErrUnreachable, httpStatus(response.StatusCode), contentType, wait)
+		}
 		return nil, "", fmt.Errorf("%w: %w %s", ErrUnreachable, httpStatus(response.StatusCode), contentType)
 	}
 	body, err := io.ReadAll(io.LimitReader(response.Body, maxImageBytes+1))
 	if err != nil {
-		return nil, "", fmt.Errorf("%w: %v", ErrUnreachable, err)
+		return nil, "", fmt.Errorf("%w: %w", ErrUnreachable, err)
 	}
 	if len(body) > maxImageBytes {
 		return nil, "", fmt.Errorf("%w: image larger than %d bytes", ErrInvalidResponse, maxImageBytes)
 	}
-	return body, contentType, nil
+	pictureType, ok := relayed.Picture(body)
+	if !ok {
+		return nil, "", noPicture{}
+	}
+	return body, pictureType, nil
+}
+
+// ErrNoPicture reports artwork that is no raster picture by its bytes,
+// whatever type its server gave it (see relayed.Picture).
+var ErrNoPicture = errors.New("the artwork is no picture that is relayed")
+
+// noPicture is ErrNoPicture, and to its callers an image its server does
+// not have: ErrUnreachable, with the status of a missing one for StatusOf.
+type noPicture struct{}
+
+func (noPicture) Error() string { return ErrNoPicture.Error() }
+
+func (noPicture) Unwrap() []error {
+	return []error{ErrNoPicture, ErrUnreachable, httpStatus(http.StatusNotFound)}
 }

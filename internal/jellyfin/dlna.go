@@ -5,7 +5,6 @@ import (
 	"cmp"
 	"context"
 	"errors"
-	"image"
 	"image/jpeg"
 	"net/http"
 	"net/url"
@@ -129,7 +128,7 @@ func (h *Handler) followDLNA(play dlnaPlay, kind int) {
 	}
 	h.Plays.Report(plays.Report{Kind: kind, Device: play.device.ID, User: play.user.ID, UserName: play.user.Name, App: dlnaApp,
 		DeviceName: play.device.DisplayName(), Title: playedTitle(play.item), Position: play.position, PositionKnown: true,
-		Method: play.method})
+		Method: play.method, Sent: h.sentSoFar(play.device.ID.String())})
 }
 
 // errDLNALimit reports a playback refused for the user's limit of
@@ -240,7 +239,7 @@ func (h *Handler) ContinueWatching(ctx context.Context, user accounts.User) ([]l
 
 // NextUp lists what Next Up lists user.
 func (h *Handler) NextUp(ctx context.Context, user accounts.User) ([]library.Item, error) {
-	return h.nextUpItems(ctx, user, nil, nil, nil, true)
+	return h.nextUpItems(ctx, user, nil, nil, nil, true, false)
 }
 
 // dlnaRequest is the PlaybackInfo request a DLNA device stands for: its
@@ -282,7 +281,7 @@ func (h *Handler) Resource(ctx context.Context, user accounts.User, item library
 		return converted, true
 	}
 	request := h.dlnaRequest(user, profile, false)
-	streams := playback.MediaStreams(analysis, p.externals(version), h.Accounts.Settings().Language)
+	streams := playback.MediaStreams(analysis, h.externals(ctx, p, version), h.Accounts.Settings().Language)
 	allowed := h.convertible(h.Accounts.Conversions(user), user, version)
 	decision, _, _ := h.trackDecision(p, version, streams, analysis, request, allowed, false)
 	converted.Duration = analysis.Duration
@@ -352,8 +351,12 @@ func audioMime(container string) string {
 	return "audio/" + container
 }
 
-// Play serves a DLNA device's request for an item's bytes.
+// Play serves a DLNA device's request for an item's bytes, counted for the
+// device's playback (see meteredDevice).
 func (h *Handler) Play(w http.ResponseWriter, r *http.Request, play dlna.Play) {
+	counted := h.meteredDevice(w, r, play.Device.ID)
+	defer counted.release()
+	w = counted
 	switch {
 	case play.Item.Kind == library.KindChannel:
 		h.playDLNAChannel(w, r, play)
@@ -399,7 +402,7 @@ func (h *Handler) chooseDLNA(w http.ResponseWriter, r *http.Request, play dlna.P
 			w.WriteHeader(http.StatusNotFound)
 			return dlnaChosen{}, false
 		}
-		p.versions = h.offered(ctx, play.User, versions)
+		h.offer(ctx, play.User, &p, versions)
 		choice = h.choose(r, play.User, p, play.Item.ID, request, candidatesOf(p.versions), settings.PreferDirectPlay)
 	}
 	if choice.decided == nil || !choice.decided.decision.DirectPlay && !choice.decided.decision.HLS {
@@ -454,7 +457,7 @@ func (h *Handler) playDLNAVideo(w http.ResponseWriter, r *http.Request, play dln
 		err := h.Playback.Serve(counter, r, chosen.version, playback.Delivery{Relay: true, ContentType: resource.MimeType})
 		stop()
 		if err != nil && r.Context().Err() == nil {
-			h.Logger.Warn("A DLNA device's file could not be served", "addon", chosen.version.Addon, "error", err)
+			h.Logger.Warn("A DLNA device's file could not be served", "addon", chosen.version.AddonLog, "error", err)
 		}
 		h.reachedDLNA(r.Context(), current, fraction(h.dlna.sent(current), size, runtime))
 		return
@@ -506,7 +509,7 @@ func (h *Handler) playDLNAVideo(w http.ResponseWriter, r *http.Request, play dln
 	case errors.Is(err, hls.ErrBusy):
 		w.WriteHeader(http.StatusServiceUnavailable)
 	case err != nil && r.Context().Err() == nil && !errors.Is(err, hls.ErrStopped):
-		h.Logger.Warn("A DLNA device's conversion failed", "addon", chosen.version.Addon, "error", err)
+		h.Logger.Warn("A DLNA device's conversion failed", "addon", chosen.version.AddonLog, "error", err)
 	}
 }
 
@@ -739,7 +742,7 @@ func (h *Handler) playDLNAChannel(w http.ResponseWriter, r *http.Request, play d
 	err = h.Playback.ServeChannel(w, r.WithContext(ctx), version, true)
 	stop()
 	if err != nil && r.Context().Err() == nil {
-		h.Logger.Warn("A DLNA device's channel could not be served", "addon", version.Addon, "error", err)
+		h.Logger.Warn("A DLNA device's channel could not be served", "addon", version.AddonLog, "error", err)
 	}
 }
 
@@ -761,7 +764,7 @@ func (h *Handler) Captions(w http.ResponseWriter, r *http.Request, play dlna.Pla
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
-	streams := playback.MediaStreams(analysis, p.externals(version), h.Accounts.Settings().Language)
+	streams := playback.MediaStreams(analysis, h.externals(r.Context(), p, version), h.Accounts.Settings().Language)
 	request := h.dlnaRequest(play.User, play.Profile, false)
 	decision, _, _ := h.trackDecision(p, version, streams, analysis, request, h.Accounts.Conversions(play.User), false)
 	if !captioned(decision, streams) {
@@ -773,7 +776,7 @@ func (h *Handler) Captions(w http.ResponseWriter, r *http.Request, play dlna.Pla
 		id = play.Item.ID
 	}
 	subtitle := r.Clone(r.Context())
-	grant := h.Playback.Signer().Sign(playback.Grant{Version: version.ID, User: play.User.ID, Relay: true})
+	grant := h.grant(playback.Grant{Version: version.ID, User: play.User.ID, Relay: true})
 	subtitle.URL = &url.URL{Path: r.URL.Path, RawQuery: url.Values{grantParameter: {grant}}.Encode()}
 	subtitle.SetPathValue("itemId", play.Item.ID.String())
 	subtitle.SetPathValue("mediaSourceId", id.String())
@@ -793,14 +796,14 @@ func (h *Handler) Art(w http.ResponseWriter, r *http.Request, id accounts.ID, wi
 	image.SetPathValue("imageType", "Primary")
 	image.SetPathValue("imageIndex", "")
 	captured := &capturedImage{header: http.Header{}, status: http.StatusOK}
-	h.taggedArtwork(captured, image, "", false)
+	h.taggedArtwork(captured, image, "", false, true)
 	if captured.status != http.StatusOK || captured.body.Len() == 0 {
 		w.WriteHeader(http.StatusNotFound)
 		return
 	}
 	body := captured.body.Bytes()
 	if !strings.HasPrefix(captured.header.Get("Content-Type"), "image/jpeg") {
-		converted, err := toJPEG(body)
+		converted, err := h.toJPEG(body)
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
@@ -813,9 +816,13 @@ func (h *Handler) Art(w http.ResponseWriter, r *http.Request, id accounts.ID, wi
 	_, _ = w.Write(body)
 }
 
-// toJPEG encodes an image as a JPEG.
-func toJPEG(data []byte) ([]byte, error) {
-	decoded, _, err := image.Decode(bytes.NewReader(data))
+// toJPEG encodes an image as a JPEG, one that may be decoded (see
+// decodePicture), in a place among the resizes.
+func (h *Handler) toJPEG(data []byte) ([]byte, error) {
+	h.images.open(h.imageDir(), h.Logger)
+	h.images.resizes <- struct{}{}
+	defer func() { <-h.images.resizes }()
+	decoded, _, err := h.decodePicture(data, pictureCost.encoded)
 	if err != nil {
 		return nil, err
 	}

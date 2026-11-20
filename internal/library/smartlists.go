@@ -9,7 +9,6 @@ import (
 	"math/rand/v2"
 	"slices"
 	"strings"
-	"sync"
 	"time"
 
 	"golang.org/x/sync/errgroup"
@@ -31,11 +30,15 @@ import (
 // catalog. The rules are applied when the list is listed, those on what the
 // user did with the titles at each listing.
 //
-// What a catalog page gives of a title (genres, year, IMDb rating) is
-// completed by its description, when one is kept: the language comes only
-// with it. Descriptions missing are read in the background, a few at a
-// time, so that the list grows as they come; until then, a title whose
-// rules depend on them is left out.
+// What a catalog page gives of a title (genres, year, IMDb rating,
+// runtime, content rating, people, release date) is completed by its
+// description, when one is kept: the language, and the episodes of a
+// series a list sorts by its latest episode, come only with it.
+// Descriptions missing are read in the background, a few at a time, so
+// that the list grows as they come; until then, a title whose rules depend
+// on them is left out, and a series sorted by its episodes comes last. The
+// votes of a title's IMDb rating come from MDBList (see ratings.go), and
+// its studios from TMDB (see studios.go), the same way.
 
 const (
 	// smartWait bounds how long a listing of a list waits for the pages it
@@ -44,13 +47,11 @@ const (
 	smartWait = 3 * time.Second
 	// smartReadTime bounds a background read of a catalog for a list.
 	smartReadTime = 5 * time.Minute
-	// smartLife is how long the titles read for a list serve its next
-	// listings: apps read a list page after page. smartBytes bounds what
-	// they take, as the catalog pages kept are bounded: the titles of a
+	// smartBytes bounds what the titles kept for lists take (see
+	// smartEntry), as the catalog pages kept are bounded: the titles of a
 	// list larger than that on their own are read again from the pages at
 	// each listing.
-	smartLife  = 30 * time.Second
-	smartBytes = 64 << 20
+	smartBytes = 128 << 20
 	// smartLookups bounds the descriptions one listing of a list asks
 	// for, and smartFetches the descriptions asked for at once, across
 	// lists.
@@ -64,10 +65,13 @@ const (
 func SmartListItemID(id accounts.ID) accounts.ID { return itemID("smartlist|" + id.String()) }
 
 // smartList is a smart list a user sees, with its item: a library, or a
-// collection.
+// collection. search is set for the collection of a search in plain words
+// (see plainsearch.go), which is neither in the Collections view nor given
+// an image.
 type smartList struct {
-	item Item
-	list smartlists.List
+	item   Item
+	list   smartlists.List
+	search bool
 }
 
 func (v view) smartList(id accounts.ID) (smartList, bool) {
@@ -81,7 +85,7 @@ func (v view) smartList(id accounts.ID) (smartList, bool) {
 
 // smartItem describes a list as apps see it: a collection, or a library of
 // movies or series when every catalog it draws from holds them, else a
-// library without type, as the Watchlist is, which apps give a home row.
+// library without type, which apps give a home row.
 func smartItem(l smartlists.List) Item {
 	item := Item{ID: SmartListItemID(l.ID), Name: l.Name}
 	if l.ShownAs == smartlists.ShownAsCollection {
@@ -130,7 +134,7 @@ func (s *Service) SmartCollections(ctx context.Context, user accounts.User) ([]I
 	}
 	var items []Item
 	for _, l := range v.smart {
-		if l.item.Kind == KindCollection {
+		if l.item.Kind == KindCollection && !l.search {
 			items = append(items, l.item)
 		}
 	}
@@ -151,13 +155,17 @@ func (s *Service) IsSmartList(ctx context.Context, user accounts.User, id accoun
 // smartTitle is a title a list read from its catalogs: its item, the
 // record that finds it again, and what is known of it, but what the user
 // did with it. described is set once its description was read; genre is
-// the genre its catalog was narrowed to, if any.
+// the genre its catalog was narrowed to, if any; episodes are the dates of
+// a series' episodes its description gives, when a sort needs them; held
+// is set for a movie the wait for its digital release holds back.
 type smartTitle struct {
 	item      Item
 	record    record
 	title     smartlists.Title
 	described bool
 	genre     string
+	episodes  episodeDates
+	held      bool
 }
 
 // smartKey identifies the titles read for a list, as it was saved, by the
@@ -171,15 +179,20 @@ type smartKey struct {
 }
 
 // smartReader tells apart the ways sources are read: by which addon, at
-// which address and how far, narrowed to which genre. A user whose
-// parental control or blocked genres hide titles reads them apart, as the
-// titles they are shown differ (see visibleMetas). The titles a user hid
-// tell no reader apart: they are read for every user, and left out at
-// each listing (see smartMatches).
+// which address and how far, narrowed to which genre. A listing that
+// leaves titles out by their rating or genres reads them apart (see
+// visibleMetas): a user whose parental control or blocked genres hide
+// titles, as the titles they are shown differ, and a listing narrowed by
+// its titles' ratings, by its rating filter. The titles a user hid tell no
+// reader apart: they are read for every user, and left out at each
+// listing (see smartMatches).
 func smartReader(v view, sources []source) string {
 	var b strings.Builder
 	if v.restricted() {
 		b.WriteString("user " + v.user.String() + "\n")
+	}
+	if v.query.active {
+		b.WriteString("rating " + v.query.signature() + "\n")
 	}
 	for _, src := range sources {
 		fmt.Fprintf(&b, "%s %s %t %q %q %q %d\n", src.addon.addon.ID, configOf(src.addon.addon), src.addon.confined,
@@ -188,24 +201,20 @@ func smartReader(v view, sources []source) string {
 	return b.String()
 }
 
-// smartTitleSize estimates what a title read for a list takes in memory
-// besides its listing's description: its item's own copies (its people,
-// its identifiers) and the structures holding them.
-const smartTitleSize = 512
-
-// smartTitlesSize is the size the smart list cache counts for the titles
-// read for a list (see cache.Sized): for each, its listing's description,
-// which its item and record share, twice what the page caches count for
-// it, plus smartTitleSize.
-func smartTitlesSize(titles []smartTitle) int {
-	size := 0
-	for _, t := range titles {
-		size += smartTitleSize
-		if t.record.Meta != nil {
-			size += 2 * cache.JSONSize(*t.record.Meta)
+// signature tells apart the rating filters that keep different titles,
+// for smartReader.
+func (q ratingQuery) signature() string {
+	score := func(s *localization.Score) string {
+		if s == nil {
+			return "-"
 		}
+		return fmt.Sprintf("%d.%d", s.Score, subScore(*s))
 	}
-	return size
+	has := "-"
+	if q.hasOfficial != nil {
+		has = fmt.Sprint(*q.hasOfficial)
+	}
+	return fmt.Sprintf("%s %s %t %s %q", score(q.min), score(q.max), q.unratedOnly, has, q.officials)
 }
 
 // smartResult is a list as it stands for a user: the titles it lists, in
@@ -235,9 +244,15 @@ func (s *Service) smartChildren(ctx context.Context, v view, l smartList, start,
 	items := make([]Item, 0, len(window))
 	records := make([]record, 0, len(window))
 	parent := l.item.ID
+	now := s.now()
 	for _, t := range window {
 		item, r := t.item, t.record
 		item.ParentID, r.Parent = parent, &parent
+		// A movie to come shows when it is out at home.
+		if out := t.title.HomeRelease; !t.title.Series && t.title.HomeReleaseKnown && out.After(now) {
+			item.PremiereDate = &out
+			homeReleaseNote(&item, v.words, out)
+		}
 		items, records = append(items, item), append(records, r)
 	}
 	return page(items, start, len(titles)), s.save(ctx, records)
@@ -246,7 +261,8 @@ func (s *Service) smartChildren(ctx context.Context, v view, l smartList, start,
 // smartMatches judges the titles a list reads for the user of v, sorts
 // those it keeps and cuts them to its maximum. Titles whose rules depend on
 // a description not read yet are left out, and their descriptions read in
-// the background.
+// the background. Movies waiting for their digital release are left out
+// but by lists of upcoming titles (see smartlists.Rule.Upcoming).
 func (s *Service) smartMatches(ctx context.Context, v view, list smartlists.List) (smartResult, error) {
 	candidates, complete, err := s.smartCandidates(ctx, v, list)
 	if err != nil {
@@ -256,20 +272,32 @@ func (s *Service) smartMatches(ctx context.Context, v view, list smartlists.List
 	if err != nil {
 		return smartResult{}, err
 	}
+	if err := s.smartElsewhere(ctx, list, candidates); err != nil {
+		return smartResult{}, err
+	}
+	if err := s.smartReleases(ctx, v, list, candidates); err != nil {
+		return smartResult{}, err
+	}
+	upcoming := list.Rules.Upcoming()
 	result := smartResult{complete: complete}
 	var undescribed []record
+	today := s.now()
 	for _, c := range candidates {
 		// The titles read for a list are those of every user who reads its
 		// catalogs the same way (see smartCandidates): the caller's hidden
 		// ones leave at each listing, as their played titles do.
-		if v.hidden.Hides(c.item) {
+		if v.hidden.Hides(c.item) || c.held && !upcoming {
 			continue
 		}
 		t := c.title
-		t.State = states[c.item.ID]
-		switch list.Rules.Judge(t) {
+		t.State, t.Today = states[c.item.ID], today
+		switch list.Keeps(t) {
 		case smartlists.Yes:
 			result.titles = append(result.titles, c)
+			// A series sorted by its episodes waits for them, listed last.
+			if !c.described && c.title.Series && sortsByEpisodes(list.Sort) {
+				undescribed = append(undescribed, c.record)
+			}
 		case smartlists.Unknown:
 			result.unknown++
 			if !c.described {
@@ -277,7 +305,7 @@ func (s *Service) smartMatches(ctx context.Context, v view, list smartlists.List
 			}
 		}
 	}
-	s.describeLater(ctx, v, list, undescribed)
+	s.describeLater(ctx, v, list.Owner == nil, undescribed)
 	sortSmart(result.titles, list, v.user, s.now())
 	result.matched = len(result.titles)
 	if list.MaxItems > 0 && len(result.titles) > list.MaxItems {
@@ -286,38 +314,103 @@ func (s *Service) smartMatches(ctx context.Context, v view, list smartlists.List
 	return result, nil
 }
 
+// smartEntry is what a list's catalogs gave, kept for its next listings
+// (see smartCandidates): each catalog's titles as read, at which version
+// of its pages (see catalogVersions), and whether pages it lacked left it
+// short; at is when every catalog was last read. The titles are merged
+// from them again at each listing, which takes a fraction of reading
+// them, and keeps an administrator's edits current.
+type smartEntry struct {
+	lists    [][]stremio.Meta
+	versions []uint64
+	missing  []bool
+	at       time.Time
+}
+
+// smartEntrySize is the memory entry holds, a size for the cache's bound
+// (see cache.MemorySize), its strings included: they outlive the pages
+// they were read from.
+func smartEntrySize(entry smartEntry) int {
+	size := 0
+	for _, metas := range entry.lists {
+		size += cache.MemorySize(metas)
+	}
+	return size
+}
+
+// newSmartCache returns the cache of the titles read for lists, bounded
+// to maxBytes. Its entries last as long as the pages kept: what reads
+// them again is a change of their catalogs (see smartCandidates).
+func (s *Service) newSmartCache(maxBytes int) *cache.Cache[smartKey, smartEntry] {
+	return cache.NewLasting[smartKey, smartEntry](200, s.keptCatalogLife, func() time.Time { return s.now() }).Sized(maxBytes, smartEntrySize)
+}
+
 // smartCandidates returns the titles a list's catalogs list, one of each
 // catalog in turn, each once, with what is known of them, the titles the
 // user hid included: they are left out at each listing (see smartMatches),
-// so that a title hidden or shown again changes the list at once. Those
-// read for a saved list whole serve its listings for smartLife, for every
-// user who reads its catalogs the same way (see smartKey); the
-// descriptions of those not described then are looked for again at each
-// listing, as they come in the background.
+// so that a title hidden or shown again changes the list at once.
+//
+// Those read for a saved list serve its next listings, for every user who
+// reads its catalogs the same way (see smartKey), as long as its catalogs'
+// pages stay as they were read (see catalogVersions), at most until they
+// are past their refresh age: the list's rules edited, or a catalog
+// added, removed or read to another maximum, make another key. A catalog
+// whose pages changed since, or which lacked pages, is read again alone,
+// and the titles merged again. Past the refresh age, every catalog is
+// read again, which refreshes their pages in the background. A list whose
+// catalogs lacked pages is not complete. A read that takes kept pages
+// only (see withKeptOnly) takes the titles kept whatever their age, and
+// keeps none; one that refreshes neither takes nor keeps any. The
+// descriptions of the titles not described then are looked for again at
+// each listing, as they come in the background.
 func (s *Service) smartCandidates(ctx context.Context, v view, list smartlists.List) ([]smartTitle, bool, error) {
 	sources := s.smartSources(v, list)
 	key := smartKey{list.ID, list.UpdatedAt, smartReader(v, sources)}
-	cacheable := list.ID != (accounts.ID{}) && !keptOnly(ctx) && !refreshing(ctx)
-	if cacheable {
-		if kept, ok := s.smartCache.Get(key); ok {
-			titles := slices.Clone(kept)
-			return titles, true, s.smartDescribed(ctx, v, list, titles)
-		}
+	saved := list.ID != (accounts.ID{}) && !refreshing(ctx)
+	var kept smartEntry
+	found := false
+	if saved {
+		kept, found = s.smartCache.Get(key)
+	}
+	if found && keptOnly(ctx) {
+		titles := s.smartFacts(sources, kept.lists, v.country)
+		return titles, !slices.Contains(kept.missing, true), s.smartDescribed(ctx, v, list, titles)
+	}
+	read := make([]bool, len(sources))
+	whole := !found || s.now().Sub(kept.at) >= s.catalogLife()
+	for i, src := range sources {
+		read[i] = whole || kept.missing[i] || kept.versions[i] != s.catalogVersions.of(src)
+	}
+	if found && !slices.Contains(read, true) {
+		titles := s.smartFacts(sources, kept.lists, v.country)
+		return titles, true, s.smartDescribed(ctx, v, list, titles)
 	}
 	reader := v
 	reader.hidden = nil
-	lists, complete := s.smartRead(ctx, reader, sources)
+	// Movies waiting for their digital release are read too: each listing
+	// tells whether the list keeps them (see smartMatches).
+	reader.upcoming = true
+	lists, versions, missing := s.smartRead(ctx, reader, sources, read)
 	if ctx.Err() != nil {
 		return nil, false, ctx.Err()
 	}
-	titles := s.smartFacts(sources, lists)
+	at := s.now()
+	if !whole {
+		at = kept.at
+		for i := range sources {
+			if !read[i] {
+				lists[i], versions[i] = kept.lists[i], kept.versions[i]
+			}
+		}
+	}
+	titles := s.smartFacts(sources, lists, v.country)
 	if err := s.smartDescribed(ctx, v, list, titles); err != nil {
 		return nil, false, err
 	}
-	if cacheable && complete {
-		s.smartCache.Put(key, titles)
+	if saved && !keptOnly(ctx) {
+		s.smartCache.Put(key, smartEntry{lists: lists, versions: versions, missing: missing, at: at})
 	}
-	return titles, complete, nil
+	return titles, !slices.Contains(missing, true), nil
 }
 
 // smartSources returns the catalogs a list draws from that the user of v
@@ -363,23 +456,29 @@ func smartCatalog(catalog stremio.Catalog) bool {
 	return !LiveCatalog(catalog.Type) && catalog.Type != "collection" && catalog.Browsable()
 }
 
-// smartRead reads each source up to its maximum, a few at a time. A
-// listing waits smartWait at most, then takes the pages kept of the
-// catalogs that did not answer in time, and reads them on in the
-// background; complete is then false. A read that refreshes (see
+// smartRead reads each source that read marks up to its maximum, a few at
+// a time, and tells the version of its catalog once read (see
+// catalogVersions): a page its read fetched counts in it, and one that
+// changes later has the next listing read it again. The others' lists
+// stay nil. A listing waits smartWait at most, then takes the pages kept
+// of the catalogs that did not answer in time, and reads them on in the
+// background: missing marks them. A read that refreshes (see
 // ReadCollections) waits for every page.
-func (s *Service) smartRead(ctx context.Context, v view, sources []source) (lists [][]stremio.Meta, complete bool) {
+func (s *Service) smartRead(ctx context.Context, v view, sources []source, read []bool) (lists [][]stremio.Meta, versions []uint64, missing []bool) {
 	lists = make([][]stremio.Meta, len(sources))
+	versions = make([]uint64, len(sources))
+	missing = make([]bool, len(sources))
 	waiting, cancel := ctx, context.CancelFunc(func() {})
 	if !keptOnly(ctx) && !refreshing(ctx) {
 		waiting, cancel = context.WithTimeout(ctx, s.smartWait)
 	}
 	defer cancel()
-	var mu sync.Mutex
-	complete = true
 	var group errgroup.Group
 	group.SetLimit(catalogFetches)
 	for i, src := range sources {
+		if !read[i] {
+			continue
+		}
 		group.Go(func() error {
 			limit := v.limit(src)
 			metas, _, err := s.window(waiting, v, src, 0, limit)
@@ -391,17 +490,15 @@ func (s *Service) smartRead(ctx context.Context, v view, sources []source) (list
 					s.logger.Debug("A catalog of a smart list could not be read", "catalog", src.catalog.ID, "error", err)
 				}
 				metas, _, _ = s.window(withKeptOnly(ctx), v, src, 0, limit)
-				mu.Lock()
-				complete = false
-				mu.Unlock()
+				missing[i] = true
 				s.smartReadLater(ctx, v, src)
 			}
-			lists[i] = metas
+			lists[i], versions[i] = metas, s.catalogVersions.of(src)
 			return nil
 		})
 	}
 	_ = group.Wait()
-	return lists, complete
+	return lists, versions, missing
 }
 
 // smartReadLater reads a catalog of a list up to its maximum in the
@@ -422,8 +519,9 @@ func (s *Service) smartReadLater(ctx context.Context, v view, src source) {
 // smartFacts merges the titles of the sources' lists, one of each in turn
 // without duplicates, as an addon's collection does, each at its best place
 // in a catalog, and tells what their listing gives of them, with
-// administrators' edits. Movies and series only are kept.
-func (s *Service) smartFacts(sources []source, lists [][]stremio.Meta) []smartTitle {
+// administrators' edits, rated as country rates them. Movies and series
+// only are kept.
+func (s *Service) smartFacts(sources []source, lists [][]stremio.Meta, country string) []smartTitle {
 	var titles []smartTitle
 	seen := map[string]bool{}
 	for rank := 0; ; rank++ {
@@ -438,12 +536,12 @@ func (s *Service) smartFacts(sources []source, lists [][]stremio.Meta) []smartTi
 				continue
 			}
 			seen[meta.ID] = true
-			item, r, err := titleItem(sources[i].addon.addon.ID, sources[i].catalog, meta, accounts.ID{}, sources[i].addon.confined)
+			item, r, err := s.titleItem(sources[i].addon, sources[i].catalog, meta, accounts.ID{}, country)
 			if err != nil || item.Kind != KindMovie && item.Kind != KindSeries {
 				continue
 			}
 			r.Parent = nil
-			titles = append(titles, smartTitle{item: item, record: r, title: smartlists.Title{Rank: rank + 1}, genre: sources[i].genre})
+			titles = append(titles, smartTitle{item: item, record: r, title: smartlists.Title{Rank: rank + 1, RatingCountry: country}, genre: sources[i].genre})
 		}
 		if !added {
 			break
@@ -461,9 +559,57 @@ func (s *Service) smartFacts(sources []source, lists [][]stremio.Meta) []smartTi
 		t.title.Genres, t.title.GenresKnown = t.item.Genres, len(t.item.Genres) > 0
 		t.title.Year = t.item.ProductionYear
 		t.title.Rating, t.title.Rated = t.item.CommunityRating, t.item.CommunityRating > 0
+		t.title.Runtime = int(t.item.Runtime / time.Minute)
+		t.title.ContentRating = t.item.OfficialRating
+		t.title.People = creditedPeople(t.item.People)
+		t.title.Released = releasedDay(t.item, t.record.Meta)
 		t.narrow()
 	}
 	return titles
+}
+
+// creditedPeople lists the names of the actors and directors of people,
+// whom person rules look for.
+func creditedPeople(people []Person) []string {
+	var names []string
+	for _, p := range people {
+		if p.Type == "Actor" || p.Type == "Director" {
+			names = append(names, p.Name)
+		}
+	}
+	return names
+}
+
+// releasedDay is the day a title was released, zero when only its year
+// is known: its premiere date, an administrator's or its listing's, but
+// the first of January its year alone stands for (see fromMeta).
+func releasedDay(item Item, meta *stremio.Meta) time.Time {
+	if item.PremiereDate == nil {
+		return time.Time{}
+	}
+	date := *item.PremiereDate
+	if meta != nil && exactDay(meta.Released) == nil && date.Month() == time.January && date.Day() == 1 &&
+		date.Equal(date.Truncate(24*time.Hour)) {
+		return time.Time{}
+	}
+	return date
+}
+
+// exactDay reads a release date given to the day, nil for none or a year
+// alone.
+func exactDay(text string) *time.Time {
+	text = strings.TrimSpace(text)
+	for _, layout := range []string{time.RFC3339Nano, time.DateOnly} {
+		if parsed, err := time.Parse(layout, text); err == nil {
+			return new(parsed.UTC())
+		}
+	}
+	return nil
+}
+
+// sortsByEpisodes reports whether a sort orders series by their episodes.
+func sortsByEpisodes(sort string) bool {
+	return sort == smartlists.SortLatestEpisode || sort == smartlists.SortSeasonPremiere
 }
 
 // narrow adds to a title read from a catalog narrowed to a genre that
@@ -474,36 +620,43 @@ func (t *smartTitle) narrow() {
 	}
 }
 
-// needsDescription reports whether rules look at what a title's listing
-// does not give: its language, which only its description gives, or its
-// genres, year or rating when its listing lacks them.
-func needsDescription(rules smartlists.Rule, t smartlists.Title) bool {
-	return rules.Uses(smartlists.FieldLanguage) || rules.Uses(smartlists.FieldGenre) && !t.GenresKnown ||
-		rules.Uses(smartlists.FieldYear) && t.Year == 0 || rules.Uses(smartlists.FieldRating) && !t.Rated
+// needsDescription reports whether a list looks at what a title's listing
+// does not give: its language, or a series' episodes it sorts by, which
+// only its description gives, or its genres, year, rating, runtime,
+// content rating, people or release date when its listing lacks them, a
+// series' release date standing for its home release.
+func needsDescription(list smartlists.List, t smartlists.Title) bool {
+	return list.Uses(smartlists.FieldLanguage) || t.Series && sortsByEpisodes(list.Sort) ||
+		list.Uses(smartlists.FieldGenre) && !t.GenresKnown || list.Uses(smartlists.FieldYear) && t.Year == 0 ||
+		list.Uses(smartlists.FieldRating) && !t.Rated || list.Uses(smartlists.FieldRuntime) && t.Runtime == 0 ||
+		list.Uses(smartlists.FieldContentRating) && t.ContentRating == "" || list.Uses(smartlists.FieldPerson) && len(t.People) == 0 ||
+		(list.Uses(smartlists.FieldReleased) || t.Series && list.Uses(smartlists.FieldHomeRelease)) && t.Released.IsZero()
 }
 
 // smartDescribed completes the titles whose description the rules need,
 // not described yet, with the descriptions kept since.
 func (s *Service) smartDescribed(ctx context.Context, v view, list smartlists.List, titles []smartTitle) error {
-	var wanted []int
+	var wanted []record
+	var indexes []int
 	for i, t := range titles {
-		if !t.described && needsDescription(list.Rules, t.title) {
-			wanted = append(wanted, i)
+		if !t.described && needsDescription(list, t.title) {
+			wanted, indexes = append(wanted, t.record), append(indexes, i)
 		}
 	}
-	descriptions, err := s.keptDescriptions(ctx, v, list, titles, wanted)
+	descriptions, err := s.keptDescriptions(ctx, v, list.Owner == nil, wanted, sortsByEpisodes(list.Sort))
 	if err != nil {
 		return err
 	}
-	for _, i := range wanted {
+	now := s.now()
+	for _, i := range indexes {
 		t := &titles[i]
 		meta, ok := descriptions[metaKey{*t.record.Addon, t.record.Meta.Type, t.record.Meta.ID}]
 		if !ok {
 			continue
 		}
 		t.described, t.title.Described = true, true
-		var full Item
-		fromMeta(&full, meta)
+		full := Item{ID: t.record.ID, Kind: t.record.Kind}
+		s.fromMeta(&full, meta, v.country)
 		if !t.title.GenresKnown {
 			t.title.Genres, t.title.GenresKnown = full.Genres, len(full.Genres) > 0
 			t.narrow()
@@ -514,36 +667,140 @@ func (s *Service) smartDescribed(ctx context.Context, v view, list smartlists.Li
 		if !t.title.Rated {
 			t.title.Rating, t.title.Rated = full.CommunityRating, full.CommunityRating > 0
 		}
+		if t.title.Runtime == 0 {
+			t.title.Runtime = int(full.Runtime / time.Minute)
+		}
+		if t.title.ContentRating == "" {
+			t.title.ContentRating = full.OfficialRating
+		}
+		if len(t.title.People) == 0 {
+			t.title.People = creditedPeople(full.People)
+		}
+		if t.title.Released.IsZero() {
+			t.title.Released = releasedDay(full, &meta)
+		}
 		t.title.Languages = localization.LanguageCodes(meta.Language)
+		t.episodes = episodeDatesOf(meta.Videos, now)
 	}
 	return nil
 }
 
+// smartElsewhere completes the titles a list judges with what neither
+// their listing nor their description gives, when its rules look at it:
+// the votes of their IMDb rating, from MDBList, and their studios, from
+// TMDB. Those not known yet are asked about in the background.
+func (s *Service) smartElsewhere(ctx context.Context, list smartlists.List, titles []smartTitle) error {
+	votes, studios := list.Uses(smartlists.FieldVotes), list.Uses(smartlists.FieldStudio)
+	if !votes && !studios {
+		return nil
+	}
+	items := make([]Item, len(titles))
+	for i, t := range titles {
+		items[i] = t.item
+	}
+	if votes {
+		scores := s.keptScores(items)
+		for i := range titles {
+			t := &titles[i]
+			if scores != nil && scores[i].IMDbVotes != nil {
+				t.title.Votes, t.title.VotesKnown = *scores[i].IMDbVotes, true
+				continue
+			}
+			// Without MDBList, or once it answered without votes, a title
+			// has none; it is unknown while waiting for MDBList.
+			r, ok := ratingsTitle(t.item)
+			t.title.Votes, t.title.VotesKnown = 0, !ok || !s.ratings.Enabled() || !s.ratings.Pending(r)
+		}
+	}
+	if studios {
+		names, known, err := s.keptStudios(ctx, items)
+		if err != nil {
+			return err
+		}
+		for i := range titles {
+			titles[i].title.Studios, titles[i].title.StudiosKnown = names[i], known[i]
+		}
+	}
+	return nil
+}
+
+// smartReleases completes the movies a list judges with the day they are
+// out at home, from TMDB, when its rules look at it, and marks those the
+// wait for their digital release holds back for the user of v (see
+// releases.go). Those not known, or known for too long, are asked about in
+// the background: a movie not known yet is held back, and unknown to the
+// rules. Without TMDB key or identifier, a movie's home release cannot be
+// known: it has none.
+func (s *Service) smartReleases(ctx context.Context, v view, list smartlists.List, titles []smartTitle) error {
+	rule := list.Uses(smartlists.FieldHomeRelease)
+	if !rule && !v.waitRelease {
+		return nil
+	}
+	enabled := s.tmdb.Enabled()
+	keys := make([][]releaseKey, len(titles))
+	var all []releaseKey
+	for i, t := range titles {
+		if t.item.Kind == KindMovie && t.record.Meta != nil && enabled {
+			keys[i] = releaseKeys(s.providerIDs(t.record.ID, *t.record.Meta))
+			all = append(all, keys[i]...)
+		}
+	}
+	kept, err := s.keptReleases(ctx, all)
+	if err != nil {
+		return err
+	}
+	now := s.now()
+	var due []releaseKey
+	for i := range titles {
+		t := &titles[i]
+		if t.item.Kind != KindMovie {
+			continue
+		}
+		known, ok := keptRelease(kept, keys[i])
+		waits := len(keys[i]) > 0 && s.waits(v, t.record)
+		if len(keys[i]) > 0 && (rule || waits) && (!ok || known.due(now)) {
+			due = append(due, keys[i][0])
+		}
+		if rule && (len(keys[i]) == 0 || ok) {
+			t.title.HomeRelease, t.title.HomeReleaseKnown = known.available, true
+		}
+		t.held = waits && (!ok || known.found && known.waiting(now))
+	}
+	s.releasesLater(ctx, due, smartLookups)
+	return nil
+}
+
 // keptDescriptions returns what the descriptions kept in the database of
-// the titles at indexes give of them that a list's rules look at, by the
-// addon that listed them: that addon's description, else one of another
-// of the view's addons, the server's only for the server's lists.
-// Polyfin's own sources keep no description.
-func (s *Service) keptDescriptions(ctx context.Context, v view, list smartlists.List, titles []smartTitle, indexes []int) (map[metaKey]stremio.Meta, error) {
-	if len(indexes) == 0 {
+// titles give of them that smart lists look at, by the addon that listed
+// them: that addon's description, else one of another of the view's
+// addons, the server's only when shared. The dates of a series' episodes
+// come only when videos is set. Polyfin's own sources keep no description.
+func (s *Service) keptDescriptions(ctx context.Context, v view, shared bool, titles []record, videos bool) (map[metaKey]stremio.Meta, error) {
+	if len(titles) == 0 {
 		return nil, nil
 	}
-	ids := make([]string, 0, len(indexes))
-	for _, i := range indexes {
-		ids = append(ids, titles[i].record.Meta.ID)
+	ids := make([]string, 0, len(titles))
+	for _, t := range titles {
+		ids = append(ids, t.Meta.ID)
 	}
 	describers := make([]accounts.ID, 0, len(v.addons))
 	for _, entry := range v.addons {
 		// Smart lists judge the facts the addons without a language give,
 		// else those given one that stand in for them (see standIn).
-		if !own(entry.addon) && (list.Owner != nil || entry.shared) {
+		if !own(entry.addon) && (!shared || entry.shared) {
 			describers = append(describers, entry.addon.ID)
 		}
 	}
 	rows, err := s.db.Query(ctx, `SELECT addon_id, meta_type, meta_id, config,
 		jsonb_strip_nulls(jsonb_build_object('genres', meta->'genres', 'releaseInfo', meta->'releaseInfo', 'year', meta->'year',
-			'released', meta->'released', 'imdbRating', meta->'imdbRating', 'language', meta->'language'))
-		FROM metas WHERE addon_id = ANY($1) AND meta_id = ANY($2) AND fetched_at > $3`, describers, ids, s.now().Add(-metaKept))
+			'released', meta->'released', 'imdbRating', meta->'imdbRating', 'language', meta->'language',
+			'runtime', meta->'runtime', 'director', meta->'director', 'cast', meta->'cast',
+			'app_extras', jsonb_build_object('cast', meta->'app_extras'->'cast', 'certification', meta->'app_extras'->'certification',
+				'certificationLocal', meta->'app_extras'->'certificationLocal', 'certifications', meta->'app_extras'->'certifications'),
+			'videos', CASE WHEN $4 AND jsonb_typeof(meta->'videos') = 'array' THEN (SELECT jsonb_agg(jsonb_strip_nulls(
+				jsonb_build_object('id', v->'id', 'season', v->'season', 'episode', v->'episode', 'released', v->'released')))
+				FROM jsonb_array_elements(meta->'videos') v) END))
+		FROM metas WHERE addon_id = ANY($1) AND meta_id = ANY($2) AND fetched_at > $3`, describers, ids, s.now().Add(-metaKept), videos)
 	if err != nil {
 		return nil, err
 	}
@@ -561,7 +818,7 @@ func (s *Service) keptDescriptions(ctx context.Context, v view, list smartlists.
 			return nil, err
 		}
 		entry, ok := v.addon(addon)
-		if !ok || configOf(entry.addon) != config || !v.factual(entry, metaType, metaID, list.Owner == nil) {
+		if !ok || configOf(entry.addon) != config || !v.factual(entry, metaType, metaID, shared) {
 			continue
 		}
 		var meta stremio.Meta
@@ -575,27 +832,27 @@ func (s *Service) keptDescriptions(ctx context.Context, v view, list smartlists.
 		return nil, err
 	}
 	result := make(map[metaKey]stremio.Meta, len(found))
-	for _, i := range indexes {
-		t := titles[i]
-		candidates := found[[2]string{t.record.Meta.Type, t.record.Meta.ID}]
+	for _, t := range titles {
+		candidates := found[[2]string{t.Meta.Type, t.Meta.ID}]
 		if len(candidates) == 0 {
 			continue
 		}
 		best := candidates[0]
 		for _, c := range candidates {
-			if c.addon == *t.record.Addon {
+			if c.addon == *t.Addon {
 				best = c
 			}
 		}
-		result[metaKey{*t.record.Addon, t.record.Meta.Type, t.record.Meta.ID}] = best.meta
+		result[metaKey{*t.Addon, t.Meta.Type, t.Meta.ID}] = best.meta
 	}
 	return result, nil
 }
 
 // describeLater reads in the background the descriptions of titles, at
 // most smartLookups of them, smartFetches at a time across lists: the
-// next listings know them. The server's lists ask the server's addons.
-func (s *Service) describeLater(ctx context.Context, v view, list smartlists.List, records []record) {
+// next listings know them. The server's lists, shared, ask the server's
+// addons.
+func (s *Service) describeLater(ctx context.Context, v view, shared bool, records []record) {
 	if keptOnly(ctx) {
 		return
 	}
@@ -617,7 +874,7 @@ func (s *Service) describeLater(ctx context.Context, v view, list smartlists.Lis
 			case <-ctx.Done():
 				return ctx.Err()
 			}
-			s.describe(ctx, v.withoutWait(), r, list.Owner == nil)
+			s.describe(ctx, v.withoutWait(), r, shared)
 			return nil
 		})
 	}
@@ -630,7 +887,7 @@ func (s *Service) describeLater(ctx context.Context, v view, list smartlists.Lis
 // played or started some, not all; a movie is started while it has a
 // resume point.
 func (s *Service) smartStates(ctx context.Context, v view, list smartlists.List, titles []smartTitle) (map[accounts.ID]smartlists.State, error) {
-	if !list.Rules.Uses(smartlists.FieldState) || v.user == (accounts.ID{}) || len(titles) == 0 {
+	if !list.Uses(smartlists.FieldState) || v.user == (accounts.ID{}) || len(titles) == 0 {
 		return nil, nil
 	}
 	ids := make([]accounts.ID, 0, len(titles))
@@ -673,13 +930,27 @@ func (s *Service) smartStates(ctx context.Context, v view, list smartlists.List,
 }
 
 // sortSmart orders the titles a list keeps as it says: as its catalogs
-// list them, merged; by premiere date, the latest first; by IMDb rating,
-// the highest first, those without one last; by name; or at random, in an
-// order drawn again each day, the same for every page of a listing.
+// list them, merged; by premiere date, the latest first; by the latest
+// regular episode aired, or season premiere aired, the latest first, a
+// movie by its premiere date and a series whose episodes are not known
+// last; by IMDb rating, the highest first, those without one last; by
+// name; or at random, in an order drawn again each day, the same for every
+// page of a listing.
 func sortSmart(titles []smartTitle, list smartlists.List, user accounts.ID, now time.Time) {
 	switch list.Sort {
 	case smartlists.SortPremiere:
 		slices.SortStableFunc(titles, func(a, b smartTitle) int { return releaseOf(b.item).Compare(releaseOf(a.item)) })
+	case smartlists.SortLatestEpisode, smartlists.SortSeasonPremiere:
+		latest := func(t smartTitle) time.Time {
+			switch {
+			case !t.title.Series:
+				return releaseOf(t.item)
+			case list.Sort == smartlists.SortLatestEpisode:
+				return t.episodes.latest
+			}
+			return t.episodes.premiere
+		}
+		slices.SortStableFunc(titles, func(a, b smartTitle) int { return latest(b).Compare(latest(a)) })
 	case smartlists.SortRating:
 		slices.SortStableFunc(titles, func(a, b smartTitle) int { return cmp.Compare(b.item.CommunityRating, a.item.CommunityRating) })
 	case smartlists.SortName:
@@ -767,7 +1038,7 @@ func (s *Service) SmartCatalogs(ctx context.Context, user accounts.User, shared 
 		}
 		for _, catalog := range entry.addon.Manifest.Catalogs {
 			if smartCatalog(catalog) {
-				result = append(result, SmartCatalog{AddonID: entry.addon.ID, AddonName: entry.addon.Manifest.Name, Shared: entry.shared,
+				result = append(result, SmartCatalog{AddonID: entry.addon.ID, AddonName: entry.addon.Name(), Shared: entry.shared,
 					Catalog: catalog, Genres: slices.Clone(addons.GenreChoices(catalog))})
 			}
 		}

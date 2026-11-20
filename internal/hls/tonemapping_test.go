@@ -46,6 +46,7 @@ func (r *recordingRunner) count() int {
 // tonemap_vaapi requires, decoded by VAAPI; without x265, or when the
 // check fails, the Intel GPU leaves HDR to the processor.
 func TestOnlyIntelGPUsTryVAAPIToneMapping(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, vendor   string
 		noX265, failed bool
@@ -72,7 +73,7 @@ func TestOnlyIntelGPUsTryVAAPIToneMapping(t *testing.T) {
 			vendor: func(node string) string { asked = append(asked, node); return tc.vendor },
 			can: capabilities{encoders: encoders, filters: []string{"hwupload", "hwdownload", "scale_vaapi", "tonemap_vaapi", "deinterlace_vaapi",
 				"libplacebo", "zscale", "tonemap"}}}
-		hw := m.detect("vaapi", "/dev/dri/renderD129")
+		hw, _ := m.detect("vaapi", "/dev/dri/renderD129")
 		if hw == nil || hw.ToneMapping != tc.want || !slices.Equal(asked, []string{"/dev/dri/renderD129"}) {
 			t.Errorf("%s: %+v, vendors asked of %v", tc.name, hw, asked)
 			continue
@@ -102,11 +103,12 @@ func TestOnlyIntelGPUsTryVAAPIToneMapping(t *testing.T) {
 
 // An NVIDIA GPU keeps its libplacebo check, and never asks for a vendor.
 func TestNVIDIAKeepsItsToneMappingCheck(t *testing.T) {
+	t.Parallel()
 	r := &recordingRunner{answer: func([]string) (time.Duration, error) { return time.Second, nil }}
 	m := &Manager{dir: t.TempDir(), logger: slog.New(slog.DiscardHandler), detected: map[string]*Hardware{}, run: r.run,
 		vendor: func(string) string { t.Error("a vendor asked of an NVIDIA GPU"); return "" },
 		can:    capabilities{encoders: []string{"h264_nvenc", "libx265"}, filters: []string{"libplacebo", "tonemap_vaapi", "scale_vaapi", "hwupload"}}}
-	if hw := m.detect("nvenc", ""); hw == nil || !hw.ToneMapping || !r.ran("libplacebo") || r.ran("tonemap_vaapi") {
+	if hw, _ := m.detect("nvenc", ""); hw == nil || !hw.ToneMapping || !r.ran("libplacebo") || r.ran("tonemap_vaapi") {
 		t.Errorf("%+v: %q", hw, r.runs)
 	}
 }
@@ -117,6 +119,7 @@ func TestNVIDIAKeepsItsToneMappingCheck(t *testing.T) {
 // conversion run as conversions do on the server: on the GPU's decoder
 // and H.264 encoder when there is one, else in software.
 func TestAutomaticToneMappedHeightFollowsTheTiming(t *testing.T) {
+	t.Parallel()
 	failed := errors.New("failed")
 	vaapi := &Hardware{Method: "vaapi", Device: "/dev/dri/renderD128", Encoders: []string{"h264_vaapi", "hevc_vaapi"}}
 	nvidia := &Hardware{Method: "cuda", Encoders: []string{"h264_nvenc", "hevc_nvenc"}, ToneMapping: true}
@@ -144,7 +147,7 @@ func TestAutomaticToneMappedHeightFollowsTheTiming(t *testing.T) {
 		}}
 		m := &Manager{dir: t.TempDir(), logger: slog.New(slog.DiscardHandler), detected: map[string]*Hardware{}, run: r.run,
 			can: capabilities{encoders: []string{"libx264", "libx265"}, filters: []string{"zscale", "tonemap"}}}
-		if got := m.timeToneMapping(t.Context(), tc.hw); got != tc.want {
+		if got, _, _ := m.timeToneMapping(t.Context(), tc.hw); got != tc.want {
 			t.Errorf("%s: %dp, want %dp", tc.name, got, tc.want)
 		}
 		if tc.sampleErr != nil {
@@ -183,6 +186,7 @@ func TestAutomaticToneMappedHeightFollowsTheTiming(t *testing.T) {
 // A GPU that encodes HEVC but refuses 10 bits leaves the sample to x265,
 // and the processor is timed all the same.
 func TestTheHDRSampleFallsBackToX265(t *testing.T) {
+	t.Parallel()
 	vaapi := &Hardware{Method: "vaapi", Device: "/dev/dri/renderD128", Encoders: []string{"h264_vaapi", "hevc_vaapi"}}
 	r := &recordingRunner{answer: func(args []string) (time.Duration, error) {
 		if slices.Contains(args, "hevc_vaapi") {
@@ -192,7 +196,7 @@ func TestTheHDRSampleFallsBackToX265(t *testing.T) {
 	}}
 	m := &Manager{dir: t.TempDir(), logger: slog.New(slog.DiscardHandler), detected: map[string]*Hardware{}, run: r.run,
 		can: capabilities{encoders: []string{"libx264", "libx265"}, filters: []string{"zscale", "tonemap"}}}
-	if got := m.timeToneMapping(t.Context(), vaapi); got != 1080 {
+	if got, _, _ := m.timeToneMapping(t.Context(), vaapi); got != 1080 {
 		t.Errorf("%dp, want 1080p", got)
 	}
 	if len(r.runs) != 3 || !contains(r.runs[1], "-c:v", "libx265") || !contains(r.runs[2], "-c:v", "h264_vaapi") {
@@ -204,6 +208,7 @@ func TestTheHDRSampleFallsBackToX265(t *testing.T) {
 // ends; then the one it chose. Without the processor's filters, nothing
 // is timed.
 func TestAutomaticToneMappedHeightIs720pUntilTimed(t *testing.T) {
+	t.Parallel()
 	r := &recordingRunner{answer: func([]string) (time.Duration, error) { return time.Second, nil }}
 	m := &Manager{dir: t.TempDir(), logger: slog.New(slog.DiscardHandler), detected: map[string]*Hardware{}, done: make(chan struct{}), run: r.run,
 		can: capabilities{encoders: []string{"libx264", "libx265"}, filters: []string{"zscale", "tonemap"}}}
@@ -229,13 +234,14 @@ func TestAutomaticToneMappedHeightIs720pUntilTimed(t *testing.T) {
 // An Intel GPU that tone maps keeps deinterlace_vaapi for HDR even when
 // its SDR frames go through memory, and times no Vulkan chain.
 func TestIntelToneMappingKeepsItsDeinterlacer(t *testing.T) {
+	t.Parallel()
 	m, f := measuringManager(t, chainTimes{sdrMemory: time.Second / 2, sdrGPU: time.Second})
 	intel := Hardware{Method: "vaapi", Device: "/dev/dri/renderD128", Encoders: []string{"h264_vaapi"}, ToneMapping: true}
-	got := m.measure(t.Context(), intel)
+	got, _ := m.measure(t.Context(), intel)
 	if got.Resident || got.VulkanDecoding || !slices.Equal(got.Deinterlacers, []string{"deinterlace_vaapi"}) {
 		t.Errorf("%+v", got)
 	}
-	if f.runs["hdr sample"] != nil || f.runs["check"] != nil {
+	if f.runs["check"] != nil || f.runs["hdr gpu"] != nil || f.runs["hdr memory"] != nil {
 		t.Errorf("Vulkan timed on an Intel GPU: %q", f.runs)
 	}
 }

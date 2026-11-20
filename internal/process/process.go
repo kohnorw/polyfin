@@ -12,7 +12,6 @@ package process
 import (
 	"io"
 	"os/exec"
-	"strconv"
 )
 
 // Outputs are the outputs a child writes besides its standard output and
@@ -27,8 +26,9 @@ type Outputs struct {
 // NewOutputs gives cmd, not started yet, n outputs: on Linux and macOS,
 // pipes it inherits as file descriptors 3 to 3+n-1; on Windows, which passes
 // none past the standard ones, connections on the loopback, whose
-// addresses replace pipe:3 to pipe:3+n-1 in cmd's arguments. Once cmd is
-// started, Started must be called.
+// addresses replace pipe:3 to pipe:3+n-1 in cmd's arguments, and which
+// are taken from cmd's process alone. Once cmd is started, Started must be
+// called.
 func NewOutputs(cmd *exec.Cmd, n int) (*Outputs, error) {
 	o := &Outputs{}
 	if err := o.open(cmd, n); err != nil {
@@ -52,9 +52,4 @@ func (o *Outputs) close() {
 	for _, r := range o.Readers {
 		_ = r.Close()
 	}
-}
-
-// pipeName is how a child names its output i, from 0: pipe:3 on.
-func pipeName(i int) string {
-	return "pipe:" + strconv.Itoa(3+i)
 }

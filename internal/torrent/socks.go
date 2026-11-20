@@ -30,6 +30,26 @@ const (
 	socksUnsupported = 7
 )
 
+// The replies of a SOCKS5 proxy that could not reach a peer (RFC 1928):
+// its network or host unreachable, the connection refused, or the TTL
+// expired, which proxies answer to a connection that timed out.
+const (
+	socksNetUnreachable  = 3
+	socksHostUnreachable = 4
+	socksRefused         = 5
+	socksTTLExpired      = 6
+)
+
+// socksReplyError is a SOCKS5 proxy's refusal of a request, by its reply
+// code.
+type socksReplyError struct {
+	code byte
+}
+
+func (e *socksReplyError) Error() string {
+	return fmt.Sprintf("the SOCKS5 proxy refused the request (reply %d)", e.code)
+}
+
 // proxyTimeout bounds a proxy's handshake, and checkedFor how long a
 // proxy that answered is not asked again.
 const (
@@ -42,42 +62,75 @@ const (
 // ASSOCIATE when the proxy offers it. Names are looked up by the proxy.
 // Nothing listens: no peer can connect in.
 func ProxyRoute(address, user, password string) Route {
-	return &proxyRoute{address: address, user: user, password: password}
+	return &proxyRoute{address: address, user: user, password: password, timeout: proxyTimeout, fresh: checkedFor}
 }
 
 type proxyRoute struct {
 	address, user, password string
+	// timeout bounds a handshake, and fresh is how long a check's result
+	// is kept: proxyTimeout and checkedFor, which tests shorten.
+	timeout, fresh time.Duration
 
 	mu        sync.Mutex
 	checkedAt time.Time
 	checkErr  error
+	// checking is closed as the handshake of the check running ends; nil
+	// while none runs.
+	checking chan struct{}
 }
 
 func (r *proxyRoute) String() string { return "SOCKS5 proxy " + r.address }
 
 func (r *proxyRoute) Close() error { return nil }
 
+// Check makes one handshake at a time: a check while one runs waits for
+// its result rather than making another, and the result is kept for
+// r.fresh. A check whose ctx ends first tells the proxy unreachable for
+// that reason, which is not kept: the handshake goes on for the next
+// check, as a WireGuard tunnel's check does.
 func (r *proxyRoute) Check(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return r.unreachable(err)
+	}
 	r.mu.Lock()
-	if !r.checkedAt.IsZero() && time.Since(r.checkedAt) < checkedFor {
+	if !r.checkedAt.IsZero() && time.Since(r.checkedAt) < r.fresh {
 		err := r.checkErr
 		r.mu.Unlock()
 		return err
 	}
+	done := r.checking
+	if done == nil {
+		done = make(chan struct{})
+		r.checking = done
+		go r.check(done)
+	}
 	r.mu.Unlock()
-	conn, err := r.handshake(ctx)
+	select {
+	case <-done:
+		r.mu.Lock()
+		defer r.mu.Unlock()
+		return r.checkErr
+	case <-ctx.Done():
+		return r.unreachable(ctx.Err())
+	}
+}
+
+// check makes the handshake of a check, within r.timeout whoever waits
+// for it, keeps its result, and closes done.
+func (r *proxyRoute) check(done chan struct{}) {
+	conn, err := r.handshake(context.Background())
 	if err == nil {
 		conn.Close()
 	}
 	r.mu.Lock()
-	r.checkedAt, r.checkErr = time.Now(), err
+	r.checking, r.checkedAt, r.checkErr = nil, time.Now(), err
 	r.mu.Unlock()
-	return err
+	close(done)
 }
 
 // handshake connects to the proxy and authenticates.
 func (r *proxyRoute) handshake(ctx context.Context) (net.Conn, error) {
-	ctx, cancel := context.WithTimeout(ctx, proxyTimeout)
+	ctx, cancel := context.WithTimeout(ctx, r.timeout)
 	defer cancel()
 	var d net.Dialer
 	conn, err := d.DialContext(ctx, "tcp", r.address)
@@ -219,7 +272,7 @@ func command(conn net.Conn, cmd byte, address string) (string, error) {
 		return "", ErrNoUDP
 	}
 	if reply[0] != socksVersion || reply[1] != 0 {
-		return "", fmt.Errorf("the SOCKS5 proxy refused the request (reply %d)", reply[1])
+		return "", &socksReplyError{code: reply[1]}
 	}
 	return readSocksAddress(conn)
 }
@@ -227,12 +280,12 @@ func command(conn net.Conn, cmd byte, address string) (string, error) {
 func (r *proxyRoute) Dial(ctx context.Context, address string) (net.Conn, error) {
 	conn, err := r.handshake(ctx)
 	if err != nil {
-		r.failed(err)
+		r.failed(ctx, err)
 		return nil, err
 	}
 	stop := context.AfterFunc(ctx, func() { _ = conn.SetDeadline(time.Now()) })
 	defer stop()
-	_ = conn.SetDeadline(time.Now().Add(proxyTimeout))
+	_ = conn.SetDeadline(time.Now().Add(r.timeout))
 	if _, err := command(conn, socksConnect, address); err != nil {
 		conn.Close()
 		if ctx.Err() != nil {
@@ -248,8 +301,14 @@ func (r *proxyRoute) Dial(ctx context.Context, address string) (net.Conn, error)
 	return conn, nil
 }
 
-// failed records that the proxy did not answer, for Check.
-func (r *proxyRoute) failed(err error) {
+// failed records that the proxy did not answer, for Check, unless ctx
+// ended first: a dial or an association cut short, as when the torrent
+// that made it stops or another connection to the peer won, tells nothing
+// of the proxy.
+func (r *proxyRoute) failed(ctx context.Context, err error) {
+	if ctx.Err() != nil {
+		return
+	}
 	r.mu.Lock()
 	r.checkedAt, r.checkErr = time.Now(), err
 	r.mu.Unlock()
@@ -258,10 +317,10 @@ func (r *proxyRoute) failed(err error) {
 func (r *proxyRoute) ListenPacket(ctx context.Context) (PacketConn, error) {
 	control, err := r.handshake(ctx)
 	if err != nil {
-		r.failed(err)
+		r.failed(ctx, err)
 		return nil, err
 	}
-	_ = control.SetDeadline(time.Now().Add(proxyTimeout))
+	_ = control.SetDeadline(time.Now().Add(r.timeout))
 	bound, err := command(control, socksAssociate, "0.0.0.0:0")
 	if err != nil {
 		control.Close()
@@ -287,7 +346,8 @@ func (r *proxyRoute) ListenPacket(ctx context.Context) (PacketConn, error) {
 		control.Close()
 		return nil, err
 	}
-	c := &socksPacketConn{control: control, udp: udp, relay: netip.AddrPortFrom(relay.Addr().Unmap(), relay.Port())}
+	_ = udp.SetReadBuffer(udpReadBuffer)
+	c := &socksPacketConn{control: control, udp: udp, relay: netip.AddrPortFrom(relay.Addr().Unmap(), relay.Port()), in: make([]byte, 65536)}
 	// The association lasts as long as its TCP connection.
 	go func() {
 		_, _ = io.Copy(io.Discard, control)
@@ -296,12 +356,17 @@ func (r *proxyRoute) ListenPacket(ctx context.Context) (PacketConn, error) {
 	return c, nil
 }
 
-// socksPacketConn sends datagrams through a proxy's UDP relay.
+// socksPacketConn sends datagrams through a proxy's UDP relay. in is the
+// buffer reads take a datagram in, out the one WriteToAddrPort builds one
+// in, under outMu.
 type socksPacketConn struct {
 	control net.Conn
 	udp     *net.UDPConn
 	relay   netip.AddrPort
 	once    sync.Once
+	in      []byte
+	outMu   sync.Mutex
+	out     []byte
 }
 
 func (c *socksPacketConn) WriteTo(p []byte, address string) error {
@@ -315,17 +380,34 @@ func (c *socksPacketConn) WriteTo(p []byte, address string) error {
 	return err
 }
 
+func (c *socksPacketConn) WriteToAddrPort(p []byte, to netip.AddrPort) error {
+	c.outMu.Lock()
+	defer c.outMu.Unlock()
+	ip := to.Addr().Unmap()
+	datagram := append(c.out[:0], 0, 0, 0)
+	if ip.Is4() {
+		raw := ip.As4()
+		datagram = append(append(datagram, socksIPv4), raw[:]...)
+	} else {
+		raw := ip.As16()
+		datagram = append(append(datagram, socksIPv6), raw[:]...)
+	}
+	datagram = binary.BigEndian.AppendUint16(datagram, to.Port())
+	c.out = append(datagram, p...)
+	_, err := c.udp.WriteToUDPAddrPort(c.out, c.relay)
+	return err
+}
+
 func (c *socksPacketConn) ReadFrom(p []byte) (int, netip.AddrPort, error) {
-	buffer := make([]byte, 65536)
 	for {
-		n, from, err := c.udp.ReadFromUDPAddrPort(buffer)
+		n, from, err := c.udp.ReadFromUDPAddrPort(c.in)
 		if err != nil {
 			return 0, netip.AddrPort{}, err
 		}
 		if netip.AddrPortFrom(from.Addr().Unmap(), from.Port()) != c.relay {
 			continue
 		}
-		if n, source, ok := readSocksDatagram(buffer[:n], p); ok {
+		if n, source, ok := readSocksDatagram(c.in[:n], p); ok {
 			return n, source, nil
 		}
 	}

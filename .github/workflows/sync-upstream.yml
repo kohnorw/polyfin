@@ -1,0 +1,153 @@
+# Keeps this fork (kohnorw/polyfin) up to date with upstream
+# (moodiness/polyfin): every quarter of an hour, and by hand, it merges
+# upstream's main into main (scripts/sync-upstream.sh), builds and tests the
+# result, and pushes it, which builds and publishes the Docker image
+# (docker.yml). The fork's own changes stay as they are.
+#
+# When the merge conflicts, or the build or the tests fail, main is left
+# alone: upstream's main is pushed to the branch upstream-sync and one pull
+# request from it is opened, saying what went wrong, for a person to settle.
+# While it is open, the runs only bring the branch up to date with upstream;
+# once it is merged, the next run goes on by itself.
+#
+# Setup, once: GitHub refuses the workflow's own token a push of commits
+# that change workflow files, which upstream's often do. Create a
+# fine-grained personal access token for this repository with Contents,
+# Pull requests and Workflows set to Read and write, and save it as the
+# repository secret SYNC_TOKEN (Settings › Secrets and variables ›
+# Actions). Without it the workflow still runs, and syncs whatever does not
+# touch upstream's workflows.
+name: sync-upstream
+
+on:
+  schedule:
+    - cron: '*/15 * * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+  actions: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: polyfin
+          POSTGRES_PASSWORD: polyfin
+          POSTGRES_DB: polyfin
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U polyfin" --health-interval 5s --health-timeout 5s --health-retries 20
+    env:
+      GH_TOKEN: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+      POLYFIN_TEST_DATABASE_URL: postgresql://polyfin:polyfin@127.0.0.1:5432/polyfin
+    steps:
+      - name: Check out main
+        uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.SYNC_TOKEN || secrets.GITHUB_TOKEN }}
+
+      - name: Wait for a pull request left to settle
+        id: pending
+        run: |
+          number=$(gh pr list --head upstream-sync --base main --state open --json number --jq '.[0].number')
+          if [ -n "$number" ]; then
+            git fetch --no-tags --quiet https://github.com/moodiness/polyfin.git main
+            git push --force origin FETCH_HEAD:refs/heads/upstream-sync || true
+            echo "Pull request #$number is waiting to be settled: nothing else to do."
+            echo "open=true" >> "$GITHUB_OUTPUT"
+          elif [ -n "$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number')" ]; then
+            echo "An upstream-sync issue is open: close it once SYNC_TOKEN is set."
+            echo "open=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream
+        id: merge
+        if: steps.pending.outputs.open != 'true'
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          scripts/sync-upstream.sh
+
+      - name: Set up Go
+        if: steps.merge.outputs.state == 'merged'
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Set up Node
+        if: steps.merge.outputs.state == 'merged'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install FFmpeg for the tests
+        if: steps.merge.outputs.state == 'merged'
+        run: sudo apt-get update -q && sudo apt-get install -y -q ffmpeg
+
+      - name: Build and test
+        id: check
+        if: steps.merge.outputs.state == 'merged'
+        run: |
+          set -o pipefail
+          step() { echo "failed=$1" >> "$GITHUB_OUTPUT"; }
+          (cd web && npm ci --no-audit --no-fund && npm run typecheck && npm run build) || { step "the admin app's build"; exit 1; }
+          go build ./... || { step "the Go build"; exit 1; }
+          go vet ./... || { step "go vet"; exit 1; }
+          # The packages the fork changes, and the server's start. The
+          # WireGuard tests need a network the runners do not give.
+          go test -timeout 40m -skip 'WireGuard' \
+            ./cmd/polyfin/ ./internal/accounts/ ./internal/database/ ./internal/admin/ ./internal/library/ \
+            ./internal/jellyfin/ ./internal/playback/ ./internal/server/ ./internal/iptv/ ./internal/tmdb/ \
+            ./internal/hls/ || { step "the tests"; exit 1; }
+
+      - name: Push to main
+        id: push
+        if: steps.merge.outputs.state == 'merged' && steps.check.outcome == 'success'
+        run: |
+          git push origin HEAD:main
+          # A push with the workflow's own token starts no workflow: the
+          # image is built by asking for it.
+          if [ -z "${{ secrets.SYNC_TOKEN }}" ]; then
+            gh workflow run docker.yml --ref main
+          fi
+
+      - name: Ask for a hand
+        if: always() && (steps.merge.outputs.state == 'conflict' || steps.check.outcome == 'failure' || steps.push.outcome == 'failure')
+        env:
+          UPSTREAM: ${{ steps.merge.outputs.upstream }}
+          STATE: ${{ steps.merge.outputs.state }}
+          FAILED: ${{ steps.check.outputs.failed }}
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          if [ "$STATE" = conflict ]; then
+            why="Merging upstream's main (moodiness/polyfin@${UPSTREAM:0:8}) conflicts with the fork in:"$'\n\n'"$(sed 's/^/- `/; s/$/`/' conflicts.txt)"
+          elif [ -n "$FAILED" ]; then
+            why="Upstream's main (moodiness/polyfin@${UPSTREAM:0:8}) merges, but $FAILED failed after the merge: see $RUN."
+          else
+            why="Upstream's main (moodiness/polyfin@${UPSTREAM:0:8}) merges and passes, but it could not be pushed to main: see $RUN. A SYNC_TOKEN secret with the Workflows permission is likely needed (see .github/workflows/sync-upstream.yml)."
+          fi
+          body="$why"$'\n\n'"main was left as it was. Merge this pull request once it is settled (GitHub's conflict editor, or locally), and the sync goes on by itself; until then each run only brings this branch up to date with upstream."
+          if git push --force origin "$UPSTREAM:refs/heads/upstream-sync"; then
+            gh pr create --head upstream-sync --base main --title "Sync with upstream needs a hand" --body "$body"
+          else
+            # The token may not push upstream's workflow changes: an issue
+            # says so instead, once.
+            if [ -z "$(gh issue list --label upstream-sync --state open --json number --jq '.[0].number')" ]; then
+              gh label create upstream-sync --color 6152df --force >/dev/null 2>&1 || true
+              gh issue create --label upstream-sync --title "Sync with upstream needs a hand" \
+                --body "$body"$'\n\n'"The branch upstream-sync could not be pushed either: add the SYNC_TOKEN secret (see .github/workflows/sync-upstream.yml)."
+            fi
+          fi

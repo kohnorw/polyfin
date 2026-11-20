@@ -3,6 +3,7 @@ package localfiles
 import (
 	"context"
 	"crypto/rand"
+	"log/slog"
 	"net"
 	"net/url"
 	"os"
@@ -21,6 +22,8 @@ import (
 // the changes of folders added since. It runs when POLYFIN_TEST_SMB names a
 // share the user may write to (see TestSMBSharesAreScannedAndRead): it
 // works in a folder of its own, removed after.
+//
+//nolint:paralleltest // writes in the share TestSMBSharesAreScannedAndRead scans
 func TestSMBShareTellsOfChanges(t *testing.T) {
 	raw := os.Getenv("POLYFIN_TEST_SMB")
 	if raw == "" {
@@ -78,7 +81,7 @@ func TestSMBShareTellsOfChanges(t *testing.T) {
 	network, address := newRelay(t, server)
 	u.Host = address
 	u.Path = "/" + path.Join(name, scratch)
-	watched := newSMB(u, user, password)
+	watched := newSMB(u, user, password, slog.New(slog.DiscardHandler))
 	defer watched.close()
 
 	// watch watches the test's folder until it fails, and returns the

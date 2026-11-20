@@ -9,7 +9,7 @@ const auth: typeof en = {
       container:
         'Par sécurité, Polyfin a inscrit un code d’installation à usage unique dans son journal au démarrage. Lancez docker logs <conteneur> (sur Unraid, ouvrez le journal du conteneur) et repérez la ligne contenant le code d’installation.',
       computer:
-        'Par sécurité, Polyfin a inscrit un code d’installation à usage unique dans son journal au démarrage. Avec Polyfin Desktop, choisissez Code d’installation dans son menu pour le copier ; sinon, repérez la ligne contenant le code d’installation dans le journal de Polyfin.',
+        'Par sécurité, Polyfin a inscrit un code d’installation à usage unique dans son journal au démarrage. Avec Polyfin Desktop, choisissez Code d’installation dans son menu pour le copier\u202f; sinon, repérez la ligne contenant le code d’installation dans le journal de Polyfin.',
     },
     setupCode: 'Code d’installation',
     setupCodeHint: 'Format XXXX-XXXX. Majuscules et tiret facultatifs.',
@@ -18,6 +18,30 @@ const auth: typeof en = {
     confirmPassword: 'Confirmer le mot de passe',
     submit: 'Créer l’administrateur',
     submitting: 'Création…',
+    restoreInstead: 'Restaurer plutôt une sauvegarde',
+    createInstead: 'Créer plutôt un administrateur',
+    restoreTitle: 'Restaurer une sauvegarde',
+    restoreLede:
+      'Ramenez ce Polyfin à partir d’une sauvegarde de sa base de données\u202f: ses administrateurs, ses utilisateurs, ses réglages et son historique de visionnage.',
+    restoreFile: 'Fichier de sauvegarde',
+    restoreFileHelp:
+      'Un fichier .dump ou .dump.enc fait par Polyfin, de son dossier des sauvegardes ou d’une destination.',
+    restoreChoose: 'Choisir un fichier',
+    restoreSend: 'Envoyer et vérifier',
+    restoreSending: 'Envoi et vérification…',
+    restoreUnlockHelp:
+      'Cette sauvegarde est chiffrée\u202f: saisissez la phrase de passe avec laquelle elle a été faite.',
+    restoreReady: (file: string) =>
+      `${file} est une sauvegarde de la base de données de Polyfin que ce Polyfin peut restaurer.`,
+    restoreSteps: [
+      'Polyfin s’arrête, restaure la sauvegarde dans sa base de données d’un seul coup, puis redémarre dessus. Si quelque chose échoue, la base de données reste telle qu’elle est maintenant.',
+      'Connectez-vous ensuite avec un administrateur de la sauvegarde.',
+    ],
+    restoreStart: 'Restaurer',
+    restoreRestoring:
+      'Polyfin restaure la sauvegarde, puis redémarre. Cette page affiche la connexion dès qu’il répond.',
+    restoreFailed:
+      'La sauvegarde n’a pas pu être restaurée\u202f: Polyfin a redémarré sans elle. Son journal dit pourquoi, et contient un nouveau code d’installation.',
   },
   login: {
     title: 'Connexion',
@@ -30,7 +54,7 @@ const auth: typeof en = {
     codeDescription:
       'Saisissez le code à 6 chiffres que votre application d’authentification affiche pour Polyfin.',
     code: 'Code',
-    codeHelp: 'Téléphone perdu ? Saisissez plutôt l’un de vos codes de secours.',
+    codeHelp: 'Téléphone perdu\u202f? Saisissez plutôt l’un de vos codes de secours.',
     verify: 'Vérifier',
     verifying: 'Vérification…',
     restart: 'Se connecter avec un autre compte',
@@ -39,6 +63,17 @@ const auth: typeof en = {
       'Les administrateurs doivent utiliser la connexion en deux étapes sur ce serveur. Ajoutez votre compte à une application d’authentification sur votre téléphone, puis saisissez le code qu’elle affiche.',
     recoveryTitle: 'Gardez vos codes de secours',
     continue: 'Continuer',
+    providerSignIn: (name: string) => `Se connecter avec ${name}`,
+    providerOutcomes: {
+      provider_refused: 'La connexion avec le fournisseur d’identité a été annulée.',
+      provider_no_account:
+        'Aucun compte de ce serveur n’est lié à votre compte chez le fournisseur d’identité. Si vous avez un compte ici, connectez-vous avec son mot de passe et liez-le dans Mon compte. Sinon, demandez à un administrateur.',
+      account_disabled: 'Ce compte est désactivé.',
+      outside_allowed_hours: 'Ce compte ne peut pas se connecter à cette heure.',
+      outside_local_network: 'Ce compte ne peut se connecter que depuis le réseau local.',
+      too_many_attempts: 'Trop de tentatives. Réessayez plus tard.',
+      provider_failed: 'La connexion avec le fournisseur d’identité a échoué. Réessayez.',
+    },
   },
   invite: {
     title: (server: string) => `Rejoindre ${server}`,

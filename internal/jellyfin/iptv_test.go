@@ -104,7 +104,7 @@ func TestIPTVSourcesListAndPlayChannels(t *testing.T) {
 	if !source.IsInfiniteStream || !source.SupportsDirectPlay {
 		t.Fatalf("a live source played as it is: %+v", source)
 	}
-	response, err := http.Get(source.Path)
+	response, err := testClient.Get(source.Path)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +119,7 @@ func TestIPTVSourcesListAndPlayChannels(t *testing.T) {
 	if segment == "" {
 		t.Fatalf("relayed playlist: %d %s", response.StatusCode, playlist)
 	}
-	response, err = http.Get(segment)
+	response, err = testClient.Get(segment)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -140,6 +140,84 @@ func TestIPTVSourcesListAndPlayChannels(t *testing.T) {
 	// A channel of a group no longer imported is no longer played.
 	if status, _ := s.call(http.MethodPost, "/Items/"+zeb.Id+"/PlaybackInfo", app("tv", token), map[string]any{}); status != http.StatusNotFound {
 		t.Errorf("PlaybackInfo of a channel no longer listed: %d", status)
+	}
+}
+
+// A channel whose provider serves browsers only, its list naming no user
+// agent, plays: its playlist, its key and its segments are requested with
+// a browser's user agent, as Jellyfin requests its M3U tuners' streams.
+func TestIPTVChannelsAreRequestedAsABrowser(t *testing.T) {
+	t.Parallel()
+	var refused atomic.Int32
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/get.php" {
+			_, _ = fmt.Fprintf(w, "#EXTM3U\n#EXTINF:-1 tvg-chno=\"5\",Zeb One\n%s/live/one.m3u8\n", server.URL)
+			return
+		}
+		if !strings.HasPrefix(r.Header.Get("User-Agent"), "Mozilla/5.0 ") {
+			refused.Add(1)
+			http.Error(w, "<html>Use a browser</html>", http.StatusForbidden)
+			return
+		}
+		switch r.URL.Path {
+		case "/live/one.m3u8":
+			_, _ = io.WriteString(w, "#EXTM3U\n#EXT-X-TARGETDURATION:2\n#EXT-X-MEDIA-SEQUENCE:7\n"+
+				"#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:2,\nseg7.ts\n")
+		case "/live/key.bin":
+			_, _ = io.WriteString(w, "0123456789abcdef")
+		case "/live/seg7.ts":
+			http.ServeContent(w, r, "seg7.ts", time.Time{}, strings.NewReader("segment bytes"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(server.Close)
+	s := newTestServer(t, 10)
+	user := s.user("member", nil)
+	token := s.signIn("member", "tv")
+	if _, err := s.iptv.Add(t.Context(), addons.Shared(), iptv.NewSource{Name: "Provider",
+		Account: iptv.Account{Kind: addons.KindM3U, URL: server.URL + "/get.php"}}, false); err != nil {
+		t.Fatal(err)
+	}
+	var channels QueryResult
+	s.get(t, "/LiveTv/Channels", token, &channels)
+	if len(channels.Items) != 1 {
+		t.Fatalf("channels: %+v", channels.Items)
+	}
+	liveAnalysis(t, s, user, channels.Items[0].Id)
+	source := livePlaybackInfo(t, s, token, channels.Items[0].Id, "jellyfin-web-chrome")
+	get := func(address string) (int, string) {
+		t.Helper()
+		response, err := testClient.Get(address)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		body, _ := io.ReadAll(response.Body)
+		return response.StatusCode, string(body)
+	}
+	status, playlist := get(source.Path)
+	key, segment := "", ""
+	for line := range strings.Lines(playlist) {
+		line = strings.TrimSpace(line)
+		if _, uri, ok := strings.Cut(line, `URI="`); ok {
+			key, _, _ = strings.Cut(uri, `"`)
+		} else if strings.HasPrefix(line, "http") {
+			segment = line
+		}
+	}
+	if status != http.StatusOK || key == "" || segment == "" {
+		t.Fatalf("relayed playlist: %d %s", status, playlist)
+	}
+	if status, body := get(key); status != http.StatusOK || body != "0123456789abcdef" {
+		t.Errorf("relayed key: %d %q", status, body)
+	}
+	if status, body := get(segment); status != http.StatusOK || body != "segment bytes" {
+		t.Errorf("relayed segment: %d %q", status, body)
+	}
+	if n := refused.Load(); n != 0 {
+		t.Errorf("%d requests without a browser's user agent", n)
 	}
 }
 
@@ -247,5 +325,49 @@ func TestTryingAChannelAgainPlaysItsFailedStreams(t *testing.T) {
 	}
 	if !unplayable(orbe.Id) || !s.handler.Playback.Failed(versions[1].ID) {
 		t.Errorf("%s, not tried again, was played", orbe.Name)
+	}
+}
+
+// An app may open a channel of a source just added by the identifier its
+// line-up gives, as the admin app shows it, before any app listed the
+// channels: it is found, numbered as the listing numbers it, and plays,
+// while users who cannot see the source still find no such item.
+func TestAChannelOpensBeforeItIsListed(t *testing.T) {
+	t.Parallel()
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/get.php" {
+			_, _ = fmt.Fprintf(w, "#EXTM3U\r\n#EXTINF:-1,Zeb One\r\n%[1]s/live/one.m3u8\r\n#EXTINF:-1,Orbe Junior\r\n%[1]s/live/two.m3u8\r\n", server.URL)
+			return
+		}
+		http.NotFound(w, r)
+	}))
+	t.Cleanup(server.Close)
+	s := newTestServer(t, 10)
+	member := s.user("member", nil)
+	s.user("other", nil)
+	token := s.signIn("member", "tv")
+	otherToken := s.signIn("other", "tv")
+	scope := addons.Personal(member.ID)
+	addon, err := s.iptv.Add(t.Context(), scope, iptv.NewSource{Name: "Mine",
+		Account: iptv.Account{Kind: addons.KindM3U, URL: server.URL + "/get.php"}}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, lineup, err := s.iptv.ListChannels(t.Context(), scope, addon.ID, iptv.ChannelFilter{})
+	if err != nil || len(lineup) != 2 {
+		t.Fatalf("line-up: %+v %v", lineup, err)
+	}
+	orbe := lineup[1]
+	if status, body := s.call(http.MethodGet, "/Items/"+orbe.ID.String(), app("tv", otherToken), nil); status != http.StatusNotFound {
+		t.Errorf("another user's channel: %d %s", status, body)
+	}
+	if status, body := s.call(http.MethodPost, "/Items/"+orbe.ID.String()+"/PlaybackInfo", app("tv", token), map[string]any{"IsPlayback": true}); status != http.StatusOK {
+		t.Errorf("PlaybackInfo of a channel never listed: %d %s", status, body)
+	}
+	var item BaseItemDto
+	s.get(t, "/Items/"+orbe.ID.String(), token, &item)
+	if item.Name != "Orbe Junior" || item.Type != "TvChannel" || item.ChannelNumber != "2" {
+		t.Errorf("the channel never listed: %+v", item)
 	}
 }

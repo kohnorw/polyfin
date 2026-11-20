@@ -3,20 +3,26 @@ package jellyfin
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/forwarded"
+	"github.com/moodiness/polyfin/internal/hls"
 	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/localization"
 	"github.com/moodiness/polyfin/internal/media"
 	"github.com/moodiness/polyfin/internal/playback"
+	"github.com/moodiness/polyfin/internal/plays"
+	"github.com/moodiness/polyfin/internal/relayed"
+	"github.com/moodiness/polyfin/internal/subtitles"
 )
 
 func (h *Handler) playbackRoutes(rt *router) {
@@ -25,12 +31,17 @@ func (h *Handler) playbackRoutes(rt *router) {
 	}
 	signedIn(http.MethodGet, "/Items/{itemId}/PlaybackInfo", h.playbackInfo)
 	signedIn(http.MethodPost, "/Items/{itemId}/PlaybackInfo", h.playbackInfo)
+	signedIn(http.MethodGet, "/Polyfin/Playback/Starting", h.playbackStarting)
+	signedIn(http.MethodGet, "/Polyfin/Playback/Badges", h.playingBadges)
 	// Players fetch media, subtitles and the fonts they use without
-	// credentials, as Jellyfin allows: see streamAccess.
-	rt.handle(http.MethodGet, "/Videos/{itemId}/{file}", http.HandlerFunc(h.stream))
-	rt.handle(http.MethodGet, "/Videos/{itemId}/hls1/{playlistId}/{file}", http.HandlerFunc(h.hlsSegment))
+	// credentials, as Jellyfin allows: see streamAccess. What the media
+	// routes send is counted (see metered).
+	rt.handle(http.MethodGet, "/Videos/{itemId}/{file}", h.meteredFile(h.stream))
+	rt.handle(http.MethodGet, "/Videos/{itemId}/hls1/{playlistId}/{file}", h.meteredStream(h.hlsSegment))
+	rt.handle(http.MethodGet, "/Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/{file}", http.HandlerFunc(h.subtitle))
+	rt.handle(http.MethodGet, "/Videos/{itemId}/{mediaSourceId}/Subtitles/{index}/{startTicks}/{file}", http.HandlerFunc(h.subtitle))
 	rt.handle(http.MethodGet, "/Videos/{itemId}/{mediaSourceId}/Attachments/{index}", http.HandlerFunc(h.attachment))
-	rt.handle(http.MethodGet, "/Items/{itemId}/Download", http.HandlerFunc(h.download))
+	rt.handle(http.MethodGet, "/Items/{itemId}/Download", h.meteredFile(h.download))
 	signedIn(http.MethodDelete, "/Videos/ActiveEncodings", h.stopEncodings)
 
 	signedIn(http.MethodPost, "/Sessions/Playing", h.reportPlayback("playbackStartInfo", playbackStarted))
@@ -49,7 +60,7 @@ func (h *Handler) playbackRoutes(rt *router) {
 // user's data.
 func (h *Handler) record(r *http.Request, event playbackEvent, state playback.PlayState, positionKnown bool) {
 	c := callerFrom(r.Context())
-	before, _ := h.sessions.Playing(c.Device.ID)
+	before, had := h.sessions.Playing(c.Device.ID)
 	switch event {
 	case playbackStarted:
 		h.sessions.Start(c.Device.ID, c.User.ID, state)
@@ -57,6 +68,20 @@ func (h *Handler) record(r *http.Request, event playbackEvent, state playback.Pl
 		h.sessions.Progress(c.Device.ID, c.User.ID, state)
 	case playbackStopped:
 		h.sessions.Stop(c.Device.ID)
+		// Another of the user's devices may go on from it at once.
+		h.served.stopped(c.User.ID, c.Device.ID)
+	}
+	// The report has arrived: it is recorded even when the app hangs up
+	// right after sending it, as when it closes once playback stops.
+	h.recorded(context.WithoutCancel(r.Context()), event, state, positionKnown, before, had)
+}
+
+// recorded follows a playback report the device's session took, before
+// being what the session held before it: the playbacks the device left,
+// its torrents, and the user's data.
+func (h *Handler) recorded(ctx context.Context, event playbackEvent, state playback.PlayState, positionKnown bool, before playback.NowPlaying, had bool) {
+	c := callerFrom(ctx)
+	if event == playbackStopped {
 		// Images waiting for this playback may start.
 		if h.Thumbnails != nil {
 			h.Thumbnails.Wake()
@@ -65,13 +90,9 @@ func (h *Handler) record(r *http.Request, event playbackEvent, state playback.Pl
 			h.Playback.StopRemux(state.PlaySessionID)
 		}
 	}
-	// The report has arrived: it is recorded even when the app hangs up
-	// right after sending it, as when it closes once playback stops.
-	h.track(context.WithoutCancel(r.Context()), c.User, c.Device, event, state, positionKnown, before)
-}
-
-func (h *Handler) noContent(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusNoContent)
+	current, switched := h.leaveTitle(c.Device.ID, event, state.PlaySessionID)
+	h.followTorrents(c.Device.ID, c.User.ID, event, current, switched, had)
+	h.track(ctx, c.User, c.Device, event, state, positionKnown, before)
 }
 
 // sessionWindow is how recently a device must have been active to count as
@@ -173,6 +194,9 @@ func (h *Handler) describePlaying(r *http.Request, user accounts.User, info *Ses
 		RepeatMode:          playing.RepeatMode,
 		PlaybackOrder:       playing.PlaybackOrder,
 	}
+	if device, err := accounts.ParseID(info.Id); err == nil {
+		info.TranscodingInfo = h.transcodingInfo(r.Context(), device, playing)
+	}
 	item, err := h.played(r.Context(), user, playing.Item)
 	if err != nil {
 		return
@@ -210,9 +234,18 @@ func (h *Handler) title(ctx context.Context, user accounts.User, opened accounts
 	return item, err
 }
 
+// errNoSources is played's answer for an item the user sees that plays
+// nothing itself: a folder, a series, a season, a collection or a library.
+// It is library.ErrNotFound to every caller, but PlaybackInfo and the
+// stream answer it 400, as Jellyfin answers an item without media sources:
+// GetStaticMediaSources throws ArgumentException for it
+// (MediaSourceManager.cs at v12.4, lines 383-393), which the exception
+// middleware answers 400 (ExceptionMiddleware.cs, line 127).
+var errNoSources = fmt.Errorf("%w: the item has no media sources", library.ErrNotFound)
+
 // played resolves what a player opens: a movie, an episode, a replay, a
 // channel, a recording, a track or an audiobook, by its own identifier or
-// by one of its versions'.
+// by one of its versions'; errNoSources for an item of another kind.
 func (h *Handler) played(ctx context.Context, user accounts.User, opened accounts.ID) (library.Item, error) {
 	item, err := h.Library.Item(ctx, user, opened)
 	if errors.Is(err, library.ErrNotFound) {
@@ -225,15 +258,26 @@ func (h *Handler) played(ctx context.Context, user accounts.User, opened account
 	if err != nil {
 		return library.Item{}, err
 	}
-	switch item.Kind {
-	case library.KindMovie, library.KindVideo, library.KindEpisode, library.KindReplay, library.KindChannel, library.KindTrack, library.KindAudiobook,
-		library.KindExtra, library.KindThemeSong:
-		return item, nil
+	if !hasSources(item.Kind) {
+		return library.Item{}, errNoSources
 	}
-	return library.Item{}, library.ErrNotFound
+	return item, nil
 }
 
-// looseInt reads a number that apps send as a JSON number or string.
+// hasSources reports whether items of kind play, with versions of their
+// own: Jellyfin's IHasMediaSources.
+func hasSources(kind library.Kind) bool {
+	switch kind {
+	case library.KindMovie, library.KindVideo, library.KindEpisode, library.KindReplay, library.KindChannel, library.KindTrack, library.KindAudiobook,
+		library.KindExtra, library.KindThemeSong:
+		return true
+	}
+	return false
+}
+
+// looseInt is a number an app may leave out, or send null or empty: set
+// tells whether it sent one. Like any number of a request body (see
+// bodyOptions), it comes as a JSON number or a string holding one.
 type looseInt struct {
 	value int64
 	set   bool
@@ -272,6 +316,15 @@ type playbackInfoRequest struct {
 	// progressive lets a version be streamed as one file, to an app whose
 	// device profile asks for it (see downloadsConverted).
 	progressive bool
+	// directPlayOff is set when the app itself sent EnableDirectPlay false,
+	// as the Jellyfin app for Android does after playback errors, rather
+	// than Polyfin for a DLNA device or a guest: the direct-play check
+	// still runs, and gives DirectPlayError (see playback.Options).
+	directPlayOff bool
+	// convertSound converts the audio of the user's videos and channels,
+	// evened, the video copied where it would play as it is (see
+	// soundConverted).
+	convertSound bool
 }
 
 // playbackInfo answers what an app needs to play an item: its version's
@@ -308,6 +361,18 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost && !h.readPlaybackInfoBody(w, r, b, &request) {
 		return
 	}
+	request.directPlayOff = request.EnableDirectPlay != nil && !*request.EnableDirectPlay
+	// The Jellyfin iOS app's native player gets over HLS what Jellyfin
+	// would stream it as one file (see iosNativeOverHLS).
+	if iosNativePlayer(r, request.DeviceProfile) {
+		request.DeviceProfile = iosNativeOverHLS(request.DeviceProfile)
+	}
+	// Browsers claim video they then show black (see
+	// playback.WithoutRiskyVideo): the web player is offered H.264 and the
+	// like, converted when the file is not (this fork).
+	if request.DeviceProfile != nil && webApp(r) && h.Accounts.Settings().WebSafeVideo {
+		request.DeviceProfile = playback.WithoutRiskyVideo(request.DeviceProfile)
+	}
 	user, ok := h.viewer(w, r, b, notFoundProblem)
 	if !ok {
 		return
@@ -316,19 +381,54 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 		h.internalError(w, r, err)
 		return
 	} else if reached {
-		rateLimitExceeded(w)
+		// The title is named to the notifications, as far as it is found.
+		var item library.Item
+		if h.PlayFailed != nil {
+			item, _ = h.played(r.Context(), user, opened)
+		}
+		h.refusePlay(w, r, user, item, "RateLimitExceeded", plays.FailedLimit)
 		return
 	}
+	// Whether the device's profile was known before this request: item
+	// details then listed the versions for it (see appOrder).
+	_, _, profileKnown := h.knownPlay(r.Context(), user)
 	h.rememberPlay(r.Context(), request)
 	limitBitrate(&request, user)
 	h.limitHeight(&request, user)
+	request.convertSound = user.ConvertSound
 	request.progressive = h.downloadsConverted(user)
 	item, err := h.played(r.Context(), user, opened)
+	// Jellyfin cannot process the request for an item without media
+	// sources, such as a folder (see errNoSources).
+	if errors.Is(err, errNoSources) {
+		processingError(w, http.StatusBadRequest)
+		return
+	}
 	if err != nil {
 		h.browseError(w, r, err)
 		return
 	}
-	if item.Kind == library.KindChannel {
+	// A movie waiting for its digital release does not play: Jellyfin's
+	// NotAllowed, which jellyfin-web tells as playback not allowed, while
+	// its page tells when it is out.
+	if item.Kind == library.KindMovie {
+		day, held, err := h.Library.Upcoming(r.Context(), user, item.ID)
+		if err != nil {
+			h.browseError(w, r, err)
+			return
+		}
+		if held {
+			out := "not known yet"
+			if !day.IsZero() {
+				out = day.Format(time.DateOnly)
+			}
+			h.Logger.Info("A movie waiting for its digital release was not played", "item", item.ID, "out", out)
+			writeJSON(w, http.StatusOK, noCompatibleStream{MediaSources: []MediaSourceInfo{}, ErrorCode: "NotAllowed"})
+			return
+		}
+	}
+	// A channel, and a video whose stream has no end, play live.
+	if item.Kind == library.KindChannel || h.liveVideo(r.Context(), user, item) {
 		h.livePlaybackInfo(w, r, user, item, opened, request)
 		return
 	}
@@ -336,6 +436,12 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 		h.audioPlaybackInfo(w, r, user, item, request)
 		return
 	}
+	// The web client tells how the torrents this play tries start, until it
+	// answers, then how the one it chose goes on (see startprogress.go).
+	starting, start := h.withPlayStart(r.Context())
+	r = r.WithContext(starting)
+	var picked *library.Version
+	defer func() { start.answer(picked) }()
 	// A stale list is played as it is, while its addon is asked again: the
 	// new answers are waited for only when none of its versions plays.
 	p, complete, err := h.playableToPlay(r.Context(), user, item)
@@ -348,8 +454,8 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	for _, version := range p.versions {
 		release, err := h.Playback.Hold(playback.ForUser(r.Context(), user.ID), version)
 		if err != nil {
-			h.Logger.Info("A replay could not play: its provider's connections are all in use", "addon", version.Addon)
-			writeJSON(w, http.StatusOK, noCompatibleStream{MediaSources: []MediaSourceInfo{}, ErrorCode: "NoCompatibleStream"})
+			h.Logger.Info("A replay could not play: its provider's connections are all in use", "addon", version.AddonLog)
+			h.refusePlay(w, r, user, item, "NoCompatibleStream", plays.FailedLimit)
 			return
 		}
 		defer release()
@@ -363,31 +469,12 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	// for that version alone.
 	requested, _ := parseGUID(request.MediaSourceId)
 	explicit := request.MediaSourceId != "" && requested != item.ID
-	// An item opened by a version's own identifier is that version picked:
-	// apps open the version the user chose in their version menu, and
-	// Jellyfin for Android TV then names the title, or nothing, as the
-	// source. It is played as if named, waiting for its analysis, rather
-	// than passed over for a version analyzed sooner or played as it is.
-	picked := !explicit && opened != item.ID
-	// An app asking again for the title it plays switches its tracks in the
-	// version it plays: Jellyfin for Android TV starts again so to have a
-	// subtitle burned in, naming the title, which is also the identifier of
-	// a title's first version. That version stays, as its play session
-	// tells, rather than another chosen anew, where the track asked for is
-	// another or none.
-	playing := h.playingVersion(r, user, item)
 	plan := func(versions []library.Version) candidates {
 		at := openedIndex(opened, versions)
-		if picked && len(versions) > 0 && versions[at].ID == opened {
-			return candidates{order: []int{at}, analyzed: 1, named: at}
-		}
-		if i := slices.IndexFunc(versions, func(v library.Version) bool { return v.ID == playing }); !explicit && !picked && i >= 0 {
-			return candidates{order: []int{i}, analyzed: 1, named: i}
-		}
 		if explicit {
 			for i, version := range versions {
 				if version.ID == requested || sourceID(opened, version, i == at) == requested {
-					return candidates{order: []int{i}, analyzed: 1, named: i}
+					return candidates{order: []int{i}, analyzed: 1, named: i, picked: true}
 				}
 			}
 			return candidates{named: -1}
@@ -412,52 +499,67 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	// is the first that plays without conversion, as it is or repackaged
 	// with its tracks copied, among those analyzed now; else the first that
 	// plays at all. Jellyfin 12.2 keeps the version opened first however
-	// it plays: the setting departs from it, and is off by default.
-	prefer := settings.PreferDirectPlay && !explicit && !picked
+	// it plays: the setting departs from it, and is off by default. The
+	// title's own identifier asks for no version, but for a device whose
+	// profile was known: its version menu was ordered for it, the versions
+	// it plays without conversion first (see appOrder), so the identifier,
+	// which it sends for the version the menu shows first, picked or not,
+	// names a version Play keeps even when it needs a conversion.
+	menuPick := request.MediaSourceId != "" && !explicit && profileKnown
+	prefer := settings.PreferDirectPlay && !explicit && !menuPick
 	c := plan(p.versions)
 	choice := h.choose(r, user, p, opened, request, c, prefer)
-	if choice.decided == nil && !complete && r.Context().Err() == nil {
+	unstarted := choice.unstarted || p.unstarted
+	// A play that stopped waiting for a torrent does not wait for it again.
+	if choice.decided == nil && !complete && !choice.late && r.Context().Err() == nil {
 		versions, err := h.Library.Versions(r.Context(), user, item.ID)
 		if err != nil {
 			h.browseError(w, r, err)
 			return
 		}
-		p.versions = h.offered(r.Context(), user, versions)
+		unstarted = unstarted || h.unstartedTorrent(versions)
+		h.offer(r.Context(), user, &p, versions)
 		c = plan(p.versions)
 		choice = h.choose(r, user, p, opened, request, c, prefer)
+		unstarted = unstarted || choice.unstarted
 	}
 	if choice.decided == nil {
-		writeJSON(w, http.StatusOK, noCompatibleStream{MediaSources: []MediaSourceInfo{}, ErrorCode: "NoCompatibleStream"})
+		if unstarted {
+			// A torrent that could not start, for its route or its swarm,
+			// may play later: Jellyfin's closest answer, which jellyfin-web
+			// tells as media that cannot be played at this time, rather than
+			// as media no app plays.
+			h.Logger.Info("No version plays now: a torrent version could not start, see System › Health", "item", item.ID)
+			h.refusePlay(w, r, user, item, "RateLimitExceeded", plays.FailedNoStream)
+			return
+		}
+		h.refusePlay(w, r, user, item, "NoCompatibleStream", plays.FailedNoStream)
 		return
 	}
 	chosen, unreadable, versions, at := choice.decided, choice.unreadable, p.versions, openedIndex(opened, p.versions)
-	// The subtitles inside an NZB are extracted while the player starts,
-	// so that they are there when it asks (see usenet.go).
-	go h.extractUsenet(context.WithoutCancel(r.Context()), chosen.version)
-	// The subtitles inside any version are read as soon as its play is
-	// decided, so that the one the user picks loads at once (see
-	// extractAhead).
-	shown := chosen.decision.SubtitleStreamIndex
-	if shown >= 0 {
-		switch chosen.decision.Subtitles[shown].Method {
-		case "External", "Hls":
-		default:
-			shown = -1
-		}
-	}
-	go h.extractAhead(context.WithoutCancel(r.Context()), chosen.version, shown)
-	session := h.Playback.Signer().Sign(playback.Grant{Version: chosen.version.ID, User: user.ID, Relay: mustRelay(r, chosen.version)})
+	picked = &chosen.version
+	h.choseVersion(callerFrom(r.Context()).Device.ID, h.titleOf(item.ID), chosen.version.ID)
+	// The Jellyfin app for Android's integrated player plays a version
+	// as it is only when it is described as a file (see asFile); before
+	// 2.6.3, it fetches that file with its play session alone, which then
+	// asks Polyfin to relay it.
+	asFile, tokenless := integratedPlayer(r, request)
+	session := h.grant(playback.Grant{Version: chosen.version.ID, User: user.ID, Device: callerFrom(r.Context()).Device.ID,
+		Relay: tokenless || mustRelay(r, chosen.version)})
 	chosenSource := h.decidedSource(r, p, *chosen, request, session)
 	// Every version listed is named for the profile sent: the one chosen
 	// from its decision, the others from what is known of them.
 	namer := h.playbackNamer(item, request, user)
 	if namer != nil {
-		chosenSource.Name = chosen.version.Name + " " + playback.PlayNote(chosen.decision, true, namer.language)
+		chosenSource.Name = p.name(chosen.version) + " " + playback.PlayNote(chosen.decision, true, namer.language)
 	}
 	if chosen.decision.HLS {
 		// The bytes of the segment the play begins with are read while the
 		// app reads the answer.
 		h.Playback.Warm(chosen.version, time.Duration(request.StartTimeTicks.value)*100)
+	}
+	if asFile {
+		h.asFile(r.Context(), &chosenSource, chosen.version)
 	}
 	// An app that named a version, the title's own identifier included,
 	// gets the version chosen alone, as from Jellyfin.
@@ -496,6 +598,9 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 			if described.Bitrate != nil && overUserLimit(request.userLimit, *described.Bitrate) || !user.FitsGroup(h.versionHeight(r.Context(), other)) {
 				described.SupportsDirectPlay, described.SupportsDirectStream = false, false
 			}
+			if asFile {
+				h.asFile(r.Context(), &described, other)
+			}
 			sources = append(sources, described)
 		}
 	}
@@ -513,8 +618,9 @@ type noCompatibleStream struct {
 }
 
 // readPlaybackInfoBody reads a posted PlaybackInfoDto over the query's
-// values. An empty body is allowed; a body without a JSON content type is
-// not.
+// values, as Jellyfin reads it (see bodyOptions). An empty body is
+// allowed; a body without a JSON content type is not. A body it cannot
+// read is logged, without its content, as the app shows no reason.
 func (h *Handler) readPlaybackInfoBody(w http.ResponseWriter, r *http.Request, b bindErrors, request *playbackInfoRequest) bool {
 	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBody))
 	if err != nil {
@@ -533,7 +639,12 @@ func (h *Handler) readPlaybackInfoBody(w http.ResponseWriter, r *http.Request, b
 		return false
 	}
 	var posted playbackInfoRequest
-	if err := json.Unmarshal(body, &posted); err != nil {
+	if err := unmarshalBody(body, &posted); err != nil {
+		c := callerFrom(r.Context())
+		// The reason can quote a value of the body, whatever its length,
+		// and the app and the device are named in the app's words: each
+		// is cut.
+		h.Logger.Warn("A PlaybackInfo request could not be read", "app", truncate(c.Device.Client), "device", truncate(c.Device.DeviceName), "error", truncate(err.Error()))
 		b.add("$", "The JSON value could not be converted.")
 		validationProblem(w, b)
 		return false
@@ -555,12 +666,6 @@ func (h *Handler) readPlaybackInfoBody(w http.ResponseWriter, r *http.Request, b
 	}
 	if posted.DeviceProfile != nil {
 		request.DeviceProfile = posted.DeviceProfile
-		// Browsers claim video they then show black (see
-		// playback.WithoutRiskyVideo): the web player is offered H.264 and
-		// the like, converted when the file is not.
-		if webApp(r) && h.Accounts.Settings().WebSafeVideo {
-			request.DeviceProfile = playback.WithoutRiskyVideo(request.DeviceProfile)
-		}
 	}
 	if posted.EnableDirectPlay != nil {
 		request.EnableDirectPlay = posted.EnableDirectPlay
@@ -587,22 +692,29 @@ type decided struct {
 	analysis media.Analysis
 	source   MediaSourceInfo
 	decision playback.Decision
-	// burns holds the subtitle tracks the app takes only burned in that
-	// the video may be converted with, should the app pick one.
-	burns map[int]bool
+	// unstarted tells, of a version decide refused, a torrent whose index
+	// could not be read in time for the play (see
+	// playback.TorrentUnstarted).
+	unstarted bool
+	// lowerable and lowerOverHLS tell, of a version played as it is,
+	// whether a lower quality would play it converted, and over HLS (see
+	// lowerable).
+	lowerable, lowerOverHLS bool
 }
 
 // unconverted reports whether the app plays a version without conversion:
 // as it is, or repackaged with its tracks copied, which needs its keyframe
 // index. A version above the user's bitrate limit never does: decide
-// refuses it unless its video is converted down to the limit.
+// refuses it unless its video is converted down to the limit. For a user
+// who has their sound converted, audio converted with the video copied
+// counts as copied: their every version converts it.
 func (h *Handler) unconverted(ctx context.Context, d decided, request playbackInfoRequest) bool {
 	switch {
 	case beyondUserLimit(request, d.analysis.Bitrate, d.decision):
 		return false
 	case d.decision.DirectPlay:
 		return true
-	case !d.decision.Streamed() || d.decision.Video != nil || d.decision.Audio != nil:
+	case !d.decision.Streamed() || d.decision.Video != nil || d.decision.Audio != nil && !request.convertSound:
 		return false
 	case d.decision.Progressive:
 		return true
@@ -623,6 +735,7 @@ func (h *Handler) decide(r *http.Request, p playable, index int, version library
 		return decided{}, false
 	}
 	source := h.baseSource(r, p, version, id, analysis, true)
+	source.MediaStreams = h.withTextCopies(r.Context(), p, version, analysis, source.MediaStreams)
 	decision, options, described := h.trackDecision(p, version, source.MediaStreams, analysis, request, allowed, named)
 	// Over HLS, a version is cut into segments: on its keyframes, or,
 	// for a file without an index such as MPEG-TS, every few seconds,
@@ -632,14 +745,23 @@ func (h *Handler) decide(r *http.Request, p playable, index int, version library
 	// cannot be read, which nothing could stream.
 	if request.DeviceProfile != nil && decision.HLS {
 		plan, err := h.Playback.Plan(r.Context(), version)
-		if err != nil {
-			h.Logger.Info("A version cannot be streamed over HLS", "addon", version.Addon, "error", err)
-			return decided{}, false
+		// The sound converted alone needs the index too: a version that
+		// plays for others without it plays as for them.
+		if err != nil && request.convertSound && r.Context().Err() == nil {
+			request.convertSound = false
+			if usual, usualOptions, _ := h.trackDecision(p, version, source.MediaStreams, analysis, request, allowed, named); !usual.HLS {
+				decision, options, err = usual, usualOptions, nil
+			}
 		}
-		if plan.Grid() && decision.Video == nil {
-			converted := options
-			converted.ConvertVideo = true
-			if decision = playback.Decide(request.DeviceProfile, described, converted); !decision.HLS || decision.Video == nil {
+		if err != nil {
+			if r.Context().Err() == nil {
+				h.Logger.Info("A version cannot be streamed over HLS", "addon", version.AddonLog, "error", err)
+			}
+			return decided{unstarted: version.Torrent != nil && playback.TorrentUnstarted(err)}, false
+		}
+		if decision.HLS && plan.Grid() && decision.Video == nil {
+			var ok bool
+			if decision, ok = gridDecision(request, described, options); !ok {
 				return decided{}, false
 			}
 		}
@@ -652,17 +774,20 @@ func (h *Handler) decide(r *http.Request, p playable, index int, version library
 	if unplayable(request, analysis, decision, allowed) {
 		return decided{}, false
 	}
-	burns := map[int]bool{}
-	for _, stream := range source.MediaStreams {
-		if stream.Type != "Subtitle" || decision.Subtitles[stream.Index].Method != "Encode" || !allowed.Video || request.DeviceProfile == nil {
-			continue
-		}
-		burn := options
-		burn.SubtitleStreamIndex, burn.ConvertVideo = new(stream.Index), true
-		burned := playback.Decide(request.DeviceProfile, described, burn)
-		burns[stream.Index] = burned.Streamed() && burned.Video != nil && permitted(allowed, burned)
+	d := decided{index: index, version: version, id: id, analysis: analysis, source: source, decision: decision}
+	if decision.DirectPlay {
+		d.lowerable, d.lowerOverHLS = lowerable(request.DeviceProfile, described, options, allowed)
 	}
-	return decided{index: index, version: version, id: id, analysis: analysis, source: source, decision: decision, burns: burns}, true
+	return d, true
+}
+
+// gridDecision decides again, with its video converted, a version played
+// over HLS whose plan is cut on a fixed grid (see hls.NewGridPlan): false
+// when the app then plays it neither over HLS nor converted.
+func gridDecision(request playbackInfoRequest, described playback.MediaSource, options playback.Options) (playback.Decision, bool) {
+	options.ConvertVideo = true
+	decision := playback.Decide(request.DeviceProfile, described, options)
+	return decision, decision.HLS && decision.Video != nil
 }
 
 // trackDecision decides how a version plays on the app, for its device
@@ -670,14 +795,48 @@ func (h *Handler) decide(r *http.Request, p playable, index int, version library
 // the app asked for when named, else those the user's preferences choose.
 // It reads nothing, leaving to decide whether the version can be cut into
 // HLS segments. options are those the decision was made with, and
-// described the version as it saw it.
+// described the version as it saw it. For a user who has their sound
+// converted, the version is decided as for others, then with its audio
+// converted and evened, which plays when soundConverted lets it.
 func (h *Handler) trackDecision(p playable, version library.Version, streams []playback.MediaStream, analysis media.Analysis,
 	request playbackInfoRequest, allowed accounts.Conversions, named bool) (playback.Decision, playback.Options, playback.MediaSource) {
+	decision, options, described := h.decideTracks(p, version, streams, analysis, request, allowed, named, false)
+	if !request.convertSound || request.DeviceProfile == nil {
+		return decision, options, described
+	}
+	converted, convertedOptions, _ := h.decideTracks(p, version, streams, analysis, request, allowed, named, true)
+	if soundConverted(converted, decision, h.Playback.GridPlanned(version, analysis), allowed) {
+		return converted, convertedOptions, described
+	}
+	return decision, options, described
+}
+
+// soundConverted reports whether converted, a version's decision with its
+// audio converted and evened for a user who asked for it (see
+// accounts.User.ConvertSound), plays in place of usual, the decision
+// others get: it converts the audio, which the user may have converted,
+// and keeps the subtitle usual shows; and it converts the video only where
+// usual does, so that the sound never costs a video conversion, as a
+// subtitle burned in would, or a file cut on a fixed grid over HLS, which
+// grid tells (see playback.Service.GridPlanned).
+func soundConverted(converted, usual playback.Decision, grid bool, allowed accounts.Conversions) bool {
+	videoConverted := func(d playback.Decision) bool { return d.Video != nil || d.HLS && grid }
+	return converted.Streamed() && converted.Audio != nil && permitted(allowed, converted) &&
+		(!videoConverted(converted) || videoConverted(usual)) && converted.SubtitleStreamIndex == usual.SubtitleStreamIndex
+}
+
+// decideTracks is trackDecision, its audio converted and evened, never
+// played as it is, when sound is set: converted with the app's channels,
+// through the normalization of converted audio whatever the settings say
+// (see playback.Tuning.Normalize).
+func (h *Handler) decideTracks(p playable, version library.Version, streams []playback.MediaStream, analysis media.Analysis,
+	request playbackInfoRequest, allowed accounts.Conversions, named, sound bool) (playback.Decision, playback.Options, playback.MediaSource) {
 	notFile := h.Playback.ReadsInput(version)
 	options := playback.Options{
 		MaxStreamingBitrate: request.MaxStreamingBitrate.value,
 		UserBitrate:         request.userLimit,
 		EnableDirectPlay:    (request.EnableDirectPlay == nil || *request.EnableDirectPlay) && !notFile,
+		DirectPlayOff:       request.directPlayOff && !notFile,
 		EnableDirectStream:  (request.EnableDirectStream == nil || *request.EnableDirectStream) && !notFile,
 		ConvertAudio:        request.AllowAudioStreamCopy != nil && !*request.AllowAudioStreamCopy,
 		ConvertVideo:        request.AllowVideoStreamCopy != nil && !*request.AllowVideoStreamCopy,
@@ -685,18 +844,21 @@ func (h *Handler) trackDecision(p playable, version library.Version, streams []p
 		ConversionHeight:    request.conversionHeight,
 		Progressive:         request.progressive,
 		Can:                 h.Playback.Capabilities(),
-		// Jellyfin's EnableSubtitleExtraction.
-		SubtitleExtraction: h.Accounts.Settings().SubtitleExtraction,
+	}
+	if sound {
+		convertSound(&options)
 	}
 	// Like Jellyfin, chosen tracks only count with the version they belong
 	// to. The user's preferences choose the others. A decision plays the
 	// audio track flagged default, else the first, by itself: another
-	// preferred one is passed as if asked, so that the decision checks it.
+	// preferred one is passed as if asked, so that the decision checks it,
+	// and so is the track that plays when none is flagged (see
+	// flaggedAudio).
 	audio := p.tracks.audio(streams)
 	if named && request.AudioStreamIndex.set {
 		audio = new(int(request.AudioStreamIndex.value))
 		options.AudioStreamIndex = audio
-	} else if audio != nil && *audio != *defaultAudio(streams) {
+	} else if audio != nil && (*audio != *defaultAudio(streams) || !flaggedAudio(streams)) {
 		options.AudioStreamIndex = audio
 	}
 	if named && request.SubtitleStreamIndex.set {
@@ -717,13 +879,30 @@ func (h *Handler) trackDecision(p playable, version library.Version, streams []p
 		return decision, options, described
 	}
 	decision := playback.Decide(request.DeviceProfile, described, options)
+	// With no track asked, a picture subtitle the app would need burned in
+	// gives way to its text copy, when one was read; otherwise the copy
+	// counts as its original (see trackPreferences.subtitle). Naming the
+	// version's default track, which the item gives apps and jellyfin-web
+	// always sends back, asks for none: another track named stays.
+	asked := named && request.SubtitleStreamIndex.set
+	if given := p.tracks.subtitle(streams, p.tracks.audio(streams)); asked && given != nil && *given == *options.SubtitleStreamIndex {
+		asked = false
+	}
+	if selected := options.SubtitleStreamIndex; !asked && selected != nil && *selected >= 0 && decision.Subtitles[*selected].Method == "Encode" {
+		if copied := textCopyOf(streams, *selected); copied >= 0 {
+			options.SubtitleStreamIndex = new(copied)
+			decision = playback.Decide(request.DeviceProfile, described, options)
+		}
+	}
 	// A subtitle the app can only take burned into the video is burned in
-	// when the video can be converted, as burning it in requires, and may
-	// be. Else it is left out rather than preventing playback, and so is
-	// one the app would take in HLS when the version cannot be streamed so.
+	// when it is pictures, an image track inside the file or a picture file
+	// beside it, and the video can be converted, as burning it in
+	// requires, and may be. Any other is left out rather than preventing
+	// playback, and so is one the app would take in HLS when the version
+	// cannot be streamed so.
 	if selected := options.SubtitleStreamIndex; !decision.DirectPlay && selected != nil && *selected >= 0 {
 		method := decision.Subtitles[*selected].Method
-		if method == "Encode" && allowed.Video {
+		if method == "Encode" && allowed.Video && burnable(streams, analysis, *selected) {
 			burn := options
 			burn.ConvertVideo = true
 			if burned := playback.Decide(request.DeviceProfile, described, burn); burned.Streamed() && burned.Video != nil && permitted(allowed, burned) {
@@ -735,21 +914,6 @@ func (h *Handler) trackDecision(p playable, version library.Version, streams []p
 			without.SubtitleStreamIndex = new(-1)
 			if retry := playback.Decide(request.DeviceProfile, described, without); retry.DirectPlay || (retry.Streamed() && !decision.Streamed()) {
 				decision = retry
-				// The track the app could not take is left out of this play.
-				if delivery, ok := decision.Subtitles[*selected]; ok && (delivery.Method == "Encode" || delivery.Method == "Hls" && !decision.HLS) {
-					delivery.Method, delivery.Format = "Drop", ""
-					decision.Subtitles[*selected] = delivery
-				}
-			}
-		}
-	}
-	// A track that could only be burned in, where nothing can burn it, is
-	// one the app leaves out.
-	if !allowed.Video || h.subtitleEncoder == nil || h.subtitleEncoder.FFmpeg == "" {
-		for index, delivery := range decision.Subtitles {
-			if delivery.Method == "Encode" {
-				delivery.Method, delivery.Format = "Drop", ""
-				decision.Subtitles[index] = delivery
 			}
 		}
 	}
@@ -760,26 +924,17 @@ func (h *Handler) trackDecision(p playable, version library.Version, streams []p
 	// convertible lets through, leaves no room for it at the limit.
 	if decision.Progressive && (!permitted(allowed, decision) || decision.Video != nil && !h.Playback.MayConvertAlone()) {
 		request.progressive = false
-		return h.trackDecision(p, version, streams, analysis, request, allowed, named)
+		return h.decideTracks(p, version, streams, analysis, request, allowed, named, sound)
 	}
 	return decision, options, described
 }
 
-// playingVersion is the version of item the calling device plays now, as
-// the play session it reports tells, the zero ID when it plays none of it.
-func (h *Handler) playingVersion(r *http.Request, user accounts.User, item library.Item) accounts.ID {
-	now, ok := h.sessions.Playing(callerFrom(r.Context()).Device.ID)
-	if !ok || now.User != user.ID || now.PlaySessionID == "" {
-		return accounts.ID{}
-	}
-	grant, err := h.Playback.Signer().Verify(now.PlaySessionID)
-	if err != nil || grant.User != user.ID {
-		return accounts.ID{}
-	}
-	if owner, ok := h.Library.VersionOwner(grant.Version); !ok || owner != item.ID {
-		return accounts.ID{}
-	}
-	return grant.Version
+// convertSound has options convert the audio and even it, never playing
+// the source as it is: the refusal is Polyfin's, as a disc's, and the
+// app's own direct-play check is not run (see playback.Options).
+func convertSound(options *playback.Options) {
+	options.EnableDirectPlay, options.DirectPlayOff, options.ConvertAudio = false, false, true
+	options.Can.Tuning.Normalize = true
 }
 
 // unplayable reports whether a decision does not play a version on the app:
@@ -803,10 +958,15 @@ func (h *Handler) decidedSource(r *http.Request, p playable, d decided, request 
 	streamed := decision.Streamed()
 	if decision.HLS {
 		if _, err := h.Playback.Plan(r.Context(), version); err != nil {
-			h.Logger.Info("A version cannot be streamed over HLS", "addon", version.Addon, "error", err)
+			h.Logger.Info("A version cannot be streamed over HLS", "addon", version.AddonLog, "error", err)
 			streamed = false
 		}
 	}
+	h.logPlay(r, p.item.ID, version, decision, streamed)
+	h.queueTextCopies(r.Context(), p, decision, streams, version, analysis)
+	h.deliverable(r.Context(), decision, streams, version, analysis, streamed)
+	h.prefetchSubtitle(r.Context(), decision, streams, version, analysis)
+	h.prefetchTorrentSubtitle(r.Context(), p, decision, version)
 
 	source.Container = decision.Container
 	source.SupportsDirectPlay, source.SupportsDirectStream = decision.DirectPlay, decision.DirectPlay
@@ -816,7 +976,7 @@ func (h *Handler) decidedSource(r *http.Request, p playable, d decided, request 
 			limit = *request.DeviceProfile.MaxStreamingBitrate
 		}
 		source.SupportsTranscoding = true
-		source.TranscodingUrl = transcodingURL(r, p.item.ID, id, version, analysis, streams, decision, limit, session)
+		source.TranscodingUrl = transcodingURL(r, p.item.ID, id, version, analysis, streams, decision, limit, session, h.fastStart(r, version, decision, request))
 		source.TranscodingSubProtocol = "hls"
 		if decision.Progressive {
 			source.TranscodingSubProtocol = "http"
@@ -824,9 +984,18 @@ func (h *Handler) decidedSource(r *http.Request, p playable, d decided, request 
 		source.TranscodingContainer = decision.Transcoding.Container
 		// A source to stream is not a remote file to play as it is:
 		// Jellyfin for Roku plays the Path of a remote source rather than
-		// its TranscodingUrl, so nothing it needed converted played.
+		// its TranscodingUrl, so nothing it needed converted played (this
+		// fork).
 		source.IsRemote = false
 		describeConverted(request, analysis, source.MediaStreams, decision.Video)
+	}
+	// Played as it is, it offers a lower quality, as Jellyfin does, when
+	// one would play it converted: over HLS, once it is known to be cut
+	// into segments, as the conversion needs, which the play does not
+	// wait to read. It keeps no TranscodingUrl, which apps use only for a
+	// source not played as it is.
+	if decision.DirectPlay && d.lowerable {
+		source.SupportsTranscoding = !d.lowerOverHLS || h.Playback.Segmented(r.Context(), version)
 	}
 	if decision.AudioStreamIndex >= 0 {
 		source.DefaultAudioStreamIndex = new(decision.AudioStreamIndex)
@@ -846,11 +1015,169 @@ func (h *Handler) decidedSource(r *http.Request, p playable, d decided, request 
 			stream.IsExternalUrl = new(false)
 		}
 	}
+	h.markSynced(r.Context(), version.ID, h.versionFiles(r.Context(), p.subtitles, version), source.MediaStreams, decision.SubtitleStreamIndex)
 	for i := range source.MediaAttachments {
 		attachment := &source.MediaAttachments[i]
 		attachment.DeliveryUrl = attachmentURL(r, p.item.ID, id, attachment.Index)
 	}
 	return source
+}
+
+// fastStart is where a play over HLS that starts with fast segments
+// starts, as the request asks (see playback.Service.FastStarts), nil for
+// one that starts without. Fast segments are converted smaller than the
+// segments after them, which need their own initialization segment in
+// fragmented MP4: there, only jellyfin-web, whose players load each,
+// gets them. Every app gets them in MPEG-TS segments, which carry what
+// decodes them, as it plays a switch to another version.
+func (h *Handler) fastStart(r *http.Request, version library.Version, decision playback.Decision, request playbackInfoRequest) *time.Duration {
+	if !decision.HLS || decision.Transcoding == nil {
+		return nil
+	}
+	if format, _ := hls.ParseFormat(decision.Transcoding.Container); format == hls.FMP4 && !webClient(callerFrom(r.Context()).Device.Client) {
+		return nil
+	}
+	start := time.Duration(request.StartTimeTicks.value) * 100
+	if !h.Playback.FastStarts(r.Context(), version, decision.Video, start) {
+		return nil
+	}
+	return &start
+}
+
+// deliverable adapts a Jellyfin decision's subtitle deliveries to what
+// Polyfin delivers: subtitles in the container reach the app embedded in
+// what it plays as it is; subtitle files, the embedded text tracks that
+// remuxes extracted whole or that the version's index lists block by block,
+// and the PGS tracks it lists so, as external files; text subtitles as HLS
+// renditions; and the pictures chosen, an image track or a picture file,
+// burned into converted video. Any other is left out.
+func (h *Handler) deliverable(ctx context.Context, decision playback.Decision, streams []playback.MediaStream, version library.Version, analysis media.Analysis, streamed bool) {
+	files := subtitleFiles(streams)
+	whole := h.Playback.SubtitlesExtracted(ctx, version.ID, analysis.Duration)
+	// The index is read only when an embedded track would go out as a file.
+	var located map[int]bool
+	locate := func(stream int) bool {
+		if located == nil {
+			located = h.Playback.SubtitlesLocated(ctx, version, analysis)
+			if located == nil {
+				located = map[int]bool{}
+			}
+		}
+		return located[stream]
+	}
+	for _, stream := range streams {
+		delivery, ok := decision.Subtitles[stream.Index]
+		if stream.Type != "Subtitle" || !ok {
+			continue
+		}
+		extractable := !stream.IsExternal && playback.ExtractableSubtitle(analysis, stream.Index-files)
+		pgs := !stream.IsExternal && playback.PGSSubtitle(analysis, stream.Index-files)
+		switch {
+		case delivery.Method == "Embed" && !stream.IsExternal && decision.DirectPlay:
+		case delivery.Method == "External" && (stream.IsExternal || (extractable && (whole || locate(stream.Index-files))) ||
+			(pgs && locate(stream.Index-files))):
+		case delivery.Method == "Hls" && streamed && (stream.IsExternal || extractable):
+		case delivery.Method == "Encode" && streamed && decision.Video != nil && stream.Index == decision.SubtitleStreamIndex &&
+			burnable(streams, analysis, stream.Index):
+		default:
+			decision.Subtitles[stream.Index] = playback.SubtitleDelivery{Method: "Drop"}
+		}
+	}
+}
+
+// subtitleFiles counts a version's subtitle files, which come first among
+// its streams; the text copies of its picture subtitles, last, are not.
+func subtitleFiles(streams []playback.MediaStream) int {
+	files := 0
+	for _, stream := range streams {
+		if stream.Type == "Subtitle" && stream.IsExternal && stream.CopyOf == nil {
+			files++
+		}
+	}
+	return files
+}
+
+// queueTextCopies has a version's picture subtitles read into text when
+// the app plays it and cannot draw them: when the decision would burn one
+// in, or leave one out, rather than have the app draw it. The track chosen
+// is read first. Nothing waits for them: the copies are listed from the
+// next PlaybackInfo once read.
+func (h *Handler) queueTextCopies(ctx context.Context, p playable, decision playback.Decision, streams []playback.MediaStream,
+	version library.Version, analysis media.Analysis) {
+	cannot := false
+	for _, stream := range streams {
+		if stream.Type == "Subtitle" && stream.CopyOf == nil && playback.PictureSubtitle(stream.Codec) {
+			if delivery, ok := decision.Subtitles[stream.Index]; ok && delivery.Method == "Encode" {
+				cannot = true
+			}
+		}
+	}
+	if !cannot {
+		return
+	}
+	h.Playback.QueueTextCopies(ctx, version, analysis, h.versionFiles(ctx, p.subtitles, version), decision.SubtitleStreamIndex)
+}
+
+// prefetchSubtitle starts reading whole the embedded track the app shows
+// by default when it goes out as a file, so that it is ready when the app
+// asks for it a moment later.
+func (h *Handler) prefetchSubtitle(ctx context.Context, decision playback.Decision, streams []playback.MediaStream, version library.Version, analysis media.Analysis) {
+	files := subtitleFiles(streams)
+	delivery, ok := decision.Subtitles[decision.SubtitleStreamIndex]
+	if !ok || delivery.Method != "External" || decision.SubtitleStreamIndex < files {
+		return
+	}
+	// Remuxes extract text tracks whole, never PGS ones.
+	if !playback.PGSSubtitle(analysis, decision.SubtitleStreamIndex-files) && h.Playback.SubtitlesExtracted(ctx, version.ID, analysis.Duration) {
+		return
+	}
+	if stream := decision.SubtitleStreamIndex - files; h.Playback.SubtitlesLocated(ctx, version, analysis)[stream] {
+		h.Playback.PrefetchSubtitle(version, analysis, stream)
+	}
+}
+
+// prefetchTorrentSubtitle has the subtitle file inside the version's
+// torrent in the user's preferred subtitle language fetched as the play
+// starts, so that it is ready when the app shows it: the one the app shows
+// by default when it is one of them, else the first of them that is not
+// forced, else the first. Without a preferred language, only the one the
+// app shows by default is. Each of the others costs a piece of the
+// torrent, and is fetched when a user picks it (see
+// playback.Service.TorrentSubtitle).
+func (h *Handler) prefetchTorrentSubtitle(ctx context.Context, p playable, decision playback.Decision, version library.Version) {
+	if version.Torrent == nil {
+		return
+	}
+	files := h.versionFiles(ctx, p.subtitles, version)
+	if shown := decision.SubtitleStreamIndex; shown >= 0 && shown < len(files) && files[shown].Torrent != nil {
+		h.Playback.PrefetchTorrentSubtitle(files[shown])
+		return
+	}
+	if p.tracks.subtitleLanguage == "" {
+		return
+	}
+	chosen := -1
+	for i, file := range files {
+		if file.Torrent != nil && localization.SameLanguage(file.Language, p.tracks.subtitleLanguage) &&
+			(chosen < 0 || files[chosen].Forced && !file.Forced) {
+			chosen = i
+		}
+	}
+	if chosen >= 0 {
+		h.Playback.PrefetchTorrentSubtitle(files[chosen])
+	}
+}
+
+// burnable reports whether the subtitle stream of Jellyfin index index can
+// be burned into converted video: a picture subtitle file, or an image
+// track inside the file.
+func burnable(streams []playback.MediaStream, analysis media.Analysis, index int) bool {
+	files := subtitleFiles(streams)
+	if index < files {
+		i := slices.IndexFunc(streams, func(s playback.MediaStream) bool { return s.Type == "Subtitle" && s.Index == index })
+		return i >= 0 && !streams[i].IsTextSubtitleStream
+	}
+	return playback.BurnableSubtitle(analysis, index-files)
 }
 
 // permitted reports whether the conversions a decision plans, of the video
@@ -871,13 +1198,33 @@ func (h *Handler) convertible(allowed accounts.Conversions, user accounts.User, 
 	return allowed
 }
 
+// mediaRoute tells how Jellyfin guards a media route: servedToAnyone for
+// those it serves without checking who asks, the streams of videos, audio
+// tracks, subtitles, attachments and recordings; servedSignedIn for those
+// it serves only to a signed-in caller ([Authorize]), as downloads, the
+// universal audio stream and its HLS playlists and segments.
+type mediaRoute bool
+
+const (
+	servedToAnyone mediaRoute = true
+	servedSignedIn mediaRoute = false
+)
+
 // streamAccess finds who a media request plays for. Players send no
 // credentials with media URLs: a signed grant in Path URLs, a signed play
-// session, or the caller's token stands for the user. A user outside their
-// allowed hours gets nothing: Jellyfin serves direct streams without
-// checking who asks, but Polyfin knows, and keeps to the hours.
-func (h *Handler) streamAccess(r *http.Request) (accounts.User, playback.Grant, bool) {
-	// A playback ended from the server gets nothing more (see ended.go).
+// session, or the caller's token stands for the user. A grant stands as
+// granted tells; one that stands no more leaves the token to decide, as a
+// play session Polyfin did not sign does. A user outside their allowed
+// hours, or outside the local network without remote access, gets
+// nothing: Jellyfin serves direct streams without checking who asks, but
+// Polyfin knows, and keeps to the hours and the network. On a route
+// servedToAnyone, the token may come as the api_key query parameter even
+// without legacy authorization (see mediaToken). The grant returned for a
+// token names the token's device and nothing else: what the request
+// signs in turn is given to that device (see filesGrant).
+func (h *Handler) streamAccess(r *http.Request, route mediaRoute) (accounts.User, playback.Grant, bool) {
+	// A playback ended from the server gets nothing more (see ended.go,
+	// this fork).
 	if h.endings.isEnded(query(r, "playSessionId")) {
 		return accounts.User{}, playback.Grant{}, false
 	}
@@ -886,22 +1233,33 @@ func (h *Handler) streamAccess(r *http.Request) (accounts.User, playback.Grant, 
 		if token == "" {
 			continue
 		}
-		grant, err := h.Playback.Signer().Verify(token)
-		if err != nil {
-			continue
-		}
-		user, err := h.Accounts.User(r.Context(), grant.User)
-		if err == nil && !user.Refused(h.now()) && !h.outsideHours(user) {
+		if user, grant, ok := h.granted(r, token); ok {
 			return user, grant, true
 		}
 	}
-	credentials := readCredentials(r, h.Accounts.Settings().LegacyAuthorization)
-	if credentials.Token != "" {
-		if _, user, err := h.Accounts.DeviceByToken(r.Context(), credentials.Token, forwarded.Client(r)); err == nil && !h.outsideHours(user) {
-			return user, playback.Grant{}, true
+	if token := h.mediaToken(r, route); token != "" {
+		if device, user, err := h.Accounts.DeviceByToken(r.Context(), token, forwarded.Client(r)); err == nil && !h.outsideHours(user) &&
+			!remoteRefused(r, user) {
+			return user, playback.Grant{Device: device.ID}, true
 		}
 	}
 	return accounts.User{}, playback.Grant{}, false
+}
+
+// mediaToken is the access token a media request carries, as any request
+// carries it (see readCredentials), or on a route servedToAnyone as the
+// api_key query parameter. Jellyfin 12.4 reads api_key only with legacy
+// authorization (AuthorizationContext.cs, lines 108 to 110), but serves
+// those routes to anyone: there the token only tells Polyfin who plays,
+// for the subtitle sync and the user's rules, and apps that sign their
+// own media URLs with api_key would otherwise be refused, or get what no
+// one in particular gets.
+func (h *Handler) mediaToken(r *http.Request, route mediaRoute) string {
+	token := readCredentials(r, h.Accounts.Settings().LegacyAuthorization).Token
+	if token == "" && route == servedToAnyone {
+		token = query(r, "api_key")
+	}
+	return token
 }
 
 // stream serves a version's bytes: /Videos/{itemId}/stream, with an
@@ -925,17 +1283,27 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 		validationProblem(w, map[string][]string{"itemId": {notValid(r.PathValue("itemId"))}})
 		return
 	}
-	user, grant, ok := h.streamAccess(r)
+	user, grant, ok := h.streamAccess(r, servedToAnyone)
 	if !ok {
 		w.WriteHeader(http.StatusUnauthorized)
 		return
 	}
-	// The stream is cut if its playback is ended (see ended.go).
+	// The user's playbacks at once count what is sent, reported or not.
+	if !h.admitPlay(w, r, user, grant.Device) {
+		return
+	}
+	// The stream is cut if its playback is ended (see ended.go, this fork).
 	w, release := h.endings.open(query(r, "playSessionId"), w)
 	defer release()
 	item, err := h.played(r.Context(), user, opened)
 	if err != nil {
-		processingError(w, http.StatusNotFound)
+		// An item without media sources is a request Jellyfin cannot
+		// process (see errNoSources).
+		status := http.StatusNotFound
+		if errors.Is(err, errNoSources) {
+			status = http.StatusBadRequest
+		}
+		processingError(w, status)
 		return
 	}
 	// The version: the one the app names by its ETag or media source id,
@@ -958,31 +1326,40 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 	// lately left out, and those the version rules or the user's quality
 	// group hide (see firstWorkingVersion).
 	if wanted == item.ID && versioned(item.Kind) {
-		wanted = h.firstWorkingVersion(r.Context(), user, item)
+		wanted = h.firstWorkingVersion(h.mediaContext(r, servedToAnyone, user), user, item)
 	}
 	version, err := h.version(r.Context(), user, item, wanted)
 	if err != nil {
 		processingError(w, http.StatusBadRequest)
 		return
 	}
+	// An app that may not be told where the version comes from gets it
+	// through Polyfin, whatever its grant asks (see keptFromSource).
+	kept := h.keptFromSource(r, user, version)
+	grant.Relay = grant.Relay || kept
 	// A player that authenticates with a header might send it to the
 	// source too: relay instead of redirecting it.
 	relay := grant.Relay || strings.Contains(r.Header.Get("Authorization"), "Token=")
-	if item.Kind == library.KindChannel {
-		h.serveChannel(w, r, user, item, version, relay)
+	if h.playsLive(r.Context(), item, version) {
+		h.serveChannel(w, r, user, item, version, relay, grant)
 		return
 	}
 	// PlaybackInfo never offers a version above the user's bitrate limit,
 	// or taller than their quality group, as it is: this guards URLs kept
-	// from before the limit was set, or made up.
+	// from before the limit was set, or made up. The hide rules are not
+	// checked: they choose what is offered, and a play started before a
+	// rule hid its version asks for it again as it seeks.
 	if analysis, known := h.Playback.Analyzed(r.Context(), version.ID); known && overUserLimit(int64(user.MaxBitrate), analysis.Bitrate) {
-		h.Logger.Info("A version above the user's bitrate limit was refused", "addon", version.Addon)
+		h.Logger.Info("A version above the user's bitrate limit was refused", "addon", version.AddonLog)
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
 	if !user.FitsGroup(h.versionHeight(r.Context(), version)) {
-		h.Logger.Info("A version taller than the user's quality group was refused", "addon", version.Addon)
+		h.Logger.Info("A version taller than the user's quality group was refused", "addon", version.AddonLog)
 		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if kept && h.namesSource(w, r, version, true) {
 		return
 	}
 	contentType := mimeTypes[strings.ToLower(extension)]
@@ -993,8 +1370,15 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 	if contentType == "" {
 		contentType = mimeTypes[containerOfName(version.Filename)]
 	}
-	if err := h.Playback.Serve(w, r, version, playback.Delivery{Relay: relay, ContentType: contentType}); err != nil && r.Context().Err() == nil {
-		h.Logger.Warn("A stream could not be served", "addon", version.Addon, "error", err)
+	// The files of an HLS playlist relayed are the same play's (see
+	// liveFile), named with a grant signed once one is named.
+	grantToken := sync.OnceValue(func() string {
+		return h.filesGrant(grant, user, version)
+	})
+	link := func(target, name string) string { return h.liveLink(r, item.ID, grantToken())(target, name) }
+	if err := h.Playback.Serve(w, r, version, playback.Delivery{Relay: relay, ContentType: contentType, Link: link}); err != nil && r.Context().Err() == nil {
+		h.Logger.Warn("A stream could not be served", "addon", version.AddonLog, "error", err)
+		h.streamFailed(r, user, item, query(r, "deviceId"))
 	}
 }
 
@@ -1007,8 +1391,309 @@ var mimeTypes = map[string]string{
 	"mov":  "video/quicktime",
 	"avi":  "video/x-msvideo",
 	"ts":   "video/mp2t",
+	"mpeg": "video/mpeg",
 	"m3u8": "application/vnd.apple.mpegurl",
 	"hls":  "application/vnd.apple.mpegurl",
+}
+
+// subtitle serves a version's subtitle, an addon's file or a track inside
+// the version, in the format the player asks, optionally from a start
+// position.
+func (h *Handler) subtitle(w http.ResponseWriter, r *http.Request) {
+	name, format, _ := strings.Cut(r.PathValue("file"), ".")
+	opened, okItem := parseGUID(r.PathValue("itemId"))
+	index, errIndex := strconv.Atoi(r.PathValue("index"))
+	if !strings.EqualFold(name, "stream") || !okItem || errIndex != nil {
+		processingError(w, http.StatusNotFound)
+		return
+	}
+	var start time.Duration
+	if raw := r.PathValue("startTicks"); raw != "" {
+		ticks, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil {
+			processingError(w, http.StatusNotFound)
+			return
+		}
+		start = time.Duration(ticks) * 100
+	}
+	item := opened
+	if owner, ok := h.Library.VersionOwner(opened); ok {
+		item = owner
+	}
+	// A signed-in caller gets the files described for them: users see
+	// different sources, and so different files (see keptSubtitles).
+	// A caller Polyfin does not know gets nothing, and the answer of a
+	// title nobody opened whether or not this one was described lately.
+	user, _, signedIn := h.streamAccess(r, servedToAnyone)
+	if !signedIn {
+		processingError(w, http.StatusNotFound)
+		return
+	}
+	files, ok := h.keptSubtitles(user, item)
+	if !ok {
+		// Not described for the caller since the server started: describe
+		// the item again for them.
+		title, err := h.title(r.Context(), user, item)
+		if err != nil {
+			processingError(w, http.StatusNotFound)
+			return
+		}
+		p, _ := h.playable(r.Context(), user, title)
+		files = p.subtitles
+	}
+	// External subtitles come first among a version's streams, its title's
+	// then its own; embedded tracks follow, served whole (see embeddedTrack
+	// and pgsTrack). The version is looked for past its title's files only.
+	var version library.Version
+	if index >= len(files) {
+		if found, ok := h.sourceVersion(r, item); ok {
+			version, files = found, h.versionFiles(r.Context(), files, found)
+		}
+	}
+	var text subtitleText
+	var copied, isCopy bool
+	if index >= len(files) {
+		text.cues, isCopy, copied = h.textCopy(r, item, files, index)
+	}
+	switch {
+	case index < 0:
+		processingError(w, http.StatusInternalServerError)
+		return
+	case isCopy:
+		// A picture subtitle's text copy, served as other text subtitles
+		// are, in the format asked.
+		if !copied {
+			processingError(w, http.StatusInternalServerError)
+			return
+		}
+	case index >= len(files) && pgsFormat(format):
+		data, found := h.pgsTrack(r, item, index-len(files))
+		if !found {
+			processingError(w, http.StatusInternalServerError)
+			return
+		}
+		// As Jellyfin 12.2 serves the raw file: apps that draw PGS read
+		// it by ranges as they play.
+		w.Header().Set("Content-Type", "application/octet-stream")
+		http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(data))
+		return
+	case index >= len(files):
+		var found bool
+		// Jellyfin answers 500 for a subtitle it cannot serve.
+		if text, found = h.embeddedTrack(r, item, index-len(files)); !found {
+			processingError(w, http.StatusInternalServerError)
+			return
+		}
+	case pictureFile(files[index]):
+		// A PGS file goes out as it is, as Jellyfin 12.2 serves one; a
+		// VobSub pair is not one file, and pictures are not text.
+		if files[index].Format != "sup" || !pgsFormat(format) {
+			processingError(w, http.StatusInternalServerError)
+			return
+		}
+		h.pgsFile(w, r, files[index])
+		return
+	default:
+		file, err := h.currentFile(r.Context(), version, files, index)
+		if err == nil {
+			text, err = h.subtitleFile(r.Context(), file)
+		}
+		if err != nil {
+			if r.Context().Err() == nil {
+				h.Logger.Warn("A subtitle could not be read", "addon", files[index].Addon, "error", err)
+			}
+			processingError(w, http.StatusInternalServerError)
+			return
+		}
+		// An addon's subtitle is synced to the version it is served for.
+		if addonSubtitle(file) {
+			if played, ok := h.subtitleVersion(r, item); ok {
+				text = h.syncedSubtitle(r.Context(), played, file, text)
+			}
+		}
+	}
+	data, contentType, ok := text.write(format, start)
+	if !ok {
+		processingError(w, http.StatusInternalServerError)
+		return
+	}
+	w.Header().Set("Content-Type", contentType)
+	http.ServeContent(w, r, "", time.Time{}, bytes.NewReader(data))
+}
+
+// textCopy returns the cues of the text copy a subtitle URL names, of
+// Jellyfin index index past the version's files and tracks (see
+// playback.Service.TextCopies). isCopy reports an index past them, and
+// found whether its text is kept.
+func (h *Handler) textCopy(r *http.Request, item accounts.ID, files []library.ExternalSubtitle, index int) (cues []subtitles.Cue, isCopy, found bool) {
+	version, ok := h.sourceVersion(r, item)
+	if !ok {
+		return nil, false, false
+	}
+	analysis, ok := h.Playback.Analyzed(r.Context(), version.ID)
+	if !ok || !playback.IsTextCopy(analysis, files, index) {
+		return nil, false, false
+	}
+	cues, found = h.Playback.TextCopyCues(r.Context(), version, analysis, files, index)
+	return cues, true, found
+}
+
+// trackWait bounds how long a subtitle request waits for its track to be
+// read whole through the version's index: seconds usually, longer when the
+// host slows Polyfin down.
+const trackWait = 2 * time.Minute
+
+// sourceVersion is the version a subtitle URL names, for a signed-in
+// caller: the URL carries the caller's token, as Jellyfin writes
+// DeliveryUrls. The title's own identifier stands for the version its
+// first media source describes (see firstWorkingVersion), as the app
+// asking is offered them, with the user's track choices on the title.
+func (h *Handler) sourceVersion(r *http.Request, item accounts.ID) (library.Version, bool) {
+	user, _, signedIn := h.streamAccess(r, servedToAnyone)
+	wanted, ok := parseGUID(r.PathValue("mediaSourceId"))
+	if !signedIn || !ok {
+		return library.Version{}, false
+	}
+	if wanted == item {
+		title, err := h.title(r.Context(), user, item)
+		if err != nil {
+			return library.Version{}, false
+		}
+		wanted = h.firstWorkingVersion(h.mediaContext(r, servedToAnyone, user), user, title)
+	}
+	version, err := h.Library.Version(r.Context(), user, item, wanted)
+	return version, err == nil
+}
+
+// embeddedTrack returns an embedded text track of the version a subtitle
+// URL names, stream being its FFmpeg index. A track the version's index
+// lists is read whole through it, now if it was not before: its file keeps
+// what the WebVTT remuxes extract loses, ASS styles first. Else it is the
+// track remuxes extracted whole, if they did.
+func (h *Handler) embeddedTrack(r *http.Request, item accounts.ID, stream int) (subtitleText, bool) {
+	version, ok := h.sourceVersion(r, item)
+	if !ok {
+		return subtitleText{}, false
+	}
+	analysis, ok := h.Playback.Analyzed(r.Context(), version.ID)
+	if !ok || !playback.ExtractableSubtitle(analysis, stream) {
+		return subtitleText{}, false
+	}
+	if h.Playback.SubtitlesLocated(r.Context(), version, analysis)[stream] {
+		ctx, cancel := context.WithTimeout(r.Context(), trackWait)
+		defer cancel()
+		if track, err := h.Playback.SubtitleTrack(ctx, version, analysis, stream); err == nil {
+			if text, err := readSubtitleText(track.Data); err == nil {
+				return text, true
+			}
+		}
+	}
+	cues, ok := h.Playback.ExtractedTrack(r.Context(), version.ID, analysis.Duration, stream)
+	return subtitleText{cues: cues}, ok
+}
+
+// pgsFormat reports whether a subtitle URL asks for PGS, as Jellyfin
+// names it: "pgssub", "pgs" or "sup".
+func pgsFormat(format string) bool {
+	return strings.Contains(strings.ToLower(format), "pgs") || strings.EqualFold(format, "sup")
+}
+
+// pgsTrack returns an embedded PGS track of the version a subtitle URL
+// names, stream being its FFmpeg index, as a SUP file read whole through
+// the version's index, and whether it could be.
+func (h *Handler) pgsTrack(r *http.Request, item accounts.ID, stream int) ([]byte, bool) {
+	version, ok := h.sourceVersion(r, item)
+	if !ok {
+		return nil, false
+	}
+	analysis, ok := h.Playback.Analyzed(r.Context(), version.ID)
+	if !ok || !playback.PGSSubtitle(analysis, stream) {
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(r.Context(), trackWait)
+	defer cancel()
+	track, err := h.Playback.SubtitleTrack(ctx, version, analysis, stream)
+	if err != nil || track.Format != "sup" {
+		return nil, false
+	}
+	return track.Data, true
+}
+
+// pgsFile serves a PGS file beside a local file as it is, byte ranges
+// included: apps that draw PGS read it by ranges as they play.
+func (h *Handler) pgsFile(w http.ResponseWriter, r *http.Request, file library.ExternalSubtitle) {
+	header := http.Header{}
+	for _, name := range []string{"Range", "If-Range"} {
+		if value := r.Header.Get(name); value != "" {
+			header.Set(name, value)
+		}
+	}
+	response, err := h.Stremio.Open(r.Context(), r.Method, file.URL, header, file.Confined)
+	if err != nil {
+		processingError(w, http.StatusInternalServerError)
+		return
+	}
+	defer response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusOK, http.StatusPartialContent, http.StatusRequestedRangeNotSatisfiable:
+	default:
+		processingError(w, http.StatusInternalServerError)
+		return
+	}
+	for _, name := range []string{"Content-Length", "Content-Range", "Accept-Ranges", "Last-Modified"} {
+		if value := response.Header.Get(name); value != "" {
+			w.Header().Set(name, value)
+		}
+	}
+	w.Header().Set("Content-Type", "application/octet-stream")
+	relayed.Sandbox(w.Header())
+	w.WriteHeader(response.StatusCode)
+	_, _ = io.Copy(w, response.Body)
+}
+
+// maxSubtitleBytes bounds subtitle downloads.
+const maxSubtitleBytes = 8 << 20
+
+// readSubtitleFile reads a subtitle file, downloading an addon's. A file
+// inside a torrent is fetched from its swarm once, then kept (see
+// playback.Service.TorrentSubtitle). subtitleFile keeps what it reads.
+func (h *Handler) readSubtitleFile(ctx context.Context, file library.ExternalSubtitle) (subtitleText, error) {
+	if file.Uploaded || file.Torrent != nil {
+		var data []byte
+		var err error
+		if file.Uploaded {
+			data, err = h.Library.UploadedSubtitleText(ctx, file.ID)
+		} else {
+			data, err = h.Playback.TorrentSubtitle(ctx, file)
+		}
+		if err != nil {
+			return subtitleText{}, err
+		}
+		text, err := readSubtitleText(data)
+		if err != nil {
+			return subtitleText{}, err
+		}
+		return text, nil
+	}
+	ctx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	response, err := h.Stremio.Open(ctx, http.MethodGet, file.URL, nil, file.Confined)
+	if err != nil {
+		return subtitleText{}, err
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return subtitleText{}, errors.New("subtitle unavailable: HTTP " + strconv.Itoa(response.StatusCode))
+	}
+	data, err := io.ReadAll(io.LimitReader(response.Body, maxSubtitleBytes))
+	if err != nil {
+		return subtitleText{}, err
+	}
+	text, err := readSubtitleText(data)
+	if err != nil {
+		return subtitleText{}, err
+	}
+	return text, nil
 }
 
 // playbackReport is what apps report about playback: Jellyfin's
@@ -1078,7 +1763,7 @@ func (h *Handler) reportPlayback(parameter string, event playbackEvent) http.Han
 			return
 		}
 		var report playbackReport
-		if err := json.Unmarshal(body, &report); err != nil {
+		if err := unmarshalBody(body, &report); err != nil {
 			validationProblem(w, map[string][]string{"$": {"The JSON value could not be converted."}, parameter: {"The " + parameter + " field is required."}})
 			return
 		}

@@ -7,26 +7,21 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/moodiness/polyfin/internal/episodename"
 	"github.com/moodiness/polyfin/internal/iptv"
 )
-
-// videoExtensions are the files a scan lists, by their extension.
-var videoExtensions = map[string]bool{
-	".mkv": true, ".mp4": true, ".m4v": true, ".avi": true, ".mov": true, ".ts": true, ".m2ts": true, ".mts": true,
-	".webm": true, ".wmv": true, ".mpg": true, ".mpeg": true, ".flv": true, ".ogv": true,
-}
 
 // videoFile reports whether name is a video a scan lists, a sample's
 // included: a scan reading extras reads it as one (see splitExtras).
 func videoFile(name string) bool {
-	return videoExtensions[strings.ToLower(path.Ext(name))]
+	return episodename.Video(name)
 }
 
 // sideExtensions are the files a scan lists beside the videos, by their
 // extension: NFO files, which may tell a title's identifiers, and subtitle
-// files (see subtitleFormats).
+// files (see subtitleFormats), with the .sub files of VobSub pairs.
 var sideExtensions = map[string]bool{".nfo": true, ".srt": true, ".ass": true, ".ssa": true, ".vtt": true, ".sup": true, ".idx": true,
-	".sub": true, ".smi": true, ".sami": true, ".mks": true}
+	".sub": true}
 
 // sideFile reports whether name is a side file a scan lists.
 func sideFile(name string) bool {
@@ -131,12 +126,14 @@ func skippedIn(kind, name string) bool {
 // name is what a file's or folder's name tells: the title and year it
 // names, the IMDb ("tt…") and TMDB identifiers written in it, the season
 // and episodes of an episode (lastEpisode, the last of a file holding
-// several, is episode for one holding one), and its video's height.
+// several, is episode for one holding one), the absolute number of an
+// episode named by it (see episodeName), and its video's height.
 type name struct {
 	title                        string
 	year                         int
 	imdb, tmdb                   string
 	season, episode, lastEpisode int
+	absolute                     int
 	episodic                     bool
 	height                       int
 }
@@ -149,16 +146,11 @@ var (
 	// bracketed are the other tags between brackets or braces, such as a
 	// release group or an edition: they are not the title.
 	bracketed = regexp.MustCompile(`\[[^\]]*\]|\{[^}]*\}`)
-	// episodeTag matches S01E02, s01e02, S01E01-E02, S01E01E02 and
-	// S01E01-02; crossTag 1x02; episodeOnly E02 or Episode 2, in a season
-	// folder.
-	episodeTag  = regexp.MustCompile(`(?i)\bs(\d{1,3})[ ._-]?e(\d{1,4})((?:(?:-e?|[ ._]?-?[ ._]?e)\d{1,4})*)`)
-	extraEpisod = regexp.MustCompile(`(?i)(?:-e?|[ ._]?-?[ ._]?e)(\d{1,4})`)
-	crossTag    = regexp.MustCompile(`(?i)\b(\d{1,2})x(\d{2,3})\b`)
-	episodeOnly = regexp.MustCompile(`(?i)(?:^|[ ._-])(?:e|ep|episode)[ ._]?(\d{1,4})\b`)
-	// seasonFolder names a season's folder: Season 01, Saison 1, S01,
-	// Specials (season 0).
-	seasonFolder = regexp.MustCompile(`(?i)^(?:season|series|saison|staffel|temporada|s)[ ._-]*(\d{1,3})$`)
+	// The episodes names tell, as the episodename package reads them.
+	episodeTag   = episodename.Tag
+	crossTag     = episodename.Cross
+	episodeOnly  = episodename.Alone
+	seasonFolder = episodename.SeasonFolder
 	// yearInParentheses is the year of "Title (1968)"; yearToken one among
 	// the words of "Title.1968.1080p".
 	yearInParentheses = regexp.MustCompile(`\((\d{4})\)`)
@@ -192,12 +184,7 @@ func parseName(text string) name {
 		n.episodic = true
 		n.season, _ = strconv.Atoi(text[loc[2]:loc[3]])
 		n.episode, _ = strconv.Atoi(text[loc[4]:loc[5]])
-		n.lastEpisode = n.episode
-		for _, m := range extraEpisod.FindAllStringSubmatch(text[loc[6]:loc[7]], -1) {
-			if last, _ := strconv.Atoi(m[1]); last > n.lastEpisode {
-				n.lastEpisode = last
-			}
-		}
+		n.lastEpisode = episodename.Last(text, n.episode, loc[6], loc[7])
 		text = text[:loc[0]]
 	} else if loc := crossTag.FindStringSubmatchIndex(text); loc != nil {
 		n.episodic = true
@@ -325,7 +312,14 @@ func completedName(file name, dir string) name {
 // says before the episode), the unit matched to a title (the show's
 // folder, or the file at the folder's top), and the episode's season and
 // numbers, from its name, its season folder giving the season of an
-// episode numbered alone.
+// episode numbered alone. A name telling an absolute number alone (see
+// episodename.Absolute) is numbered so in the specials' folder, as
+// Jellyfin reads it; elsewhere it tells its absolute number, the episode
+// being listed, until it is matched to the catalog's (see
+// absolutePlace), in its season folder's season, else the first, as
+// Jellyfin's TMDB provider reads an episode without a season
+// (MediaBrowser.Providers/Plugins/Tmdb/TV/TmdbEpisodeProvider.cs, lines
+// 99-100 at v12.4).
 func episodeName(rel string) (show name, episode name, unit string) {
 	episode = parseName(stem(rel))
 	parts := strings.Split(rel, "/")
@@ -345,6 +339,16 @@ func episodeName(rel string) (show name, episode name, unit string) {
 			episode.lastEpisode = episode.episode
 		}
 	}
+	if !episode.episodic {
+		if number, title, ok := episodename.Absolute(stem(rel)); ok {
+			episode.episodic = true
+			episode.season, episode.episode, episode.lastEpisode = season, number, number
+			if season != 0 {
+				episode.season, episode.absolute = max(season, 1), number
+			}
+			episode.title, episode.year = titleAndYear(title)
+		}
+	}
 	top := parts[0]
 	if len(parts) >= 2 && !seasonFolder.MatchString(top) && !strings.EqualFold(top, "specials") {
 		show = parseName(top)
@@ -359,4 +363,38 @@ func episodeName(rel string) (show name, episode name, unit string) {
 func stem(rel string) string {
 	base := path.Base(rel)
 	return strings.TrimSuffix(base, path.Ext(base))
+}
+
+// Why the name of a show's file tells no episode, the reason Unmatched
+// gives such a file of a show in place of reasonUnreadableName, with how
+// to name it (see episodeReason). A name telling an absolute number alone
+// tells its episode (see absolute.go).
+const (
+	// reasonNoSeason: an episode's number alone, as "E05" or "Episode
+	// 5", outside a season's folder.
+	reasonNoSeason = "no_season"
+	// reasonAirDate: an air date, as "2024-03-15", which local folders
+	// do not read.
+	reasonAirDate = "air_date"
+	// reasonNoEpisodeNumber: no number at all.
+	reasonNoEpisodeNumber = "no_episode_number"
+)
+
+// airDate is the date of a daily show's episode, "2024-03-15" or
+// "15.03.2024", as Jellyfin reads it
+// (Emby.Naming/Common/NamingOptions.cs, lines 332-351 at v12.4).
+var airDate = regexp.MustCompile(`(?:^|\D)(?:(?:19|20)\d{2}[._ -](?:0[1-9]|1[0-2])[._ -](?:0[1-9]|[12]\d|3[01])|` +
+	`(?:0[1-9]|[12]\d|3[01])[._ -](?:0[1-9]|1[0-2])[._ -](?:19|20)\d{2})(?:\D|$)`)
+
+// episodeReason is why the name of the file at rel, of a show, tells no
+// episode (see episodeName).
+func episodeReason(rel string) string {
+	text := stem(rel)
+	if episodeOnly.MatchString(text) {
+		return reasonNoSeason
+	}
+	if airDate.MatchString(text) {
+		return reasonAirDate
+	}
+	return reasonNoEpisodeNumber
 }

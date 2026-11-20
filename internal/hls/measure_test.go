@@ -12,11 +12,14 @@ import (
 )
 
 // chainTimes are the injected durations of the timed conversions, by kind
-// and chain; a missing one fails. checkFails fails the Vulkan decoding
-// check, sampleFails the making of the samples, and brokenDeinterlacers
-// the check of those deinterlacers.
+// and chain; a missing one fails. hdrDevice is the tone mapping of Intel's
+// GPU or of VideoToolbox, hdrLow any GPU's HDR chain to 720p, and
+// processor the processor's tone mapping. checkFails fails the Vulkan
+// decoding check, sampleFails the making of the samples, and
+// brokenDeinterlacers the check of those deinterlacers.
 type chainTimes struct {
 	sdrMemory, sdrGPU, hdrMemory, hdrGPU time.Duration
+	hdrDevice, hdrLow, processor         time.Duration
 	checkFails, sampleFails              bool
 	brokenDeinterlacers                  []string
 }
@@ -70,6 +73,10 @@ func (f *fakeRunner) run(_ context.Context, args []string) (time.Duration, error
 			return 0, failed
 		}
 		return time.Second, nil
+	case strings.Contains(vf, "h=720") && (strings.Contains(vf, "libplacebo") || deviceToneMaps(vf)):
+		return answer("hdr low", f.times.hdrLow)
+	case deviceToneMaps(vf):
+		return answer("hdr device", f.times.hdrDevice)
 	case strings.Contains(vf, "libplacebo") && contains(args, "-hwaccel_output_format", "vulkan"):
 		return answer("hdr gpu", f.times.hdrGPU)
 	case strings.Contains(vf, "libplacebo"):
@@ -77,11 +84,19 @@ func (f *fakeRunner) run(_ context.Context, args []string) (time.Duration, error
 	case strings.Contains(vf, "scale_cuda") || strings.Contains(vf, "scale_vaapi") || strings.Contains(vf, "scale_vt") ||
 		strings.Contains(vf, "scale_qsv") || strings.Contains(vf, "vpp_amf"):
 		return answer("sdr gpu", f.times.sdrGPU)
+	case strings.Contains(vf, "zscale="):
+		return answer("processor", f.times.processor)
 	case strings.HasPrefix(vf, "scale=w=1920:h=1080"):
 		return answer("sdr memory", f.times.sdrMemory)
 	}
 	f.t.Errorf("an unexpected command line: %q", args)
 	return 0, failed
+}
+
+// deviceToneMaps reports whether a filter chain tone maps on Intel's GPU or
+// with VideoToolbox (see deviceToneMapping).
+func deviceToneMaps(vf string) bool {
+	return strings.Contains(vf, "tonemap_vaapi") || strings.Contains(vf, "tonemap=1") || strings.Contains(vf, "scale_vt=") && strings.Contains(vf, "color_matrix=bt709")
 }
 
 func measuringManager(t *testing.T, times chainTimes) (*Manager, *fakeRunner) {
@@ -97,6 +112,7 @@ func measuringManager(t *testing.T, times chainTimes) (*Manager, *fakeRunner) {
 // owner's GPU, and any other mix; a GPU chain that fails, or HDR frames
 // Vulkan did not decode, keep the memory path.
 func TestTheFasterChainIsKeptForEachKind(t *testing.T) {
+	t.Parallel()
 	nvidia := Hardware{Method: "cuda", Encoders: []string{"h264_nvenc", "hevc_nvenc"}, ToneMapping: true}
 	vaapi := Hardware{Method: "vaapi", Device: "/dev/dri/renderD128", Encoders: []string{"h264_vaapi"}}
 	for _, tc := range []struct {
@@ -124,9 +140,14 @@ func TestTheFasterChainIsKeptForEachKind(t *testing.T) {
 		{"VAAPI faster through memory", vaapi, chainTimes{sdrMemory: time.Second / 2, sdrGPU: time.Second}, false, false, nil},
 	} {
 		m, f := measuringManager(t, tc.times)
-		got := m.measure(t.Context(), tc.hw)
+		got, found := m.measure(t.Context(), tc.hw)
 		if got.Resident != tc.resident || got.VulkanDecoding != tc.vulkan || !slices.Equal(got.Deinterlacers, tc.deinterlacers) {
 			t.Errorf("%s: resident %v, Vulkan decoding %v, deinterlacers %v", tc.name, got.Resident, got.VulkanDecoding, got.Deinterlacers)
+		}
+		// The speeds kept tell the same choices, once kept and read again.
+		if kept := found.apply(tc.hw); kept.Resident != got.Resident || kept.VulkanDecoding != got.VulkanDecoding ||
+			!slices.Equal(kept.Deinterlacers, got.Deinterlacers) || kept.HDRSpeed != got.HDRSpeed || kept.LowHDRSpeed != got.LowHDRSpeed {
+			t.Errorf("%s: the speeds kept give %+v, the timing %+v", tc.name, kept, got)
 		}
 		if tc.times.sampleFails {
 			continue
@@ -172,6 +193,7 @@ func TestTheFasterChainIsKeptForEachKind(t *testing.T) {
 // A chain wins only when it converted, and faster than the other, or the
 // other failed.
 func TestTheGPUChainWinsOnlyWhenFaster(t *testing.T) {
+	t.Parallel()
 	failed := errors.New("failed")
 	for _, tc := range []struct {
 		t    timing
@@ -196,6 +218,7 @@ func TestTheGPUChainWinsOnlyWhenFaster(t *testing.T) {
 // Conversions starting while the chains are timed go through memory; the
 // chosen GPU then switches to what the timing found.
 func TestConversionsGoThroughMemoryUntilTimed(t *testing.T) {
+	t.Parallel()
 	m, f := measuringManager(t, chainTimes{sdrMemory: time.Second, sdrGPU: time.Second / 2, hdrMemory: time.Second, hdrGPU: time.Second / 2})
 	release := make(chan struct{})
 	timed := f.run

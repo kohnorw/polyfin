@@ -71,6 +71,9 @@ func (s *Service) ImageSources(ctx context.Context, id accounts.ID) (ImageSource
 	case r.Kind == KindPerson && r.Person != nil:
 		sources.Person = r.Person.Name
 		return sources, nil
+	case r.Kind == KindSeason && r.Group != "":
+		// A season of an episode order is none of TMDB's seasons.
+		return sources, nil
 	case r.Kind == KindSeason, r.Kind == KindEpisode && r.Video != nil:
 		if r.Kind == KindSeason {
 			sources.Season = r.Season
@@ -123,12 +126,12 @@ func (s *Service) addonImages(ctx context.Context, v view, title record) ([]Addo
 		g.Go(func() error {
 			kept, err := s.keptMeta(ctx, candidate, title.Meta.Type, title.Meta.ID)
 			if err != nil {
-				s.logger.Debug("An addon could not describe a title", "addon", candidate.addon.Manifest.Name, "error", err)
+				s.logger.Debug("An addon could not describe a title", "addon", candidate.addon.LogName(), "error", err)
 				return nil
 			}
 			meta := kept.value
-			found[i] = described{ids: providerIDs(meta), ok: true, images: AddonImages{
-				Addon: candidate.addon.Manifest.Name,
+			found[i] = described{ids: s.providerIDs(title.ID, meta), ok: true, images: AddonImages{
+				Addon: candidate.addon.Name(),
 				Images: Images{Primary: remoteImage(meta.Poster), Backdrop: remoteImage(meta.Background),
 					Logo: remoteImage(meta.Logo), Thumb: remoteImage(meta.LandscapePoster)},
 				Confined: candidate.confined || title.Confined && title.Addon != nil && candidate.addon.ID == *title.Addon,
@@ -137,7 +140,7 @@ func (s *Service) addonImages(ctx context.Context, v view, title record) ([]Addo
 		})
 	}
 	_ = g.Wait()
-	ids := providerIDs(*title.Meta)
+	ids := s.providerIDs(title.ID, *title.Meta)
 	var images []AddonImages
 	for _, d := range found {
 		if !d.ok {

@@ -2,6 +2,7 @@ package admin
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/localfiles"
+	"github.com/moodiness/polyfin/internal/tmdb"
 )
 
 // maxTitleQuery bounds the text of a title search, in bytes.
@@ -54,25 +56,74 @@ type folderJSON struct {
 	// An S3 bucket's endpoint and region, an rclone remote's name,
 	// whether an SFTP folder has a private key and a passphrase stored,
 	// never them, the fingerprints of the host key saved and of another
-	// its server offered since, and how often the folder is listed again,
-	// 0 only at its scans, null for the other folders.
-	Endpoint       string `json:"endpoint"`
-	Region         string `json:"region"`
-	RcloneRemote   string `json:"rcloneRemote"`
-	PrivateKeySet  bool   `json:"privateKeySet"`
-	PassphraseSet  bool   `json:"passphraseSet"`
-	HostKey        string `json:"hostKey"`
-	OfferedHostKey string `json:"offeredHostKey"`
-	PollMinutes    *int   `json:"pollMinutes"`
+	// its server offered since, whether the folder moved to another server
+	// since its key was saved, so that the next key is shown rather than
+	// saved, and how often the folder is listed again, 0 only at its
+	// scans, null for the other folders.
+	Endpoint         string `json:"endpoint"`
+	Region           string `json:"region"`
+	RcloneRemote     string `json:"rcloneRemote"`
+	PrivateKeySet    bool   `json:"privateKeySet"`
+	PassphraseSet    bool   `json:"passphraseSet"`
+	HostKey          string `json:"hostKey"`
+	OfferedHostKey   string `json:"offeredHostKey"`
+	HostKeyForgotten bool   `json:"hostKeyForgotten"`
+	PollMinutes      *int   `json:"pollMinutes"`
+	// SearchFailed counts the files left unmatched as their titles'
+	// searches failed, searchFailure tells the addon that failed most of
+	// them and why (null when none did), and searchRetryAt when the folder
+	// is scanned again to search them again (null when it is not to be).
+	SearchFailed  int                `json:"searchFailed"`
+	SearchFailure *searchFailureJSON `json:"searchFailure"`
+	SearchRetryAt *time.Time         `json:"searchRetryAt"`
+	// NoSearch counts the files left unmatched as no addon of the server
+	// describes and searches titles of the folder's kind.
+	NoSearch int `json:"noSearch"`
+	// UnlistedEpisodes counts the episodes its files hold that their
+	// series' metadata addon does not list, as the series were last
+	// described; they are listed all the same, named after their files.
+	UnlistedEpisodes int `json:"unlistedEpisodes"`
+	// AbsoluteEpisodes counts its files named by an absolute number, as
+	// "Show - 41", that are versions of the catalog's episodes of their
+	// places.
+	AbsoluteEpisodes int `json:"absoluteEpisodes"`
+	// UnmappedEpisodes counts its shows' files their numbering could not
+	// place, each an episode of its own.
+	UnmappedEpisodes int `json:"unmappedEpisodes"`
+}
+
+// searchFailureJSON is a failed search of a title: the name of the addon
+// that failed it, and why, as System › Health names an addon's failures
+// ("unreachable", "timeout", "private_network", "rate_limited",
+// "server_error", "http_error", "invalid_response"), or "failed".
+type searchFailureJSON struct {
+	Addon   string `json:"addon"`
+	Failure string `json:"failure"`
+}
+
+// newSearchFailureJSON is a failed search, nil when failure is empty: the
+// search did not fail.
+func newSearchFailureJSON(addon, failure string) *searchFailureJSON {
+	if failure == "" {
+		return nil
+	}
+	return &searchFailureJSON{Addon: addon, Failure: failure}
 }
 
 // matchedByJSON counts the matched files by how they were matched: by an
-// identifier in their name, by their NFO file, by a search, or by a link.
+// identifier in their name, by their NFO file, by a search, by a search
+// that kept a title of the year before or after the name's (year), named
+// alike once numerals are read (numerals), or both (yearNumerals), by a
+// link, or by TMDB's search when the metadata addons' failed (tmdb).
 type matchedByJSON struct {
-	Name   int `json:"name"`
-	NFO    int `json:"nfo"`
-	Search int `json:"search"`
-	Link   int `json:"link"`
+	Name         int `json:"name"`
+	NFO          int `json:"nfo"`
+	Search       int `json:"search"`
+	Year         int `json:"year"`
+	Numerals     int `json:"numerals"`
+	YearNumerals int `json:"yearNumerals"`
+	Link         int `json:"link"`
+	TMDB         int `json:"tmdb"`
 }
 
 // datedByJSON counts a home videos folder's videos by where their dates
@@ -84,9 +135,13 @@ type datedByJSON struct {
 	File    int `json:"file"`
 }
 
+// linkJSON is a unit linked by hand to an IMDb identifier, and whether a
+// metadata addon of the server described that title, as the folder's
+// kind, when the unit's files were last matched to it.
 type linkJSON struct {
-	Unit   string `json:"unit"`
-	ImdbID string `json:"imdbId"`
+	Unit      string `json:"unit"`
+	ImdbID    string `json:"imdbId"`
+	Described bool   `json:"described"`
 }
 
 // givenEpisodeJSON is the episodes given by hand to a title of a show's
@@ -104,7 +159,7 @@ type givenEpisodeJSON struct {
 func newFolderJSON(f localfiles.Folder) *folderJSON {
 	links := make([]linkJSON, 0, len(f.Links))
 	for _, l := range f.Links {
-		links = append(links, linkJSON{Unit: l.Unit, ImdbID: l.IMDb})
+		links = append(links, linkJSON{Unit: l.Unit, ImdbID: l.IMDb, Described: l.Described})
 	}
 	episodes := make([]givenEpisodeJSON, 0, len(f.Episodes))
 	for _, e := range f.Episodes {
@@ -112,12 +167,15 @@ func newFolderJSON(f localfiles.Folder) *folderJSON {
 	}
 	return &folderJSON{Kind: f.Kind, Path: f.Addon.ManifestURL, Share: f.Share, User: f.User, PasswordSet: f.PasswordSet,
 		CheckedAt: f.CheckedAt, ScannedAt: f.ScannedAt, Error: f.Error, Scanning: f.Scanning, Files: f.Files, Matched: f.Matched,
-		MatchedBy: matchedByJSON{Name: f.MatchedBy.Name, NFO: f.MatchedBy.NFO, Search: f.MatchedBy.Search, Link: f.MatchedBy.Link},
+		MatchedBy: matchedByJSON{Name: f.MatchedBy.Name, NFO: f.MatchedBy.NFO, Search: f.MatchedBy.Search, Year: f.MatchedBy.Year,
+			Numerals: f.MatchedBy.Numerals, YearNumerals: f.MatchedBy.YearNumerals, Link: f.MatchedBy.Link, TMDB: f.MatchedBy.TMDB},
 		Unmatched: f.Unmatched, Albums: f.Albums, Artists: f.Artists, Gained: f.Gained, Measured: f.Measured,
 		DatedBy: datedByJSON{NFO: f.Dated.NFO, Created: f.Dated.Created, File: f.Dated.File},
 		Links:   links, Episodes: episodes, UseArtwork: f.UseArtwork, ReadExtras: f.ReadExtras, Extras: f.Extras,
 		Endpoint: f.Endpoint, Region: f.Region, RcloneRemote: f.Remote, PrivateKeySet: f.PrivateKeySet, PassphraseSet: f.PassphraseSet,
-		HostKey: f.HostKey, OfferedHostKey: f.OfferedHostKey, PollMinutes: f.PollMinutes}
+		HostKey: f.HostKey, OfferedHostKey: f.OfferedHostKey, HostKeyForgotten: f.HostKeyForgotten, PollMinutes: f.PollMinutes,
+		SearchFailed: f.SearchFailed, SearchFailure: newSearchFailureJSON(f.SearchAddon, f.SearchFailure), SearchRetryAt: f.SearchRetryAt,
+		NoSearch: f.NoSearch, UnlistedEpisodes: f.Unlisted, AbsoluteEpisodes: f.Absolute, UnmappedEpisodes: f.Unmapped}
 }
 
 // folderScope answers the folder routes' scope: local folders are the
@@ -146,7 +204,8 @@ func (h *handler) folderScope(w http.ResponseWriter, r *http.Request) (addons.Sc
 // rclone remote the remote's name; those three how often they are listed
 // again for changes, in minutes, 0 only at their scans, their kind's
 // default when left out on adding. acceptHostKey accepts the host key an
-// SFTP server offered in place of the one saved.
+// SFTP server offered in place of the one saved, named by its
+// fingerprint as offeredHostKey gave it.
 type folderRequest struct {
 	Name          *string `json:"name"`
 	Path          *string `json:"path"`
@@ -161,7 +220,10 @@ type folderRequest struct {
 	Passphrase    *string `json:"passphrase"`
 	RcloneRemote  *string `json:"rcloneRemote"`
 	PollMinutes   *int    `json:"pollMinutes"`
-	AcceptHostKey bool    `json:"acceptHostKey"`
+	AcceptHostKey string  `json:"acceptHostKey"`
+	// UsedBy is who uses the folder, on adding it; everyone when left
+	// out.
+	UsedBy *usedByJSON `json:"usedBy"`
 }
 
 // addFolder adds a local folder to the server's addons and scans it in
@@ -176,6 +238,9 @@ func (h *handler) addFolder(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	folder := localfiles.NewFolder{Kind: body.Kind, UseArtwork: body.UseArtwork, ReadExtras: body.ReadExtras, PollMinutes: body.PollMinutes}
+	if folder.UsedBy, ok = usedBy(w, scope, body.UsedBy); !ok {
+		return
+	}
 	for _, field := range []struct {
 		from *string
 		to   *string
@@ -189,7 +254,10 @@ func (h *handler) addFolder(w http.ResponseWriter, r *http.Request) {
 	ctx := context.WithoutCancel(r.Context())
 	addon, err := h.Folders.Add(ctx, folder)
 	if err == nil {
-		h.Activity.AddonInstalled(ctx, sessionFrom(ctx).User, addon.Manifest.Name, addon.Manifest.Version, true)
+		h.Activity.AddonInstalled(ctx, sessionFrom(ctx).User, addon.Name(), addon.Manifest.Version, true)
+		if addon.UsedBy.Listed {
+			h.usedByChanged(ctx, addon)
+		}
 	}
 	h.answerAddon(w, r, scope, http.StatusCreated, addon, err)
 }
@@ -198,7 +266,8 @@ func (h *handler) addFolder(w http.ResponseWriter, r *http.Request) {
 // user or password, whether its titles show the artwork beside their
 // files, whether its scans read the extras beside them, or what it holds;
 // a new path or address, a new user or password, or what it holds, is
-// scanned at once.
+// scanned at once. A host key accepted that is not the one the server
+// offers now is a conflict, offered_host_key_changed.
 func (h *handler) updateFolder(w http.ResponseWriter, r *http.Request) {
 	scope, ok := h.folderScope(w, r)
 	if !ok {
@@ -214,7 +283,7 @@ func (h *handler) updateFolder(w http.ResponseWriter, r *http.Request) {
 	}
 	if body.Name == nil && body.Path == nil && body.User == nil && body.Password == nil && body.UseArtwork == nil && body.ReadExtras == nil &&
 		body.Kind == "" && body.Endpoint == nil && body.Region == nil && body.PrivateKey == nil && body.Passphrase == nil &&
-		body.RcloneRemote == nil && body.PollMinutes == nil && !body.AcceptHostKey {
+		body.RcloneRemote == nil && body.PollMinutes == nil && body.AcceptHostKey == "" {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -225,6 +294,10 @@ func (h *handler) updateFolder(w http.ResponseWriter, r *http.Request) {
 		changes.Kind = &body.Kind
 	}
 	addon, err := h.Folders.Update(context.WithoutCancel(r.Context()), id, changes)
+	if errors.Is(err, localfiles.ErrOfferedKeyChanged) {
+		writeError(w, http.StatusConflict, "offered_host_key_changed")
+		return
+	}
 	h.answerAddon(w, r, scope, http.StatusOK, addon, err)
 }
 
@@ -307,6 +380,9 @@ type unmatchedJSON struct {
 	Year   *int   `json:"year"`
 	Size   int64  `json:"size"`
 	Reason string `json:"reason"`
+	// Search tells, for a failed search ("search_failed"), the addon that
+	// failed it and why; null for another reason.
+	Search *searchFailureJSON `json:"search"`
 	// Disc is the kind of the disc the file is read as, "bluray" or "dvd",
 	// unit being the disc's folder, or a Blu-ray disc's title other than
 	// its main one, "<folder>#<playlist>", or "bluray_image" or
@@ -354,7 +430,8 @@ func (h *handler) folderUnmatched(w http.ResponseWriter, r *http.Request) {
 		return &s
 	}
 	for _, u := range list {
-		file := unmatchedJSON{Path: u.Path, Unit: u.Unit, Title: u.Title, Size: u.Size, Reason: u.Reason, Disc: text(u.Disc)}
+		file := unmatchedJSON{Path: u.Path, Unit: u.Unit, Title: u.Title, Size: u.Size, Reason: u.Reason, Disc: text(u.Disc),
+			Search: newSearchFailureJSON(u.SearchAddon, u.SearchFailure)}
 		if u.Year > 0 {
 			file.Year = new(u.Year)
 		}
@@ -365,6 +442,132 @@ func (h *handler) folderUnmatched(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		result.Files = append(result.Files, file)
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// unlistedShowJSON is a show of a local folder whose files hold episodes
+// its metadata addon does not list: its IMDb identifier, the name it was
+// matched to, a unit of its files, and those episodes' seasons, in order.
+// Described is false while the addon's own numbers are not known, until
+// the show is described again; catalogFirst and catalogLast are its first
+// and last episodes, specials left out unless it lists only specials,
+// null when it lists none or while they are not known.
+type unlistedShowJSON struct {
+	ImdbID       string               `json:"imdbId"`
+	Name         string               `json:"name"`
+	Unit         string               `json:"unit"`
+	Described    bool                 `json:"described"`
+	CatalogFirst *episodeNumberJSON   `json:"catalogFirst"`
+	CatalogLast  *episodeNumberJSON   `json:"catalogLast"`
+	Seasons      []unlistedSeasonJSON `json:"seasons"`
+	Numbering    string               `json:"numbering"`
+	Group        string               `json:"group"`
+}
+
+// episodeNumberJSON is an episode's season and number.
+type episodeNumberJSON struct {
+	Season  int `json:"season"`
+	Episode int `json:"episode"`
+}
+
+// unlistedSeasonJSON is a season of an unlistedShowJSON: the numbers its
+// files hold that the addon does not list, and those the addon lists in
+// the season, empty when it has no such season; each as ranges, [first,
+// last], of numbers that follow one another.
+type unlistedSeasonJSON struct {
+	Season  int      `json:"season"`
+	Files   [][2]int `json:"files"`
+	Catalog [][2]int `json:"catalog"`
+}
+
+// folderUnlisted lists the shows of a local folder whose files hold
+// episodes their metadata addon does not list, by name, with the files'
+// numbers next to the addon's.
+func (h *handler) folderUnlisted(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.folderScope(w, r); !ok {
+		return
+	}
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	shows, err := h.Folders.Unlisted(r.Context(), id)
+	if h.answerFailure(w, r, err) {
+		return
+	}
+	ranges := func(list []localfiles.Range) [][2]int {
+		result := make([][2]int, len(list))
+		for i, r := range list {
+			result[i] = [2]int{r.First, r.Last}
+		}
+		return result
+	}
+	number := func(n *[2]int) *episodeNumberJSON {
+		if n == nil {
+			return nil
+		}
+		return &episodeNumberJSON{Season: n[0], Episode: n[1]}
+	}
+	result := struct {
+		Shows []unlistedShowJSON `json:"shows"`
+	}{Shows: make([]unlistedShowJSON, 0, len(shows))}
+	for _, show := range shows {
+		entry := unlistedShowJSON{ImdbID: show.StremioID, Name: show.Name, Unit: show.Unit, Described: show.Described,
+			CatalogFirst: number(show.First), CatalogLast: number(show.Last), Seasons: make([]unlistedSeasonJSON, len(show.Seasons)),
+			Numbering: numberingName(show.Numbering.Numbering), Group: show.Numbering.Group}
+		for i, season := range show.Seasons {
+			entry.Seasons[i] = unlistedSeasonJSON{Season: season.Season, Files: ranges(season.Files), Catalog: ranges(season.Listed)}
+		}
+		result.Shows = append(result.Shows, entry)
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// looserJSON is a unit of a local folder a looser rule matched: the unit
+// an unlink names, its first file and how many it has, what its name was
+// read as, the title it was matched to, its name and year, and the rule:
+// "year" for a title of the year before or after, "numerals" for one
+// named alike once numerals are read, "year_numerals" for both.
+type looserJSON struct {
+	Unit      string `json:"unit"`
+	Path      string `json:"path"`
+	Files     int    `json:"files"`
+	Title     string `json:"title"`
+	Year      *int   `json:"year"`
+	ImdbID    string `json:"imdbId"`
+	Name      string `json:"name"`
+	TitleYear *int   `json:"titleYear"`
+	Rule      string `json:"rule"`
+}
+
+// folderLooser lists the units of a local folder a looser rule matched,
+// and how many there are.
+func (h *handler) folderLooser(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.folderScope(w, r); !ok {
+		return
+	}
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	list, total, err := h.Folders.Looser(r.Context(), id)
+	if h.answerFailure(w, r, err) {
+		return
+	}
+	result := struct {
+		Total int          `json:"total"`
+		Units []looserJSON `json:"units"`
+	}{Total: total, Units: make([]looserJSON, 0, len(list))}
+	year := func(y int) *int {
+		if y > 0 {
+			return new(y)
+		}
+		return nil
+	}
+	for _, l := range list {
+		result.Units = append(result.Units, looserJSON{Unit: l.Unit, Path: l.Path, Files: l.Files, Title: l.Title, Year: year(l.Year),
+			ImdbID: l.StremioID, Name: l.Name, TitleYear: year(l.TitleYear), Rule: l.By})
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -450,8 +653,9 @@ func (h *handler) linkFolderFile(w http.ResponseWriter, r *http.Request) {
 	h.answerFolder(w, r, scope, id, err)
 }
 
-// unlinkFolderFile removes a link made by hand: the files are matched
-// again by their name.
+// unlinkFolderFile removes a link made by hand, or the title a looser rule
+// matched: the files are matched again by their name, by the exact rule
+// only for the latter.
 func (h *handler) unlinkFolderFile(w http.ResponseWriter, r *http.Request) {
 	scope, ok := h.folderScope(w, r)
 	if !ok {
@@ -501,4 +705,147 @@ func (h *handler) answerFolder(w http.ResponseWriter, r *http.Request, scope add
 	}
 	addon, err := h.Addons.Find(r.Context(), id)
 	h.answerAddon(w, r, scope, http.StatusOK, addon, err)
+}
+
+// numberingCatalog is how the admin API names the numbering of a show's
+// files that is the catalog's, localfiles.NumberedAsCatalog.
+const numberingCatalog = "catalog"
+
+// numberingName is the admin API's name of how a show's files are
+// numbered.
+func numberingName(numbering string) string {
+	if numbering == localfiles.NumberedAsCatalog {
+		return numberingCatalog
+	}
+	return numbering
+}
+
+// folderShowJSON is a show a shows folder holds: its series' identifier,
+// the name it was matched to, its first unit, how many files it has, how
+// they are numbered ("catalog", "per_season", "continuing", "absolute" or
+// "order", in the TMDB episode group group), how many of them that
+// numbering mapped to the catalog's episodes, and those it could not
+// place.
+type folderShowJSON struct {
+	ImdbID    string             `json:"imdbId"`
+	Name      string             `json:"name"`
+	Unit      string             `json:"unit"`
+	Files     int                `json:"files"`
+	Numbering string             `json:"numbering"`
+	Group     string             `json:"group"`
+	Mapped    int                `json:"mapped"`
+	Unmapped  []unmappedFileJSON `json:"unmapped"`
+}
+
+// unmappedFileJSON is a show's file its numbering could not place: its
+// path, the season and episodes it tells, its absolute number when its
+// name tells one alone, the episode of its own it is listed as, and why:
+// "no_catalog", "outside_season", "beyond_catalog", "not_in_order",
+// "not_listed" or "no_order".
+type unmappedFileJSON struct {
+	Path        string            `json:"path"`
+	Season      int               `json:"season"`
+	Episode     int               `json:"episode"`
+	LastEpisode int               `json:"lastEpisode"`
+	Absolute    *int              `json:"absolute"`
+	Listed      episodeNumberJSON `json:"listed"`
+	Reason      string            `json:"reason"`
+}
+
+// folderShows lists the shows of a shows folder, by name, with how their
+// files are numbered.
+func (h *handler) folderShows(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.folderScope(w, r); !ok {
+		return
+	}
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	shows, err := h.Folders.Shows(r.Context(), id)
+	if h.answerFailure(w, r, err) {
+		return
+	}
+	result := struct {
+		Shows []folderShowJSON `json:"shows"`
+	}{Shows: make([]folderShowJSON, 0, len(shows))}
+	for _, show := range shows {
+		entry := folderShowJSON{ImdbID: show.StremioID, Name: show.Name, Unit: show.Unit, Files: show.Files,
+			Numbering: numberingName(show.Numbering.Numbering), Group: show.Numbering.Group, Mapped: show.Mapped,
+			Unmapped: make([]unmappedFileJSON, 0, len(show.Unmapped))}
+		for _, file := range show.Unmapped {
+			unmapped := unmappedFileJSON{Path: file.Path, Season: file.Season, Episode: file.First, LastEpisode: file.Last,
+				Listed: episodeNumberJSON{Season: file.Listed[0], Episode: file.Listed[1]}, Reason: file.Reason}
+			if file.Absolute > 0 {
+				unmapped.Absolute = &file.Absolute
+			}
+			entry.Unmapped = append(entry.Unmapped, unmapped)
+		}
+		result.Shows = append(result.Shows, entry)
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+// setShowNumbering says how the files of a show of a shows folder are
+// numbered, {"numbering", "group"}, and answers the folder.
+func (h *handler) setShowNumbering(w http.ResponseWriter, r *http.Request) {
+	scope, ok := h.folderScope(w, r)
+	if !ok {
+		return
+	}
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	var body struct {
+		Numbering string `json:"numbering"`
+		Group     string `json:"group"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	choice := localfiles.ShowNumbering{Numbering: body.Numbering, Group: strings.TrimSpace(body.Group)}
+	switch body.Numbering {
+	case numberingCatalog:
+		choice.Numbering = localfiles.NumberedAsCatalog
+	case localfiles.NumberedAsCatalog:
+		writeError(w, http.StatusBadRequest, "invalid_numbering")
+		return
+	}
+	err := h.Folders.SetNumbering(context.WithoutCancel(r.Context()), id, r.PathValue("show"), choice)
+	h.answerFolder(w, r, scope, id, err)
+}
+
+// showNumberingGroups lists the TMDB episode groups a show of a shows
+// folder may be numbered in, with lookup telling why there are none when
+// TMDB could not tell: "no_key", "unknown" or "failed".
+func (h *handler) showNumberingGroups(w http.ResponseWriter, r *http.Request) {
+	if _, ok := h.folderScope(w, r); !ok {
+		return
+	}
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	groups, err := h.Folders.NumberingGroups(r.Context(), id, r.PathValue("show"))
+	result := struct {
+		Groups []episodeGroupJSON `json:"groups"`
+		Lookup string             `json:"lookup"`
+	}{Groups: []episodeGroupJSON{}}
+	switch {
+	case errors.Is(err, tmdb.ErrNoKey):
+		result.Lookup = "no_key"
+	case errors.Is(err, library.ErrUnknownGroup):
+		result.Lookup = "unknown"
+	case errors.Is(err, localfiles.ErrNoGroups):
+		h.Logger.Warn("The episode groups of a show could not be read from TMDB", "title", r.PathValue("show"), "error", err)
+		result.Lookup = "failed"
+	case h.answerFailure(w, r, err):
+		return
+	}
+	for _, g := range groups {
+		result.Groups = append(result.Groups, episodeGroupJSON{ID: g.ID, Name: g.Name, Type: library.DisplayOrderOf(g.Type),
+			Episodes: g.Episodes, Seasons: g.Groups})
+	}
+	writeJSON(w, http.StatusOK, result)
 }

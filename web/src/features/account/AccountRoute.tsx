@@ -1,19 +1,3 @@
-import {
-  AlarmIcon,
-  ArrowSquareInIcon,
-  BellIcon,
-  ChartBarIcon,
-  ClockCounterClockwiseIcon,
-  DeviceMobileIcon,
-  DevicesIcon,
-  EyeSlashIcon,
-  ListChecksIcon,
-  PasswordIcon,
-  RowsIcon,
-  ShareNetworkIcon,
-  ShieldCheckIcon,
-  TranslateIcon,
-} from '@phosphor-icons/react'
 import { useQuery } from '@tanstack/react-query'
 import { useEffect, useId, useState, type ReactNode } from 'react'
 import { useLocation, useSearchParams } from 'react-router'
@@ -22,6 +6,7 @@ import {
   fetchOwnAppImport,
   fetchOwnReminders,
   fetchOwnImport,
+  fetchStatus,
   fetchOwnShareLinks,
   ownAppConnections,
   ownAppReaders,
@@ -29,15 +14,18 @@ import {
   queryKeys,
   signOutMyDevice,
   startOwnAppImport,
+  userImageUrl,
   type OwnAppImport,
+  type SessionUser,
 } from '@/api'
 import { PageLayout } from '@/app/PageLayout'
 import { useSessionUser } from '@/app/session'
 import DeviceList from '@/features/users/DeviceList'
+import { useWatching, WatchingLink } from '@/features/users/rows'
 import NotificationTargets from '@/features/notifications/NotificationTargets'
 import StatisticsView from '@/features/statistics/StatisticsView'
 import { useI18n } from '@/i18n'
-import { SectionNav } from '@/ui'
+import { Avatar, SectionNav, type SectionNavItem } from '@/ui'
 import AppImport, { AppConnections } from './AppImport'
 import PasswordForm from './PasswordForm'
 import ServerImport from './ServerImport'
@@ -45,16 +33,31 @@ import SharedLinks from './SharedLinks'
 import TrackingServices from './TrackingServices'
 import { ReminderList, ReminderSettingsForm } from './Reminders'
 import { OwnMetadataLanguage } from './MetadataLanguage'
-import { HiddenList, HomeRowList, ResumeList } from './WatchingLists'
+import { OwnWebTheme } from './WebTheme'
+import { OwnAudioRegion } from './AudioRegion'
+import { OwnInterfaceSize } from './InterfaceSize'
+import { OwnSoundOptions } from './Sound'
+import ResetPreferences from './ResetPreferences'
+import TasteProfile from './TasteProfile'
+import { HiddenList, HomeRowList, NextUpList, ResumeList } from './WatchingLists'
+import OwnTrackChoices from './TrackChoices'
 import TwoStep from './TwoStep'
+import ProviderLink from './ProviderLink'
 
 const sectionIds = [
   'statistics',
   'tracking',
   'resume',
+  'next-up',
   'hidden',
   'home-rows',
+  'taste',
+  'track-choices',
   'metadata-language',
+  'web-theme',
+  'audio-region',
+  'interface-size',
+  'sound',
   'shared-links',
   'reminders',
   'import',
@@ -63,18 +66,27 @@ const sectionIds = [
   'devices',
   'password',
   'two-step',
+  'provider',
 ] as const
 type SectionId = (typeof sectionIds)[number]
 
 /** How often the user's own import is read while it runs. */
 const ownImportPollMs = 2000
 
+/** A section's anchor stays clear of the top row, and on a phone of the strip of sections too. */
+const anchorMargin =
+  'scroll-mt-[calc(var(--spacing-topbar)+2rem)] max-md:scroll-mt-[calc(var(--spacing-topbar)+4.5rem)]'
+
 /**
- * `/me/account`: statistics, tracking services, Continue Watching, hidden titles, home rows, the
- * metadata language, shared links (while the user may share or has links), programme reminders
- * (with the Live TV permission), importing from another server and from an app (unless the server
- * turns it off), notifications, devices, password and two-step sign-in, with a list of sections
- * beside them.
+ * `/me/account`, in the frame of a user's page: a band with the person (avatar, name, role) and
+ * Reset my preferences, then the sections as words on the left and their content beside them:
+ * statistics, tracking services, Continue Watching, hidden titles, home rows, the taste profile,
+ * track choices, the metadata language, the web player theme, the audio region, the interface
+ * size, sound, shared links (while the user may share or has links), programme reminders (with
+ * the Live TV permission), importing from another server and from an app (unless the server
+ * turns it off), notifications, devices, password, two-step sign-in and the identity provider
+ * (while the server offers one). Every setting saves as it changes, so the page has no unsaved
+ * dock.
  */
 export default function AccountRoute() {
   const { t } = useI18n()
@@ -118,167 +130,149 @@ export default function AccountRoute() {
     queryFn: ({ signal }) => fetchOwnReminders(signal),
   })
   const reminding = reminders.data?.available === true
+  const appImportShown = importingFromApps || appConnections.length > 0
+  // The identity provider the server offers, whose link the last section makes.
+  const provider = useQuery({
+    queryKey: queryKeys.status,
+    queryFn: ({ signal }) => fetchStatus(signal),
+  }).data?.provider
   const { hash } = useLocation()
 
   // Sections drawn once their answer comes: a #section address scrolls once it is there.
   useEffect(() => {
     if (hash) document.getElementById(hash.slice(1))?.scrollIntoView({ block: 'start' })
-  }, [hash, sharing, reminding])
+  }, [hash, sharing, reminding, provider])
+
+  const shown: Record<SectionId, boolean> = {
+    statistics: true,
+    tracking: true,
+    resume: true,
+    'next-up': true,
+    hidden: true,
+    'home-rows': true,
+    taste: true,
+    'track-choices': true,
+    'metadata-language': true,
+    'web-theme': true,
+    'audio-region': true,
+    'interface-size': true,
+    sound: true,
+    'shared-links': sharing,
+    reminders: reminding,
+    import: importing,
+    'app-import': appImportShown,
+    notifications: true,
+    devices: true,
+    password: true,
+    'two-step': true,
+    provider: provider != null,
+  }
+  const labels: Record<SectionId, string> = {
+    statistics: text.sections.statistics,
+    tracking: text.sections.tracking,
+    resume: text.sections.resume,
+    'next-up': text.sections.nextUp,
+    hidden: text.sections.hidden,
+    'home-rows': text.sections.homeRows,
+    taste: text.sections.taste,
+    'track-choices': text.sections.trackChoices,
+    'metadata-language': text.sections.metadataLanguage,
+    'web-theme': text.sections.webTheme,
+    'audio-region': text.sections.audioRegion,
+    'interface-size': text.sections.interfaceSize,
+    sound: text.sections.sound,
+    'shared-links': text.sections.sharedLinks,
+    reminders: text.sections.reminders,
+    import: text.sections.import,
+    'app-import': text.sections.appImport,
+    notifications: text.sections.notifications,
+    devices: text.sections.devices,
+    password: text.sections.password,
+    'two-step': text.sections.twoStep,
+    provider: text.sections.provider,
+  }
+  // Words only, as on a user's page.
+  const items: SectionNavItem[] = sectionIds
+    .filter((id) => shown[id])
+    .map((id) => ({ id, label: labels[id], to: `#${id}` }))
 
   return (
     <PageLayout
-      title={text.title}
-      lede={
-        <>
-          {text.signedInAs}
-          <span className="font-mono text-ink">{user.name}</span>.
-        </>
-      }
-      nav={
-        <SectionNav
-          label={text.sectionsLabel}
-          current={current}
-          items={[
-            {
-              id: 'statistics',
-              label: text.sections.statistics,
-              icon: ChartBarIcon,
-              to: '#statistics',
-            },
-            {
-              id: 'tracking',
-              label: text.sections.tracking,
-              icon: ListChecksIcon,
-              to: '#tracking',
-            },
-            {
-              id: 'resume',
-              label: text.sections.resume,
-              icon: ClockCounterClockwiseIcon,
-              to: '#resume',
-            },
-            { id: 'hidden', label: text.sections.hidden, icon: EyeSlashIcon, to: '#hidden' },
-            {
-              id: 'home-rows',
-              label: text.sections.homeRows,
-              icon: RowsIcon,
-              to: '#home-rows',
-            },
-            {
-              id: 'metadata-language',
-              label: text.sections.metadataLanguage,
-              icon: TranslateIcon,
-              to: '#metadata-language',
-            },
-            ...(sharing
-              ? [
-                  {
-                    id: 'shared-links' as const,
-                    label: text.sections.sharedLinks,
-                    icon: ShareNetworkIcon,
-                    to: '#shared-links',
-                  },
-                ]
-              : []),
-            ...(reminding
-              ? [
-                  {
-                    id: 'reminders' as const,
-                    label: text.sections.reminders,
-                    icon: AlarmIcon,
-                    to: '#reminders',
-                  },
-                ]
-              : []),
-            ...(importing
-              ? [
-                  {
-                    id: 'import' as const,
-                    label: text.sections.import,
-                    icon: ArrowSquareInIcon,
-                    to: '#import',
-                  },
-                ]
-              : []),
-            ...(importingFromApps || appConnections.length > 0
-              ? [
-                  {
-                    id: 'app-import' as const,
-                    label: text.sections.appImport,
-                    icon: DeviceMobileIcon,
-                    to: '#app-import',
-                  },
-                ]
-              : []),
-            {
-              id: 'notifications',
-              label: text.sections.notifications,
-              icon: BellIcon,
-              to: '#notifications',
-            },
-            { id: 'devices', label: text.sections.devices, icon: DevicesIcon, to: '#devices' },
-            { id: 'password', label: text.sections.password, icon: PasswordIcon, to: '#password' },
-            {
-              id: 'two-step',
-              label: text.sections.twoStep,
-              icon: ShieldCheckIcon,
-              to: '#two-step',
-            },
-          ]}
-        />
-      }
+      head={<PersonBand user={user} />}
+      nav={<SectionNav label={text.sectionsLabel} current={current} items={items} />}
     >
-      <AccountSection id="statistics" title={text.sections.statistics} help={text.statisticsHelp}>
-        <div className="space-y-10">
+      <AccountSection id="statistics" title={labels.statistics} help={text.statisticsHelp}>
+        <div className="space-y-6">
           <StatisticsView scope="own" />
         </div>
       </AccountSection>
-      <AccountSection id="tracking" title={text.sections.tracking} help={text.tracking.description}>
+      <AccountSection id="tracking" title={labels.tracking} help={text.tracking.description}>
         <TrackingServices />
       </AccountSection>
-      <AccountSection id="resume" title={text.sections.resume} help={text.watching.resumeHelp}>
+      <AccountSection id="resume" title={labels.resume} help={text.watching.resumeHelp}>
         <ResumeList />
       </AccountSection>
-      <AccountSection id="hidden" title={text.sections.hidden} help={text.watching.hiddenHelp}>
+      <AccountSection id="next-up" title={labels['next-up']} help={text.watching.nextUpHelp}>
+        <NextUpList />
+      </AccountSection>
+      <AccountSection id="hidden" title={labels.hidden} help={text.watching.hiddenHelp}>
         <HiddenList />
       </AccountSection>
-      <AccountSection id="home-rows" title={text.sections.homeRows} help={text.homeRows.help}>
+      <AccountSection id="home-rows" title={labels['home-rows']} help={text.homeRows.help}>
         <HomeRowList />
       </AccountSection>
+      <AccountSection id="taste" title={labels.taste} help={text.taste.help}>
+        <TasteProfile />
+      </AccountSection>
       <AccountSection
-        id="metadata-language"
-        title={text.sections.metadataLanguage}
-        help={text.metadataLanguage.help}
+        id="track-choices"
+        title={labels['track-choices']}
+        help={text.trackChoices.help}
       >
-        <OwnMetadataLanguage />
+        <OwnTrackChoices />
+      </AccountSection>
+      {/* Four settings of one row each: the row is the section, its label the heading's
+              words, its help its caption. */}
+      <div className="grid grid-cols-[minmax(0,1fr)] gap-1.5">
+        <div id="metadata-language" className={anchorMargin}>
+          <OwnMetadataLanguage />
+        </div>
+        <div id="web-theme" className={anchorMargin}>
+          <OwnWebTheme />
+        </div>
+        <div id="audio-region" className={anchorMargin}>
+          <OwnAudioRegion />
+        </div>
+        <div id="interface-size" className={anchorMargin}>
+          <OwnInterfaceSize />
+        </div>
+      </div>
+      <AccountSection id="sound" title={labels.sound} help={text.sound.help}>
+        <OwnSoundOptions />
       </AccountSection>
       {sharing && (
         <AccountSection
           id="shared-links"
-          title={text.sections.sharedLinks}
+          title={labels['shared-links']}
           help={text.sharedLinksHelp}
         >
           <SharedLinks allowed={shareLinks.data.allowed} links={shareLinks.data.links} />
         </AccountSection>
       )}
       {reminding && (
-        <AccountSection id="reminders" title={text.sections.reminders} help={text.reminders.help}>
+        <AccountSection id="reminders" title={labels.reminders} help={text.reminders.help}>
           <ReminderList />
         </AccountSection>
       )}
       {ownImport.data !== undefined && importing && (
-        <AccountSection
-          id="import"
-          title={text.sections.import}
-          help={text.serverImport.description}
-        >
+        <AccountSection id="import" title={labels.import} help={text.serverImport.description}>
           <ServerImport own={ownImport.data} />
         </AccountSection>
       )}
-      {ownAppImport.data !== undefined && (importingFromApps || appConnections.length > 0) && (
+      {ownAppImport.data !== undefined && appImportShown && (
         <AccountSection
           id="app-import"
-          title={text.sections.appImport}
+          title={labels['app-import']}
           help={text.appImport.description}
         >
           <div className="flex flex-col gap-6">
@@ -288,13 +282,14 @@ export default function AccountRoute() {
               onChanged={() =>
                 void queryClient.invalidateQueries({ queryKey: queryKeys.ownAppImport })
               }
-              own
+              scope="own"
               importEveryMinutes={ownAppImport.data.importEveryMinutes}
             />
             {importingFromApps && (
               <AppImport
                 current={ownAppImport.data.import}
                 addonsAllowed={ownAppImport.data.addonsAllowed}
+                parentalControl={ownAppImport.data.parentalControl}
                 readers={ownAppReaders}
                 start={startOwnAppImport}
                 onStarted={(started) =>
@@ -305,39 +300,79 @@ export default function AccountRoute() {
                 }
                 own
                 importEveryMinutes={ownAppImport.data.importEveryMinutes}
+                secretKey={ownAppImport.data.secretKey}
               />
             )}
           </div>
         </AccountSection>
       )}
-      <AccountSection
-        id="notifications"
-        title={text.sections.notifications}
-        help={text.notificationsHelp}
-      >
+      <AccountSection id="notifications" title={labels.notifications} help={text.notificationsHelp}>
         <div className="flex flex-col gap-6">
           <NotificationTargets scope="own" />
           <ReminderSettingsForm />
         </div>
       </AccountSection>
-      <AccountSection id="devices" title={text.sections.devices} help={text.devicesHelp}>
+      <AccountSection id="devices" title={labels.devices} help={text.devicesHelp}>
         <DeviceList
           queryKey={queryKeys.myDevices}
           load={fetchMyDevices}
           signOut={signOutMyDevice}
         />
       </AccountSection>
-      <AccountSection id="password" title={text.sections.password} help={text.passwordHelp}>
+      <AccountSection id="password" title={labels.password} help={text.passwordHelp}>
         <PasswordForm />
       </AccountSection>
-      <AccountSection id="two-step" title={text.sections.twoStep} help={text.twoStep.help}>
+      <AccountSection id="two-step" title={labels['two-step']} help={text.twoStep.help}>
         <TwoStep />
       </AccountSection>
+      {provider != null && (
+        <AccountSection
+          id="provider"
+          title={labels.provider}
+          help={text.provider.help(provider.name)}
+        >
+          <ProviderLink provider={provider} />
+        </AccountSection>
+      )}
     </PageLayout>
   )
 }
 
-/** A section of the page: an anchor for the list of sections, a heading and what it is for. */
+/**
+ * The band at the top, as on a user's page: the avatar, the page's title, who is signed in and
+ * their role, what they watch now, and Reset my preferences.
+ */
+function PersonBand({ user }: { user: SessionUser }) {
+  const { t } = useI18n()
+  const text = t.account
+  const watching = useWatching(user.id)
+  const [artFailed, setArtFailed] = useState<string | null>(null)
+  const posterId = watching?.item?.posterId
+  const art = posterId && artFailed !== posterId ? posterId : null
+  return (
+    <header className="mb-7 flex flex-wrap items-center gap-x-5 gap-y-3 rounded-panel bg-s1 px-5 py-4 max-md:mb-6 max-md:gap-x-3.5 max-md:px-4">
+      <Avatar name={user.name} image={userImageUrl(user)} size="xl" />
+      <div className="min-w-0 flex-1 basis-60 max-md:basis-40">
+        <h1 className="text-h1 break-words text-ink">{text.title}</h1>
+        <p className="mt-1 flex flex-wrap gap-x-3.5 gap-y-1 text-control text-ink-2">
+          <span className="min-w-0 break-words">
+            {text.signedInAs}
+            <span className="font-semibold text-ink">{user.name}</span>
+          </span>
+          <span>{user.isAdministrator ? text.roles.administrator : text.roles.member}</span>
+        </p>
+        {watching !== null && (
+          <WatchingLink session={watching} art={art} onArtError={() => setArtFailed(art)} />
+        )}
+      </div>
+      <div className="flex max-w-full flex-wrap gap-2">
+        <ResetPreferences />
+      </div>
+    </header>
+  )
+}
+
+/** A section of the page: an anchor for the list of sections, its group title and what it is for. */
 function AccountSection({
   id,
   title,
@@ -351,16 +386,12 @@ function AccountSection({
 }) {
   const headingId = useId()
   return (
-    <section
-      id={id}
-      aria-labelledby={headingId}
-      className="scroll-mt-[calc(var(--spacing-topbar)+32px)] max-md:scroll-mt-[calc(var(--spacing-topbar)+72px)] max-md:first:pt-6"
-    >
-      <h2 id={headingId} className="text-h3 text-ink">
+    <section id={id} aria-labelledby={headingId} className={anchorMargin}>
+      <h2 id={headingId} className="text-h2 text-ink">
         {title}
       </h2>
-      <p className="mt-1.5 max-w-[60ch] text-small text-ink-2">{help}</p>
-      <div className="mt-5">{children}</div>
+      <p className="mt-1 max-w-[72ch] text-small text-ink-2">{help}</p>
+      <div className="mt-3">{children}</div>
     </section>
   )
 }

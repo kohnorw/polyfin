@@ -79,6 +79,19 @@ func (p *pendingSteps) remove(token string) {
 	delete(p.steps, string(accounts.HashAdminToken(token)))
 }
 
+// forget ends the steps under way for user, when their account is signed
+// out everywhere: a step taken with the password before does not open a
+// session after.
+func (p *pendingSteps) forget(user accounts.ID) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for key, step := range p.steps {
+		if step.user == user {
+			delete(p.steps, key)
+		}
+	}
+}
+
 func setStepCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     stepCookieName,
@@ -191,6 +204,9 @@ func (h *handler) signInSecondStep(w http.ResponseWriter, r *http.Request) {
 		h.steps.remove(cookie.Value)
 		clearStepCookie(w)
 		writeError(w, http.StatusForbidden, "account_disabled")
+		return
+	case !user.AllowedFrom(forwarded.InLocalNetwork(r)):
+		writeError(w, http.StatusForbidden, "outside_local_network")
 		return
 	case !user.AllowedAt(now):
 		writeError(w, http.StatusForbidden, "outside_allowed_hours")
@@ -311,18 +327,27 @@ func (h *handler) confirmOwnTwoStep(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string][]string{"recoveryCodes": codes})
 }
 
+// identity is what the signed-in user confirms a sensitive action with: a
+// code of their authenticator app, or a recovery code, or their password.
+type identity struct {
+	Code     string `json:"code"`
+	Password string `json:"password"`
+}
+
 // confirmIdentity checks the code or the password the signed-in user
-// confirms a change of their two-step sign-in with, and answers when it is
-// wrong: 400 invalid_code, 403 wrong_password. Wrong ones count as wrong
-// passwords at sign-in do.
+// confirms a change of their two-step sign-in with (see checkIdentity).
 func (h *handler) confirmIdentity(w http.ResponseWriter, r *http.Request, user accounts.User) bool {
-	var body struct {
-		Code     string `json:"code"`
-		Password string `json:"password"`
-	}
+	var body identity
 	if !decode(w, r, &body) {
 		return false
 	}
+	return h.checkIdentity(w, r, user, body)
+}
+
+// checkIdentity checks the code or the password the signed-in user gave,
+// and answers when it is wrong: 400 invalid_code, 403 wrong_password.
+// Wrong ones count as wrong passwords at sign-in do.
+func (h *handler) checkIdentity(w http.ResponseWriter, r *http.Request, user accounts.User, given identity) bool {
 	attempt := h.reserve(w, forwarded.Client(r), twoStepKey(user.ID))
 	if attempt == nil {
 		return false
@@ -330,11 +355,11 @@ func (h *handler) confirmIdentity(w http.ResponseWriter, r *http.Request, user a
 	// A right one takes back only its own attempt: it signs nobody in.
 	defer attempt.Cancel()
 	var err error
-	if body.Code != "" {
-		_, err = h.Accounts.VerifyTwoStep(r.Context(), user.ID, body.Code)
+	if given.Code != "" {
+		_, err = h.Accounts.VerifyTwoStep(r.Context(), user.ID, given.Code)
 	} else {
 		var right bool
-		right, err = h.Accounts.CheckPassword(r.Context(), user.ID, body.Password)
+		right, err = h.Accounts.CheckPassword(r.Context(), user.ID, given.Password)
 		if err == nil && !right {
 			err = accounts.ErrWrongPassword
 		}

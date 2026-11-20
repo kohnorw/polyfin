@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"encoding/json"
+	"errors"
 	"regexp"
 	"slices"
 	"strconv"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/stremio"
+	"github.com/moodiness/polyfin/internal/tmdb"
 )
 
 // TitleRef names a movie, a series, or an episode by its series and
@@ -31,12 +33,21 @@ type TitleRef struct {
 	// Season and Number place an episode in its series. When Absolute,
 	// Number counts the episode among the regular episodes of its series,
 	// from the first of its first season, across its seasons (TVDB's
-	// absolute numbering), and Season is not read.
+	// absolute numbering), and Season is not read. When TMDBNumbered,
+	// they are TMDB's numbers of the episode, as aired, which the addon
+	// may number otherwise (see EpisodeNumbering).
 	Season, Number int
 	Absolute       bool
+	TMDBNumbered   bool
 	// Anime names the anime entry as anime catalogs list it, when the
 	// ref is of one.
 	Anime AnimeRef
+	// Source, for an episode another media server numbers, lists the
+	// episodes that server holds of the series: the episode is the one
+	// of them Season and Number name, placed among the addon's as the
+	// comment on episodes another media server holds tells. Refs of one
+	// series share it.
+	Source *SourceEpisodes
 	// Name is the title's name as the other service gives it, the series'
 	// for an episode; empty when it gives none. It names the record of a
 	// title Polyfin had none of until its addons describe it.
@@ -114,10 +125,14 @@ const describedFetches = 4
 // found among the episodes Polyfin listed, else named the way the listed
 // ones of its series are. An episode numbered as TVDB's absolute
 // numbering is the one of that place among the regular episodes Polyfin
-// listed of its series, in order. The titles an anime catalog listed
-// under the ref's AnimeRef are found too, an episode by its number in the
-// entry ("kitsu:<id>:<episode>"), and only once listed. A ref nothing
-// designates gets no target.
+// listed of its series, in order. An episode TMDB numbers is the one the
+// addon numbers as its EpisodeNumbering tells, and none when it tells the
+// addon has none. An episode another media server numbers (Source) is
+// the one of the addon's it is placed on, as the comment on episodes
+// another media server holds tells, and none when it is placed on none.
+// The titles an anime catalog listed under the ref's AnimeRef are found
+// too, an episode by its number in the entry ("kitsu:<id>:<episode>"),
+// and only once listed. A ref nothing designates gets no target.
 //
 // A ref Polyfin listed nothing under, which has no IMDb identifier but a
 // TMDB one, or for a series a TVDB one, is the title the server's
@@ -127,6 +142,11 @@ const describedFetches = 4
 // one asked, an episode then by the description's video of its season and
 // number. The addons are asked for nothing else.
 //
+// A ref still found by nothing, which has a TMDB identifier but no IMDb
+// one and which no addon described, takes the IMDb identifier TMDB gives
+// it when the server has a TMDB key (see imdbFromTMDB), and is then found
+// or recorded as a ref with that IMDb identifier is.
+//
 // The items Resolve names that Polyfin has no record of, as a title no
 // catalog listed, are recorded as the addons would name them: a movie or
 // series by its identifier and the ref's name, or the description's, and
@@ -135,18 +155,35 @@ const describedFetches = 4
 // already kept is left as it is, and a later listing replaces these with
 // full ones.
 func (s *Service) Resolve(ctx context.Context, refs []TitleRef) ([][]TitleTarget, error) {
+	targets, _, err := s.ResolveFromSource(ctx, refs)
+	return targets, err
+}
+
+// ResolveFromSource finds the items each ref designates as Resolve does,
+// and reports the episode refs with a Source that no episode the addon
+// lists of a series found is surely (see the comment on episodes another
+// media server holds): they have no target, and none was recorded for
+// them.
+func (s *Service) ResolveFromSource(ctx context.Context, refs []TitleRef) ([][]TitleTarget, []bool, error) {
+	unplaced := make([]bool, len(refs))
 	titles, err := s.knownTitles(ctx, refs)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	refs, titles, described, err := s.describeUnlisted(ctx, refs, titles)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
+	}
+	refs, titles, err = s.imdbFromTMDB(ctx, refs, titles, described)
+	if err != nil {
+		return nil, nil, err
 	}
 	// The Stremio identifiers of the series each episode ref belongs to,
-	// and of those an anime catalog listed under its AnimeRef.
+	// and of those an anime catalog listed under its AnimeRef, and the
+	// TMDB identifiers of the series TMDB numbers refs of, 0 for unknown.
 	seriesOf := make([][]string, len(refs))
 	animeOf := make([][]string, len(refs))
+	tmdbNumbered := map[string]int{}
 	var seriesIDs []string
 	var unlisted []record
 	result := make([][]TitleTarget, len(refs))
@@ -195,6 +232,9 @@ func (s *Service) Resolve(ctx context.Context, refs []TitleRef) ([][]TitleTarget
 			}
 			seriesOf[i] = append(seriesOf[i], title.stremioID)
 			addSeries(title.stremioID)
+			if ref.TMDBNumbered && !ref.Absolute {
+				tmdbNumbered[title.stremioID] = cmp.Or(tmdbNumbered[title.stremioID], ref.TMDB, describedNumber(stremio.Text(title.tmdb)))
+			}
 		}
 		for _, title := range anime {
 			switch {
@@ -207,22 +247,65 @@ func (s *Service) Resolve(ctx context.Context, refs []TitleRef) ([][]TitleTarget
 		}
 	}
 	if len(seriesIDs) == 0 {
-		return result, s.saveNew(ctx, unlisted)
+		return result, unplaced, s.saveNew(ctx, unlisted)
 	}
 	known, err := s.knownEpisodes(ctx, seriesIDs)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
+	numberings, err := s.numberings(ctx, tmdbNumbered, known)
+	if err != nil {
+		return nil, nil, err
+	}
+	var sourced []string
+	for i, ref := range refs {
+		if ref.Source == nil || ref.Absolute || ref.TMDBNumbered {
+			continue
+		}
+		for _, series := range seriesOf[i] {
+			if !slices.Contains(sourced, series) {
+				sourced = append(sourced, series)
+			}
+		}
+	}
+	var lists map[string]addonList
+	if len(sourced) > 0 {
+		if lists, err = s.addonLists(ctx, sourced, known, videos); err != nil {
+			return nil, nil, err
+		}
+	}
+	placements := map[sourceKey]placement{}
 	for i, ref := range refs {
 		for _, series := range seriesOf[i] {
 			episodes := known[series]
 			season, number := ref.Season, ref.Number
-			if ref.Absolute {
+			switch {
+			case ref.Absolute:
 				episode, ok := episodes.absolute(ref.Number)
 				if !ok {
 					continue
 				}
 				season, number = episode.season, episode.number
+			case ref.TMDBNumbered:
+				var ok bool
+				if season, number, ok = numberings[series].FromTMDB(season, number); !ok {
+					continue
+				}
+			case ref.Source != nil:
+				key := sourceKey{series, ref.Source}
+				p, placed := placements[key]
+				if !placed {
+					p = placeSource(lists[series].episodes, ref.Source)
+					placements[key] = p
+				}
+				place, ok := p.place(season, number)
+				// An episode the addon's description does not list is not
+				// made up.
+				if !ok || lists[series].described && !lists[series].lists(place) {
+					unplaced[i] = true
+					continue
+				}
+				season, number = place.season, place.number
 			}
 			target := TitleTarget{Series: itemID(titleKey(KindSeries, series)), Season: itemID(seasonKey(series, season)),
 				SeasonNumber: season, Number: number, Runtime: runtimes[series]}
@@ -264,8 +347,10 @@ func (s *Service) Resolve(ctx context.Context, refs []TitleRef) ([][]TitleTarget
 				SeasonNumber: episode.season, Number: episode.number, Runtime: cmp.Or(episode.runtime, runtimes[series]), Anime: true}
 			result[i] = append(result[i], target)
 		}
+		// A ref another series it belongs to places is found.
+		unplaced[i] = unplaced[i] && len(result[i]) == 0
 	}
-	return result, s.saveNew(ctx, unlisted)
+	return result, unplaced, s.saveNew(ctx, unlisted)
 }
 
 // listedAmong finds among titles the movies or series r names: found by
@@ -380,10 +465,11 @@ func (s *Service) describeUnlisted(ctx context.Context, refs []TitleRef, titles 
 		} else if imdbID.MatchString(meta.ID) {
 			ref.IMDb = meta.ID
 		}
-		if tmdb := describedNumber(meta.TmdbID); tmdb > 0 && ref.TMDB == 0 {
+		ids := s.providerIDs(itemID(titleKey(asked[j].kind, asked[j].id)), meta)
+		if tmdb := describedNumber(stremio.Text(ids["Tmdb"])); tmdb > 0 && ref.TMDB == 0 {
 			ref.TMDB = tmdb
 		}
-		if tvdb := describedNumber(meta.TvdbID); tvdb > 0 && ref.TVDB == 0 && ref.kind() == KindSeries {
+		if tvdb := describedNumber(stremio.Text(ids["Tvdb"])); tvdb > 0 && ref.TVDB == 0 && ref.kind() == KindSeries {
 			ref.TVDB = tvdb
 		}
 		completed = append(completed, *ref)
@@ -392,12 +478,89 @@ func (s *Service) describeUnlisted(ctx context.Context, refs []TitleRef, titles 
 	if err != nil {
 		return nil, nil, nil, err
 	}
+	return refs, withTitles(titles, more), described, nil
+}
+
+// withTitles adds to titles those of more it does not hold.
+func withTitles(titles, more []knownTitle) []knownTitle {
 	for _, title := range more {
 		if !slices.ContainsFunc(titles, func(t knownTitle) bool { return t.kind == title.kind && t.stremioID == title.stremioID }) {
 			titles = append(titles, title)
 		}
 	}
-	return refs, titles, described, nil
+	return titles
+}
+
+// imdbFromTMDB completes, when the server has a TMDB key, the refs that
+// have a TMDB identifier and no IMDb one, that Polyfin listed nothing
+// under and that no addon described (described[i] nil), with the IMDb
+// identifier TMDB gives their title: the answer kept, found or not (see
+// learntIMDb), else TMDB's, asked a few at a time and kept (see
+// lookUpIMDb). It returns the refs completed, and titles with those
+// Polyfin listed under the IMDb identifiers found. A lookup that fails
+// leaves its ref as it is, for the next time.
+func (s *Service) imdbFromTMDB(ctx context.Context, refs []TitleRef, titles []knownTitle, described []*description) ([]TitleRef, []knownTitle, error) {
+	if !s.tmdb.Enabled() {
+		return refs, titles, nil
+	}
+	// The TMDB title of each ref asked for, zero for the others.
+	of := make([]tmdbTitle, len(refs))
+	var asked []personCredit
+	for i, ref := range refs {
+		if ref.IMDb != "" || ref.TMDB <= 0 || described[i] != nil {
+			continue
+		}
+		if found, anime := ref.listedAmong(titles); len(found) > 0 || len(anime) > 0 {
+			continue
+		}
+		of[i] = tmdbTitle{tmdb.Movie, ref.TMDB}
+		if ref.kind() == KindSeries {
+			of[i].kind = tmdb.TV
+		}
+		if !slices.ContainsFunc(asked, func(c personCredit) bool { return c.title() == of[i] }) {
+			asked = append(asked, personCredit{Kind: string(of[i].kind), ID: ref.TMDB})
+		}
+	}
+	if len(asked) == 0 {
+		return refs, titles, nil
+	}
+	known, err := s.learntIMDb(ctx, asked)
+	if err != nil {
+		return nil, nil, err
+	}
+	unknown := slices.DeleteFunc(slices.Clone(asked), func(c personCredit) bool { return hasKey(known, c.title()) })
+	if len(unknown) > 0 {
+		failures := make([]error, len(unknown))
+		var group errgroup.Group
+		group.SetLimit(describedFetches)
+		for j, c := range unknown {
+			group.Go(func() error {
+				failures[j] = s.lookUpIMDb(ctx, c.title())
+				return nil
+			})
+		}
+		_ = group.Wait()
+		if err := errors.Join(failures...); err != nil && ctx.Err() == nil {
+			s.logger.Warn("TMDB did not give the IMDb identifiers of titles known by their TMDB one: they are asked again the next time",
+				"error", err)
+		}
+		if known, err = s.learntIMDb(ctx, asked); err != nil {
+			return nil, nil, err
+		}
+	}
+	refs = slices.Clone(refs)
+	var completed []TitleRef
+	for i, t := range of {
+		if imdb := known[t]; t.id > 0 && imdb != "" {
+			refs[i].IMDb = imdb
+			completed = append(completed, refs[i])
+		}
+	}
+	more, err := s.knownTitles(ctx, completed)
+	if err != nil {
+		return nil, nil, err
+	}
+	return refs, withTitles(titles, more), nil
 }
 
 // describedNumber reads an identifier a description gives as a number,
@@ -433,7 +596,10 @@ type knownTitle struct {
 }
 
 // matches reports whether the title is the one ref names, by one of their
-// identifiers.
+// identifiers. When ref names an IMDb identifier, a title with another
+// IMDb identifier is not it, whatever its TMDB or TVDB identifier: an
+// addon may give a title another title's (see stremio.Meta's
+// TmdbFromMoviedb), and a mark taken once is never taken back.
 func (t knownTitle) matches(ref TitleRef) bool {
 	tmdb, tvdb := "", ""
 	if ref.TMDB > 0 {
@@ -442,9 +608,15 @@ func (t knownTitle) matches(ref TitleRef) bool {
 	if ref.TVDB > 0 && ref.kind() == KindSeries {
 		tvdb = strconv.Itoa(ref.TVDB)
 	}
+	imdb := t.imdb
+	if imdb == "" && imdbID.MatchString(t.stremioID) {
+		imdb = t.stremioID
+	}
 	switch {
 	case ref.IMDb != "" && (t.stremioID == ref.IMDb || t.imdb == ref.IMDb):
 		return true
+	case ref.IMDb != "" && imdb != "":
+		return false
 	case tmdb != "" && (t.stremioID == "tmdb:"+tmdb || t.tmdb == tmdb):
 		return true
 	case tvdb != "" && (t.stremioID == "tvdb:"+tvdb || t.tvdb == tvdb):
@@ -453,11 +625,51 @@ func (t knownTitle) matches(ref TitleRef) bool {
 	return false
 }
 
+// knownTitlesQuery returns the statement that reads the movies and series
+// listed under one of keys, or with one of the IMDb (imdbs), TMDB (tmdbs)
+// or TVDB (tvdbs) identifiers, or whose items are among edited, and its
+// arguments. Each identifier is compared with the very expression of its
+// index and statistics (items_title_*), so that PostgreSQL looks each one
+// up and combines them in one read of the table: each title once, in the
+// order of the table, which decides the title found first when several
+// match a ref. A kind of identifier with none to look up, nil or empty,
+// gets no condition: PostgreSQL takes a comparison with an empty array for
+// false, and false lets any partial index of items stand for it, read
+// whole (items_person_tmdb, for one).
+func knownTitlesQuery(keys, imdbs, tmdbs, tvdbs []string, edited []accounts.ID) (string, []any) {
+	var query strings.Builder
+	query.Grow(256)
+	query.WriteString(`SELECT id, kind, key, data->'meta' FROM items WHERE kind IN ('movie', 'series') AND (key = ANY($1)`)
+	args := make([]any, 1, 5)
+	args[0] = keys
+	for _, by := range [...]struct {
+		expression string
+		ids        any
+		count      int
+	}{{`data->'meta'->>'imdb_id'`, imdbs, len(imdbs)}, {`data->'meta'->>'_tmdbId'`, tmdbs, len(tmdbs)},
+		{`data->'meta'->>'_tvdbId'`, tvdbs, len(tvdbs)}, {`id`, edited, len(edited)}} {
+		if by.count == 0 {
+			continue
+		}
+		args = append(args, by.ids)
+		query.WriteString(" OR ")
+		query.WriteString(by.expression)
+		query.WriteString(" = ANY($")
+		query.WriteString(strconv.Itoa(len(args)))
+		query.WriteString(")")
+	}
+	query.WriteString(")")
+	return query.String(), args
+}
+
 // knownTitles loads the movies and series Polyfin listed under one of the
 // identifiers of refs, or that an anime catalog listed under their
-// AnimeRef.
+// AnimeRef. A title whose TMDB or TVDB identifier an administrator set is
+// known by that one, and no longer by its source's (see providerIDs).
 func (s *Service) knownTitles(ctx context.Context, refs []TitleRef) ([]knownTitle, error) {
+	set := s.overridesNow()
 	var keys, imdbs, tmdbs, tvdbs []string
+	var edited []accounts.ID
 	for _, ref := range refs {
 		kind := ref.kind()
 		if ref.IMDb != "" {
@@ -466,10 +678,12 @@ func (s *Service) knownTitles(ctx context.Context, refs []TitleRef) ([]knownTitl
 		if ref.TMDB > 0 {
 			id := strconv.Itoa(ref.TMDB)
 			keys, tmdbs = append(keys, titleKey(kind, "tmdb:"+id)), append(tmdbs, id)
+			edited = append(edited, set.identified["Tmdb:"+id]...)
 		}
 		if ref.TVDB > 0 && kind == KindSeries {
 			id := strconv.Itoa(ref.TVDB)
 			keys, tvdbs = append(keys, titleKey(kind, "tvdb:"+id)), append(tvdbs, id)
+			edited = append(edited, set.identified["Tvdb:"+id]...)
 		}
 		for _, id := range ref.Anime.ids() {
 			keys = append(keys, titleKey(kind, id))
@@ -478,34 +692,42 @@ func (s *Service) knownTitles(ctx context.Context, refs []TitleRef) ([]knownTitl
 	if len(keys) == 0 {
 		return nil, nil
 	}
-	rows, err := s.db.Query(ctx, `SELECT kind, key, data->'meta' FROM items
-		WHERE kind IN ('movie', 'series') AND (key = ANY($1) OR data->'meta'->>'imdb_id' = ANY($2)
-			OR data->'meta'->>'_tmdbId' = ANY($3) OR data->'meta'->>'_tvdbId' = ANY($4))`, keys, imdbs, tmdbs, tvdbs)
+	query, args := knownTitlesQuery(keys, imdbs, tmdbs, tvdbs, edited)
+	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (knownTitle, error) {
+		var id accounts.ID
 		var kind, key string
 		var raw []byte
-		if err := row.Scan(&kind, &key, &raw); err != nil {
+		if err := row.Scan(&id, &kind, &key, &raw); err != nil {
 			return knownTitle{}, err
 		}
 		title := knownTitle{kind: Kind(kind), stremioID: strings.TrimPrefix(key, kind+"|")}
 		var meta stremio.Meta
 		if len(raw) > 0 && json.Unmarshal(raw, &meta) == nil {
-			title.imdb, title.tmdb, title.tvdb = meta.ImdbID, strings.TrimSpace(string(meta.TmdbID)), strings.TrimSpace(string(meta.TvdbID))
-			title.runtime = parseRuntime(string(meta.Runtime))
+			title.imdb, title.runtime = meta.ImdbID, parseRuntime(string(meta.Runtime))
 		}
+		// The identifiers set win, as wherever titles' identifiers are read.
+		meta.ID = title.stremioID
+		ids := set.fields[id].identifiers(meta)
+		title.tmdb, title.tvdb = strings.TrimSpace(ids["Tmdb"]), strings.TrimSpace(ids["Tvdb"])
 		return title, nil
 	})
 }
 
-// knownEpisode is an episode Polyfin listed.
+// knownEpisode is an episode Polyfin listed: day is the day it aired, in
+// UTC, zero when unknown, name its name, normalized (see airedName), and
+// tmdb and tvdb its own identifiers, zero when the addon gave none.
 type knownEpisode struct {
 	id             accounts.ID
 	videoID        string
 	season, number int
 	runtime        time.Duration
+	day            time.Time
+	name           string
+	tmdb, tvdb     int
 }
 
 type episodeList []knownEpisode
@@ -559,11 +781,16 @@ func (l episodeList) conventional(series string) bool {
 	return true
 }
 
+// knownEpisodesQuery reads the episodes listed of the series of the Stremio
+// identifiers $1, through the index and statistics of the expression it
+// compares (items_episode_series).
+const knownEpisodesQuery = `SELECT id, data->>'seriesId', data->'video' FROM items
+	WHERE kind = 'episode' AND data->>'seriesId' = ANY($1)`
+
 // knownEpisodes loads the episodes Polyfin listed of the series, by their
 // Stremio identifiers.
 func (s *Service) knownEpisodes(ctx context.Context, series []string) (map[string]episodeList, error) {
-	rows, err := s.db.Query(ctx, `SELECT id, data->>'seriesId', data->'video' FROM items
-		WHERE kind = 'episode' AND data->>'seriesId' = ANY($1)`, series)
+	rows, err := s.db.Query(ctx, knownEpisodesQuery, series)
 	if err != nil {
 		return nil, err
 	}
@@ -581,7 +808,8 @@ func (s *Service) knownEpisodes(ctx context.Context, series []string) (map[strin
 			continue
 		}
 		known[seriesID] = append(known[seriesID], knownEpisode{id: id, videoID: video.ID, season: int(video.Season),
-			number: video.EpisodeNumber(), runtime: parseRuntime(string(video.Runtime))})
+			number: video.EpisodeNumber(), runtime: parseRuntime(string(video.Runtime)), day: episodeDay(video.Released),
+			name: airedName(video.DisplayName()), tmdb: video.MoviedbID.ID(), tvdb: video.TvdbID.ID()})
 	}
 	return known, rows.Err()
 }

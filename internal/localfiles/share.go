@@ -7,6 +7,7 @@ import (
 	"hash/fnv"
 	"io"
 	"io/fs"
+	"log/slog"
 	"net/url"
 	"path"
 	"strconv"
@@ -81,6 +82,11 @@ const (
 	connectTimeout = 15 * time.Second
 	// listTimeout bounds the listing of one folder of a share.
 	listTimeout = time.Minute
+	// shareScanTime bounds one scan of a share, its walk and the reading
+	// of what it found new or changed. A walk of 100,000 folders through
+	// a cloud remote, about a third of a second each, lasts about 9
+	// hours; a scan reading only changes, minutes.
+	shareScanTime = 12 * time.Hour
 	// maxPollMinutes bounds the time between the listings of a share.
 	maxPollMinutes = 1440
 )
@@ -355,26 +361,34 @@ type shareAccess struct {
 // hostKeys keeps an SFTP server's host key: saved is the one saved,
 // empty before the first connection, save saves the one the first
 // connection was offered, and offered tells the one a server offers in
-// place of the one saved, which an administrator may accept.
+// place of the one saved, which an administrator may accept. forgotten
+// tells a folder moved to another server since its key was saved: no key
+// is saved without being accepted. single tells, once a connection, of a
+// server at host that opens no session for listings beside the one files
+// are read over (see sftpShare.list).
 type hostKeys struct {
-	saved   string
-	save    func(key string)
-	offered func(key string)
+	saved     string
+	forgotten bool
+	save      func(key string)
+	offered   func(key string)
+	single    func(host string)
 }
 
 // newRemote returns the reader of a share; it connects when first used.
-func newRemote(access shareAccess, keys hostKeys) (remote, error) {
+// logger logs what no request's handler or scan stands above to log (see
+// smbShare.panicked).
+func newRemote(access shareAccess, keys hostKeys, logger *slog.Logger) (remote, error) {
 	u, err := url.Parse(access.address)
 	if err != nil {
 		return nil, err
 	}
 	switch shareKind(access.address) {
 	case ShareSMB:
-		return newSMB(u, access.user, access.password), nil
+		return newSMB(u, access.user, access.password, logger), nil
 	case ShareS3:
 		return newS3(u, access)
 	case ShareSFTP:
-		return newSFTP(u, access, keys)
+		return newSFTP(u, access, keys, logger)
 	case ShareRclone:
 		return newRclone(u, access), nil
 	}
@@ -383,7 +397,10 @@ func newRemote(access shareAccess, keys hostKeys) (remote, error) {
 
 // shareFailure tells why a share cannot be read, as a folder's Error.
 func shareFailure(err error) string {
+	var bound *shareBound
 	switch {
+	case errors.As(err, &bound):
+		return bound.failure
 	case errors.Is(err, errShareRefused):
 		return errRefused
 	case errors.Is(err, errShareHostKey):
@@ -418,7 +435,7 @@ func (s *Service) remote(id accounts.ID, access shareAccess, keys hostKeys) (rem
 		p.remote.close()
 		delete(s.shares, id)
 	}
-	r, err := newRemote(access, keys)
+	r, err := newRemote(access, keys, s.logger)
 	if err != nil {
 		return nil, err
 	}
@@ -458,9 +475,9 @@ func (s *Service) folderRemote(ctx context.Context, id accounts.ID, address, use
 	var keys hostKeys
 	if cachedKind(shareKind(address)) {
 		var sealedKey, sealedPassphrase string
-		err := s.db.QueryRow(ctx, `SELECT share_endpoint, share_region, share_remote, share_private_key, share_passphrase, share_host_key
-			FROM local_folders WHERE addon_id = $1`, id).Scan(&access.endpoint, &access.region, &access.remote, &sealedKey, &sealedPassphrase,
-			&keys.saved)
+		err := s.db.QueryRow(ctx, `SELECT share_endpoint, share_region, share_remote, share_private_key, share_passphrase, share_host_key,
+			share_host_key_forgotten FROM local_folders WHERE addon_id = $1`, id).Scan(&access.endpoint, &access.region, &access.remote,
+			&sealedKey, &sealedPassphrase, &keys.saved, &keys.forgotten)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, fs.ErrNotExist
 		}
@@ -475,29 +492,36 @@ func (s *Service) folderRemote(ctx context.Context, id accounts.ID, address, use
 		}
 		keys.save = func(key string) { s.saveHostKey(id, address, key) }
 		keys.offered = func(key string) { s.offerHostKey(id, address, key) }
+		keys.single = func(host string) {
+			s.logger.Info("An SFTP server opens no second session on a connection: the folder's listings are read whole, without their bounds while read",
+				"host", host, "address", address)
+		}
 	}
 	return s.remote(id, access, keys)
 }
 
 // saveHostKey saves the host key an SFTP server offered at its folder's
-// first connection, unless one was saved meanwhile.
+// first connection, unless one was saved meanwhile, or the folder moved
+// since.
 func (s *Service) saveHostKey(id accounts.ID, address, key string) {
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
 	defer cancel()
 	if _, err := s.db.Exec(ctx, `UPDATE local_folders SET share_host_key = $3, share_offered_key = '' FROM addons a
-		WHERE addon_id = $1 AND a.id = addon_id AND a.manifest_url = $2 AND share_host_key = ''`, id, address, key); err != nil {
+		WHERE addon_id = $1 AND a.id = addon_id AND a.manifest_url = $2 AND share_host_key = '' AND NOT share_host_key_forgotten`,
+		id, address, key); err != nil {
 		s.logger.Warn("The host key of an SFTP folder could not be saved", "address", address, "error", err)
 	}
 }
 
 // offerHostKey keeps the host key an SFTP server offers in place of the
-// one saved, which an administrator may accept (see Changes.AcceptHostKey).
+// one saved, or after the folder moved to it, which an administrator may
+// accept (see Changes.AcceptHostKey).
 func (s *Service) offerHostKey(id accounts.ID, address, key string) {
 	ctx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
 	defer cancel()
 	if _, err := s.db.Exec(ctx, `UPDATE local_folders SET share_offered_key = $3 FROM addons a
-		WHERE addon_id = $1 AND a.id = addon_id AND a.manifest_url = $2 AND share_host_key <> '' AND share_host_key <> $3`, id, address,
-		key); err != nil {
+		WHERE addon_id = $1 AND a.id = addon_id AND a.manifest_url = $2 AND (share_host_key <> '' OR share_host_key_forgotten)
+		AND share_host_key <> $3`, id, address, key); err != nil {
 		s.logger.Warn("The new host key of an SFTP folder could not be kept", "address", address, "error", err)
 	}
 }
@@ -507,8 +531,18 @@ func (s *Service) offerHostKey(id accounts.ID, address, key string) {
 // playlists among them (see walked), and their side files, one folder
 // after the other, from the listings alone, with the print of each folder
 // it listed (see folderPrint). The folders it could not list, missing or
-// refused, are skipped. A share that stops answering fails the walk.
+// refused, are skipped. A share that stops answering fails the walk, as
+// does one that holds more than shareWalk bounds a walk to.
 func walkShare(ctx context.Context, r remote, root []remoteEntry, kind string) (listing, error) {
+	return shareWalk.walk(ctx, r, root, kind)
+}
+
+// walk walks a share as walkShare does, within b: a share whose folders
+// go deeper, or which holds more folders or files, fails it, as does a
+// folder listing more than is read of one. Folders nested without end, as
+// a link to a folder above it makes them where the server follows it, end
+// the walk so rather than never.
+func (b walkBounds) walk(ctx context.Context, r remote, root []remoteEntry, kind string) (listing, error) {
 	list := listing{files: map[string]found{}, sides: map[string]found{}, prints: map[string]uint64{},
 		open: func(ctx context.Context, rel string) (io.ReadCloser, error) {
 			file, _, err := r.open(ctx, rel)
@@ -516,9 +550,11 @@ func walkShare(ctx context.Context, r remote, root []remoteEntry, kind string) (
 		}}
 	type pending struct {
 		rel     string
+		depth   int
 		listed  bool
 		entries []remoteEntry
 	}
+	count := walkCount{bounds: b}
 	queue := []pending{{rel: "", listed: true, entries: root}}
 	for len(queue) > 0 {
 		if ctx.Err() != nil {
@@ -536,6 +572,10 @@ func walkShare(ctx context.Context, r remote, root []remoteEntry, kind string) (
 				list.skipped = append(list.skipped, next.rel)
 				continue
 			}
+			var bound *shareBound
+			if errors.As(err, &bound) {
+				return listing{}, bound.in(next.rel)
+			}
 			if err != nil {
 				return listing{}, err
 			}
@@ -548,13 +588,22 @@ func walkShare(ctx context.Context, r remote, root []remoteEntry, kind string) (
 			}
 			if e.folder {
 				if !skippedIn(kind, e.name) {
+					if err := count.folder(rel, next.depth+1); err != nil {
+						return listing{}, err
+					}
 					// Listed once its turn comes, so that one folder's
 					// entries at most are held at once.
-					queue = append(queue, pending{rel: rel})
+					queue = append(queue, pending{rel: rel, depth: next.depth + 1})
 				}
 				continue
 			}
-			switch file, side := walked(kind, rel); {
+			file, side := walked(kind, rel)
+			if file || side {
+				if err := count.file(rel); err != nil {
+					return listing{}, err
+				}
+			}
+			switch {
 			case file:
 				list.files[rel] = found{size: e.size, modified: e.modified.UTC().Truncate(time.Microsecond)}
 			case side:
@@ -616,7 +665,17 @@ func (s *Service) shareFiles(ctx context.Context, id accounts.ID, address, user,
 			return listing{}, "", ctx.Err()
 		}
 		s.logger.Warn("A network share cannot be read", "address", address, "error", err)
-		return listing{}, shareFailure(err), nil
+		failure = shareFailure(err)
+		if metBound(failure) {
+			// The polls compare the share with the prints of its last
+			// scan: they would find it changed at every round, and have it
+			// walked up to its bound each time. Without them, they ask for
+			// one more scan, then leave it to its schedule.
+			s.mu.Lock()
+			delete(s.prints, id)
+			s.mu.Unlock()
+		}
+		return listing{}, failure, nil
 	}
 	return list, "", nil
 }

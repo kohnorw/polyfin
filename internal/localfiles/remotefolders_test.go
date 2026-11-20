@@ -3,6 +3,7 @@ package localfiles
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
 	"maps"
@@ -92,6 +93,7 @@ func remoteCases(t *testing.T, dir string) []remoteCase {
 // from the storage: a seek reads only the blocks missing, and those read
 // before need the storage no more.
 func TestRemoteFoldersAreScannedAndRead(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	box, err := secrets.New(bytes.Repeat([]byte{7}, secrets.KeySize))
 	if err != nil {
@@ -107,7 +109,7 @@ func TestRemoteFoldersAreScannedAndRead(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "movies", "Night of the Living Dead (1968).mkv"), data, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	cache, err := source.New(t.TempDir(), func() int64 { return 1 << 30 }, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	cache, err := source.New(t.TempDir(), func() source.Policy { return source.Policy{Limit: 1 << 30} }, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,6 +121,7 @@ func TestRemoteFoldersAreScannedAndRead(t *testing.T) {
 	}
 	for _, c := range remoteCases(t, dir) {
 		t.Run(c.name, func(t *testing.T) {
+			t.Parallel()
 			addon, err := e.service.Add(t.Context(), c.wrong)
 			if err != nil {
 				t.Fatal(err)
@@ -204,6 +207,7 @@ func TestRemoteFoldersAreScannedAndRead(t *testing.T) {
 // A bucket's folders are listed page by page: a folder holding more than
 // a page lists whole.
 func TestBucketListingsArePaged(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	for i := range 7 {
 		write(t, filepath.Join(dir, "movies", "Movie "+string(rune('A'+i))+" (1950).mkv"), 10)
@@ -211,7 +215,7 @@ func TestBucketListingsArePaged(t *testing.T) {
 	write(t, filepath.Join(dir, "movies", "Shows", "Old", "The General (1926).mkv"), 10)
 	_, server := serveS3(t, dir, "media", "AKIDTEST", "secret")
 	r, err := newRemote(shareAccess{address: "s3://media/movies", endpoint: server.URL, region: "eu-test-1", user: "AKIDTEST",
-		password: "secret"}, hostKeys{})
+		password: "secret"}, hostKeys{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +228,7 @@ func TestBucketListingsArePaged(t *testing.T) {
 		t.Errorf("a folder: %+v %v", entries, err)
 	}
 	other, err := newRemote(shareAccess{address: "s3://media/movies/Shows/Old/The General (1926).mkv", endpoint: server.URL,
-		region: "eu-test-1", user: "AKIDTEST", password: "secret"}, hostKeys{})
+		region: "eu-test-1", user: "AKIDTEST", password: "secret"}, hostKeys{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -233,7 +237,7 @@ func TestBucketListingsArePaged(t *testing.T) {
 		t.Errorf("an object as the folder: %v", err)
 	}
 	missing, err := newRemote(shareAccess{address: "s3://other/movies", endpoint: server.URL, region: "eu-test-1", user: "AKIDTEST",
-		password: "secret"}, hostKeys{})
+		password: "secret"}, hostKeys{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,6 +250,7 @@ func TestBucketListingsArePaged(t *testing.T) {
 // An rclone instance that does not know the remote answers that it is
 // missing; a path that is a file is no folder.
 func TestRcloneRemoteMissing(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "movies", "Nosferatu (1922).mkv"), 10)
 	_, server := serveRclone(t, "media", dir, "rc", "secret")
@@ -286,6 +291,7 @@ func must[T any](v T, err error) T {
 // its files, until an administrator accepts it. A wrong password is
 // refused.
 func TestSFTPHostKeys(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "movies", "Nosferatu (1922).mkv"), 10)
@@ -313,7 +319,7 @@ func TestSFTPHostKeys(t *testing.T) {
 		folder.OfferedHostKey != ssh.FingerprintSHA256(other) {
 		t.Fatalf("another host key: %+v %v", folder, err)
 	}
-	if _, err := e.service.Update(t.Context(), addon.ID, Changes{AcceptHostKey: true}); err != nil {
+	if _, err := e.service.Update(t.Context(), addon.ID, Changes{AcceptHostKey: folder.OfferedHostKey}); err != nil {
 		t.Fatal(err)
 	}
 	e.idle(addon.ID)
@@ -343,10 +349,117 @@ func TestSFTPHostKeys(t *testing.T) {
 	}
 }
 
+// An SFTP server's new host key is accepted by the fingerprint the
+// administrator was shown. When the server has offered another key since,
+// the acceptance is refused: the key saved stays, the key now offered
+// shows, and the folder's password is sent to neither. The key then shown
+// is accepted in turn, the scan signs in to it, and a key offered after
+// that is refused as any other is. A change that names no fingerprint
+// accepts nothing.
+func TestAHostKeyIsAcceptedByTheFingerprintShown(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "movies", "Nosferatu (1922).mkv"), 10)
+	const password = "pass phrase"
+	server := serveSFTP(t, "reader", password, nil)
+	address := "sftp://" + server.addr + sftpPath(filepath.Join(dir, "movies"))
+	addon, err := e.service.Add(t.Context(), NewFolder{Name: "Server", Path: address, Kind: KindMovies, User: "reader", Password: password})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.idle(addon.ID)
+	folder, err := e.service.Folder(t.Context(), addon.ID)
+	if err != nil || folder.Error != "" || folder.HostKey == "" {
+		t.Fatalf("first connection: %+v %v", folder, err)
+	}
+	saved := folder.HostKey
+
+	// The key the administrator is shown.
+	shown := ssh.FingerprintSHA256(server.rekey(t))
+	if err := e.service.Scan(t.Context(), addon.ID); err != nil {
+		t.Fatal(err)
+	}
+	folder, err = e.service.Folder(t.Context(), addon.ID)
+	if err != nil || folder.Error != errHostKey || folder.HostKey != saved || folder.OfferedHostKey != shown {
+		t.Fatalf("another host key: %+v %v", folder, err)
+	}
+	// The server offers yet another one before it is accepted.
+	later := ssh.FingerprintSHA256(server.rekey(t))
+	if err := e.service.Scan(t.Context(), addon.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, c := range []struct {
+		name   string
+		accept string
+		err    error
+	}{
+		{"no fingerprint", "", nil},
+		{"the fingerprint shown", shown, ErrOfferedKeyChanged},
+		{"the fingerprint of the key saved", saved, ErrOfferedKeyChanged},
+		{"a text that is no fingerprint", "true", ErrOfferedKeyChanged},
+	} {
+		if _, err := e.service.Update(t.Context(), addon.ID, Changes{AcceptHostKey: c.accept}); !errors.Is(err, c.err) || err == nil != (c.err == nil) {
+			t.Errorf("%s: accepted with %v, expected %v", c.name, err, c.err)
+		}
+		e.idle(addon.ID)
+		if err := e.service.Scan(t.Context(), addon.ID); err != nil {
+			t.Fatal(err)
+		}
+		folder, err = e.service.Folder(t.Context(), addon.ID)
+		if err != nil || folder.Error != errHostKey || folder.HostKey != saved || folder.OfferedHostKey != later {
+			t.Errorf("%s: the key saved is %s and the key offered %s (%s, %v), expected %s and %s", c.name, folder.HostKey,
+				folder.OfferedHostKey, folder.Error, err, saved, later)
+		}
+		for _, print := range []string{shown, later} {
+			if got := server.sentTo(print); len(got) != 0 {
+				t.Errorf("%s: a key that was not accepted was sent %q", c.name, got)
+			}
+		}
+		if t.Failed() {
+			return
+		}
+	}
+
+	// The key now shown is still the one offered.
+	if _, err := e.service.Update(t.Context(), addon.ID, Changes{AcceptHostKey: folder.OfferedHostKey}); err != nil {
+		t.Fatal(err)
+	}
+	e.idle(addon.ID)
+	folder, err = e.service.Folder(t.Context(), addon.ID)
+	if err != nil || folder.Error != "" || folder.Files != 1 || folder.HostKey != later || folder.OfferedHostKey != "" {
+		t.Fatalf("the host key accepted: %+v %v", folder, err)
+	}
+	if got := server.sentTo(later); !slices.Contains(got, password) {
+		t.Errorf("the key accepted was sent %q", got)
+	}
+	// Accepting it again finds no key offered.
+	if _, err := e.service.Update(t.Context(), addon.ID, Changes{AcceptHostKey: later}); !errors.Is(err, ErrOfferedKeyChanged) {
+		t.Errorf("accepted twice: %v", err)
+	}
+
+	// The connections after the acceptance check the key it saved.
+	last := ssh.FingerprintSHA256(server.rekey(t))
+	if err := e.service.Scan(t.Context(), addon.ID); err != nil {
+		t.Fatal(err)
+	}
+	folder, err = e.service.Folder(t.Context(), addon.ID)
+	if err != nil || folder.Error != errHostKey || folder.HostKey != later || folder.OfferedHostKey != last {
+		t.Errorf("a key offered after the acceptance: %+v %v", folder, err)
+	}
+	if got := slices.Concat(server.sentTo(shown), server.sentTo(last)); len(got) != 0 {
+		t.Errorf("keys that were not accepted were sent %q", got)
+	}
+}
+
 // A file added to a bucket, an SFTP folder or an rclone remote is found
 // by the next listing round, the share polled as such; one listed only
 // at its scans is not watched.
+//
+//nolint:paralleltest,tparallel // its subtests change files in the one folder all their polls list
 func TestRemoteFoldersArePolled(t *testing.T) {
+	t.Parallel()
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "movies", "Nosferatu (1922)", "Nosferatu (1922).mkv"), 10)
 	_, s3Server := serveS3(t, dir, "media", "AKIDTEST", "secret")
@@ -360,7 +473,7 @@ func TestRemoteFoldersArePolled(t *testing.T) {
 	} {
 		kind := shareKind(access.address)
 		t.Run(kind, func(t *testing.T) {
-			r, err := newRemote(access, hostKeys{})
+			r, err := newRemote(access, hostKeys{}, slog.New(slog.DiscardHandler))
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -395,6 +508,8 @@ func TestRemoteFoldersArePolled(t *testing.T) {
 
 // A disc image on a bucket is matched and plays as on any share: its
 // main title as one MPEG-TS file, read from the image by ranges.
+//
+//nolint:paralleltest // swaps the package's minMovie, which every scan of a disc reads
 func TestBucketDiscImages(t *testing.T) {
 	defer func(old time.Duration) { minMovie = old }(minMovie)
 	minMovie = 20 * time.Second
@@ -608,9 +723,13 @@ func TestStoredSecretsStayWithTheirServer(t *testing.T) {
 	if folder := update(sftpFolder, Changes{Path: &address}); folder.PrivateKeySet || folder.PassphraseSet {
 		t.Errorf("a folder moved to another server: %+v", folder)
 	}
-	if folder := update(sftpFolder, Changes{PrivateKey: &key, Passphrase: new("pass phrase")}); !folder.PrivateKeySet || folder.Error != "" ||
-		folder.Files != 1 {
-		t.Errorf("the key given again: %+v", folder)
+	// The moved folder's new server shows its host key, to accept.
+	folder := update(sftpFolder, Changes{PrivateKey: &key, Passphrase: new("pass phrase")})
+	if !folder.PrivateKeySet || folder.Error != errHostKey || folder.OfferedHostKey == "" {
+		t.Fatalf("the key given again: %+v", folder)
+	}
+	if folder := update(sftpFolder, Changes{AcceptHostKey: folder.OfferedHostKey}); folder.Error != "" || folder.Files != 1 {
+		t.Errorf("the host key accepted: %+v", folder)
 	}
 }
 
@@ -632,7 +751,7 @@ func TestFolderChangesRetryItsVersions(t *testing.T) {
 		t.Fatal(err)
 	}
 	e.idle(addon.ID)
-	server.rekey(t)
+	offered := ssh.FingerprintSHA256(server.rekey(t))
 	if err := e.service.Scan(t.Context(), addon.ID); err != nil {
 		t.Fatal(err)
 	}
@@ -643,7 +762,7 @@ func TestFolderChangesRetryItsVersions(t *testing.T) {
 	}{
 		{"a name", Changes{Name: new("Other server")}, false},
 		{"its artwork", Changes{UseArtwork: new(false)}, false},
-		{"the host key accepted", Changes{AcceptHostKey: true}, true},
+		{"the host key accepted", Changes{AcceptHostKey: offered}, true},
 		{"a password", Changes{Password: new("pass phrase")}, true},
 		{"another user", Changes{User: new("other")}, true},
 		{"an address", Changes{Path: new("sftp://" + server.addr + sftpPath(dir))}, true},
@@ -656,5 +775,57 @@ func TestFolderChangesRetryItsVersions(t *testing.T) {
 		if want := []accounts.ID{addon.ID}; c.retried != slices.Equal(retried, want) || !c.retried && retried != nil {
 			t.Errorf("%s: retried %v", c.name, retried)
 		}
+	}
+}
+
+// A folder moved to another SFTP server saves none of its keys unseen: the
+// key the new server offers is refused before the password is sent, shown,
+// and saved only once accepted by its fingerprint.
+func TestAMovedFoldersHostKeyIsShownBeforeItIsSaved(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	dir := t.TempDir()
+	write(t, filepath.Join(dir, "movies", "Nosferatu (1922).mkv"), 10)
+	const password = "pass phrase"
+	first := serveSFTP(t, "reader", password, nil)
+	moved := serveSFTP(t, "reader", password, nil)
+	path := sftpPath(filepath.Join(dir, "movies"))
+	addon, err := e.service.Add(t.Context(), NewFolder{Name: "Server", Path: "sftp://" + first.addr + path, Kind: KindMovies, User: "reader",
+		Password: password})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.idle(addon.ID)
+	if folder, err := e.service.Folder(t.Context(), addon.ID); err != nil || folder.Error != "" || folder.HostKey == "" || folder.HostKeyForgotten {
+		t.Fatalf("first connection: %+v %v", folder, err)
+	}
+
+	// The password goes only to the server it was given for: it is given
+	// again with the new one.
+	if _, err := e.service.Update(t.Context(), addon.ID, Changes{Path: new("sftp://" + moved.addr + path), Password: new(password)}); err != nil {
+		t.Fatal(err)
+	}
+	e.idle(addon.ID)
+	moved.mu.Lock()
+	shown := ssh.FingerprintSHA256(moved.hostKey.PublicKey())
+	moved.mu.Unlock()
+	folder, err := e.service.Folder(t.Context(), addon.ID)
+	if err != nil || folder.Error != errHostKey || folder.HostKey != "" || folder.OfferedHostKey != shown || !folder.HostKeyForgotten {
+		t.Fatalf("moved: %+v %v", folder, err)
+	}
+	if got := moved.sentTo(shown); len(got) != 0 {
+		t.Errorf("a key that was not accepted was sent %q", got)
+	}
+
+	if _, err := e.service.Update(t.Context(), addon.ID, Changes{AcceptHostKey: shown}); err != nil {
+		t.Fatal(err)
+	}
+	e.idle(addon.ID)
+	folder, err = e.service.Folder(t.Context(), addon.ID)
+	if err != nil || folder.Error != "" || folder.Files != 1 || folder.HostKey != shown || folder.OfferedHostKey != "" || folder.HostKeyForgotten {
+		t.Errorf("the host key accepted: %+v %v", folder, err)
+	}
+	if got := moved.sentTo(shown); len(got) == 0 {
+		t.Error("the key accepted was sent no password")
 	}
 }

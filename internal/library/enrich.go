@@ -22,8 +22,16 @@ import (
 // count, in memory or in the database too. ok reports whether an addon's
 // description completed the source's.
 func (s *Service) enrich(ctx context.Context, v view, source installed, meta stremio.Meta, shared bool, how reach) (_ stremio.Meta, ok bool) {
+	meta, _, ok = s.enrichBy(ctx, v, source, meta, shared, how)
+	return meta, ok
+}
+
+// enrichBy is enrich, which also returns the addon whose description
+// completed the source's: the artwork it gave is reached as that addon
+// may.
+func (s *Service) enrichBy(ctx context.Context, v view, source installed, meta stremio.Meta, shared bool, how reach) (_ stremio.Meta, by installed, ok bool) {
 	if s.iptv == nil || meta.Type != "movie" && meta.Type != "series" || !s.iptv.Enrichment(ctx, source.addon.ID) {
-		return meta, false
+		return meta, installed{}, false
 	}
 	var ids []string
 	if meta.ImdbID != "" {
@@ -41,7 +49,7 @@ func (s *Service) enrich(ctx context.Context, v view, source installed, meta str
 			if how == fromAddons {
 				var err error
 				if described, err = s.meta(ctx, candidate, meta.Type, id); err != nil {
-					s.logger.Debug("An addon could not describe an IPTV title", "addon", candidate.addon.Manifest.Name, "error", err)
+					s.logger.Debug("An addon could not describe an IPTV title", "addon", candidate.addon.LogName(), "error", err)
 					continue
 				}
 			} else if kept, ok := s.keptDescription(ctx, candidate, metaKey{candidate.addon.ID, meta.Type, id}, how); ok {
@@ -49,16 +57,18 @@ func (s *Service) enrich(ctx context.Context, v view, source installed, meta str
 			} else {
 				continue
 			}
-			return enriched(meta, described), true
+			return enriched(meta, described), candidate, true
 		}
 	}
-	return meta, false
+	return meta, installed{}, false
 }
 
 // enriched is an IPTV title's description completed by an addon's.
 func enriched(own, addon stremio.Meta) stremio.Meta {
 	result := own
-	result.Poster = cmp.Or(addon.Poster, own.Poster)
+	if addon.Poster != "" {
+		result.Poster, result.PosterShape = addon.Poster, addon.PosterShape
+	}
 	result.Background = cmp.Or(addon.Background, own.Background)
 	result.Logo = cmp.Or(addon.Logo, own.Logo)
 	result.LandscapePoster = cmp.Or(addon.LandscapePoster, own.LandscapePoster)
@@ -69,7 +79,7 @@ func enriched(own, addon stremio.Meta) stremio.Meta {
 	result.Runtime = cmp.Or(addon.Runtime, own.Runtime)
 	result.ImdbRating = cmp.Or(addon.ImdbRating, own.ImdbRating)
 	result.ImdbID = cmp.Or(own.ImdbID, addon.ImdbID)
-	result.TmdbID = cmp.Or(own.TmdbID, addon.TmdbID)
+	result.TmdbID, result.TmdbFromMoviedb = cmp.Or(own.TmdbID, addon.TmdbID), own.TmdbID == "" && addon.TmdbFromMoviedb
 	result.TvdbID = cmp.Or(own.TvdbID, addon.TvdbID)
 	for _, names := range []struct{ into, from *stremio.Names }{{&result.Cast, &addon.Cast}, {&result.Director, &addon.Director},
 		{&result.Writer, &addon.Writer}} {

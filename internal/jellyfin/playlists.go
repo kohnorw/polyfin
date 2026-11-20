@@ -2,16 +2,21 @@ package jellyfin
 
 import (
 	"bytes"
+	"cmp"
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"math"
+	"math/rand/v2"
 	"net/http"
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
+
+	"golang.org/x/text/unicode/norm"
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/library"
@@ -92,6 +97,18 @@ func playlistNotFound(w http.ResponseWriter) {
 	writeJSON(w, http.StatusNotFound, "Playlist not found")
 }
 
+// nameTooLong is what a name over playlists.MaxNameLength is refused
+// with, as ASP.NET words a text over its length.
+var nameTooLong = fmt.Sprintf("The field Name must be a string with a maximum length of %d.", playlists.MaxNameLength)
+
+// tooManyEntries refuses, as a request that does not validate, a change
+// that would leave a playlist with more entries than it may hold: nothing
+// of it is kept, so that an app never reports as added titles that were
+// not.
+func tooManyEntries(w http.ResponseWriter) {
+	validationProblem(w, bindErrors{"Ids": {fmt.Sprintf("A playlist holds at most %d entries.", playlists.MaxEntries)}})
+}
+
 // visiblePlaylist loads the playlist id as user sees it. One user may not
 // see is answered as missing. ok is false once w was answered.
 func (h *Handler) visiblePlaylist(w http.ResponseWriter, r *http.Request, user accounts.User, id accounts.ID) (playlists.Playlist, bool) {
@@ -124,6 +141,9 @@ func (h *Handler) playlistChanged(w http.ResponseWriter, r *http.Request, err er
 	case errors.Is(err, playlists.ErrNotFound):
 		// Another request deleted it meanwhile.
 		playlistNotFound(w)
+	case errors.Is(err, playlists.ErrTooManyEntries):
+		// Another request filled it meanwhile.
+		tooManyEntries(w)
 	case err != nil:
 		h.internalError(w, r, err)
 	default:
@@ -147,7 +167,7 @@ func readJSONBody(w http.ResponseWriter, r *http.Request, into any, required str
 		unsupportedMediaTypeProblem(w)
 		return false, false
 	}
-	if err := json.Unmarshal(body, into); err != nil {
+	if err := unmarshalBody(body, into); err != nil {
 		problem := map[string][]string{"$": {"The JSON value could not be converted."}}
 		if required != "" {
 			problem[required] = []string{"The " + required + " field is required."}
@@ -212,12 +232,18 @@ func isMediaType(raw string) bool {
 }
 
 // playlistTitles lists the movies and episodes ids name, as Jellyfin
-// expands folders into playlists: a series or a season adds its released
-// episodes in order. Other items, and those user cannot reach, are left
-// out.
-func (h *Handler) playlistTitles(ctx context.Context, user accounts.User, ids []accounts.ID) ([]accounts.ID, error) {
+// expands folders into playlists: a series adds its aired episodes of
+// regular seasons, a season its aired episodes, in order (see
+// library.PlaylistEpisodes). Other items, and those user cannot reach,
+// are left out. It stops with playlists.ErrTooManyEntries once they are
+// more than most, the entries the playlist has room for, and looks up
+// nothing for more identifiers than a playlist may hold.
+func (h *Handler) playlistTitles(ctx context.Context, user accounts.User, ids []accounts.ID, most int) ([]accounts.ID, error) {
 	if len(ids) == 0 {
 		return nil, nil
+	}
+	if len(ids) > max(most, playlists.MaxEntries) {
+		return nil, playlists.ErrTooManyEntries
 	}
 	items, err := h.Library.Items(ctx, user, ids)
 	if err != nil {
@@ -225,15 +251,40 @@ func (h *Handler) playlistTitles(ctx context.Context, user accounts.User, ids []
 	}
 	var titles []accounts.ID
 	for _, item := range items {
-		targets, err := h.markTargets(ctx, user, item)
+		targets, err := h.playlistTargets(ctx, user, item)
 		if err != nil {
 			return nil, err
 		}
 		for _, target := range targets {
 			titles = append(titles, target.ID)
 		}
+		if len(titles) > most {
+			return nil, playlists.ErrTooManyEntries
+		}
 	}
 	return titles, nil
+}
+
+// titlesFailed answers a failure of playlistTitles.
+func (h *Handler) titlesFailed(w http.ResponseWriter, r *http.Request, err error) {
+	if errors.Is(err, playlists.ErrTooManyEntries) {
+		tooManyEntries(w)
+		return
+	}
+	h.browseError(w, r, err)
+}
+
+// playlistTargets lists what a playlist takes for item: a series' or a
+// season's episodes as playlistTitles tells, what a played mark applies to
+// for anything else.
+func (h *Handler) playlistTargets(ctx context.Context, user accounts.User, item library.Item) ([]library.Item, error) {
+	switch item.Kind {
+	case library.KindSeries:
+		return h.Library.PlaylistEpisodes(ctx, user, item.ID, nil)
+	case library.KindSeason:
+		return h.Library.PlaylistEpisodes(ctx, user, item.SeriesID, &item.ID)
+	}
+	return h.markTargets(ctx, user, item)
 }
 
 // createPlaylist creates a playlist from the CreatePlaylistDto body or, as
@@ -270,6 +321,9 @@ func (h *Handler) createPlaylist(w http.ResponseWriter, r *http.Request) {
 	if name == "" {
 		b.add("Name", "The Name field is required.")
 	}
+	if utf8.RuneCountInString(name) > playlists.MaxNameLength {
+		b.add("Name", nameTooLong)
+	}
 	if len(b) > 0 {
 		validationProblem(w, b)
 		return
@@ -278,14 +332,18 @@ func (h *Handler) createPlaylist(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	titles, err := h.playlistTitles(r.Context(), user, ids)
+	titles, err := h.playlistTitles(r.Context(), user, ids, playlists.MaxEntries)
 	if err != nil {
-		h.browseError(w, r, err)
+		h.titlesFailed(w, r, err)
 		return
 	}
 	id, err := h.Playlists.Create(r.Context(), playlists.Draft{
 		Owner: user.ID, Name: name, OpenAccess: request.IsPublic, Shares: shares, Items: titles,
 	})
+	if errors.Is(err, playlists.ErrTooMany) {
+		validationProblem(w, bindErrors{"UserId": {fmt.Sprintf("A user owns at most %d playlists.", playlists.MaxPerUser)}})
+		return
+	}
 	if err != nil {
 		h.internalError(w, r, err)
 		return
@@ -341,6 +399,9 @@ func (h *Handler) updatePlaylist(w http.ResponseWriter, r *http.Request) {
 	if request.Users != nil {
 		changes.Shares = new(b.bodyShares(*request.Users))
 	}
+	if request.Name != nil && utf8.RuneCountInString(*request.Name) > playlists.MaxNameLength {
+		b.add("Name", nameTooLong)
+	}
 	if len(b) > 0 {
 		validationProblem(w, b)
 		return
@@ -350,15 +411,41 @@ func (h *Handler) updatePlaylist(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	if request.Ids != nil {
-		titles, err := h.playlistTitles(r.Context(), user, ids)
+	if p.Watchlist && request.Name != nil {
+		// jellyfin-web's edit dialog sends back the name it showed: the
+		// default name, as the caller sees it, stays the default, which
+		// follows each viewer's language.
+		shown, err := h.playlistName(r.Context(), user, playlists.Playlist{Owner: p.Owner, Watchlist: true})
 		if err != nil {
-			h.browseError(w, r, err)
+			h.internalError(w, r, err)
+			return
+		}
+		if name := strings.TrimSpace(*request.Name); name == "" || name == shown {
+			changes.Name = new("")
+		}
+	}
+	if request.Ids != nil && !p.Watchlist {
+		// A playlist that held more before the bound takes no more than
+		// it holds.
+		titles, err := h.playlistTitles(r.Context(), user, ids, max(playlists.MaxEntries, len(p.Entries)))
+		if err != nil {
+			h.titlesFailed(w, r, err)
 			return
 		}
 		changes.Items = &titles
 	}
-	h.playlistChanged(w, r, h.Playlists.Update(r.Context(), p.ID, changes))
+	if err := h.Playlists.Update(r.Context(), p.ID, changes); err != nil || request.Ids == nil || !p.Watchlist {
+		h.playlistChanged(w, r, err)
+		return
+	}
+	groups, err := h.watchlistItems(r.Context(), user, ids)
+	if err != nil {
+		h.browseError(w, r, err)
+		return
+	}
+	change, err := h.Library.ReplaceWatchlist(r.Context(), p.Owner, groups)
+	h.watchlistEdited(user, p.Owner, change)
+	h.playlistChanged(w, r, err)
 }
 
 func (h *Handler) playlistItems(w http.ResponseWriter, r *http.Request) {
@@ -386,18 +473,54 @@ func (h *Handler) playlistItems(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	h.writePlaylistEntries(w, r, user, p, start, limit)
+	shown, err := h.shownPlaylists(r.Context(), user, []playlists.Playlist{p})
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	if len(shown) == 0 {
+		playlistNotFound(w)
+		return
+	}
+	h.writePlaylistEntries(w, r, user, p, start, limit, false)
 }
 
 // writePlaylistEntries answers the titles of a playlist that user can
-// reach, in order, each with the entry it is listed as.
-func (h *Handler) writePlaylistEntries(w http.ResponseWriter, r *http.Request, user accounts.User, p playlists.Playlist, start, limit int) {
+// reach, in order, each with the entry it is listed as. Listed as its
+// children (sorted), as Jellyfin does, it follows sortBy when asked, Random
+// included, which Shuffle asks for.
+func (h *Handler) writePlaylistEntries(w http.ResponseWriter, r *http.Request, user accounts.User, p playlists.Playlist, start, limit int,
+	sorted bool) {
 	titles, err := h.playlistContents(r.Context(), user, p)
 	if err != nil {
 		h.internalError(w, r, err)
 		return
 	}
-	entries := reachable(p, titles)
+	entries, err := h.shownEntries(r.Context(), user, p, titles)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	// SortBy=None, which one of Jellyfin's official apps asks and Jellyfin
+	// drops, keeps the playlist's order.
+	keys := slices.DeleteFunc(listQuery(r, "sortBy"), func(key string) bool { return strings.EqualFold(key, "None") })
+	if sorted && len(keys) > 0 && len(entries) > 1 {
+		all := make([]library.Item, len(entries))
+		for i, entry := range entries {
+			all[i] = titles[entry.Item]
+		}
+		state, err := h.userState(r.Context(), user, all)
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		order := sortedOrder(r, all, state)
+		ordered := make([]playlists.Entry, len(entries))
+		for i, k := range order {
+			ordered[i] = entries[k]
+		}
+		entries = ordered
+	}
 	from, to := bounds(len(entries), start, limit)
 	page := entries[from:to]
 	items := make([]library.Item, len(page))
@@ -427,7 +550,7 @@ func bounds(n, start, limit int) (from, to int) {
 }
 
 // playlistContents describes, by identifier, the titles of playlists that
-// user can reach.
+// user can reach, and the request's rating filter keeps.
 func (h *Handler) playlistContents(ctx context.Context, user accounts.User, lists ...playlists.Playlist) (map[accounts.ID]library.Item, error) {
 	var ids []accounts.ID
 	seen := map[accounts.ID]bool{}
@@ -444,6 +567,9 @@ func (h *Handler) playlistContents(ctx context.Context, user accounts.User, list
 		return titles, nil
 	}
 	items, err := h.Library.Items(ctx, user, ids)
+	if err == nil {
+		items, err = h.Library.RatingFiltered(ctx, user, items)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -465,7 +591,184 @@ func reachable(p playlists.Playlist, titles map[accounts.ID]library.Item) []play
 	return entries
 }
 
-// addToPlaylist adds titles at position, or last.
+// shownEntries lists the entries of p user is shown, whose titles are in
+// titles (see reachable): a watchlist leaves out the titles user hid.
+func (h *Handler) shownEntries(ctx context.Context, user accounts.User, p playlists.Playlist, titles map[accounts.ID]library.Item) ([]playlists.Entry, error) {
+	entries := reachable(p, titles)
+	if !p.Watchlist || len(entries) == 0 {
+		return entries, nil
+	}
+	hidden, err := h.Library.HiddenTitles(ctx, user)
+	if err != nil {
+		return nil, err
+	}
+	return slices.DeleteFunc(entries, func(e playlists.Entry) bool { return hidden.Hides(titles[e.Item]) }), nil
+}
+
+// posterTitles lists the titles whose posters entries show, in order,
+// each once: an episode shows its series'.
+func posterTitles(entries []playlists.Entry, titles map[accounts.ID]library.Item) []accounts.ID {
+	ids := make([]accounts.ID, 0, len(entries))
+	for _, entry := range entries {
+		title := titles[entry.Item]
+		id := title.ID
+		if title.Kind == library.KindEpisode && title.SeriesID != (accounts.ID{}) {
+			id = title.SeriesID
+		}
+		if !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	return ids
+}
+
+// kindPlaylist is the kind of a playlist described as an item to the user
+// data routes (see playlistItem).
+const kindPlaylist library.Kind = "playlist"
+
+// shownTitles loads the playlist id that user sees, and lists the titles
+// it shows them, in order, once per entry. ok is false when user sees no
+// such playlist.
+func (h *Handler) shownTitles(ctx context.Context, user accounts.User, id accounts.ID) (p playlists.Playlist, shown []library.Item, ok bool, err error) {
+	p, err = h.Playlists.Get(ctx, id)
+	if errors.Is(err, playlists.ErrNotFound) || err == nil && !p.Visible(user.ID) {
+		return playlists.Playlist{}, nil, false, nil
+	}
+	if err != nil {
+		return playlists.Playlist{}, nil, false, err
+	}
+	titles, err := h.playlistContents(ctx, user, p)
+	if err != nil {
+		return playlists.Playlist{}, nil, false, err
+	}
+	entries, err := h.shownEntries(ctx, user, p, titles)
+	if err != nil {
+		return playlists.Playlist{}, nil, false, err
+	}
+	shown = make([]library.Item, len(entries))
+	for i, entry := range entries {
+		shown[i] = titles[entry.Item]
+	}
+	return p, shown, true, nil
+}
+
+// playlistItem describes the playlist id that user sees as an item of the
+// user data routes, which jellyfin-web's playlist page marks played and
+// favorite: a folder of the titles it shows user, played once they all
+// are. library.ErrNotFound names none.
+func (h *Handler) playlistItem(ctx context.Context, user accounts.User, id accounts.ID) (library.Item, error) {
+	p, shown, ok, err := h.shownTitles(ctx, user, id)
+	if err != nil || !ok {
+		return library.Item{}, cmp.Or(err, library.ErrNotFound)
+	}
+	name, err := h.playlistName(ctx, user, p)
+	if err != nil {
+		return library.Item{}, err
+	}
+	contents := &library.Contents{Children: len(shown), Released: len(shown), Videos: make([]accounts.ID, len(shown))}
+	for i, title := range shown {
+		contents.Videos[i] = title.ID
+	}
+	return library.Item{ID: p.ID, Kind: kindPlaylist, Name: name, Contents: contents}, nil
+}
+
+// playlistMarkTargets lists what marking the playlist item played marks:
+// each title it shows user, once, as Jellyfin marks a playlist's
+// children.
+func (h *Handler) playlistMarkTargets(ctx context.Context, user accounts.User, item library.Item) ([]library.Item, error) {
+	_, shown, _, err := h.shownTitles(ctx, user, item.ID)
+	seen := map[accounts.ID]bool{}
+	return slices.DeleteFunc(shown, func(title library.Item) bool {
+		was := seen[title.ID]
+		seen[title.ID] = true
+		return was
+	}), err
+}
+
+// playItems replaces, among ids, the playlists user sees with the titles
+// they show user, in order, as Jellyfin's play commands play a playlist:
+// the session told gets them rather than the playlist. Other identifiers
+// stay as they are.
+func (h *Handler) playItems(ctx context.Context, user accounts.User, ids []accounts.ID) ([]accounts.ID, error) {
+	result := make([]accounts.ID, 0, len(ids))
+	for _, id := range ids {
+		_, shown, ok, err := h.shownTitles(ctx, user, id)
+		if err != nil {
+			return nil, err
+		}
+		if !ok {
+			result = append(result, id)
+			continue
+		}
+		for _, title := range shown {
+			result = append(result, title.ID)
+		}
+	}
+	return result, nil
+}
+
+// playlistsAsked tells whether a listing asks the user's own playlists
+// (videos) and those of local music folders, from its item and media
+// types and filters; asked is false when it asks for no playlist at all,
+// as a listing without parent that names no Playlist type does.
+func playlistsAsked(r *http.Request, hasParent bool) (own, folders, asked bool) {
+	matches := func(list []string, value string) bool {
+		return slices.ContainsFunc(list, func(t string) bool { return strings.EqualFold(t, value) })
+	}
+	include := listQuery(r, "includeItemTypes")
+	if !hasParent && !matches(include, "Playlist") {
+		return false, false, false
+	}
+	media := listQuery(r, "mediaTypes")
+	excluded := len(include) > 0 && !matches(include, "Playlist") || matches(listQuery(r, "excludeItemTypes"), "Playlist") ||
+		matches(listQuery(r, "filters"), "IsNotFolder")
+	return !excluded && (len(media) == 0 || matches(media, "Video")), !excluded && (len(media) == 0 || matches(media, "Audio")), true
+}
+
+// searchPlaylists answers the playlists of user's own a search finds, by
+// the name user sees them by, as Jellyfin's search finds playlists: when
+// it names the Playlist type or none, across the server or in the
+// Playlists view. Those of local music folders come with the music.
+func (h *Handler) searchPlaylists(r *http.Request, user accounts.User, term string, parent accounts.ID, hasParent bool) ([]BaseItemDto, error) {
+	if hasParent && parent != playlistsViewID {
+		return nil, nil
+	}
+	if len(listQuery(r, "includeItemTypes")) == 0 {
+		// A search naming no type asks for playlists too.
+		hasParent = true
+	}
+	if own, _, _ := playlistsAsked(r, hasParent); !own {
+		return nil, nil
+	}
+	lists, err := h.listedPlaylists(r.Context(), user)
+	if err != nil {
+		return nil, err
+	}
+	folded := foldName(term)
+	lists = slices.DeleteFunc(lists, func(p playlists.Playlist) bool { return !strings.Contains(foldName(p.Name), folded) })
+	f, filtered := stateFilterOf(r)
+	dtos, err := h.listedDtos(r, user, lists, requestedFields(r))
+	if err != nil || !filtered {
+		return dtos, err
+	}
+	return slices.DeleteFunc(dtos, func(dto BaseItemDto) bool { return !f.keepsData(dto.UserData, false) }), nil
+}
+
+// foldName is what playlists sort, narrow and are searched by: their name
+// without regard to case or accents, as Jellyfin sorts and searches names,
+// so that "À regarder" sorts among the A.
+func foldName(name string) string {
+	decomposed := norm.NFD.String(strings.ToLower(strings.TrimSpace(name)))
+	return norm.NFC.String(strings.Map(func(r rune) rune {
+		if unicode.Is(unicode.Mn, r) {
+			return -1
+		}
+		return r
+	}, decomposed))
+}
+
+// addToPlaylist adds titles at position, or last; a watchlist's go first
+// unless a position is given.
 func (h *Handler) addToPlaylist(w http.ResponseWriter, r *http.Request) {
 	b := bindErrors{}
 	id := b.pathID(r, "playlistId")
@@ -478,9 +781,23 @@ func (h *Handler) addToPlaylist(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	titles, err := h.playlistTitles(r.Context(), user, queryIDs(r, "ids"))
+	if p.Watchlist {
+		groups, err := h.watchlistItems(r.Context(), user, queryIDs(r, "ids"))
+		if err != nil {
+			h.browseError(w, r, err)
+			return
+		}
+		if !positioned {
+			position = 0
+		}
+		change, err := h.Library.AddToWatchlist(r.Context(), p.Owner, groups, position)
+		h.watchlistEdited(user, p.Owner, change)
+		h.playlistChanged(w, r, err)
+		return
+	}
+	titles, err := h.playlistTitles(r.Context(), user, queryIDs(r, "ids"), playlists.MaxEntries-len(p.Entries))
 	if err != nil {
-		h.browseError(w, r, err)
+		h.titlesFailed(w, r, err)
 		return
 	}
 	if !positioned {
@@ -508,7 +825,14 @@ func (h *Handler) removeFromPlaylist(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	h.playlistChanged(w, r, h.Playlists.Remove(r.Context(), p.ID, queryIDs(r, "entryIds")))
+	entries := queryIDs(r, "entryIds")
+	if p.Watchlist {
+		change, err := h.Library.RemoveWatchlistEntries(r.Context(), p.Owner, entries)
+		h.watchlistEdited(callerFrom(r.Context()).User, p.Owner, change)
+		h.playlistChanged(w, r, err)
+		return
+	}
+	h.playlistChanged(w, r, h.Playlists.Remove(r.Context(), p.ID, entries))
 }
 
 // movePlaylistEntry moves an entry to newIndex among the entries the
@@ -530,15 +854,25 @@ func (h *Handler) movePlaylistEntry(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
-	titles, err := h.playlistContents(r.Context(), callerFrom(r.Context()).User, p)
+	user := callerFrom(r.Context()).User
+	titles, err := h.playlistContents(r.Context(), user, p)
 	if err != nil {
 		h.internalError(w, r, err)
 		return
 	}
-	others := slices.DeleteFunc(reachable(p, titles), func(e playlists.Entry) bool { return e.ID == entry })
+	shown, err := h.shownEntries(r.Context(), user, p, titles)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	others := slices.DeleteFunc(shown, func(e playlists.Entry) bool { return e.ID == entry })
 	var before accounts.ID
 	if index < len(others) {
 		before = others[max(index, 0)].ID
+	}
+	if p.Watchlist {
+		h.playlistChanged(w, r, h.Library.MoveInWatchlist(r.Context(), p.Owner, entry, before))
+		return
 	}
 	h.playlistChanged(w, r, h.Playlists.Move(r.Context(), p.ID, entry, before))
 }
@@ -597,7 +931,8 @@ func (h *Handler) playlistUser(w http.ResponseWriter, r *http.Request) {
 }
 
 // sharePlaylist shares a playlist with a user, or changes whether they may
-// edit it. Only the owner shares.
+// edit it. Only the owner shares, and only with a user they are told of
+// (see shownTo): another is answered as one who does not exist.
 func (h *Handler) sharePlaylist(w http.ResponseWriter, r *http.Request) {
 	b := bindErrors{}
 	id := b.pathID(r, "playlistId")
@@ -623,12 +958,13 @@ func (h *Handler) sharePlaylist(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
 		return
 	}
-	if _, err := h.Accounts.User(r.Context(), target); err != nil {
-		if errors.Is(err, accounts.ErrNotFound) {
-			writeJSON(w, http.StatusNotFound, "User not found")
-		} else {
-			h.internalError(w, r, err)
-		}
+	shared, err := h.Accounts.User(r.Context(), target)
+	if err != nil && !errors.Is(err, accounts.ErrNotFound) {
+		h.internalError(w, r, err)
+		return
+	}
+	if err != nil || !h.shownTo(user, shared) {
+		writeJSON(w, http.StatusNotFound, "User not found")
 		return
 	}
 	share := playlists.Share{User: target, CanEdit: request.CanEdit != nil && *request.CanEdit}
@@ -657,9 +993,11 @@ func (h *Handler) unsharePlaylist(w http.ResponseWriter, r *http.Request) {
 }
 
 // deleteItem deletes a playlist, which its owner or an administrator may
-// do, or a collection (see deleteCollection). Titles come from addons and
-// are never deleted: like Jellyfin for a user who may not delete an item,
-// Polyfin answers 401.
+// do, or a collection (see deleteCollection). A watchlist forgets its
+// owner's own list, and comes back empty at the next need (see
+// watchlist.Store.Delete). Titles come from addons and are never deleted:
+// like Jellyfin for a user who may not delete an item, Polyfin answers
+// 401.
 func (h *Handler) deleteItem(w http.ResponseWriter, r *http.Request) {
 	b := bindErrors{}
 	id := b.pathID(r, "itemId")
@@ -678,7 +1016,12 @@ func (h *Handler) deleteItem(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, http.StatusUnauthorized, "Unauthorized access")
 			return
 		}
-		if err := h.Playlists.Delete(r.Context(), p.ID); err != nil {
+		if p.Watchlist {
+			err = h.Library.DeleteWatchlist(r.Context(), p.Owner)
+		} else {
+			err = h.Playlists.Delete(r.Context(), p.ID)
+		}
+		if err != nil {
 			h.internalError(w, r, err)
 			return
 		}
@@ -700,14 +1043,16 @@ func (h *Handler) deleteItem(w http.ResponseWriter, r *http.Request) {
 
 // Browsing playlists.
 
-// playlistsViewItem is the Playlists view, among the user's libraries.
-func playlistsViewItem() library.Item {
-	return library.Item{ID: playlistsViewID, Kind: library.KindLibrary, Name: "Playlists", CollectionType: "playlists"}
+// playlistsViewItem is the Playlists view, among the user's libraries,
+// named in the server's language, with its emblem.
+func (h *Handler) playlistsViewItem() library.Item {
+	return withEmblem(library.Item{ID: playlistsViewID, Kind: library.KindLibrary,
+		Name: library.PlaylistsName(h.Accounts.Settings().Language), CollectionType: "playlists"})
 }
 
 // playlistsView describes the Playlists view.
 func (h *Handler) playlistsView(r *http.Request, user accounts.User) (BaseItemDto, error) {
-	dtos, err := h.folderDtos(r, user, []library.Item{playlistsViewItem()})
+	dtos, err := h.folderDtos(r, user, []library.Item{h.playlistsViewItem()})
 	if err != nil {
 		return BaseItemDto{}, err
 	}
@@ -716,7 +1061,8 @@ func (h *Handler) playlistsView(r *http.Request, user accounts.User) (BaseItemDt
 }
 
 // addPlaylistsView adds the Playlists view to views once user may see a
-// playlist, as Jellyfin shows it once there is one.
+// playlist, as Jellyfin shows it once there is one: every user has their
+// watchlist, until they delete it.
 func (h *Handler) addPlaylistsView(r *http.Request, user accounts.User, views []BaseItemDto) ([]BaseItemDto, error) {
 	visible, err := h.Playlists.AnyVisible(r.Context(), user.ID)
 	if err != nil || !visible {
@@ -731,39 +1077,42 @@ func (h *Handler) addPlaylistsView(r *http.Request, user accounts.User, views []
 
 // playlistListing answers the listings that hold playlists: the Playlists
 // view's, a listing of playlists across the server, and a playlist's
-// titles listed as its children. The first two list the user's playlists
-// and those of the local music folders they reach, by name. It reports
-// whether it answered.
+// titles listed as its children. The first two list the user's playlists,
+// their watchlist always among them, and those of the local music folders
+// they reach, under the names the user sees (see playlistName), narrowed
+// by Filters and sorted by SortBy as Jellyfin does (by name unless asked
+// otherwise). It reports whether it answered.
 func (h *Handler) playlistListing(w http.ResponseWriter, r *http.Request, user accounts.User, parent accounts.ID, hasParent bool, start, limit int) bool {
 	if hasParent && parent != playlistsViewID {
 		p, err := h.Playlists.Get(r.Context(), parent)
 		if errors.Is(err, playlists.ErrNotFound) || err == nil && !p.Visible(user.ID) {
 			return false
 		}
+		var shown []playlists.Playlist
+		if err == nil {
+			shown, err = h.shownPlaylists(r.Context(), user, []playlists.Playlist{p})
+		}
 		if err != nil {
 			h.internalError(w, r, err)
 			return true
 		}
-		h.writePlaylistEntries(w, r, user, p, start, limit)
+		if len(shown) == 0 {
+			notFoundProblem(w)
+			return true
+		}
+		h.writePlaylistEntries(w, r, user, p, start, limit, true)
 		return true
 	}
-	matches := func(list []string, value string) bool {
-		return slices.ContainsFunc(list, func(t string) bool { return strings.EqualFold(t, value) })
-	}
-	include := listQuery(r, "includeItemTypes")
-	if !hasParent && !matches(include, "Playlist") {
+	own, folders, asked := playlistsAsked(r, hasParent)
+	if !asked {
 		return false
 	}
-	media := listQuery(r, "mediaTypes")
-	excluded := len(include) > 0 && !matches(include, "Playlist") || matches(listQuery(r, "excludeItemTypes"), "Playlist") ||
-		matches(listQuery(r, "filters"), "IsNotFolder")
-	own := !excluded && (len(media) == 0 || matches(media, "Video"))
-	folders := !excluded && (len(media) == 0 || matches(media, "Audio"))
 	var lists []playlists.Playlist
 	var music []library.Item
 	var err error
 	if own {
-		if lists, err = h.Playlists.Visible(r.Context(), user.ID); err != nil {
+		lists, err = h.listedPlaylists(r.Context(), user)
+		if err != nil {
 			h.internalError(w, r, err)
 			return true
 		}
@@ -774,33 +1123,80 @@ func (h *Handler) playlistListing(w http.ResponseWriter, r *http.Request, user a
 			return true
 		}
 	}
-	inRange := letterRange(r)
-	lists = slices.DeleteFunc(lists, func(p playlists.Playlist) bool { return !inRange(strings.ToLower(strings.TrimSpace(p.Name))) })
-	music = slices.DeleteFunc(music, func(item library.Item) bool { return !inRange(sortName(item)) })
-	// Both are by name: merged, a user's playlist is its index in lists,
-	// a folder's playlist -1 less its index in music.
-	merged := make([]int, 0, len(lists)+len(music))
-	for i, j := 0, 0; i < len(lists) || j < len(music); {
-		if j == len(music) || i < len(lists) && strings.ToLower(strings.TrimSpace(lists[i].Name)) <= sortName(music[j]) {
-			merged = append(merged, i)
-			i++
-		} else {
-			merged = append(merged, -1-j)
-			j++
-		}
+	// A row is a user's playlist, its index in lists, or a folder's, -1
+	// less its index in music.
+	type row struct {
+		index   int
+		name    string
+		created time.Time
 	}
-	from, to := bounds(len(merged), start, limit)
+	inRange := letterRange(r)
+	rows := make([]row, 0, len(lists)+len(music))
+	for i, p := range lists {
+		rows = append(rows, row{index: i, name: foldName(p.Name), created: p.Created})
+	}
+	for j, item := range music {
+		rows = append(rows, row{index: -1 - j, name: foldName(sortName(item))})
+	}
+	rows = slices.DeleteFunc(rows, func(x row) bool { return !inRange(x.name) })
+	fields := requestedFields(r)
+	// Filtered, every playlist the filter may keep is described to tell
+	// what the user did with it; else only those of the page are.
+	var ownDtos map[int]BaseItemDto
+	if f, filtered := stateFilterOf(r); filtered {
+		state, err := h.userState(r.Context(), user, music)
+		if err == nil {
+			ownDtos, err = h.filteredDtos(r, user, lists, f, fields)
+		}
+		if err != nil {
+			h.internalError(w, r, err)
+			return true
+		}
+		rows = slices.DeleteFunc(rows, func(x row) bool {
+			if x.index >= 0 {
+				_, kept := ownDtos[x.index]
+				return !kept
+			}
+			return !f.keeps(music[-1-x.index], state)
+		})
+	}
+	keys := slices.DeleteFunc(listQuery(r, "sortBy"), func(key string) bool { return strings.EqualFold(key, "None") })
+	orders := listQuery(r, "sortOrder")
+	slices.SortStableFunc(rows, func(a, b row) int {
+		for i, key := range keys {
+			var result int
+			switch strings.ToLower(key) {
+			case "sortname", "name":
+				result = cmp.Compare(a.name, b.name)
+			case "datecreated":
+				result = a.created.Compare(b.created)
+			}
+			if descendingAt(orders, i) {
+				result = -result
+			}
+			if result != 0 {
+				return result
+			}
+		}
+		// By name, a user's playlist before a folder's of the same name.
+		return cmp.Or(cmp.Compare(a.name, b.name), cmp.Compare(min(b.index, 0), min(a.index, 0)))
+	})
+	if slices.ContainsFunc(keys, func(key string) bool { return strings.EqualFold(key, "Random") }) {
+		rand.Shuffle(len(rows), func(i, j int) { rows[i], rows[j] = rows[j], rows[i] })
+	}
+	from, to := bounds(len(rows), start, limit)
+	page := rows[from:to]
 	var pageLists []playlists.Playlist
 	var pageMusic []library.Item
-	for _, k := range merged[from:to] {
-		if k >= 0 {
-			pageLists = append(pageLists, lists[k])
-		} else {
-			pageMusic = append(pageMusic, music[-1-k])
+	for _, x := range page {
+		switch {
+		case x.index < 0:
+			pageMusic = append(pageMusic, music[-1-x.index])
+		case ownDtos == nil:
+			pageLists = append(pageLists, lists[x.index])
 		}
 	}
-	fields := requestedFields(r)
-	ownDtos, err := h.playlistDtos(r, user, pageLists, fields, false)
+	described, err := h.listedDtos(r, user, pageLists, fields)
 	if err != nil {
 		h.internalError(w, r, err)
 		return true
@@ -811,15 +1207,18 @@ func (h *Handler) playlistListing(w http.ResponseWriter, r *http.Request, user a
 		return true
 	}
 	musicDtos := h.listDtos(r, user, pageMusic, fields, state)
-	dtos := make([]BaseItemDto, 0, to-from)
-	for _, k := range merged[from:to] {
-		if k >= 0 {
-			dtos, ownDtos = append(dtos, ownDtos[0]), ownDtos[1:]
-		} else {
+	dtos := make([]BaseItemDto, 0, len(page))
+	for _, x := range page {
+		switch {
+		case x.index < 0:
 			dtos, musicDtos = append(dtos, musicDtos[0]), musicDtos[1:]
+		case ownDtos != nil:
+			dtos = append(dtos, ownDtos[x.index])
+		default:
+			dtos, described = append(dtos, described[0]), described[1:]
 		}
 	}
-	writeJSON(w, http.StatusOK, QueryResult{Items: dtos, TotalRecordCount: len(merged), StartIndex: start})
+	writeJSON(w, http.StatusOK, QueryResult{Items: dtos, TotalRecordCount: len(rows), StartIndex: start})
 	return true
 }
 
@@ -839,9 +1238,16 @@ func (h *Handler) describePlaylist(w http.ResponseWriter, r *http.Request, user 
 	if errors.Is(err, playlists.ErrNotFound) || err == nil && !p.Visible(user.ID) {
 		return false
 	}
+	var shown []playlists.Playlist
+	if err == nil {
+		shown, err = h.shownPlaylists(r.Context(), user, []playlists.Playlist{p})
+	}
 	if err != nil {
 		h.internalError(w, r, err)
 		return true
+	}
+	if len(shown) == 0 {
+		return false
 	}
 	dtos, err := h.playlistDtos(r, user, []playlists.Playlist{p}, requestedFields(r), true)
 	if err != nil {
@@ -872,16 +1278,127 @@ func (h *Handler) playlistAncestors(w http.ResponseWriter, r *http.Request, user
 	return true
 }
 
+// namePlaylists gives lists the names user sees them by (see
+// playlistName), and sorts them by those names.
+func (h *Handler) namePlaylists(ctx context.Context, user accounts.User, lists []playlists.Playlist) error {
+	for i := range lists {
+		name, err := h.playlistName(ctx, user, lists[i])
+		if err != nil {
+			return err
+		}
+		lists[i].Name = name
+	}
+	slices.SortStableFunc(lists, func(a, b playlists.Playlist) int { return strings.Compare(foldName(a.Name), foldName(b.Name)) })
+	return nil
+}
+
+// listedPlaylists lists the playlists user is shown, under the names they
+// see them by and in that order, a row each: without their entries (see
+// playlists.Store.Visible), which listedDtos reads for those it describes.
+// A playlist none of whose titles user reaches is left out, as
+// shownPlaylists leaves it out: only for a user whose listings are
+// narrowed does that take the titles of each.
+func (h *Handler) listedPlaylists(ctx context.Context, user accounts.User) ([]playlists.Playlist, error) {
+	lists, err := h.Playlists.Visible(ctx, user.ID)
+	if err != nil || len(lists) == 0 {
+		return lists, err
+	}
+	narrows, err := h.Library.Narrows(library.WithMembersFilter(ctx), user)
+	if err != nil {
+		return nil, err
+	}
+	if narrows {
+		var ids []accounts.ID
+		for _, p := range lists {
+			if p.HasEntries {
+				ids = append(ids, p.ID)
+			}
+		}
+		titles, err := h.Playlists.Titles(ctx, ids)
+		if err != nil {
+			return nil, err
+		}
+		members := make([][]accounts.ID, len(lists))
+		for i, p := range lists {
+			members[i] = titles[p.ID]
+		}
+		shown, err := h.shownContainers(ctx, user, members)
+		if err != nil {
+			return nil, err
+		}
+		kept := lists[:0]
+		for i, p := range lists {
+			if shown[i] {
+				kept = append(kept, p)
+			}
+		}
+		lists = kept
+	}
+	return lists, h.namePlaylists(ctx, user, lists)
+}
+
+// listedDtos describes playlists a listing answers, whose entries it
+// reads first (see listedPlaylists): those of the playlists described,
+// not of every playlist the listing went through.
+func (h *Handler) listedDtos(r *http.Request, user accounts.User, lists []playlists.Playlist, fields fieldSet) ([]BaseItemDto, error) {
+	if err := h.Playlists.LoadEntries(r.Context(), lists); err != nil {
+		return nil, err
+	}
+	return h.playlistDtos(r, user, lists, fields, false)
+}
+
+// filteredDtos describes the playlists of lists that a filter on what the
+// user did keeps, by their index in lists. What the user marked a playlist
+// tells first, so that a listing of favorites reads the entries of the
+// user's favorites, not of every playlist they may see.
+func (h *Handler) filteredDtos(r *http.Request, user accounts.User, lists []playlists.Playlist, f stateFilter,
+	fields fieldSet) (map[int]BaseItemDto, error) {
+	ids := make([]accounts.ID, len(lists))
+	for i, p := range lists {
+		ids[i] = p.ID
+	}
+	data, err := h.UserData.Get(r.Context(), user.ID, ids)
+	if err != nil {
+		return nil, err
+	}
+	marks := stateFilter{favorite: f.favorite, notFavorite: f.notFavorite, likes: f.likes, dislikes: f.dislikes,
+		favoriteOrLikes: f.favoriteOrLikes}
+	var indexes []int
+	var marked []playlists.Playlist
+	for i, p := range lists {
+		if marks.keepsData(UserItemData{IsFavorite: data[p.ID].Favorite, Likes: data[p.ID].Likes()}, false) {
+			indexes, marked = append(indexes, i), append(marked, p)
+		}
+	}
+	dtos, err := h.listedDtos(r, user, marked, fields)
+	if err != nil {
+		return nil, err
+	}
+	kept := make(map[int]BaseItemDto, len(dtos))
+	for n, dto := range dtos {
+		if f.keepsData(dto.UserData, false) {
+			kept[indexes[n]] = dto
+		}
+	}
+	return kept, nil
+}
+
 // playlistDtos describes playlists from the titles user can reach in them:
-// their number, runtime and genres, and how many the user played.
+// their number, runtime and genres, and how many the user played; whether
+// the user made them a favorite, or liked them, is their own. Each shows a
+// mosaic of its first titles user is shown, as Jellyfin draws one for its
+// playlists, unless an administrator uploaded an image for it.
 func (h *Handler) playlistDtos(r *http.Request, user accounts.User, lists []playlists.Playlist, fields fieldSet, detail bool) ([]BaseItemDto, error) {
 	titles, err := h.playlistContents(r.Context(), user, lists...)
 	if err != nil {
 		return nil, err
 	}
-	ids := make([]accounts.ID, 0, len(titles))
+	ids := make([]accounts.ID, 0, len(titles)+len(lists))
 	for id := range titles {
 		ids = append(ids, id)
+	}
+	for _, p := range lists {
+		ids = append(ids, p.ID)
 	}
 	data, err := h.UserData.Get(r.Context(), user.ID, ids)
 	if err != nil {
@@ -889,7 +1406,14 @@ func (h *Handler) playlistDtos(r *http.Request, user accounts.User, lists []play
 	}
 	result := make([]BaseItemDto, 0, len(lists))
 	for _, p := range lists {
-		entries := reachable(p, titles)
+		entries, err := h.shownEntries(r.Context(), user, p, titles)
+		if err != nil {
+			return nil, err
+		}
+		name, err := h.playlistName(r.Context(), user, p)
+		if err != nil {
+			return nil, err
+		}
 		var runtime time.Duration
 		var genres []string
 		played := 0
@@ -906,8 +1430,17 @@ func (h *Handler) playlistDtos(r *http.Request, user accounts.User, lists []play
 			}
 		}
 		// A playlist shows administrators' edits as items do.
-		item := h.Library.Overridden(library.Item{ID: p.ID, Kind: library.KindMusicPlaylist, Name: p.Name, Genres: genres})[0]
+		item := h.Library.Overridden(library.Item{ID: p.ID, Kind: library.KindMusicPlaylist, Name: name, Genres: genres})[0]
 		genres = item.Genres
+		if item.Images.Primary == "" {
+			// A playlist with nothing to draw, such as a new member's empty
+			// Watchlist, shows the Playlists view's emblem, not a blank tile.
+			image := h.Library.PlaylistImage(r.Context(), user, p.ID, item.Name, posterTitles(entries, titles))
+			if image == "" {
+				image = library.EmblemImage(viewEmblems[playlistsViewID]).URL()
+			}
+			item.Images.Primary, item.WidePrimary = image, true
+		}
 		dto := BaseItemDto{
 			Name:              item.Name,
 			ServerId:          h.ServerID,
@@ -923,7 +1456,8 @@ func (h *Handler) playlistDtos(r *http.Request, user accounts.User, lists []play
 			UserData: UserItemData{
 				Key: hyphenated(p.ID), ItemId: p.ID.String(),
 				PlayedPercentage: new(0.0), UnplayedItemCount: new(len(entries) - played),
-				Played: len(entries) > 0 && played == len(entries),
+				Played:     len(entries) > 0 && played == len(entries),
+				IsFavorite: data[p.ID].Favorite, Rating: data[p.ID].Rating, Likes: data[p.ID].Likes(),
 			},
 		}
 		if len(entries) > 0 {
@@ -948,7 +1482,7 @@ func (h *Handler) playlistDtos(r *http.Request, user accounts.User, lists []play
 		if item.Overview != "" && (detail || fields.has("Overview")) {
 			dto.Overview = new(item.Overview)
 		}
-		h.setImages(&dto, item)
+		h.setImages(&dto, item, nil)
 		if detail || fields.has("Genres") {
 			dto.Genres = new(nonNil(genres))
 		}
@@ -961,7 +1495,7 @@ func (h *Handler) playlistDtos(r *http.Request, user accounts.User, lists []play
 		if detail || fields.has("CanDelete") {
 			dto.CanDelete = new(p.Owner == user.ID || user.IsAdministrator)
 		}
-		describeEdited(&dto, item, fields, detail)
+		h.describeEdited(&dto, item, fields, detail)
 		if detail || fields.has("ParentId") {
 			dto.ParentId = playlistsViewID.String()
 		}
@@ -973,7 +1507,7 @@ func (h *Handler) playlistDtos(r *http.Request, user accounts.User, lists []play
 			dto.PlayAccess = "Full"
 			dto.RemoteTrailers = &[]MediaUrl{}
 			dto.People = &[]BaseItemPerson{}
-			dto.GenreItems = new(genreItems(genres))
+			dto.GenreItems = new(h.namedPairs(user.ID, genreNamed, genres))
 			dto.LocalTrailerCount = new(0)
 			dto.SpecialFeatureCount = new(0)
 			dto.DisplayPreferencesId = p.ID.String()

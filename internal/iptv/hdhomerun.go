@@ -69,7 +69,11 @@ type Tuner struct {
 }
 
 // tunerAddress checks a tuner's address, "192.168.1.20" or "http://…", and
-// returns the address it is stored under: its scheme and host.
+// returns the address it is stored under: its scheme, host and path. A
+// path is kept, as Jellyfin keeps it (HdHomerunHost.cs, GetApiUrl, lines
+// 165-180): proxies that act as a tuner serve its documents under one
+// ("http://host:9191/hdhr"). An address given as the tuner's discover.json
+// or lineup.json is the tuner's, as is one with a final "/".
 func tunerAddress(raw string) (string, error) {
 	raw = strings.TrimSpace(raw)
 	if raw == "" || len(raw) > maxAddress {
@@ -80,15 +84,16 @@ func tunerAddress(raw string) (string, error) {
 	}
 	parsed, err := url.Parse(raw)
 	if err != nil || parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil ||
-		parsed.RawQuery != "" || parsed.Fragment != "" {
+		parsed.Opaque != "" || parsed.RawQuery != "" || parsed.ForceQuery || parsed.Fragment != "" {
 		return "", ErrInvalidAddress
 	}
-	switch strings.TrimSuffix(parsed.Path, "/") {
-	case "", "/discover.json", "/lineup.json":
-	default:
-		return "", ErrInvalidAddress
+	path := strings.TrimSuffix(parsed.EscapedPath(), "/")
+	if document, ok := strings.CutSuffix(path, "/discover.json"); ok {
+		path = document
+	} else if document, ok := strings.CutSuffix(path, "/lineup.json"); ok {
+		path = document
 	}
-	return parsed.Scheme + "://" + parsed.Host, nil
+	return parsed.Scheme + "://" + parsed.Host + path, nil
 }
 
 // flag reads a lineup.json flag, which tuners write 1, and some true.
@@ -120,11 +125,13 @@ type lineupJSON struct {
 	Favorite    flag
 }
 
-// tunerGet reads a tuner's JSON document at address into into.
+// tunerGet reads a tuner's JSON document at address into into: a request
+// to the source itself, confined to public addresses or else made to
+// local addresses only (see stremio.Client.OpenSource).
 func tunerGet(ctx context.Context, client *stremio.Client, address string, confined bool, into any) error {
 	ctx, cancel := context.WithTimeout(ctx, tunerAnswer)
 	defer cancel()
-	response, err := client.Open(ctx, http.MethodGet, address, nil, confined)
+	response, err := client.OpenSource(ctx, http.MethodGet, address, nil, confined)
 	if err != nil {
 		return err
 	}
@@ -291,20 +298,24 @@ func (s *Service) Scan(ctx context.Context, scope addons.Scope, id accounts.ID) 
 		close(run.done)
 	}
 	base := addon.ManifestURL
+	// The scan asks the tuner as its list is read (see reach).
+	member, confined, err := s.reach(ctx, id)
 	var status statusJSON
-	err = tunerGet(ctx, s.client, base+"/lineup_status.json", false, &status)
+	if err == nil {
+		err = tunerGet(ctx, s.client, base+"/lineup_status.json", confined, &status)
+	}
 	if err == nil {
 		source := cmp.Or(status.Source, "Antenna")
 		if len(status.SourceList) > 0 && !slices.Contains(status.SourceList, source) {
 			source = status.SourceList[0]
 		}
-		err = s.startScan(ctx, base, source)
+		err = s.startScan(ctx, base, source, confined)
 	}
 	if err != nil {
 		finish()
 		return nil, err
 	}
-	s.logger.Info("A tuner scans for channels", "source", addon.Manifest.Name)
+	s.logger.Info("A tuner scans for channels", "source", addon.LogName())
 	go func() {
 		defer finish()
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), scanMost)
@@ -317,8 +328,8 @@ func (s *Service) Scan(ctx context.Context, scope addons.Scope, id accounts.ID) 
 			case <-time.After(poll):
 			}
 			var status statusJSON
-			if err := tunerGet(ctx, s.client, base+"/lineup_status.json", false, &status); err != nil {
-				s.logger.Warn("A tuner's scan could not be followed", "source", addon.Manifest.Name, "error", err)
+			if err := tunerGet(ctx, s.client, base+"/lineup_status.json", confined, &status); err != nil {
+				s.logger.Warn("A tuner's scan could not be followed", "source", addon.LogName(), "error", err)
 				break
 			}
 			if status.ScanInProgress == 0 {
@@ -328,18 +339,18 @@ func (s *Service) Scan(ctx context.Context, scope addons.Scope, id accounts.ID) 
 			run.state = ScanState{Progress: min(max(status.Progress, 0), 100), Found: max(status.Found, 0)}
 			s.scans.mu.Unlock()
 		}
-		if err := s.refresh(ctx, addon, false); err != nil {
-			s.logger.Warn("A tuner's line-up could not be read after its scan", "source", addon.Manifest.Name, "error", err)
+		if err := s.refresh(ctx, addon, member); err != nil {
+			s.logger.Warn("A tuner's line-up could not be read after its scan", "source", addon.LogName(), "error", err)
 		}
 	}()
 	return run.done, nil
 }
 
 // startScan asks a tuner to scan its source ("Antenna", "Cable").
-func (s *Service) startScan(ctx context.Context, base, source string) error {
+func (s *Service) startScan(ctx context.Context, base, source string, confined bool) error {
 	ctx, cancel := context.WithTimeout(ctx, tunerAnswer)
 	defer cancel()
-	response, err := s.client.Open(ctx, http.MethodPost, base+"/lineup.post?"+url.Values{"scan": {"start"}, "source": {source}}.Encode(), nil, false)
+	response, err := s.client.OpenSource(ctx, http.MethodPost, base+"/lineup.post?"+url.Values{"scan": {"start"}, "source": {source}}.Encode(), nil, confined)
 	if err != nil {
 		return err
 	}
@@ -498,11 +509,12 @@ func (s *Service) RemoveTuner(ctx context.Context, id accounts.ID) (addons.Addon
 	if !list[index].Tuner() {
 		return addons.Addon{}, ErrNotTuner
 	}
-	if err := s.addons.Remove(ctx, addons.Shared(), id); err != nil {
+	removed, err := s.addons.Remove(ctx, addons.Shared(), id)
+	if err != nil {
 		return addons.Addon{}, err
 	}
 	s.forget(id)
-	return list[index], nil
+	return removed, nil
 }
 
 // HDHomeRun's discovery: a packet is its type and payload's length (big

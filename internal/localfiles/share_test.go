@@ -19,11 +19,21 @@ import (
 	"github.com/moodiness/polyfin/internal/secrets"
 )
 
+// davServer is a WebDAV share a test serves. Each request holds serving
+// for reading while it is served (see remove).
+type davServer struct {
+	*httptest.Server
+	serving sync.RWMutex
+}
+
 // serveWebDAV serves dir over WebDAV to user with password, as a NAS does.
-func serveWebDAV(t *testing.T, dir, user, password string) *httptest.Server {
+func serveWebDAV(t *testing.T, dir, user, password string) *davServer {
 	t.Helper()
 	handler := &webdav.Handler{FileSystem: webdav.Dir(dir), LockSystem: webdav.NewMemLS()}
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	s := &davServer{}
+	s.Server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.serving.RLock()
+		defer s.serving.RUnlock()
 		if u, p, ok := r.BasicAuth(); !ok || u != user || p != password {
 			w.Header().Set("WWW-Authenticate", `Basic realm="share"`)
 			http.Error(w, "sign in", http.StatusUnauthorized)
@@ -31,8 +41,22 @@ func serveWebDAV(t *testing.T, dir, user, password string) *httptest.Server {
 		}
 		handler.ServeHTTP(w, r)
 	}))
-	t.Cleanup(server.Close)
-	return server
+	t.Cleanup(s.Close)
+	return s
+}
+
+// remove removes a file of the share once the requests being served are
+// done, and before the next is. The server opens each file of a folder
+// it lists (see webdav's props) with os.OpenFile, which on Windows shares
+// it for reading and writing, not deleting: a file it has open cannot be
+// removed there, as it can be on a NAS.
+func (s *davServer) remove(t *testing.T, name string) {
+	t.Helper()
+	s.serving.Lock()
+	defer s.serving.Unlock()
+	if err := os.Remove(name); err != nil {
+		t.Fatal(err)
+	}
 }
 
 // content is a file's bytes, each telling its offset.
@@ -58,6 +82,7 @@ func (e env) fileKey(id accounts.ID, rel string) string {
 // is, its password stored sealed, and its files read from the share with
 // byte ranges.
 func TestWebDAVFoldersAreScannedAndRead(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	box, err := secrets.New(bytes.Repeat([]byte{7}, secrets.KeySize))
 	if err != nil {
@@ -118,10 +143,49 @@ func TestWebDAVFoldersAreScannedAndRead(t *testing.T) {
 	}
 }
 
+// MPEG-TS files are read by each of their extensions, in any letter case,
+// as Jellyfin reads .m2t and .tp: in a local folder and on a share.
+func TestMPEGTSFilesOfEachExtensionAreRead(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	box, err := secrets.New(bytes.Repeat([]byte{7}, secrets.KeySize))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.service.box = box
+	files := map[string]int{
+		"Nosferatu (1922).m2t":                10,
+		"The General (1926).tp":               10,
+		"Night of the Living Dead (1968).TRP": 10,
+		"The Gold Rush (1925).ts":             10,
+	}
+	want := map[string]string{
+		"Nosferatu (1922).m2t":                "tt0013442",
+		"The General (1926).tp":               "tt0017925",
+		"Night of the Living Dead (1968).TRP": "tt0063350",
+		"The Gold Rush (1925).ts":             "tt0015864",
+	}
+	local, dir := e.folder(KindMovies, files)
+	if got := e.files(local.ID); !maps.Equal(got, want) {
+		t.Errorf("local folder: %v", got)
+	}
+	server := serveWebDAV(t, dir, "reader", "pass phrase")
+	share, err := e.service.Add(t.Context(), NewFolder{Name: "NAS", Path: server.URL + "/", Kind: KindMovies, User: "reader",
+		Password: "pass phrase"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.idle(share.ID)
+	if got := e.files(share.ID); !maps.Equal(got, want) {
+		t.Errorf("share: %v", got)
+	}
+}
+
 // A share refusing the password is reported as such, and read once the
 // right one is entered; a share that cannot be reached keeps the files
 // found before.
 func TestUnreadableSharesKeepTheirFiles(t *testing.T) {
+	t.Parallel()
 	e := newEnv(t)
 	dir := t.TempDir()
 	write(t, filepath.Join(dir, "Night of the Living Dead (1968).mkv"), 10)
@@ -203,6 +267,7 @@ func (r *relay) cut() {
 // names a share holding video files, its user and password in the
 // address: smb://user:password@host:port/share/folder.
 func TestSMBSharesAreScannedAndRead(t *testing.T) {
+	t.Parallel()
 	raw := os.Getenv("POLYFIN_TEST_SMB")
 	if raw == "" {
 		t.Skip("POLYFIN_TEST_SMB is not set")

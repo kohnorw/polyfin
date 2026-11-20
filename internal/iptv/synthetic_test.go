@@ -5,7 +5,10 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
+	"math/rand/v2"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -16,8 +19,11 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/moodiness/polyfin/internal/addons"
 )
@@ -70,6 +76,11 @@ type synthetic struct {
 	series       []syntheticSeries
 	vodGroups    []string
 	seriesGroups []string
+	// guideDays is how many days the guide covers from yesterday, its
+	// programmes of lengths seed draws; 0 for two-hour programmes from
+	// six hours ago to a day ahead.
+	guideDays int
+	seed      uint64
 }
 
 // syntheticMovie is a movie of the provider: its name with the provider's
@@ -85,14 +96,24 @@ type syntheticMovie struct {
 }
 
 // syntheticSeries is a series of the provider, with seasons of episodes
-// each; modified tells its details changed.
+// each, but the last of last when set; modified tells its details
+// changed.
 type syntheticSeries struct {
 	ID       int
 	Name     string
 	Group    int
 	Seasons  int
 	Episodes int
+	Last     int
 	Modified int64
+}
+
+// episodesIn is how many episodes a season of the series has.
+func (show syntheticSeries) episodesIn(season int) int {
+	if season == show.Seasons && show.Last > 0 {
+		return show.Last
+	}
+	return show.Episodes
 }
 
 var syntheticGenres = []string{"Action", "Drama", "Comedy", "Kids", "Documentary", "Thriller", "Animation", "Science Fiction"}
@@ -133,6 +154,15 @@ func (s *synthetic) withVOD(movies, series int) *synthetic {
 // newSynthetic makes about streams entries in groups groups.
 func newSynthetic(streams, groups int) *synthetic {
 	s := &synthetic{}
+	s.addChannels(streams, groups, func(base int) ([]string, bool) {
+		return syntheticVariants[base%len(syntheticVariants)], base%5 != 4
+	})
+	return s
+}
+
+// addChannels adds streams entries in groups groups: base channels in
+// the variants shape tells, with a guide identifier when it says so.
+func (s *synthetic) addChannels(streams, groups int, shape func(base int) (variants []string, guided bool)) {
 	for g := range groups {
 		country := ""
 		if g < groups*9/10 {
@@ -149,15 +179,16 @@ func newSynthetic(streams, groups int) *synthetic {
 		group := s.groups[min(len(s.streams)/perGroup, groups-1)]
 		word := syntheticSyllables[base%len(syntheticSyllables)] + syntheticSyllables[base/len(syntheticSyllables)%len(syntheticSyllables)]
 		name := strings.ToUpper(word[:1]) + word[1:] + fmt.Sprintf(" %d", base)
+		variants, guided := shape(base)
 		guideID := ""
-		if base%5 != 4 {
+		if guided {
 			guideID = fmt.Sprintf("%s%d.%s", word, base, strings.ToLower(group.Country))
 			if group.Country == "" {
 				guideID = fmt.Sprintf("%s%d.zz", word, base)
 			}
 		}
 		s.channels = append(s.channels, syntheticChannel{name: name, guideID: guideID})
-		for _, quality := range syntheticVariants[base%len(syntheticVariants)] {
+		for _, quality := range variants {
 			if len(s.streams) >= streams {
 				break
 			}
@@ -173,7 +204,77 @@ func newSynthetic(streams, groups int) *synthetic {
 				Logo: fmt.Sprintf("https://logos.example/%d.png", base)})
 		}
 	}
+}
+
+// The large library the bench of docs/scripts/bench measures, in the
+// shape a user reported: 2,360 channels with a guide of four days on
+// most, 8,111 movies, and 8,267 series with 1,151,201 episodes.
+const (
+	libraryStreams   = 2_360
+	libraryGroups    = 60
+	libraryMovies    = 8_111
+	librarySeries    = 8_267
+	libraryEpisodes  = 1_151_201
+	libraryGuideDays = 4
+)
+
+// newSyntheticLibrary makes the bench's large library, the same for the
+// same seed. Seven channels in ten come in one quality, two in two and
+// one in three; the guide covers 85 % of them. Series lengths follow a
+// log-normal law, as providers' do: most series have a few seasons, a
+// few dozen daily ones run past a thousand episodes in seasons of about
+// 230.
+func newSyntheticLibrary(seed uint64) *synthetic {
+	random := rand.New(rand.NewPCG(seed, 0))
+	s := &synthetic{guideDays: libraryGuideDays, seed: seed}
+	s.addChannels(libraryStreams, libraryGroups, func(int) ([]string, bool) {
+		variants := []string{""}
+		switch n := random.IntN(10); {
+		case n == 0:
+			variants = []string{"FHD", "HD", "SD"}
+		case n < 3:
+			variants = []string{"HD", "SD"}
+		}
+		return variants, random.IntN(100) < 85
+	})
+	s.withVOD(libraryMovies, librarySeries)
+	lengths := make([]float64, len(s.series))
+	sum := 0.0
+	for i := range lengths {
+		lengths[i] = math.Exp(0.9 * random.NormFloat64())
+		sum += lengths[i]
+	}
+	counts := make([]int, len(lengths))
+	left, longest := libraryEpisodes, 0
+	for i, length := range lengths {
+		counts[i] = max(1, int(math.Round(length*libraryEpisodes/sum)))
+		left -= counts[i]
+		if counts[i] > counts[longest] {
+			longest = i
+		}
+	}
+	counts[longest] += left
+	perSeason := []int{6, 8, 10, 12, 13, 22, 24}
+	for i, count := range counts {
+		season := perSeason[random.IntN(len(perSeason))]
+		if count >= 300 {
+			season = 200 + random.IntN(61)
+		}
+		season = max(season, (count+29)/30)
+		show := &s.series[i]
+		show.Seasons, show.Episodes = (count+season-1)/season, season
+		show.Last = count - (show.Seasons-1)*season
+	}
 	return s
+}
+
+// episodes counts the provider's episodes.
+func (s *synthetic) episodes() int {
+	n := 0
+	for _, show := range s.series {
+		n += (show.Seasons-1)*show.Episodes + show.episodesIn(show.Seasons)
+	}
+	return n
 }
 
 // syntheticServer serves a synthetic provider for user "user", password
@@ -315,9 +416,9 @@ func (s *syntheticServer) playerAPI(w http.ResponseWriter, action string, query 
 			var seasons []map[string]any
 			for season := 1; season <= show.Seasons; season++ {
 				seasons = append(seasons, map[string]any{"season_number": season, "cover": fmt.Sprintf("https://posters.example/s%d-%d.jpg", show.ID, season)})
-				for episode := 1; episode <= show.Episodes; episode++ {
+				for episode := 1; episode <= show.episodesIn(season); episode++ {
 					episodes[fmt.Sprint(season)] = append(episodes[fmt.Sprint(season)], map[string]any{
-						"id": fmt.Sprint(show.ID*100 + season*10 + episode), "episode_num": episode, "season": season, "container_extension": "mkv",
+						"id": fmt.Sprint(show.ID*1_000_000 + season*1_000 + episode), "episode_num": episode, "season": season, "container_extension": "mkv",
 						"title": fmt.Sprintf("%s - S%02dE%02d - Part %d FHD", show.Name, season, episode, episode),
 						"info":  map[string]any{"plot": fmt.Sprintf("Episode %d.", episode), "duration_secs": 2700, "releasedate": "2021-03-04"}})
 				}
@@ -332,8 +433,8 @@ func (s *syntheticServer) playerAPI(w http.ResponseWriter, action string, query 
 	}
 }
 
-// guide writes the XMLTV guide: the channels with a guide identifier, each
-// with two-hour programmes from six hours ago to a day ahead.
+// guide writes the XMLTV guide: the channels with a guide identifier, and
+// their programmes (see programmes).
 func (s *syntheticServer) guide(w http.ResponseWriter) {
 	buffered := bufio.NewWriterSize(w, 1<<16)
 	defer buffered.Flush()
@@ -343,19 +444,50 @@ func (s *syntheticServer) guide(w http.ResponseWriter) {
 			fmt.Fprintf(buffered, "<channel id=\"%s\"><display-name>%s</display-name></channel>\n", c.guideID, c.name)
 		}
 	}
-	start := time.Now().UTC().Truncate(time.Hour).Add(-6 * time.Hour)
-	for _, c := range s.data.channels {
+	s.data.programmes(time.Now(), func(c syntheticChannel, part int, from, to time.Time, title string) {
+		fmt.Fprintf(buffered, "<programme channel=\"%s\" start=\"%s\" stop=\"%s\"><title>%s</title><desc>Part %d of the day on %s.</desc></programme>\n",
+			c.guideID, from.Format("20060102150405 -0700"), to.Format("20060102150405 -0700"), title, part, c.name)
+	})
+	_, _ = buffered.WriteString("</tv>\n")
+}
+
+// syntheticLengths are the lengths of a long guide's programmes, in
+// minutes, as often as a channel's day has them.
+var syntheticLengths = []int{15, 30, 30, 45, 60, 60, 60, 90, 120}
+
+// programmes gives each programme of the guide at now: by default
+// fifteen of two hours from six hours ago; with guideDays, those from
+// yesterday's midnight (UTC) for that many days, of lengths drawn from
+// the seed and the channel, the same on any day. A long guide names one
+// programme in four as a show, as the series' names are made, so that a
+// search finds programmes as it finds series.
+func (s *synthetic) programmes(now time.Time, yield func(c syntheticChannel, part int, from, to time.Time, title string)) {
+	for index, c := range s.channels {
 		if c.guideID == "" {
 			continue
 		}
-		for slot := range 15 {
-			from := start.Add(time.Duration(slot) * 2 * time.Hour)
-			fmt.Fprintf(buffered, "<programme channel=\"%s\" start=\"%s\" stop=\"%s\"><title>%s</title><desc>Part %d of the day on %s.</desc></programme>\n",
-				c.guideID, from.Format("20060102150405 -0700"), from.Add(2*time.Hour).Format("20060102150405 -0700"),
-				syntheticThemes[slot%len(syntheticThemes)], slot+1, c.name)
+		if s.guideDays == 0 {
+			start := now.UTC().Truncate(time.Hour).Add(-6 * time.Hour)
+			for slot := range 15 {
+				from := start.Add(time.Duration(slot) * 2 * time.Hour)
+				yield(c, slot+1, from, from.Add(2*time.Hour), syntheticThemes[slot%len(syntheticThemes)])
+			}
+			continue
+		}
+		random := rand.New(rand.NewPCG(s.seed, uint64(index)+1))
+		from := now.UTC().Truncate(24 * time.Hour).Add(-24 * time.Hour)
+		end := from.Add(time.Duration(s.guideDays) * 24 * time.Hour)
+		for part := 1; from.Before(end); part++ {
+			to := from.Add(time.Duration(syntheticLengths[random.IntN(len(syntheticLengths))]) * time.Minute)
+			title := fmt.Sprintf("%s %d", syntheticThemes[random.IntN(len(syntheticThemes))], 1+random.IntN(400))
+			if random.IntN(4) == 0 {
+				word := syntheticSyllables[random.IntN(len(syntheticSyllables))] + syntheticSyllables[random.IntN(len(syntheticSyllables))]
+				title = strings.ToUpper(word[:1]) + word[1:] + " Show"
+			}
+			yield(c, part, from, to, title)
+			from = to
 		}
 	}
-	_, _ = buffered.WriteString("</tv>\n")
 }
 
 // syntheticVideos makes ten seconds of video with the ffmpeg of
@@ -393,8 +525,10 @@ func syntheticVideos(ctx context.Context) map[string][]byte {
 // interrupted, for trying Polyfin by hand with a large line-up, movies and
 // series. It only runs with POLYFIN_SYNTHETIC_XTREAM set: to a number of
 // channels (default 54000; a third as many movies and a twentieth as many
-// series come with them), or to "1" for the default. POLYFIN_SYNTHETIC_XTREAM_ADDR sets the
-// address it listens on (default 127.0.0.1:0).
+// series come with them), to "1" for the default, or to "library" for the
+// large library of the bench (see newSyntheticLibrary), with the seed of
+// POLYFIN_SYNTHETIC_XTREAM_SEED (default 1). POLYFIN_SYNTHETIC_XTREAM_ADDR
+// sets the address it listens on (default 127.0.0.1:0).
 //
 //	POLYFIN_SYNTHETIC_XTREAM=1 go test -run TestServeSyntheticXtream -v -timeout 0 ./internal/iptv
 func TestServeSyntheticXtream(t *testing.T) {
@@ -403,14 +537,27 @@ func TestServeSyntheticXtream(t *testing.T) {
 	if setting == "" {
 		t.Skip("set POLYFIN_SYNTHETIC_XTREAM to serve a synthetic Xtream provider")
 	}
-	channels := 54_000
-	if n := 0; setting != "1" {
-		if _, err := fmt.Sscan(setting, &n); err != nil || n < 1 {
-			t.Fatalf("POLYFIN_SYNTHETIC_XTREAM: %q is not a number of channels", setting)
+	var data *synthetic
+	switch setting {
+	case "library":
+		seed := uint64(1)
+		if value := os.Getenv("POLYFIN_SYNTHETIC_XTREAM_SEED"); value != "" {
+			if _, err := fmt.Sscan(value, &seed); err != nil {
+				t.Fatalf("POLYFIN_SYNTHETIC_XTREAM_SEED: %q is not a number", value)
+			}
 		}
-		channels = n
+		data = newSyntheticLibrary(seed)
+	default:
+		channels := 54_000
+		if n := 0; setting != "1" {
+			if _, err := fmt.Sscan(setting, &n); err != nil || n < 1 {
+				t.Fatalf("POLYFIN_SYNTHETIC_XTREAM: %q is not a number of channels, 1 or library", setting)
+			}
+			channels = n
+		}
+		data = newSynthetic(channels, max(channels/130, 1)).withVOD(channels/3, channels/20)
 	}
-	server := newSyntheticServer(newSynthetic(channels, max(channels/130, 1)).withVOD(channels/3, channels/20), syntheticVideos(t.Context()))
+	server := newSyntheticServer(data, syntheticVideos(t.Context()))
 	if address := os.Getenv("POLYFIN_SYNTHETIC_XTREAM_ADDR"); address != "" {
 		listener, err := net.Listen("tcp", address)
 		if err != nil {
@@ -421,105 +568,253 @@ func TestServeSyntheticXtream(t *testing.T) {
 	}
 	server.Start()
 	defer server.Close()
-	fmt.Printf("Synthetic Xtream provider: %d channels in %d groups, %d movies in %d categories, %d series in %d categories, video %v\n",
-		len(server.data.streams), len(server.data.groups), len(server.data.movies), len(server.data.vodGroups), len(server.data.series),
-		len(server.data.seriesGroups), server.videos != nil)
+	guided, programmes := 0, 0
+	for _, c := range data.channels {
+		if c.guideID != "" {
+			guided++
+		}
+	}
+	data.programmes(time.Now(), func(syntheticChannel, int, time.Time, time.Time, string) { programmes++ })
+	fmt.Printf("Synthetic Xtream provider: %d channels (%d base channels, %d with a guide) in %d groups, %d programmes, "+
+		"%d movies in %d categories, %d series in %d categories, %d episodes, video %v\n",
+		len(data.streams), len(data.channels), guided, len(data.groups), programmes, len(data.movies), len(data.vodGroups),
+		len(data.series), len(data.seriesGroups), data.episodes(), server.videos != nil)
 	fmt.Printf("  server   %s\n  username user\n  password secret\n  guide    %s/xmltv.php?username=user&password=secret\n",
 		server.URL, server.URL)
 	fmt.Println("Interrupt (Ctrl-C) to stop.")
 	<-t.Context().Done()
 }
 
+// statementCounter counts the statements a pool sends, COPY and those of
+// batches among them, and the rows the database returns to them.
+type statementCounter struct{ statements, rows atomic.Int64 }
+
+func (c *statementCounter) TraceQueryStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceQueryStartData) context.Context {
+	c.statements.Add(1)
+	return ctx
+}
+
+func (c *statementCounter) TraceQueryEnd(_ context.Context, _ *pgx.Conn, data pgx.TraceQueryEndData) {
+	if data.CommandTag.Select() {
+		c.rows.Add(data.CommandTag.RowsAffected())
+	}
+}
+
+func (c *statementCounter) TraceCopyFromStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceCopyFromStartData) context.Context {
+	c.statements.Add(1)
+	return ctx
+}
+
+func (c *statementCounter) TraceCopyFromEnd(context.Context, *pgx.Conn, pgx.TraceCopyFromEndData) {}
+
+func (c *statementCounter) TraceBatchStart(ctx context.Context, _ *pgx.Conn, _ pgx.TraceBatchStartData) context.Context {
+	return ctx
+}
+
+func (c *statementCounter) TraceBatchQuery(context.Context, *pgx.Conn, pgx.TraceBatchQueryData) {
+	c.statements.Add(1)
+}
+
+func (c *statementCounter) TraceBatchEnd(context.Context, *pgx.Conn, pgx.TraceBatchEndData) {}
+
 // A line-up of about 54,000 entries in hundreds of groups is imported,
-// merged, refreshed, listed and searched within bounds: reconciling is
-// batched and listing pages and searches read the database once. The race
-// detector gets a smaller one (see lineupScale).
+// refreshed, merged, listed and searched as one a tenth its size is: with
+// no more statements, in at most thirty times the time, processed in at
+// most twenty times the processor time, and listed a page at a time with
+// at most twice the rows. Reconciling is batched, listing pages and
+// searches read the database a fixed number of times and the page alone,
+// and no step costs more than in proportion to the line-up. Two small
+// line-ups take each step with the large one, one just before it and one
+// just after, so that the machine's load weighs on the three alike, and
+// the large one is compared with the slower small one. Time alone would
+// not do on a loaded machine: each statement waits longer for the
+// database, which weighs most on the small line-ups, mostly statements,
+// so that work growing faster than the line-up could hide in the gap.
+// Processor time does not count waiting, but would count the other tests'
+// work, so this test runs alone. The race detector gets smaller line-ups
+// (see lineupScale).
+//
+//nolint:paralleltest // compares its process's processor time, which the other tests' work would add to
 func TestLargeLineupsStayFast(t *testing.T) {
-	t.Parallel()
 	if testing.Short() {
 		t.Skip("large line-up")
 	}
-	e := newEnv(t)
-	server := newSyntheticServer(newSynthetic(54_000/lineupScale, 420/lineupScale), nil)
-	server.Start()
-	t.Cleanup(server.Close)
-	account := Account{Kind: addons.KindXtream, Server: server.URL, Username: "user", Password: "secret"}
-	bound := func(what string, limit time.Duration, run func() error) {
+	// Ten times the entries take at most about ten times as long, a step's
+	// fixed costs being the same. On a loaded machine, with or without the
+	// race detector, that was measured at most 14 times the time, when a
+	// burst of load fell on the large line-up's turn alone, hence thirty,
+	// and 10.5 times the processor time, which waiting does not count,
+	// hence twenty. A cost growing with the square of the entries is a
+	// hundred times larger for the large line-up: past twenty times the
+	// processor time, one fails as soon as it takes about one and a half
+	// times what processing the line-up does.
+	const timeScaling, processorScaling = 30, 20
+	statements := &statementCounter{}
+	e := tracedEnv(t, statements)
+	type lineup struct {
+		name            string
+		entries, groups int
+		account         Account
+		addon           addons.Addon
+	}
+	small := &lineup{name: "Small", entries: 5_400 / lineupScale, groups: 42 / lineupScale}
+	large := &lineup{name: "Big", entries: 54_000 / lineupScale, groups: 420 / lineupScale}
+	lineups := []*lineup{small, large, {name: "Other small", entries: small.entries, groups: small.groups}}
+	for _, l := range lineups {
+		server := newSyntheticServer(newSynthetic(l.entries, l.groups), nil)
+		server.Start()
+		t.Cleanup(server.Close)
+		l.account = Account{Kind: addons.KindXtream, Server: server.URL, Username: "user", Password: "secret"}
+	}
+	// also is what a step compares besides statements and time: the
+	// processor time of a step processing the line-ups, and the rows the
+	// database returns to a step reading a page or a count, as many
+	// whatever the line-up's size.
+	type also struct{ processorTime, rows bool }
+	// scaled runs a step on each line-up in turn, rounds times, and
+	// compares the large one's most statements and rows and least times
+	// with the small ones'.
+	scaled := func(what string, rounds int, compare also, run func(l *lineup, round int) error) {
 		t.Helper()
-		start := time.Now()
-		if err := run(); err != nil {
-			t.Fatalf("%s: %v", what, err)
+		var sent, read [3]int64
+		var took, used [3]time.Duration
+		for round := range rounds {
+			for i, l := range lineups {
+				sentBefore, readBefore := statements.statements.Load(), statements.rows.Load()
+				start, usedBefore := time.Now(), processCPU()
+				if err := run(l, round); err != nil {
+					t.Fatalf("%s, %d entries: %v", what, l.entries, err)
+				}
+				tookNow, usedNow := time.Since(start), processCPU()-usedBefore
+				sent[i] = max(sent[i], statements.statements.Load()-sentBefore)
+				read[i] = max(read[i], statements.rows.Load()-readBefore)
+				if round == 0 {
+					took[i], used[i] = tookNow, usedNow
+				}
+				took[i], used[i] = min(took[i], tookNow), min(used[i], usedNow)
+			}
 		}
-		limit *= raceSlowdown
-		if took := time.Since(start); took > limit {
-			t.Errorf("%s took %v, more than %v", what, took.Round(time.Millisecond), limit)
-		} else {
-			t.Logf("%s: %v", what, took.Round(time.Millisecond))
+		smallSent, smallRead := max(sent[0], sent[2]), max(read[0], read[2])
+		smallTook, smallUsed := max(took[0], took[2]), max(used[0], used[2])
+		passed := true
+		check := func(failed bool, format string, args ...any) {
+			t.Helper()
+			if failed {
+				passed = false
+				t.Errorf("%s %s", what, fmt.Sprintf(format, args...))
+			}
+		}
+		check(sent[1] > smallSent, "sent %d statements for %d entries, more than the %d for %d", sent[1], large.entries, smallSent, small.entries)
+		check(took[1] > timeScaling*smallTook, "took %v for %d entries, more than %d times the %v for %d", took[1].Round(time.Millisecond),
+			large.entries, timeScaling, smallTook.Round(time.Millisecond), small.entries)
+		check(compare.processorTime && used[1] > processorScaling*smallUsed, "used %v of processor time for %d entries, more than %d times the %v for %d",
+			used[1].Round(time.Millisecond), large.entries, processorScaling, smallUsed.Round(time.Millisecond), small.entries)
+		check(compare.rows && read[1] > 2*smallRead, "read %d rows for %d entries, more than twice the %d for %d", read[1], large.entries,
+			smallRead, small.entries)
+		if passed {
+			details := ""
+			if compare.processorTime {
+				details = fmt.Sprintf(", and %.1f times the processor time", float64(used[1])/float64(max(smallUsed, 1)))
+			}
+			if compare.rows {
+				details = fmt.Sprintf(", reading %d rows against %d", read[1], smallRead)
+			}
+			t.Logf("%s: %v for %d entries, %.1f times the %v for %d%s", what, took[1].Round(time.Millisecond), large.entries,
+				float64(took[1])/float64(smallTook), smallTook.Round(time.Millisecond), small.entries, details)
 		}
 	}
-	var addon addons.Addon
-	bound("adding", 12*time.Second, func() (err error) {
-		addon, err = e.service.Add(t.Context(), addons.Shared(), NewSource{Name: "Big", Account: account}, false)
+	scaled("adding", 1, also{processorTime: true}, func(l *lineup, _ int) (err error) {
+		l.addon, err = e.service.Add(t.Context(), addons.Shared(), NewSource{Name: l.name, Account: l.account}, false)
 		return err
 	})
-	source, err := e.service.Source(t.Context(), addons.Shared(), addon.ID)
-	if err != nil || source.Lineup.Channels != 54_000/lineupScale || source.Lineup.Categories != 420/lineupScale {
-		t.Fatalf("line-up: %+v %v", source.Lineup, err)
+	for _, l := range lineups {
+		source, err := e.service.Source(t.Context(), addons.Shared(), l.addon.ID)
+		if err != nil || source.Lineup.Channels != l.entries || source.Lineup.Categories != l.groups {
+			t.Fatalf("line-up of %d entries: %+v %v", l.entries, source.Lineup, err)
+		}
 	}
 	// An edit survives the refreshes and option changes below.
-	_, channels, err := e.service.ListChannels(t.Context(), addons.Shared(), addon.ID, ChannelFilter{Q: "Zebzeb 0", Limit: 1})
+	_, channels, err := e.service.ListChannels(t.Context(), addons.Shared(), large.addon.ID, ChannelFilter{Q: "Zebzeb 0", Limit: 1})
 	if err != nil || len(channels) != 1 {
 		t.Fatalf("search: %+v %v", channels, err)
 	}
-	if _, err := e.service.UpdateChannel(t.Context(), addons.Shared(), addon.ID, channels[0].ID, ChannelChanges{Name: &Nullable[string]{Value: new("Kept")}}); err != nil {
+	if _, err := e.service.UpdateChannel(t.Context(), addons.Shared(), large.addon.ID, channels[0].ID, ChannelChanges{Name: &Nullable[string]{Value: new("Kept")}}); err != nil {
 		t.Fatal(err)
 	}
-	bound("refreshing unchanged", 12*time.Second, func() error { return e.service.Refresh(t.Context(), addons.Shared(), addon.ID, false) })
+	scaled("refreshing unchanged", 1, also{processorTime: true}, func(l *lineup, _ int) error {
+		return e.service.Refresh(t.Context(), addons.Shared(), l.addon.ID, false)
+	})
 	merged := ChannelsMerged
-	bound("merging", 15*time.Second, func() error {
-		return e.service.Update(t.Context(), addons.Shared(), addon.ID, Changes{Options: &OptionsPatch{Channels: &merged}}, false)
+	scaled("merging", 1, also{processorTime: true}, func(l *lineup, _ int) error {
+		return e.service.Update(t.Context(), addons.Shared(), l.addon.ID, Changes{Options: &OptionsPatch{Channels: &merged}}, false)
 	})
 	byCountry := CategoriesCountry
-	bound("by country", 15*time.Second, func() error {
-		return e.service.Update(t.Context(), addons.Shared(), addon.ID, Changes{Options: &OptionsPatch{Categories: &byCountry}}, false)
+	scaled("by country", 1, also{processorTime: true}, func(l *lineup, _ int) error {
+		return e.service.Update(t.Context(), addons.Shared(), l.addon.ID, Changes{Options: &OptionsPatch{Categories: &byCountry}}, false)
 	})
-	if kept, err := e.service.Channel(t.Context(), addons.Shared(), addon.ID, channels[0].ID); err != nil || kept.Name != "Kept" || len(kept.Streams) != 3 {
+	if kept, err := e.service.Channel(t.Context(), addons.Shared(), large.addon.ID, channels[0].ID); err != nil || kept.Name != "Kept" || len(kept.Streams) != 3 {
 		t.Errorf("the edited channel after merging: %+v %v", kept, err)
 	}
-	bound("listing a page far down", 1*time.Second, func() error {
-		total, page, err := e.service.ListChannels(t.Context(), addons.Shared(), addon.ID, ChannelFilter{Offset: 20_000 / lineupScale, Limit: 500 / lineupScale})
+	scaled("listing the first page", 5, also{rows: true}, func(l *lineup, _ int) error {
+		_, page, err := e.service.ListChannels(t.Context(), addons.Shared(), l.addon.ID, ChannelFilter{Limit: 500 / lineupScale})
+		if err == nil && len(page) != 500/lineupScale {
+			err = fmt.Errorf("%d channels", len(page))
+		}
+		return err
+	})
+	// A page far down costs a few times what the first one does, not tens
+	// of times: the listing reads the page alone, and the database skips
+	// the channels before it. The two pages are listed in turn, five times,
+	// so that the machine's load weighs on both alike, and their fastest
+	// times are compared. Alone, the far page takes about four times as
+	// long as the first, and two and a half under the race detector.
+	listPage := func(offset int) time.Duration {
+		t.Helper()
+		start := time.Now()
+		total, page, err := e.service.ListChannels(t.Context(), addons.Shared(), large.addon.ID, ChannelFilter{Offset: offset, Limit: 500 / lineupScale})
+		took := time.Since(start)
 		if err == nil && (len(page) != 500/lineupScale || total < 20_500/lineupScale) {
 			err = fmt.Errorf("%d of %d", len(page), total)
 		}
+		if err != nil {
+			t.Fatalf("listing the page at %d: %v", offset, err)
+		}
+		return took
+	}
+	first, far := listPage(0), listPage(20_000/lineupScale)
+	for range 4 {
+		first = min(first, listPage(0))
+		far = min(far, listPage(20_000/lineupScale))
+	}
+	if far > 10*first {
+		t.Errorf("listing a page far down took %v, more than ten times the first page's %v", far.Round(time.Millisecond), first.Round(time.Millisecond))
+	} else {
+		t.Logf("listing the first page: %v, a page far down: %v", first.Round(time.Millisecond), far.Round(time.Millisecond))
+	}
+	scaled("searching", 5, also{rows: true}, func(l *lineup, _ int) error {
+		_, _, err := e.service.ListChannels(t.Context(), addons.Shared(), l.addon.ID, ChannelFilter{Q: "orb", Limit: 100 / lineupScale})
 		return err
 	})
-	bound("searching", 1*time.Second, func() error {
-		_, _, err := e.service.ListChannels(t.Context(), addons.Shared(), addon.ID, ChannelFilter{Q: "orb", Limit: 100})
+	// Each round disables the channels the keyword finds, or enables them
+	// again, so that each writes.
+	scaled("bulk by keyword", 5, also{rows: true}, func(l *lineup, round int) error {
+		_, _, err := e.service.BulkChannels(t.Context(), addons.Shared(), l.addon.ID, Bulk{Q: "tac", Enabled: round%2 == 1})
 		return err
 	})
-	bound("bulk by keyword", 2*time.Second, func() error {
-		_, _, err := e.service.BulkChannels(t.Context(), addons.Shared(), addon.ID, Bulk{Q: "tac", Enabled: false})
+	scaled("listing the catalog", 5, also{}, func(l *lineup, _ int) error {
+		e.service.forget(l.addon.ID)
+		_, err := e.service.Channels(t.Context(), l.addon.ID)
 		return err
 	})
-	bound("listing the catalog", 2*time.Second, func() error {
-		e.service.forget(addon.ID)
-		_, err := e.service.Channels(t.Context(), addon.ID)
-		return err
-	})
-	var wg sync.WaitGroup
-	bound("eight parallel pages", 2*time.Second, func() error {
+	scaled("eight parallel pages", 5, also{rows: true}, func(l *lineup, _ int) error {
+		var wg sync.WaitGroup
 		errs := make([]error, 8)
 		for i := range 8 {
 			wg.Go(func() {
-				_, _, errs[i] = e.service.ListChannels(t.Context(), addons.Shared(), addon.ID, ChannelFilter{Offset: i * 1000 / lineupScale, Limit: 100})
+				_, _, errs[i] = e.service.ListChannels(t.Context(), addons.Shared(), l.addon.ID, ChannelFilter{Offset: i * l.entries / 54, Limit: 100})
 			})
 		}
 		wg.Wait()
-		for _, err := range errs {
-			if err != nil {
-				return err
-			}
-		}
-		return nil
+		return errors.Join(errs...)
 	})
 }

@@ -3,7 +3,6 @@ package jellyfin
 import (
 	"bytes"
 	"context"
-	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -14,6 +13,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/playback"
+	"github.com/moodiness/polyfin/internal/smartlists"
 	"github.com/moodiness/polyfin/internal/trackers"
 	"github.com/moodiness/polyfin/internal/userdata"
 )
@@ -41,13 +41,18 @@ func (h *Handler) userDataRoutes(rt *router) {
 	signedIn(http.MethodGet, "/Shows/NextUp", h.nextUp)
 	signedIn(http.MethodGet, "/Shows/Upcoming", h.upcoming)
 	h.hiddenTitleRoutes(signedIn)
+	h.nextUpRemovalRoutes(signedIn)
+	h.watchlistRoutes(signedIn)
 }
 
 // userState is what a user did with the items of one response, what is
 // known of its songs' lyrics and of its songs' and albums' gains, and how
 // the app asking is told collection libraries.
 type userState struct {
-	data map[accounts.ID]userdata.Data
+	// reader is the user, to whom genres' names are given (see
+	// namedItems).
+	reader accounts.ID
+	data   map[accounts.ID]userdata.Data
 	// counts are the played and resumable episodes under series and
 	// seasons.
 	counts map[accounts.ID]userdata.Counts
@@ -63,6 +68,9 @@ type userState struct {
 	// library holds collections: an administrator chose the app (see
 	// appCollectionType).
 	collectionLibraries bool
+	// badges holds what the badges over the posters of movies and series
+	// show, while the settings draw them (see posterBadges).
+	badges map[accounts.ID]string
 }
 
 // userState loads what user did with items, which of its songs have
@@ -71,7 +79,7 @@ type userState struct {
 // description of a library goes through it.
 func (h *Handler) userState(ctx context.Context, user accounts.User, items []library.Item) (userState, error) {
 	ids := make([]accounts.ID, 0, len(items))
-	var parents, songs []accounts.ID
+	var parents, songs, videos, collections []accounts.ID
 	for _, item := range items {
 		ids = append(ids, item.ID)
 		if item.Kind == library.KindSeries || item.Kind == library.KindSeason {
@@ -80,17 +88,55 @@ func (h *Handler) userState(ctx context.Context, user accounts.User, items []lib
 		if item.Kind == library.KindTrack {
 			songs = append(songs, item.ID)
 		}
+		if counted(item) {
+			videos = append(videos, item.Contents.Videos...)
+		}
+		if item.Kind == library.KindCollection {
+			collections = append(collections, item.ID)
+		}
 	}
-	data, err := h.UserData.Get(ctx, user.ID, ids)
+	data, err := h.UserData.Get(ctx, user.ID, append(ids, videos...))
 	if err != nil {
 		return userState{}, err
+	}
+	// The collection of a search in plain words is a favorite once saved
+	// as the user's own smart list (see markFavorite).
+	saved, err := h.Library.SavedPlainSearches(ctx, user, collections)
+	if err != nil {
+		return userState{}, err
+	}
+	for id := range saved {
+		if data == nil {
+			data = map[accounts.ID]userdata.Data{}
+		}
+		d := data[id]
+		d.Favorite = true
+		data[id] = d
 	}
 	counts, err := h.UserData.EpisodeCounts(ctx, user.ID, parents)
 	if err != nil {
 		return userState{}, err
 	}
-	state := userState{data: data, counts: counts, contents: map[accounts.ID]*library.Contents{}, lyrics: h.Lyrics.Known(ctx, songs),
-		gains: h.gains(ctx, items), collectionLibraries: h.collectionLibrariesByType(ctx)}
+	// A folder counts its videos the user watched, and started, as a
+	// series counts its episodes; so does a season of an episode order,
+	// which the episodes' data does not name.
+	for _, item := range items {
+		if !counted(item) {
+			continue
+		}
+		var c userdata.Counts
+		for _, video := range item.Contents.Videos {
+			if data[video].Played {
+				c.Played++
+			}
+			if data[video].Position > 0 {
+				c.Resumable++
+			}
+		}
+		counts[item.ID] = c
+	}
+	state := userState{reader: user.ID, data: data, counts: counts, contents: map[accounts.ID]*library.Contents{}, lyrics: h.Lyrics.Known(ctx, songs),
+		gains: h.gains(ctx, items), collectionLibraries: h.collectionLibrariesByType(ctx), badges: h.posterBadges(ctx, items)}
 	var incomplete []accounts.ID
 	for _, item := range items {
 		if item.Kind == library.KindSeries && item.Contents == nil && counts[item.ID].Played > 0 {
@@ -109,9 +155,16 @@ func (h *Handler) userState(ctx context.Context, user accounts.User, items []lib
 	return state, nil
 }
 
+// counted reports whether the videos an item holds are counted from their
+// own data: a folder's, a playlist's, and a season of an episode order's.
+func counted(item library.Item) bool {
+	return item.Contents != nil && (item.Kind == library.KindFolder || item.Kind == kindPlaylist || item.Kind == library.KindSeason && item.EpisodeGroup != "")
+}
+
 // of describes what the user did with item. Series and seasons count
-// their played episodes; a partly watched episode counts as unplayed.
-// Other folders only show that they are not played.
+// their played episodes, and folders and playlists their played videos; a
+// partly watched episode or video counts as unplayed. Other folders only
+// show that they are not played.
 func (s userState) of(item library.Item) UserItemData {
 	result := UserItemData{Key: hyphenated(item.ID), ItemId: item.ID.String()}
 	data := s.data[item.ID]
@@ -128,7 +181,7 @@ func (s userState) of(item library.Item) UserItemData {
 		if percent, ok := data.PlayedPercentage(); ok {
 			result.PlayedPercentage = new(percent)
 		}
-	case library.KindSeries, library.KindSeason, library.KindCollection:
+	case library.KindSeries, library.KindSeason, library.KindCollection, library.KindFolder, kindPlaylist:
 		result.PlayedPercentage = new(0.0)
 		contents := item.Contents
 		if contents == nil {
@@ -148,9 +201,10 @@ func (s userState) of(item library.Item) UserItemData {
 }
 
 // resumable reports whether the user can resume item: a movie or episode
-// with a resume point, or a series or season with such an episode.
+// with a resume point, or a series, season or folder with such an episode
+// or video.
 func (s userState) resumable(item library.Item) bool {
-	if item.Kind == library.KindSeries || item.Kind == library.KindSeason {
+	if item.Kind == library.KindSeries || item.Kind == library.KindSeason || item.Kind == library.KindFolder {
 		return s.counts[item.ID].Resumable > 0
 	}
 	return s.data[item.ID].Position > 0
@@ -175,8 +229,9 @@ func stored(item library.Item) userdata.Item {
 }
 
 // userDataItem binds the item a user data endpoint acts on and the user it
-// acts for. A version stands for its title. ok is false once w was
-// answered.
+// acts for. A version stands for its title; a playlist the user sees, and
+// a studio, are described as items too (see playlistItem and studioItem).
+// ok is false once w was answered.
 func (h *Handler) userDataItem(w http.ResponseWriter, r *http.Request, b bindErrors) (accounts.User, library.Item, bool) {
 	id := b.pathID(r, "itemId")
 	user, ok := h.viewer(w, r, b, notFoundProblem)
@@ -186,6 +241,12 @@ func (h *Handler) userDataItem(w http.ResponseWriter, r *http.Request, b bindErr
 	item, err := h.Library.Item(r.Context(), user, id)
 	if errors.Is(err, library.ErrNotFound) {
 		item, err = h.title(r.Context(), user, id)
+	}
+	if errors.Is(err, library.ErrNotFound) {
+		item, err = h.playlistItem(r.Context(), user, id)
+	}
+	if errors.Is(err, library.ErrNotFound) {
+		item, err = h.studioItem(r.Context(), id)
 	}
 	if err != nil {
 		h.browseError(w, r, err)
@@ -285,10 +346,15 @@ func (h *Handler) markTargets(ctx context.Context, user accounts.User, item libr
 	case library.KindAlbum, library.KindMusicPlaylist:
 		// As Jellyfin marks a folder's tracks.
 		return h.Library.Music(ctx, user, library.MusicQuery{Parent: item.ID})
+	case kindPlaylist:
+		return h.playlistMarkTargets(ctx, user, item)
 	case library.KindSeries:
 		episodes, err = h.Library.Episodes(ctx, user, item.ID, nil)
 	case library.KindSeason:
 		episodes, err = h.Library.Episodes(ctx, user, item.SeriesID, &item.ID)
+	case library.KindFolder:
+		// As Jellyfin marks a folder's videos.
+		episodes, err = h.Library.FolderVideos(ctx, user, item.ID)
 	default:
 		return nil, nil
 	}
@@ -305,15 +371,43 @@ func (h *Handler) markTargets(ctx context.Context, user accounts.User, item libr
 }
 
 // markFavorite marks an item, of any kind, as a favorite or not. Favorites
-// do not spread to what the item contains.
+// do not spread to what the item contains. The collection of a search in
+// plain words is saved as the user's own smart list instead, or the list
+// saved from it deleted (see library.SavePlainSearch). A user whose apps
+// would not show the list, or who has as many as they may, is refused with
+// an empty 403, as Jellyfin refuses what a user's policy does not allow.
 func (h *Handler) markFavorite(favorite bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		user, item, ok := h.userDataItem(w, r, bindErrors{})
 		if !ok {
 			return
 		}
+		if item.Kind == library.KindCollection && h.Library.IsPlainSearch(user, item.ID) {
+			h.savePlainSearch(w, r, user, item, favorite)
+			return
+		}
 		h.change(w, r, user, item, []library.Item{item}, func(d *userdata.Data) { d.Favorite = favorite })
 	}
+}
+
+// savePlainSearch saves the collection of a search in plain words, or
+// deletes the list saved from it, and answers what the user did with it.
+func (h *Handler) savePlainSearch(w http.ResponseWriter, r *http.Request, user accounts.User, item library.Item, save bool) {
+	_, err := h.Library.SavePlainSearch(r.Context(), user, item.ID, save)
+	if errors.Is(err, library.ErrOwnListsOff) || errors.Is(err, smartlists.ErrTooMany) {
+		w.WriteHeader(http.StatusForbidden)
+		return
+	}
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	data, err := h.itemData(r.Context(), user, item)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, data)
 }
 
 // rate records that the user likes or dislikes an item. Posting without
@@ -385,7 +479,7 @@ func (h *Handler) updateUserData(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var update userDataUpdate
-	if err := json.Unmarshal(body, &update); err != nil {
+	if err := unmarshalBody(body, &update); err != nil {
 		validationProblem(w, map[string][]string{"$": {"The JSON value could not be converted."}, "userDataDto": {"The userDataDto field is required."}})
 		return
 	}
@@ -478,9 +572,17 @@ func (h *Handler) track(ctx context.Context, user accounts.User, device accounts
 		return
 	}
 	h.followPlayback(user, device, event, state, positionKnown, playing, item)
-	// Channels have no user data, nor a place in the activity log.
-	if item.Kind == library.KindChannel {
+	// Channels, and videos that play live, have no user data, nor a place
+	// in the activity log; nothing is read from their streams for
+	// thumbnails or speech.
+	if item.Kind == library.KindChannel || h.reportedLive(ctx, user, item, mediaSource) {
 		return
+	}
+	// The tracks a report says play may be the user's choice, when they
+	// changed since the last report of the device.
+	if event == playbackStarted || playing.Item != id || !equalIndex(playing.AudioStreamIndex, state.AudioStreamIndex) ||
+		!equalIndex(playing.SubtitleStreamIndex, state.SubtitleStreamIndex) {
+		h.rememberTracks(ctx, user, item, state, mediaSource)
 	}
 	h.recordPlayback(ctx, user, device.DeviceName, event, item)
 	runtime := h.playedRuntime(ctx, user, item, mediaSource, event == playbackStarted || playing.Item != id)
@@ -495,6 +597,7 @@ func (h *Handler) track(ctx context.Context, user accounts.User, device accounts
 	if !audio && event == playbackStarted {
 		h.queueImages(ctx, user, deviceID, item, mediaSource)
 		h.findInAudio(ctx, user, item, mediaSource)
+		h.findSpeech(ctx, user, item, mediaSource)
 	}
 	if audio && event == playbackStarted {
 		h.prepareNextTrack(user, item, state)

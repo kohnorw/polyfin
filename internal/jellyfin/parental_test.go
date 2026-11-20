@@ -98,7 +98,7 @@ func (s testServer) postRaw(path, authorization, body string) (int, []byte) {
 	request, _ := http.NewRequestWithContext(s.t.Context(), http.MethodPost, s.url+path, strings.NewReader(body))
 	request.Header.Set("Authorization", authorization)
 	request.Header.Set("Content-Type", "application/json")
-	response, err := http.DefaultClient.Do(request)
+	response, err := testClient.Do(request)
 	if err != nil {
 		s.t.Fatal(err)
 	}
@@ -297,7 +297,7 @@ func TestParentalControlMatchesJellyfin(t *testing.T) {
 	check("Unrestricted", status, body)
 
 	// The subtitle search and playlists keep to the limit too.
-	if status, _ := s.call(http.MethodGet, "/Items/"+ids["Restricted"]+"/RemoteSearch/Subtitles/eng", childApp, nil); status != http.StatusNotFound && status != http.StatusForbidden {
+	if status, _ := s.call(http.MethodGet, "/Items/"+ids["Restricted"]+"/RemoteSearch/Subtitles/eng", childApp, nil); status != http.StatusNotFound {
 		t.Errorf("subtitle search of a hidden title: %d", status)
 	}
 	playlist := s.createPlaylist(t, adminToken, map[string]any{"Name": "Mix", "Ids": []string{ids["Allowed"], ids["Restricted"]}, "IsPublic": true})

@@ -15,6 +15,7 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/backup"
+	"github.com/moodiness/polyfin/internal/process"
 	"github.com/moodiness/polyfin/internal/secrets"
 	"github.com/moodiness/polyfin/internal/testdb"
 )
@@ -87,7 +88,7 @@ func TestBackupsAreThoseOfTheFolder(t *testing.T) {
 		}
 	}
 	script := filepath.Join(t.TempDir(), "pg_dump")
-	if err := os.WriteFile(script, []byte(fakePgDump), 0o700); err != nil {
+	if err := process.WriteExecutable(script, strings.NewReader(fakePgDump), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	s, admin, member, service := backupServer(t, dir, func(c *backup.Config, _ *pgxpool.Pool) { c.PgDump = script })
@@ -153,6 +154,73 @@ func TestBackupsAreThoseOfTheFolder(t *testing.T) {
 	}
 }
 
+// An encrypted backup is listed, but /Backup/Restore refuses it with 400
+// and words that say where to restore it: apps cannot ask for its
+// passphrase.
+func TestAppsCannotRestoreAnEncryptedBackup(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	script := filepath.Join(t.TempDir(), "pg_dump")
+	if err := process.WriteExecutable(script, strings.NewReader("#!/bin/sh\nprintf 'PGDMP'\n"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	s, admin, _, service := backupServer(t, dir, func(c *backup.Config, _ *pgxpool.Pool) {
+		c.PgDump, c.PgRestore, c.DatabaseURL = script, "true", "postgresql://polyfin@127.0.0.1:1/polyfin"
+		c.Settings = func() accounts.Settings {
+			return accounts.Settings{BackupsKept: 7, BackupPassphrase: "correct horse battery"}
+		}
+	})
+	if err := service.Run(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	made, _ := service.Status(t.Context())
+	if !strings.HasSuffix(made.File, ".dump.enc") {
+		t.Fatalf("the backup made: %q", made.File)
+	}
+	if status, body := s.call(http.MethodGet, "/Backup", admin, nil); status != http.StatusOK || !strings.Contains(string(body), made.File) {
+		t.Errorf("list: %d %s", status, body)
+	}
+	status, body := s.call(http.MethodPost, "/Backup/Restore", admin, map[string]string{"ArchiveFileName": made.File})
+	if status != http.StatusBadRequest || string(body) != errEncrypted {
+		t.Errorf("restore: %d %s", status, body)
+	}
+	select {
+	case <-service.Requested():
+		t.Error("an encrypted backup is restored")
+	default:
+	}
+}
+
+// A file of the folder named as an encrypted backup that is not one is
+// refused by /Backup/Restore with 400, as the admin app refuses it:
+// nothing is restored, and nothing is backed up first.
+func TestAppsCannotRestoreABackupNamedEncryptedThatIsNot(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+	s, admin, _, service := backupServer(t, dir, func(c *backup.Config, _ *pgxpool.Pool) {
+		c.PgRestore, c.DatabaseURL = "true", "postgresql://polyfin@127.0.0.1:1/polyfin"
+	})
+	name := "polyfin-20261001-040000.dump.enc"
+	if err := os.WriteFile(filepath.Join(dir, name), []byte("PGDMP a dump that is not encrypted"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if status, body := s.call(http.MethodGet, "/Backup", admin, nil); status != http.StatusOK || !strings.Contains(string(body), name) {
+		t.Errorf("list: %d %s", status, body)
+	}
+	if status, body := s.call(http.MethodPost, "/Backup/Restore", admin, map[string]string{"ArchiveFileName": name}); status != http.StatusBadRequest {
+		t.Errorf("restore: %d %s", status, body)
+	}
+	select {
+	case <-service.Requested():
+		t.Error("a file named as encrypted that is not is restored")
+	default:
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 1 {
+		t.Errorf("the folder after the refusal: %v %v", entries, err)
+	}
+}
+
 // /Backup/Restore restores a backup of the folder as the admin app does:
 // Polyfin backs up the current database, then stops to restore it. A
 // backup holding stored keys the current POLYFIN_SECRET_KEY cannot decrypt
@@ -163,6 +231,7 @@ func TestAppsRestoreABackupAsTheAdminAppDoes(t *testing.T) {
 	if pgDump == "" || pgRestore == "" {
 		t.Skip("POLYFIN_TEST_PG_DUMP and POLYFIN_TEST_PG_RESTORE name no pg_dump and pg_restore of PostgreSQL 18")
 	}
+	testdb.LockRestores(t)
 	box, err := secrets.New([]byte("0123456789abcdef0123456789abcdef"))
 	if err != nil {
 		t.Fatal(err)

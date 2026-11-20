@@ -224,6 +224,7 @@ func TestFollowUpsNeverShortenAList(t *testing.T) {
 		{"same answer", 3, 3},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			e := newFollowEnv(t, 20*time.Millisecond, 20*time.Millisecond)
 			e.replies <- 3
 			e.replies <- tc.second
@@ -311,17 +312,130 @@ func TestARefreshIsNotUndoneByAFollowUp(t *testing.T) {
 	e.settles("stream", 6)
 }
 
+// A refresh while an addon is asked for a title's list leaves out its
+// answer, given before the refresh: the addon is asked again, for the
+// requests that waited for the answer too, and the title keeps the new
+// list.
+func TestARefreshIsNotUndoneByARequestUnderWay(t *testing.T) {
+	t.Parallel()
+	// No follow-ups: the addon is asked only as the title is opened. It
+	// tells the test of each request it receives, then holds its answer.
+	replies := make(chan int, 10)
+	received := make(chan string, 10)
+	held := scriptedReplies(replies)
+	e := repliedEnv(t, func(w http.ResponseWriter, r *http.Request, resource string) {
+		select {
+		case received <- resource:
+		case <-r.Context().Done():
+			return
+		}
+		held(w, r, resource)
+	})
+	e.replies = replies
+	waiting := make(chan string, 10)
+	e.service.joined = func(key string) { waiting <- strings.Fields(key)[0] }
+	joins := func(list string, n int) {
+		t.Helper()
+		for range n {
+			if key := next(t, waiting, "a request to wait for the "+list); key != list {
+				t.Fatalf("joined a request for %s, want %s", key, list)
+			}
+		}
+	}
+	// reaches waits for the addon to receive a request for resource. A
+	// request joined may not have reached the addon yet: one that reaches
+	// it only after a refresh asks for the list after the refresh, and its
+	// answer is rightly kept. So each refresh waits for the addon to hold
+	// the request.
+	reaches := func(resource string) {
+		t.Helper()
+		if got := next(t, received, "the addon to be asked for "+resource); got != resource {
+			t.Fatalf("the addon was asked for %s, want %s", got, resource)
+		}
+	}
+
+	// Item details ask the addon in the background, and a request that
+	// waits for every version joins them, while the addon holds its answer.
+	if _, _, err := e.service.VersionsNow(t.Context(), e.member, e.movie); err != nil {
+		t.Fatal(err)
+	}
+	listed := make(chan int, 1)
+	go func() {
+		versions, _ := e.service.Versions(t.Context(), e.member, e.movie)
+		listed <- len(versions)
+	}()
+	joins("streams", 2)
+	reaches("stream")
+	if err := e.service.Refresh(t.Context(), e.member, e.movie); err != nil {
+		t.Fatal(err)
+	}
+	// Opened again meanwhile, the title waits for the addon still asked.
+	if _, _, err := e.service.VersionsNow(t.Context(), e.member, e.movie); err != nil {
+		t.Fatal(err)
+	}
+	// Both requests ask again, together: the answer comes only once each
+	// has joined the one request, the addon asked once more.
+	e.replies <- 1
+	joins("streams", 2)
+	reaches("stream")
+	e.replies <- 2
+	if n := next(t, listed, "the request that waited"); n != 2 {
+		t.Errorf("the request that waited lists %d versions, want those of the answer after the refresh, 2", n)
+	}
+	e.eventually("the addon to be asked no more", func() bool {
+		pending, err := e.service.Pending(t.Context(), e.member, e.movie)
+		return err == nil && pending == 0
+	})
+	if got := e.known(); got != 2 {
+		t.Errorf("%d versions known after the refresh, want 2", got)
+	}
+	if got := e.asked("stream"); got != 2 {
+		t.Errorf("addon asked %d times for streams, want 2", got)
+	}
+
+	// So are subtitles.
+	go func() {
+		subtitles, _ := e.service.Subtitles(t.Context(), e.member, e.movie)
+		listed <- len(subtitles)
+	}()
+	joins("subtitles", 1)
+	reaches("subtitles")
+	if err := e.service.Refresh(t.Context(), e.member, e.movie); err != nil {
+		t.Fatal(err)
+	}
+	e.replies <- 1
+	joins("subtitles", 1)
+	reaches("subtitles")
+	e.replies <- 2
+	if n := next(t, listed, "the request for subtitles"); n != 2 {
+		t.Errorf("the request that waited lists %d subtitles, want 2", n)
+	}
+	if subtitles, err := e.service.Subtitles(t.Context(), e.member, e.movie); err != nil || len(subtitles) != 2 || e.asked("subtitles") != 2 {
+		t.Errorf("subtitles kept after the refresh: %d, %v, addon asked %d times", len(subtitles), err, e.asked("subtitles"))
+	}
+}
+
+// next waits for what ch sends next, and fails the test if nothing comes
+// within a few seconds.
+func next[T any](t *testing.T, ch <-chan T, what string) T {
+	t.Helper()
+	select {
+	case v := <-ch:
+		return v
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+	var zero T
+	return zero
+}
+
 func TestSubtitleListsAreFollowedUp(t *testing.T) {
 	t.Parallel()
 	e := newFollowEnv(t, 20*time.Millisecond, 50*time.Millisecond)
 	e.replies <- 1
 	subtitles := func() int {
 		t.Helper()
-		names, err := e.service.SubtitleAddons(t.Context(), e.member, e.movie)
-		if err != nil || len(names) == 0 {
-			t.Fatal(names, err)
-		}
-		subtitles, err := e.service.AddonSubtitles(t.Context(), e.member, e.movie, names[0])
+		subtitles, err := e.service.Subtitles(t.Context(), e.member, e.movie)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -423,7 +537,7 @@ func TestVersionsKeepTheirIdentifiersAcrossAnAddonsAnswers(t *testing.T) {
 func TestCarriedIdentitiesAreNeverShared(t *testing.T) {
 	t.Parallel()
 	stream := func(name, link, filename string, size int) stremio.Stream {
-		return stremio.Stream{Name: name, URL: link, BehaviorHints: stremio.StreamBehavior{Filename: filename, VideoSize: stremio.Number(size)}}
+		return stremio.Stream{Name: name, URL: link, BehaviorHints: stremio.StreamBehavior{Filename: filename, VideoSize: stremio.Number64(size)}}
 	}
 	a1 := stream("A", "https://cdn.example/a.mkv?token=1", "", 0)
 	a2 := stream("A", "https://cdn.example/a.mkv?token=2", "", 0)
@@ -451,6 +565,7 @@ func TestCarriedIdentitiesAreNeverShared(t *testing.T) {
 			[]stremio.Stream{stream("B", "https://cdn.example/b.mkv", "", 0), a2}, []int{-1, 0}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			carried := carryIdentities(tc.answer, tc.before)
 			seen := map[string]bool{}
 			for i, stream := range carried {

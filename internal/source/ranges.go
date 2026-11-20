@@ -1,6 +1,7 @@
 package source
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -110,14 +111,18 @@ func (s *Source) fetched(response *http.Response, off int64, n int) ([]byte, err
 	if !ok || start != off {
 		return nil, fmt.Errorf("%w: %w %q", ErrUnavailable, errWrongRange, response.Header.Get("Content-Range"))
 	}
-	if err := s.learn(total, response.Header.Get("Content-Type")); err != nil {
+	if err := s.learn(respondent(response), response.StatusCode, total, response.Header.Get("Content-Type")); err != nil {
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	if total >= 0 && off+int64(n) > total {
 		n = int(max(0, total-off))
 	}
 	data := make([]byte, n)
-	if _, err := io.ReadFull(response.Body, data); err != nil {
+	read, err := io.ReadFull(response.Body, data)
+	if s.received != nil {
+		s.received.Add(read)
+	}
+	if err != nil {
 		return nil, fmt.Errorf("%w: %w: %v", ErrUnavailable, errBroken, err)
 	}
 	return data, nil
@@ -220,16 +225,19 @@ type multiRange struct {
 	// range read goes.
 	asked  []int
 	result [][]byte
-	// budget is the bytes parts may still take.
+	// budget is the bytes parts may still take, and host the host that
+	// answered, empty when unknown.
 	budget int64
+	host   string
 }
 
 // read reads the response to a request for several ranges into the
 // results, the body only when it is made of them.
 func (m *multiRange) read(response *http.Response) error {
+	m.host = respondent(response)
 	switch response.StatusCode {
 	case http.StatusOK:
-		if err := m.source.learn(response.ContentLength, response.Header.Get("Content-Type")); err != nil {
+		if err := m.source.learn(m.host, response.StatusCode, response.ContentLength, response.Header.Get("Content-Type")); err != nil {
 			return fmt.Errorf("%w: %w", ErrUnavailable, err)
 		}
 		return fmt.Errorf("%w: HTTP 200", container.ErrMultiRangeUnsupported)
@@ -284,7 +292,7 @@ func (m *multiRange) part(value string, body io.Reader, alone bool) error {
 	if !ok || end < start {
 		return fmt.Errorf("%w: a part of range %q", container.ErrMultiRangeUnsupported, value)
 	}
-	if err := m.source.learn(total, ""); err != nil {
+	if err := m.source.learn(m.host, 0, total, ""); err != nil {
 		return fmt.Errorf("%w: %w", ErrUnavailable, err)
 	}
 	// Ranges past the end of the file, which the part tells, have no part.
@@ -303,10 +311,12 @@ func (m *multiRange) part(value string, body io.Reader, alone bool) error {
 			covered = append(covered, i)
 		}
 	}
-	length := end - start + 1
-	if alone && len(covered)+past != len(m.asked) || length > m.budget {
+	// The budget bounds the part before its length is counted: a part
+	// told as bytes 0-9223372036854775807 would overflow it.
+	if alone && len(covered)+past != len(m.asked) || end-start >= m.budget {
 		return fmt.Errorf("%w: a part of range %q", container.ErrMultiRangeUnsupported, value)
 	}
+	length := end - start + 1
 	m.budget -= length
 	if len(covered) == 0 {
 		return nil
@@ -367,7 +377,9 @@ func (s *Source) exchange(ctx context.Context, ranges string, length int64, once
 			}
 			s.unpin(to)
 			if attempt >= tries {
-				return fmt.Errorf("%w: %v", ErrUnavailable, withoutURL(err))
+				// Why, kept for what reads the source: a torrent read while
+				// no playback plays it is no failure of its file.
+				return fmt.Errorf("%w: %w", ErrUnavailable, withoutURL(err))
 			}
 			s.holdOff(backoff(attempt, ""))
 			continue
@@ -406,7 +418,7 @@ func (s *Source) exchange(ctx context.Context, ranges string, length int64, once
 			cancel()
 			s.unpin(to)
 			if once {
-				return &StatusError{Status: status, Kind: ErrExpired}
+				return statusError(response, ErrExpired)
 			}
 			continue
 		case expiredStatus(status) && to.renew != nil && !renewed:
@@ -421,7 +433,7 @@ func (s *Source) exchange(ctx context.Context, ranges string, length int64, once
 		case once && expiredStatus(status) && to.renew != nil:
 			response.Body.Close()
 			cancel()
-			return &StatusError{Status: status, Kind: ErrExpired}
+			return statusError(response, ErrExpired)
 		case slowDown(status) && attempt < tries:
 			response.Body.Close()
 			cancel()
@@ -429,11 +441,11 @@ func (s *Source) exchange(ctx context.Context, ranges string, length int64, once
 		case slowDown(status):
 			response.Body.Close()
 			cancel()
-			return &StatusError{Status: status, Kind: ErrSlowDown}
+			return statusError(response, ErrSlowDown)
 		default:
 			response.Body.Close()
 			cancel()
-			return &StatusError{Status: status, Kind: ErrUnavailable}
+			return statusError(response, ErrUnavailable)
 		}
 		s.holdOff(backoff(attempt, retryAfter))
 	}
@@ -452,7 +464,8 @@ func expiredStatus(status int) bool {
 }
 
 // renewLink asks for a fresh link to the source, which the next requests
-// use. ErrExpired when the source has no way to renew it.
+// use: the same file, whose analysis still tells its size. ErrExpired when
+// the source has no way to renew it.
 func (s *Source) renewLink(ctx context.Context) error {
 	s.mu.Lock()
 	renew := s.renew
@@ -465,6 +478,7 @@ func (s *Source) renewLink(ctx context.Context) error {
 		return err
 	}
 	s.mu.Lock()
+	fresh.Analyzed = cmp.Or(fresh.Analyzed, s.origin.Analyzed)
 	s.origin, s.pinned = fresh, nil
 	s.mu.Unlock()
 	s.cache.logger.Debug("A source link was renewed", "source", s.id)
@@ -478,7 +492,7 @@ func (s *Source) renewLink(ctx context.Context) error {
 func (s *Source) unsatisfiable(response *http.Response, off int64) error {
 	response.Body.Close()
 	if _, _, total, ok := contentRange(response.Header.Get("Content-Range")); ok && total >= 0 {
-		if err := s.learn(total, ""); err != nil {
+		if err := s.learn(respondent(response), 0, total, ""); err != nil {
 			return fmt.Errorf("%w: %w", ErrUnavailable, err)
 		}
 		if off < total {
@@ -493,17 +507,31 @@ func (s *Source) unsatisfiable(response *http.Response, off int64) error {
 }
 
 // pace waits for the next time the source may be sent a request of Fetch
-// or FetchRanges, and takes it.
+// or FetchRanges, and takes it: fetchInterval after the last request it
+// let go, past a hold-off. A request waiting asks again once woken, rather
+// than keeping a turn taken before it waited: woken late, it would go
+// close to the next one, and it would go during a hold-off asked since.
 func (s *Source) pace(ctx context.Context) error {
-	s.mu.Lock()
-	now := time.Now()
-	at := s.nextFetch
-	if at.Before(now) {
-		at = now
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		s.mu.Lock()
+		now := time.Now()
+		if at := s.nextFetch; at.After(now) {
+			s.mu.Unlock()
+			if err := pause(ctx, at.Sub(now)); err != nil {
+				return err
+			}
+			continue
+		}
+		s.nextFetch = now.Add(s.cache.fetchInterval)
+		if s.cache.paced != nil {
+			s.cache.paced(now)
+		}
+		s.mu.Unlock()
+		return nil
 	}
-	s.nextFetch = at.Add(s.cache.fetchInterval)
-	s.mu.Unlock()
-	return pause(ctx, at.Sub(now))
 }
 
 // holdOff sends the source no request of Fetch or FetchRanges for d: a

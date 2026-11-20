@@ -40,6 +40,7 @@ func encodersTried(r *recordingRunner) []string {
 // computer without a GPU, converts on the processor. A method of another
 // system finds nothing and runs nothing.
 func TestEachSystemDetectsOnlyItsMethods(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		system string
 		tried  []string
@@ -81,7 +82,7 @@ func TestEachSystemDetectsOnlyItsMethods(t *testing.T) {
 		r := &recordingRunner{answer: func([]string) (time.Duration, error) { return time.Second, nil }}
 		m := &Manager{system: system, dir: t.TempDir(), logger: slog.New(slog.DiscardHandler), detected: map[string]*Hardware{}, run: r.run,
 			can: capabilities{encoders: everyEncoder, filters: everyFilter}}
-		if hw := m.detect(foreign, "/dev/dri/renderD128"); hw != nil || r.count() != 0 {
+		if hw, _ := m.detect(foreign, "/dev/dri/renderD128"); hw != nil || r.count() != 0 {
 			t.Errorf("%s found %s: %+v after %q", system, foreign, hw, r.runs)
 		}
 	}
@@ -93,6 +94,7 @@ func TestEachSystemDetectsOnlyItsMethods(t *testing.T) {
 // that encodes. VideoToolbox's and QSV's tone mapping is proved on an x265
 // HDR10 sample through the chain conversions use; AMF's is never tried.
 func TestEachMethodIsDetectedOnItsDevice(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name, system, want string
 		failing            []string
@@ -123,7 +125,7 @@ func TestEachMethodIsDetectedOnItsDevice(t *testing.T) {
 		}}
 		m := &Manager{system: tc.system, dir: t.TempDir(), logger: slog.New(slog.DiscardHandler), detected: map[string]*Hardware{}, run: r.run,
 			can: capabilities{encoders: everyEncoder, filters: everyFilter}}
-		hw := m.detect(tc.want, "")
+		hw, _ := m.detect(tc.want, "")
 		if hw == nil || hw.Method != tc.method || len(hw.Encoders) != 2 || hw.ToneMapping != (tc.toneMapping != "") || hw.QVBR {
 			t.Errorf("%s: %+v", tc.name, hw)
 			continue
@@ -161,6 +163,7 @@ func TestEachMethodIsDetectedOnItsDevice(t *testing.T) {
 // the processor decodes, brought down to memory to burn subtitles), and
 // everything else goes through memory, where QSV and AMF take NV12.
 func TestDesktopGPUPipelines(t *testing.T) {
+	t.Parallel()
 	plan := NewPlan(seconds(0, 6, 12), 18*time.Second)
 	vt := &Hardware{Method: "videotoolbox", Encoders: []string{"h264_videotoolbox", "hevc_videotoolbox"}, ToneMapping: true, Resident: true,
 		Deinterlacers: []string{"yadif_videotoolbox"}}
@@ -269,19 +272,69 @@ func TestDesktopGPUPipelines(t *testing.T) {
 	}
 }
 
+// Every encoder writes the colors the frames carry: converted frames are
+// tagged last with the source's colors, those known, on the processor
+// and on each GPU, burned subtitles or not; tone mapped frames are left
+// to the tone mapping, which tags them BT.709.
+func TestConvertedFramesAreTaggedWithTheSourcesColors(t *testing.T) {
+	t.Parallel()
+	plan := NewPlan(seconds(0, 6, 12), 18*time.Second)
+	gpu := func(method string, encoder string) *Hardware {
+		return &Hardware{Method: method, Encoders: []string{encoder}, Resident: true, ToneMapping: true}
+	}
+	const all = ",setparams=range=tv:colorspace=bt709:color_trc=bt709:color_primaries=bt709"
+	bt709 := Colors{Range: "tv", Matrix: "bt709", Transfer: "bt709", Primaries: "bt709"}
+	burned := 2
+	for _, tc := range []struct {
+		name   string
+		e      VideoEncoding
+		suffix string
+	}{
+		{"x264", VideoEncoding{Encoder: "libx264", Colors: bt709}, all},
+		{"NVENC", VideoEncoding{Encoder: "h264_nvenc", Hardware: gpu("cuda", "h264_nvenc"), Colors: bt709}, all},
+		{"VAAPI", VideoEncoding{Encoder: "h264_vaapi", Hardware: gpu("vaapi", "h264_vaapi"), Colors: bt709}, all},
+		{"QSV", VideoEncoding{Encoder: "h264_qsv", Hardware: gpu("qsv", "h264_qsv"), Colors: bt709}, all},
+		{"AMF", VideoEncoding{Encoder: "h264_amf", Hardware: gpu("amf", "h264_amf"), Colors: bt709}, all},
+		{"VideoToolbox", VideoEncoding{Encoder: "h264_videotoolbox", Hardware: gpu("videotoolbox", "h264_videotoolbox"), Colors: bt709}, all},
+		{"burned in", VideoEncoding{Encoder: "libx264", Burn: &burned, Colors: bt709}, all + "[video]"},
+		// Only what the source states: an HEVC source without a VUI
+		// still has limited range.
+		{"range alone", VideoEncoding{Encoder: "libx264", Colors: Colors{Range: "tv", Matrix: "unknown"}}, "format=yuv420p,setparams=range=tv"},
+		{"nothing known", VideoEncoding{Encoder: "libx264", Colors: Colors{Matrix: "unknown", Transfer: "reserved"}}, "format=yuv420p"},
+		{"an RGB source", VideoEncoding{Encoder: "libx264", Colors: Colors{Matrix: "gbr"}}, "format=yuv420p"},
+		{"tone mapped", VideoEncoding{Encoder: "libx264", ToneMap: true, Colors: Colors{Range: "tv", Matrix: "bt2020nc", Transfer: "smpte2084", Primaries: "bt2020"}},
+			"zscale=t=bt709:m=bt709:r=tv,format=yuv420p"},
+		{"tone mapped by VideoToolbox", VideoEncoding{Encoder: "h264_videotoolbox", Hardware: gpu("videotoolbox", "h264_videotoolbox"), ToneMap: true,
+			Colors: Colors{Transfer: "smpte2084", Primaries: "bt2020"}}, "color_transfer=bt709"},
+	} {
+		tc.e.Level, tc.e.Width, tc.e.Height, tc.e.Bitrate, tc.e.FrameRate = "4.1", 1920, 1080, 8_000_000, 24
+		args := Remux{Input: "http://127.0.0.1:1/a.mkv", Video: 0, Audio: 1, Format: FMP4, Plan: plan, Encode: &tc.e}.args(0, 0)
+		i := slices.IndexFunc(args, func(arg string) bool { return arg == "-vf" || arg == "-filter_complex" })
+		if i < 0 || !strings.HasSuffix(args[i+1], tc.suffix) {
+			t.Errorf("%s: %q, want it to end with %q", tc.name, args, tc.suffix)
+		}
+	}
+}
+
 // Each encoder family takes its own options, from FFmpeg's documentation
 // of each: VideoToolbox's H.264 encoder names levels up to 5.2 and its
 // HEVC encoder none, and its quality runs from 1 to 100 within the
 // maximum rate; QSV and AMF force IDR frames, QSV picks its level, and AMF
 // names levels with a tenth; QSV and AMF aim for the bitrate, a quality
-// set or not. Presets follow x264's names.
+// set or not. Presets follow x264's names. Every H.264 encoder, x264 as
+// the GPUs', encodes the High profile the master playlist announces.
 func TestEachEncoderFamilyTakesItsOptions(t *testing.T) {
+	t.Parallel()
 	plan := NewPlan(seconds(0, 6, 12), 18*time.Second)
 	for _, tc := range []struct {
 		name       string
 		e          VideoEncoding
 		want, none [][]string
 	}{
+		{"x264", VideoEncoding{Encoder: "libx264", Level: "4.1", Bitrate: 8_000_000},
+			[][]string{{"-b:v", "8000000", "-maxrate", "12000000"}, {"-preset", "veryfast", "-sc_threshold", "0", "-profile:v", "high", "-level:v", "4.1"}}, nil},
+		{"x265", VideoEncoding{Encoder: "libx265", Level: "4.1", Bitrate: 8_000_000},
+			[][]string{{"-preset", "veryfast", "-sc_threshold", "0", "-profile:v", "main"}}, nil},
 		{"VideoToolbox H.264", VideoEncoding{Encoder: "h264_videotoolbox", Level: "5.1", Bitrate: 8_000_000, Preset: "faster"},
 			[][]string{{"-b:v", "8000000", "-maxrate", "12000000", "-bufsize", "16000000"}, {"-profile:v", "high", "-level:v", "5.1", "-prio_speed", "1"}},
 			[][]string{{"-forced_idr"}, {"-rc_mode"}, {"-compression_level"}, {"-global_quality"}}},
@@ -318,9 +371,55 @@ func TestEachEncoderFamilyTakesItsOptions(t *testing.T) {
 	}
 }
 
+// Each encoder takes a level under the names FFmpeg 9.0.2 gives it:
+// VideoToolbox's H.264 encoder and AMF's only "5.0" for a whole level
+// (videotoolboxenc.c, amfenc_h264.c, amfenc_hevc.c), VAAPI's only "5"
+// (vaapi_encode_h264.c, vaapi_encode_h265.c), and x264, x265 and NVENC
+// either. VideoToolbox's HEVC encoder and QSV's take none.
+func TestEachEncoderSpellsLevelsItsWay(t *testing.T) {
+	t.Parallel()
+	plan := NewPlan(seconds(0, 6, 12), 18*time.Second)
+	level := func(args []string) string {
+		for i, a := range args {
+			if a == "-level:v" && i+1 < len(args) {
+				return args[i+1]
+			}
+			if a == "-x265-params" && i+1 < len(args) {
+				_, idc, _ := strings.Cut(args[i+1], "level-idc=")
+				return idc
+			}
+		}
+		return ""
+	}
+	for _, tc := range []struct {
+		encoder, whole, fraction string
+	}{
+		{"libx264", "5", "4.1"},
+		{"libx265", "5", "4.1"},
+		{"h264_nvenc", "5", "4.1"},
+		{"hevc_nvenc", "5", "4.1"},
+		{"h264_videotoolbox", "5.0", "4.1"},
+		{"hevc_videotoolbox", "", ""},
+		{"h264_qsv", "", ""},
+		{"hevc_qsv", "", ""},
+		{"h264_amf", "5.0", "4.1"},
+		{"hevc_amf", "5.0", "4.1"},
+		{"h264_vaapi", "5", "4.1"},
+		{"hevc_vaapi", "5", "4.1"},
+	} {
+		for _, c := range []struct{ level, want string }{{"5", tc.whole}, {"4.1", tc.fraction}} {
+			e := VideoEncoding{Encoder: tc.encoder, Level: c.level, Width: 1920, Height: 1080, FrameRate: 24, Bitrate: 8_000_000}
+			if got := level(e.args(plan, 0)); got != c.want {
+				t.Errorf("%s at %s: level %q, want %q", tc.encoder, c.level, got, c.want)
+			}
+		}
+	}
+}
+
 // Recordings are converted to HEVC by each method at the quality factor of
 // x265, VideoToolbox's on its own scale, decoded as conversions are.
 func TestFileConversionsOnEachMethod(t *testing.T) {
+	t.Parallel()
 	vt := &Hardware{Method: "videotoolbox", Encoders: []string{"hevc_videotoolbox"}, Resident: true}
 	qsv := &Hardware{Method: "qsv", Encoders: []string{"hevc_qsv"}}
 	amf := &Hardware{Method: "amf", Encoders: []string{"hevc_amf"}}
@@ -355,6 +454,7 @@ func TestFileConversionsOnEachMethod(t *testing.T) {
 // Work that only decodes, such as thumbnails, decodes on each method's
 // GPU into memory, and the metrics name each method.
 func TestEachMethodDecodesAndIsCounted(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		hw     *Hardware
 		inputs []string
@@ -386,9 +486,10 @@ func TestEachMethodDecodesAndIsCounted(t *testing.T) {
 // deinterlacer FFmpeg lists that fails on the GPU, as yadif_videotoolbox
 // may, is left out: interlaced video then goes through memory.
 func TestVideoToolboxChainsAreTimed(t *testing.T) {
+	t.Parallel()
 	m, f := measuringManager(t, chainTimes{sdrMemory: time.Second, sdrGPU: time.Second / 2, brokenDeinterlacers: []string{"yadif_videotoolbox"}})
 	m.can = capabilities{encoders: everyEncoder, filters: everyFilter}
-	hw := m.measure(t.Context(), Hardware{Method: "videotoolbox", Encoders: []string{"h264_videotoolbox", "hevc_videotoolbox"}})
+	hw, _ := m.measure(t.Context(), Hardware{Method: "videotoolbox", Encoders: []string{"h264_videotoolbox", "hevc_videotoolbox"}})
 	if !hw.Resident || len(hw.Deinterlacers) != 0 {
 		t.Errorf("%+v", hw)
 	}
@@ -404,7 +505,7 @@ func TestVideoToolboxChainsAreTimed(t *testing.T) {
 	// QSV's deinterlacer is checked on QSV frames.
 	m, f = measuringManager(t, chainTimes{sdrMemory: time.Second, sdrGPU: time.Second / 2})
 	m.can = capabilities{encoders: everyEncoder, filters: everyFilter}
-	if hw := m.measure(t.Context(), Hardware{Method: "qsv", Encoders: []string{"h264_qsv"}}); !hw.Resident || !slices.Equal(hw.Deinterlacers, []string{"vpp_qsv"}) {
+	if hw, _ := m.measure(t.Context(), Hardware{Method: "qsv", Encoders: []string{"h264_qsv"}}); !hw.Resident || !slices.Equal(hw.Deinterlacers, []string{"vpp_qsv"}) {
 		t.Errorf("QSV: %+v", hw)
 	}
 	if check := f.runs["deinterlacer vpp_qsv"]; !contains(check, "-vf", "format=nv12,hwupload,hwmap=derive_device=qsv,format=qsv,vpp_qsv=deinterlace=advanced,hwdownload,format=nv12") {

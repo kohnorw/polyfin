@@ -28,8 +28,9 @@ type trackerCall struct {
 }
 
 // trackerFakes stands in for MDBList (/mdblist) and PublicMetaDB
-// (/publicmetadb), accepting every key and change, and knowing the test
-// series by its TMDB identifier.
+// (/publicmetadb), accepting every key and change, knowing the test
+// series by its TMDB identifier, and holding a watchlist of the test
+// movie and series.
 type trackerFakes struct {
 	mu    sync.Mutex
 	calls []trackerCall
@@ -49,8 +50,13 @@ func newTrackerFakes(t *testing.T) *trackerFakes {
 			_, _ = io.WriteString(w, `{"username":"member"}`)
 			return
 		case "/publicmetadb/api/external/lists":
-			_, _ = io.WriteString(w, `{"items":[]}`)
+			_, _ = io.WriteString(w, `{"items":[{"id":"w1","type":"watchlist"}],"totalPages":1}`)
 			return
+		case "/publicmetadb/api/external/lists/w1/items":
+			if r.Method == http.MethodGet {
+				_, _ = io.WriteString(w, `{"items":[{"id":"li_10","tmdb_id":10,"media_type":"movie"},{"id":"li_30","tmdb_id":30,"media_type":"tv"}],"totalPages":1}`)
+				return
+			}
 		case "/publicmetadb/api/external/mappings/lookup":
 			_, _ = io.WriteString(w, `{"results":[{"tmdb_id":30,"media_type":"tv"}],"total":1}`)
 			return
@@ -151,7 +157,7 @@ func TestUsersTrackingServicesHearOfTheirMoviesAndEpisodes(t *testing.T) {
 
 	// The movie runs 1h30: started, stopped past the played mark.
 	tr.report(t, "/Sessions/Playing", map[string]any{"ItemId": tr.movie, "PositionTicks": 0})
-	tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": tr.movie, "PositionTicks": 52_000_000_000})
+	tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": tr.movie, "PositionTicks": int64(52_000_000_000)})
 	// The first season marked played; marking it again counts no new play.
 	tr.mark(t, http.MethodPost, "/UserPlayedItems/"+tr.seasons[0])
 	tr.mark(t, http.MethodPost, "/UserPlayedItems/"+tr.seasons[0])
@@ -229,6 +235,51 @@ func TestUserDataUploadsReachTrackingServicesAsPlayedMarks(t *testing.T) {
 		got[1] != "POST /mdblist/sync/watched/remove "+fmt.Sprintf(episode, "") ||
 		!strings.HasPrefix(got[2], `POST /mdblist/sync/watched {"movies":[{"ids":{"imdb":"tt0000","tmdb":10}`) {
 		t.Errorf("sent:\n%s", strings.Join(got, "\n"))
+	}
+}
+
+func TestTrackedEpisodesCarryTMDBsNumbers(t *testing.T) {
+	t.Parallel()
+	fakes := newTrackerFakes(t)
+	var tracker *trackers.Service
+	s := newProbingServer(t, 10, "ffprobe-not-installed", func(options *Options, pool *pgxpool.Pool) {
+		tracker = trackers.New(trackers.Options{DB: pool, Settings: options.Accounts.Settings, Version: "test", Logger: options.Logger,
+			URLs: map[string]string{trackers.MDBList: fakes.url + "/mdblist"}})
+		options.Trackers = tracker
+	})
+	t.Cleanup(tracker.Close)
+	tr := trackingOn(t, s)
+	member, err := s.store.Authenticate(t.Context(), "member", "correct horse")
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, err := s.library.Item(t.Context(), member, mustID(t, tr.episodes[0]))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The addon's S2E8 of the same series, which TMDB numbers S2E9, and
+	// its S1E2, which TMDB numbers none.
+	later, unpaired := first, first
+	later.ParentIndexNumber, later.IndexNumber = 2, 8
+	unpaired.ParentIndexNumber, unpaired.IndexNumber = 1, 2
+	numbers := func() [][2]int {
+		t.Helper()
+		var got [][2]int
+		for _, title := range s.handler.trackedTitles(member, []library.Item{first, later, unpaired})(t.Context()) {
+			got = append(got, [2]int{title.TMDBSeason, title.TMDBNumber})
+		}
+		return got
+	}
+	// Without a source, the series keeps its numbers.
+	if got := numbers(); fmt.Sprint(got) != "[[0 0] [0 0] [0 0]]" {
+		t.Errorf("without a numbering: %v", got)
+	}
+	if _, err := s.pool.Exec(t.Context(), `INSERT INTO episode_alignments (series, tmdb_id, episodes, places, asked_at)
+		VALUES ('tt0100', 30, $1, '[[1,1,1,1],[2,9,2,8]]', now())`, len(tr.episodes)); err != nil {
+		t.Fatal(err)
+	}
+	if got := numbers(); fmt.Sprint(got) != "[[0 0] [2 9] [0 -1]]" {
+		t.Errorf("with TMDB's numbering: %v", got)
 	}
 }
 

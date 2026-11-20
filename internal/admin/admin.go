@@ -24,6 +24,7 @@ import (
 	"github.com/moodiness/polyfin/internal/backup"
 	"github.com/moodiness/polyfin/internal/config"
 	"github.com/moodiness/polyfin/internal/homerows"
+	"github.com/moodiness/polyfin/internal/importlinks"
 	"github.com/moodiness/polyfin/internal/iptv"
 	"github.com/moodiness/polyfin/internal/jellyfinimport"
 	"github.com/moodiness/polyfin/internal/letterboxd"
@@ -31,16 +32,23 @@ import (
 	"github.com/moodiness/polyfin/internal/logs"
 	"github.com/moodiness/polyfin/internal/mediasegments"
 	"github.com/moodiness/polyfin/internal/notifications"
+	"github.com/moodiness/polyfin/internal/oidc"
+	"github.com/moodiness/polyfin/internal/playback"
 	"github.com/moodiness/polyfin/internal/plays"
 	"github.com/moodiness/polyfin/internal/quickconnect"
 	"github.com/moodiness/polyfin/internal/ratings"
 	"github.com/moodiness/polyfin/internal/recordings"
+	"github.com/moodiness/polyfin/internal/redirect"
 	"github.com/moodiness/polyfin/internal/reminders"
 	"github.com/moodiness/polyfin/internal/smartlists"
 	"github.com/moodiness/polyfin/internal/tasks"
+	"github.com/moodiness/polyfin/internal/taste"
+	"github.com/moodiness/polyfin/internal/themecopy"
 	"github.com/moodiness/polyfin/internal/throttle"
 	"github.com/moodiness/polyfin/internal/tmdb"
 	"github.com/moodiness/polyfin/internal/trackers"
+	"github.com/moodiness/polyfin/internal/updatetool"
+	"github.com/moodiness/polyfin/internal/virtualtv"
 )
 
 const (
@@ -81,6 +89,10 @@ type Options struct {
 	// Activity records what administrators change for the activity log;
 	// nil records nothing.
 	Activity *activity.Store
+	// ActivityTitles finds which titles the activity log names the
+	// administrator still reaches, whose words Recent activity links; nil
+	// links none.
+	ActivityTitles ActivityTitles
 	// DataDir is the folder Polyfin keeps its files in, which holds the
 	// default recordings and backups folders.
 	DataDir string
@@ -102,6 +114,9 @@ type Options struct {
 	TMDB *tmdb.Client
 	// WebClient tells whether Polyfin serves jellyfin-web at /web/.
 	WebClient bool
+	// ThemeCopier keeps a copy of the files the web player's Custom texts
+	// load from elsewhere; nil offers none.
+	ThemeCopier *themecopy.Copier
 	// InContainer tells whether Polyfin runs in a container, as the Docker
 	// image does: the status tells the admin app where local folders are.
 	InContainer bool
@@ -122,6 +137,17 @@ type Options struct {
 	// LibraryImages finds and keeps the images of libraries; nil shows
 	// none, and refuses to choose them.
 	LibraryImages LibraryImages
+	// Leftovers counts what removing a source loses, and finds the sources
+	// own channels air that are gone; nil counts nothing.
+	Leftovers Leftovers
+	// LibraryRefreshes reads the descriptions of the server's libraries
+	// again; nil offers it for none.
+	LibraryRefreshes LibraryRefreshes
+	// ShownTitles gives users' data to the items the titles of libraries
+	// become as they switch between home videos and movies and shows, and
+	// decides how libraries of other videos show their titles while none
+	// chose; nil does neither.
+	ShownTitles ShownTitles
 	// Health are what the health page reads.
 	Health HealthSources
 	// Variables are the POLYFIN_ environment variables in effect,
@@ -142,6 +168,9 @@ type Options struct {
 	// Letterboxd imports Letterboxd members' export files; nil offers no
 	// import.
 	Letterboxd *letterboxd.Service
+	// ImportTitles keeps the titles each import did not find, and the
+	// links users make of them; nil offers none.
+	ImportTitles *importlinks.Store
 	// Nuvio reads Nuvio accounts, for AppImport; nil offers none.
 	Nuvio *nuvio.Reader
 	// Stremio reads Stremio accounts, for AppImport; nil offers none.
@@ -162,26 +191,111 @@ type Options struct {
 	// they are saved.
 	SmartLists    *smartlists.Store
 	SmartPreviews SmartPreviews
+	// VirtualChannels keeps the channels Polyfin airs, which
+	// ChannelBuilder builds from the library's titles and Playouts stops
+	// when they change; nil offers none.
+	VirtualChannels *virtualtv.Store
+	ChannelBuilder  ChannelBuilder
+	Playouts        Playouts
 	// HomeRows keeps the rows of the web player's home page, and the rows
 	// each user turned off; nil keeps none. HomeRowChoices tells the
-	// collections they may list.
-	HomeRows       *homerows.Store
-	HomeRowChoices HomeRowChoices
+	// collections they may list, and HomeRowPreviews a user's rows as the
+	// web player shows them; nil previews none.
+	HomeRows        *homerows.Store
+	HomeRowChoices  HomeRowChoices
+	HomeRowPreviews HomeRowPreviews
+	// Taste keeps the users' taste profiles, which My account shows each
+	// their own; nil keeps none.
+	Taste *taste.Service
+	// PosterPreviews finds titles to preview the badges over posters on
+	// (Settings › Content › Posters); nil previews none.
+	PosterPreviews PosterPreviews
 	// Sharing finds the titles users give through share links; nil lets
 	// no one make a link.
 	Sharing Sharing
+	// Versions explains titles' versions, pins and blocks them, for the
+	// Versions page, and Titles finds the titles it explains; nil offers
+	// no page.
+	Versions Versions
+	Titles   Titles
+	// AddonCaches forgets an addon's version lists once its address is
+	// replaced, and makes what it gave old on Refresh everything; nil
+	// forgets none.
+	AddonCaches AddonCaches
+	// Signer signs the configure links of addons with the server's secret
+	// (see configureLink); nil gives none.
+	Signer *playback.Signer
+	// Restart stops Polyfin as a signal does, for its container's restart
+	// policy, its service manager or Polyfin Desktop to start it again; it
+	// returns at once. Nil offers no restart.
+	Restart func()
+	// NewSigningSecret stores a new signing secret for the server (see
+	// database.ReplaceSecret), which the Polyfin Restart has started
+	// again signs with. Nil offers no new one.
+	NewSigningSecret func(context.Context) error
+	// Desktop tells that Polyfin Desktop runs Polyfin: it starts it again,
+	// and offers its updates in the data folder (see desktop.Offered).
+	Desktop bool
+	// UpdateTool sends Update now's requests; nil sends none.
+	UpdateTool *updatetool.Client
+	// Preferences forgets the display preferences and the configuration
+	// Jellyfin apps saved for a user, for Reset my preferences; nil keeps
+	// none.
+	Preferences PreferencesReset
+	// TrackChoices counts and forgets the tracks a user chose on titles,
+	// for My account; nil has none.
+	TrackChoices TrackChoices
+	// LibraryOrders counts and clears the orders of libraries users saved
+	// from Jellyfin apps, for Apply this order to every user under Content
+	// › Libraries; nil has none.
+	LibraryOrders LibraryOrders
+	// EpisodeOrders shows and sets the order series show their episodes
+	// in, under Content › Libraries; nil offers none.
+	EpisodeOrders EpisodeOrders
+	// ChannelChoices lists the channel groups and channels of the server's
+	// Live TV sources, which users' and groups' channel rules name; nil
+	// lists none.
+	ChannelChoices ChannelChoices
+	// renderNodesPattern matches the render nodes listed, as filepath.Glob
+	// reads it; empty is defaultRenderNodes. Tests point it at a folder of
+	// their own.
+	renderNodesPattern string
+	// configureRun is signed into every configure link, which so ends
+	// with the process that signed it (see signConfigure); empty has New
+	// draw one. Tests that sign links of their own set it.
+	configureRun string
 }
 
 type handler struct {
 	Options
 	now func() time.Time
 	// checks spaces the checks of addons asked by hand.
-	checks addonChecks
+	checks spacing
+	// actions spaces the server's actions: a restart, an update.
+	actions spacing
 	// steps are the sign-ins waiting for their second step.
 	steps pendingSteps
+	// provider reaches the identity provider; providerFlows are the
+	// sign-ins under way there, by their state, and providerTickets the
+	// web client's sign-ins waiting to be traded (see providerStart).
+	provider        *oidc.Client
+	providerFlows   once[providerFlow]
+	providerTickets once[accounts.ID]
+	// decryptedDownloads are the downloads of backups decrypted that a
+	// passphrase checked allows (see checkBackupPassphrase).
+	decryptedDownloads once[decryptedDownload]
+	// secrets keeps the report of the stored secrets (see secretsReport).
+	secrets secretsCache
+	// nowPlayingLinks keeps which titles of Now playing link to the web
+	// player (see linkTitles).
+	nowPlayingLinks nowPlayingLinks
+	// configureUses are the configure links used up (see
+	// continueConfigureLink).
+	configureUses configureUses
 }
 
-// New returns the handler of every /admin/api/ route.
+// New returns the handler of every /admin/api/ route, and of the configure
+// links under /admin/configure/ (see openConfigureLink).
 func New(options Options) http.Handler {
 	h := &handler{Options: options, now: time.Now}
 	if options.Now != nil {
@@ -190,8 +304,32 @@ func New(options Options) http.Handler {
 	if h.Health.Started.IsZero() {
 		h.Health.Started = time.Now()
 	}
+	if h.renderNodesPattern == "" {
+		h.renderNodesPattern = defaultRenderNodes
+	}
+	if h.configureRun == "" {
+		h.configureRun = newConfigureRun()
+	}
+	// Starting counts as a restart: a restart is refused within a minute
+	// of start-up as within a minute of the last one, which the process
+	// that restarted could not tell the new one.
+	h.actions.last = map[string]time.Time{"restart": h.Health.Started}
+	// The identity provider's client has a transport of its own, a clone
+	// of the default one: whoever closes the idle connections of
+	// http.DefaultTransport cannot break a sign-in (#958). It follows
+	// redirects by redirect's rule, which keeps the token request's form
+	// from another host.
+	h.provider = oidc.New(&http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone(), Timeout: providerTimeout,
+		CheckRedirect: redirect.Follow(redirect.Default)}, h.now)
+	// A sign-in waiting for its second step ends with the account's
+	// sessions when the account is signed out everywhere.
+	options.Accounts.OnSignOutEverywhere(h.steps.forget)
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /admin/api/status", h.status)
+	// A configure link opens with no session, from any browser or app: a
+	// page whose Continue posts back before the configure page opens.
+	mux.HandleFunc("GET "+configureLinkPath+"{token}", h.openConfigureLink)
+	mux.HandleFunc("POST "+configureLinkPath+"{token}", h.continueConfigureLink)
 	mux.HandleFunc("POST /admin/api/setup", h.setup)
 	mux.HandleFunc("POST /admin/api/session", h.signIn)
 	mux.HandleFunc("POST /admin/api/session/jellyfin", h.signInWithJellyfin)
@@ -200,6 +338,11 @@ func New(options Options) http.Handler {
 	mux.HandleFunc("POST /admin/api/invite/{token}", h.acceptInvite)
 	mux.HandleFunc("GET /admin/api/register", h.registration)
 	mux.HandleFunc("POST /admin/api/register", h.register)
+	mux.HandleFunc("GET "+providerPath+"start", h.providerStart)
+	mux.HandleFunc("GET "+providerCallbackPath, h.providerCallback)
+	mux.HandleFunc("POST "+providerWebPath, h.providerWebSignIn)
+	mux.Handle("GET /admin/api/account/provider", h.signedIn(h.ownProvider))
+	mux.Handle("POST /admin/api/account/provider/link", h.signedIn(h.startProviderLink))
 
 	mux.Handle("GET /admin/api/session", h.signedInAnyHour(h.session))
 	mux.Handle("DELETE /admin/api/session", h.signedInAnyHour(h.signOut))
@@ -220,6 +363,10 @@ func New(options Options) http.Handler {
 	mux.Handle("POST /admin/api/account/tracking/{service}/key/reveal", h.signedIn(h.revealTrackingKey))
 	mux.Handle("GET /admin/api/account/server-import", h.signedIn(h.ownImport))
 	mux.Handle("POST /admin/api/account/server-import", h.signedIn(h.startOwnImport))
+	mux.Handle("POST /admin/api/account/server-import/plex/sign-in", h.signedIn(h.plexSignIn(true, h.startPlexSignIn)))
+	mux.Handle("POST /admin/api/account/server-import/plex/sign-in/poll", h.signedIn(h.plexSignIn(true, h.pollPlexSignIn)))
+	mux.Handle("POST /admin/api/account/server-import/plex/profile", h.signedIn(h.plexSignIn(true, h.choosePlexProfile)))
+	mux.Handle("DELETE /admin/api/account/server-import/plex/sign-in", h.signedIn(h.plexSignIn(true, h.dropPlexSignIn)))
 	mux.Handle("GET /admin/api/account/app-import", h.signedIn(h.ownAppImport))
 	mux.Handle("POST /admin/api/account/app-import", h.signedIn(h.startAppImport(h.ownAppImportTarget)))
 	mux.Handle("POST /admin/api/account/app-import/nuvio", h.signedIn(h.readNuvio(h.ownAppImportTarget)))
@@ -227,14 +374,20 @@ func New(options Options) http.Handler {
 	mux.Handle("POST /admin/api/account/app-import/stremio/link/poll", h.signedIn(h.pollStremioLink(h.ownAppImportTarget)))
 	mux.Handle("POST /admin/api/account/app-import/stremio/password", h.signedIn(h.readStremioPassword(h.ownAppImportTarget)))
 	mux.Handle("POST /admin/api/account/app-import/stremio/key", h.signedIn(h.readStremioKey(h.ownAppImportTarget)))
+	mux.Handle("POST /admin/api/account/app-import/stremio/unlock", h.signedIn(h.unlockStremio(h.ownAppImportTarget)))
 	mux.Handle("POST /admin/api/account/app-connections/{app}/import", h.signedIn(h.importAppConnection(h.ownAppImportTarget)))
 	mux.Handle("DELETE /admin/api/account/app-connections/{app}", h.signedIn(h.disconnectApp(h.ownAppConnectionTarget)))
+	mux.Handle("GET /admin/api/account/import-titles", h.signedIn(h.importTitleSources(h.ownImportTitlesTarget)))
+	mux.Handle("GET /admin/api/account/import-titles/{source}", h.signedIn(h.importTitles(h.ownImportTitlesTarget)))
+	mux.Handle("PUT /admin/api/account/import-titles/{source}/links", h.signedIn(h.linkImportTitle(h.ownImportTitlesTarget)))
+	mux.Handle("DELETE /admin/api/account/import-titles/{source}/links", h.signedIn(h.unlinkImportTitle(h.ownImportTitlesTarget)))
 	own := notificationRoutes{h: h, owner: ownTargets}
 	mux.Handle("GET /admin/api/account/notifications", h.signedIn(own.list))
 	mux.Handle("POST /admin/api/account/notifications/targets", h.signedIn(own.create))
 	mux.Handle("PATCH /admin/api/account/notifications/targets/{id}", h.signedIn(own.update))
 	mux.Handle("DELETE /admin/api/account/notifications/targets/{id}", h.signedIn(own.remove))
 	mux.Handle("POST /admin/api/account/notifications/targets/{id}/test", h.signedIn(own.test))
+	mux.Handle("GET /admin/api/account/notifications/targets/{id}/deliveries", h.signedIn(own.deliveries))
 	mux.Handle("GET /admin/api/account/reminders", h.signedIn(h.ownReminders))
 	mux.Handle("DELETE /admin/api/account/reminders/{id}", h.signedIn(h.deleteOwnReminder))
 	mux.Handle("GET /admin/api/account/reminders/settings", h.signedIn(h.ownReminderSettings))
@@ -242,16 +395,33 @@ func New(options Options) http.Handler {
 	mux.Handle("GET /admin/api/account/metadata-language", h.signedIn(h.ownMetadataLanguage))
 	mux.Handle("PUT /admin/api/account/metadata-language", h.signedIn(h.setOwnMetadataLanguage))
 	mux.Handle("GET /admin/api/metadata-languages", h.signedIn(h.metadataLanguages))
+	mux.Handle("GET /admin/api/account/web-theme", h.signedIn(h.ownWebTheme))
+	mux.Handle("PUT /admin/api/account/web-theme", h.signedIn(h.setOwnWebTheme))
+	mux.Handle("GET /admin/api/web-themes", h.signedIn(h.webThemes))
+	mux.Handle("GET /admin/api/account/audio-region", h.signedIn(h.ownAudioRegion))
+	mux.Handle("PUT /admin/api/account/audio-region", h.signedIn(h.setOwnAudioRegion))
+	mux.Handle("GET /admin/api/account/sound", h.signedIn(h.ownSound))
+	mux.Handle("PUT /admin/api/account/sound", h.signedIn(h.setOwnSound))
+	mux.Handle("PUT /admin/api/account/interface-size", h.signedIn(h.setOwnInterfaceSize))
 	ownPlays := statisticsRoutes{h: h, scope: ownPlaybacks}
 	mux.Handle("GET /admin/api/account/statistics", h.signedIn(ownPlays.statistics))
 	mux.Handle("GET /admin/api/account/history", h.signedIn(ownPlays.history))
 	mux.Handle("GET /admin/api/account/history/export", h.signedIn(ownPlays.export))
 	mux.Handle("GET /admin/api/account/resume", h.signedIn(h.ownResume))
 	mux.Handle("DELETE /admin/api/account/resume/{id}", h.signedIn(h.removeOwnResume))
+	mux.Handle("GET /admin/api/account/next-up", h.signedIn(h.ownNextUp))
+	mux.Handle("DELETE /admin/api/account/next-up/{id}", h.signedIn(h.removeOwnNextUp))
+	mux.Handle("DELETE /admin/api/account/next-up/removed/{id}", h.signedIn(h.putBackOwnNextUp))
+	mux.Handle("PUT /admin/api/account/next-up/settings", h.signedIn(h.setOwnNextUpWithResume))
 	mux.Handle("GET /admin/api/account/hidden", h.signedIn(h.ownHidden))
 	mux.Handle("GET /admin/api/account/home-rows", h.signedIn(h.ownHomeRows))
 	mux.Handle("PUT /admin/api/account/home-rows/{id}", h.signedIn(h.setOwnHomeRow))
+	mux.Handle("GET /admin/api/account/taste", h.signedIn(h.ownTaste))
+	mux.Handle("PUT /admin/api/account/taste", h.signedIn(h.setOwnTaste))
 	mux.Handle("DELETE /admin/api/account/hidden/{id}", h.signedIn(h.showOwnHidden))
+	mux.Handle("POST /admin/api/account/preferences/reset", h.signedIn(h.resetOwnPreferences))
+	mux.Handle("GET /admin/api/account/track-choices", h.signedIn(h.ownTrackChoices))
+	mux.Handle("DELETE /admin/api/account/track-choices", h.signedIn(h.forgetOwnTrackChoices))
 	mux.Handle("GET /admin/api/account/share-links", h.signedIn(h.ownShareLinks))
 	mux.Handle("POST /admin/api/account/share-links", h.signedIn(h.createShareLink))
 	mux.Handle("POST /admin/api/account/share-links/{id}/revoke", h.signedIn(h.revokeOwnShareLink))
@@ -260,6 +430,20 @@ func New(options Options) http.Handler {
 	mux.Handle("GET /admin/api/account/share-titles/{id}/episodes", h.signedIn(h.shareEpisodes))
 	mux.Handle("GET /admin/api/quick-connect/{code}", h.signedIn(h.quickConnectRequest))
 	mux.Handle("POST /admin/api/quick-connect", h.signedIn(h.quickConnectApprove))
+	if options.Versions != nil && options.Titles != nil {
+		mux.Handle("GET /admin/api/titles", h.administrator(h.versionTitles))
+		mux.Handle("GET /admin/api/titles/{id}", h.administrator(h.versionTitle))
+		mux.Handle("GET /admin/api/titles/{id}/episodes", h.administrator(h.versionEpisodes))
+		mux.Handle("GET /admin/api/titles/{id}/versions", h.administrator(h.titleVersions))
+		mux.Handle("POST /admin/api/titles/{id}/versions/search", h.administrator(h.askVersionsAgain))
+		mux.Handle("PUT /admin/api/titles/{id}/versions/pin", h.administrator(h.pinVersion))
+		mux.Handle("DELETE /admin/api/titles/{id}/versions/pin", h.administrator(h.unpinVersion))
+		mux.Handle("POST /admin/api/titles/{id}/versions/blocks", h.administrator(h.blockVersion))
+		mux.Handle("POST /admin/api/titles/{id}/versions/{versionId}/analyze", h.administrator(h.analyzeVersion))
+		mux.Handle("POST /admin/api/titles/{id}/versions/{versionId}/thumbnails", h.administrator(h.makeThumbnailsAgain))
+		mux.Handle("GET /admin/api/version-blocks", h.administrator(h.versionBlocks))
+		mux.Handle("DELETE /admin/api/version-blocks/{id}", h.administrator(h.unblockVersion))
+	}
 
 	mux.Handle("GET /admin/api/users", h.administrator(h.users))
 	mux.Handle("POST /admin/api/users", h.administrator(h.createUser))
@@ -276,15 +460,21 @@ func New(options Options) http.Handler {
 	mux.Handle("POST /admin/api/users/{id}/app-import/stremio/link/poll", h.administrator(h.pollStremioLink(h.userAppImportTarget)))
 	mux.Handle("POST /admin/api/users/{id}/app-import/stremio/password", h.administrator(h.readStremioPassword(h.userAppImportTarget)))
 	mux.Handle("POST /admin/api/users/{id}/app-import/stremio/key", h.administrator(h.readStremioKey(h.userAppImportTarget)))
+	mux.Handle("POST /admin/api/users/{id}/app-import/stremio/unlock", h.administrator(h.unlockStremio(h.userAppImportTarget)))
 	mux.Handle("POST /admin/api/users/{id}/app-connections/{app}/import", h.administrator(h.importAppConnection(h.userAppImportTarget)))
 	mux.Handle("DELETE /admin/api/users/{id}/app-connections/{app}", h.administrator(h.disconnectApp(h.userAppImportTarget)))
 	mux.Handle("GET /admin/api/registration-codes", h.administrator(h.registrationCodes))
 	mux.Handle("POST /admin/api/registration-codes", h.administrator(h.createRegistrationCodes))
 	mux.Handle("DELETE /admin/api/registration-codes/{code}", h.administrator(h.deleteRegistrationCode))
 	mux.Handle("PATCH /admin/api/registration-codes/{code}", h.administrator(h.updateRegistrationCode))
+	mux.Handle("GET /admin/api/users/{id}/import-titles", h.administrator(h.importTitleSources(h.userImportTitlesTarget)))
+	mux.Handle("GET /admin/api/users/{id}/import-titles/{source}", h.administrator(h.importTitles(h.userImportTitlesTarget)))
+	mux.Handle("PUT /admin/api/users/{id}/import-titles/{source}/links", h.administrator(h.linkImportTitle(h.userImportTitlesTarget)))
+	mux.Handle("DELETE /admin/api/users/{id}/import-titles/{source}/links", h.administrator(h.unlinkImportTitle(h.userImportTitlesTarget)))
 	mux.Handle("GET /admin/api/invites", h.administrator(h.invites))
 	mux.Handle("POST /admin/api/invites", h.administrator(h.createInvite))
 	mux.Handle("POST /admin/api/invites/{id}/revoke", h.administrator(h.revokeInvite))
+	mux.Handle("GET /admin/api/live-tv/channel-choices", h.administrator(h.channelChoices))
 	mux.Handle("GET /admin/api/groups", h.administrator(h.groups))
 	mux.Handle("POST /admin/api/groups", h.administrator(h.createGroup))
 	mux.Handle("GET /admin/api/groups/{id}", h.administrator(h.group))
@@ -292,6 +482,12 @@ func New(options Options) http.Handler {
 	mux.Handle("DELETE /admin/api/groups/{id}", h.administrator(h.deleteGroup))
 	mux.Handle("GET /admin/api/groups/{id}/members", h.administrator(h.groupMembers))
 	mux.Handle("POST /admin/api/groups/{id}/members", h.administrator(h.addGroupMembers))
+	mux.Handle("PUT /admin/api/groups/{id}/sources/{source}", h.administrator(h.groupSource(true)))
+	mux.Handle("DELETE /admin/api/groups/{id}/sources/{source}", h.administrator(h.groupSource(false)))
+	mux.Handle("GET /admin/api/users/{id}/defaults", h.administrator(h.userDefaults))
+	mux.Handle("POST /admin/api/users/{id}/reset", h.administrator(h.resetUser))
+	mux.Handle("GET /admin/api/groups/{id}/defaults", h.administrator(h.groupDefaults))
+	mux.Handle("POST /admin/api/groups/{id}/reset", h.administrator(h.resetGroup))
 	mux.Handle("GET /admin/api/users/{id}/share-links", h.administrator(h.userShareLinks))
 	mux.Handle("POST /admin/api/share-links/{id}/revoke", h.administrator(h.revokeAnyShareLink))
 	mux.Handle("GET /admin/api/parental-ratings", h.administrator(h.parentalRatings))
@@ -299,8 +495,12 @@ func New(options Options) http.Handler {
 	h.dlnaRoutes(mux)
 	mux.Handle("PUT /admin/api/settings", h.administrator(h.updateSettings))
 	mux.Handle("GET /admin/api/settings/apps", h.administrator(h.settingsApps))
+	mux.Handle("GET /admin/api/settings/poster-previews", h.administrator(h.posterPreviews))
 	mux.Handle("POST /admin/api/settings/secrets/{name}/reveal", h.administrator(h.revealServerSecret))
 	mux.Handle("POST /admin/api/settings/metrics-token", h.administrator(h.newMetricsToken))
+	mux.Handle("GET /admin/api/settings/theme-copy", h.administrator(h.themeCopy))
+	mux.Handle("POST /admin/api/settings/theme-copy", h.administrator(h.keepThemeCopy))
+	mux.Handle("DELETE /admin/api/settings/theme-copy", h.administrator(h.removeThemeCopy))
 	mux.Handle("POST /admin/api/users/{id}/unblock", h.administrator(h.unblockUser))
 	mux.Handle("POST /admin/api/users/{id}/two-step/off", h.administrator(h.turnOffUserTwoStep))
 	mux.Handle("POST /admin/api/users/downloads/off", h.administrator(h.turnOffDownloads))
@@ -308,21 +508,46 @@ func New(options Options) http.Handler {
 	mux.Handle("POST /admin/api/jellyfin-import", h.administrator(h.startJellyfinImport))
 	mux.Handle("POST /admin/api/jellyfin-import/users", h.administrator(h.jellyfinImportUsers))
 	mux.Handle("POST /admin/api/jellyfin-import/stop", h.administrator(h.stopJellyfinImport))
+	mux.Handle("POST /admin/api/jellyfin-import/plex/sign-in", h.administrator(h.plexSignIn(false, h.startPlexSignIn)))
+	mux.Handle("POST /admin/api/jellyfin-import/plex/sign-in/poll", h.administrator(h.plexSignIn(false, h.pollPlexSignIn)))
+	mux.Handle("DELETE /admin/api/jellyfin-import/plex/sign-in", h.administrator(h.plexSignIn(false, h.dropPlexSignIn)))
+	mux.Handle("POST /admin/api/jellyfin-import/plex/owner", h.administrator(h.plexSignIn(false, h.plexOwnerAccess)))
 	mux.Handle("GET /admin/api/user-content-choices", h.administrator(h.userContentChoices))
 	mux.Handle("GET /admin/api/api-keys", h.administrator(h.apiKeys))
 	mux.Handle("POST /admin/api/api-keys", h.administrator(h.createAPIKey))
 	mux.Handle("DELETE /admin/api/api-keys/{id}", h.administrator(h.revokeAPIKey))
 	mux.Handle("GET /admin/api/activity", h.administrator(h.recentActivity))
-	mux.Handle("GET /admin/api/sessions", h.administrator(h.liveSessions))
+	// A member reads their own playbacks only (see liveSessions).
+	mux.Handle("GET /admin/api/sessions", h.signedIn(h.liveSessions))
 	mux.Handle("POST /admin/api/sessions/{id}/stop", h.administrator(h.stopSession))
 	mux.Handle("POST /admin/api/sessions/{id}/message", h.administrator(h.messageSession))
+	mux.Handle("GET /admin/api/bandwidth", h.administrator(h.bandwidth))
 	mux.Handle("GET /admin/api/tasks", h.administrator(h.scheduledTasks))
 	mux.Handle("POST /admin/api/tasks/{id}/run", h.administrator(h.runTask))
 	mux.Handle("POST /admin/api/tasks/{id}/stop", h.administrator(h.stopTask))
+	mux.Handle("PUT /admin/api/tasks/{id}/triggers", h.administrator(h.setTaskTriggers))
+	mux.Handle("DELETE /admin/api/tasks/{id}/triggers", h.administrator(h.resetTaskTriggers))
 	mux.Handle("GET /admin/api/timers", h.administrator(h.timers))
+	if h.VirtualChannels != nil {
+		mux.Handle("GET /admin/api/live-tv/channels", h.administrator(h.virtualChannels))
+		mux.Handle("POST /admin/api/live-tv/channels", h.administrator(h.createVirtualChannel))
+		mux.Handle("GET /admin/api/live-tv/channels/choices", h.administrator(h.virtualChannelChoices))
+		mux.Handle("GET /admin/api/live-tv/channels/titles", h.administrator(h.virtualChannelTitles))
+		mux.Handle("GET /admin/api/live-tv/channels/{id}", h.administrator(h.virtualChannel))
+		mux.Handle("PUT /admin/api/live-tv/channels/{id}", h.administrator(h.updateVirtualChannel))
+		mux.Handle("DELETE /admin/api/live-tv/channels/{id}", h.administrator(h.deleteVirtualChannel))
+	}
 	mux.Handle("GET /admin/api/health", h.administrator(h.health))
 	mux.Handle("GET /admin/api/health/problems", h.administrator(h.healthProblemsRoute))
+	mux.Handle("GET /admin/api/server", h.administrator(h.serverActions))
+	mux.Handle("POST /admin/api/server/restart", h.administrator(h.restartServer))
+	mux.Handle("POST /admin/api/server/desktop-update", h.administrator(h.installDesktopUpdate))
+	mux.Handle("POST /admin/api/server/update-tool", h.administrator(h.askUpdateTool))
+	mux.Handle("POST /admin/api/server/signing-secret", h.administrator(h.replaceSigningSecret))
 	mux.Handle("POST /admin/api/health/addons/{id}/check", h.administrator(h.checkAddon))
+	mux.Handle("GET /admin/api/health/goroutines", h.administrator(h.downloadGoroutines))
+	mux.Handle("POST /admin/api/health/images/clear", h.administrator(h.clearImageCache))
+	mux.Handle("POST /admin/api/health/languages/{language}/download", h.administrator(h.downloadLanguage))
 	mux.Handle("GET /admin/api/sources", h.administrator(h.sources))
 	mux.Handle("GET /admin/api/logs", h.administrator(h.logLines))
 	mux.Handle("GET /admin/api/logs/download", h.administrator(h.downloadLog))
@@ -343,10 +568,20 @@ func New(options Options) http.Handler {
 	mux.Handle("DELETE /admin/api/backup/destinations/{id}", backups(h.deleteBackupDestination))
 	mux.Handle("POST /admin/api/backup/destinations/{id}/test", backups(h.testBackupDestination))
 	mux.Handle("GET /admin/api/backup/files", backups(h.backupFiles))
+	mux.Handle("GET /admin/api/backup/files/{name}", backups(h.downloadBackup))
+	mux.Handle("POST /admin/api/backup/files/{name}/check", backups(h.checkBackupPassphrase))
+	mux.Handle("GET /admin/api/backup/files/{name}/decrypted", backups(h.downloadDecryptedBackup))
 	mux.Handle("POST /admin/api/backup/restore/prepare", backups(h.prepareRestore))
 	mux.Handle("POST /admin/api/backup/restore/upload", backups(h.uploadRestore))
+	mux.Handle("POST /admin/api/backup/restore/unlock", backups(h.unlockRestore))
 	mux.Handle("POST /admin/api/backup/restore/discard", backups(h.discardRestore))
 	mux.Handle("POST /admin/api/backup/restore", backups(h.startRestore))
+	// The setup page restores a backup instead of creating the first
+	// administrator: gated by the setup code, until one exists.
+	mux.HandleFunc("POST /admin/api/setup/restore/upload", h.setupRestoreUpload)
+	mux.HandleFunc("POST /admin/api/setup/restore/unlock", h.setupRestoreUnlock)
+	mux.HandleFunc("POST /admin/api/setup/restore/discard", h.setupRestoreDiscard)
+	mux.HandleFunc("POST /admin/api/setup/restore", h.setupRestoreStart)
 	mux.Handle("GET /admin/api/variables", h.administrator(h.variables))
 	// Without a store, as in tests that leave it out, there are no rows.
 	homeRows := func(next http.HandlerFunc) http.Handler {
@@ -364,12 +599,15 @@ func New(options Options) http.Handler {
 	mux.Handle("PUT /admin/api/home-rows/order", homeRows(h.orderHomeRows))
 	mux.Handle("PATCH /admin/api/home-rows/{id}", homeRows(h.updateHomeRow))
 	mux.Handle("DELETE /admin/api/home-rows/{id}", homeRows(h.deleteHomeRow))
+	mux.Handle("GET /admin/api/home-rows/preview/{id}", homeRows(h.previewHomeRows))
 	server := notificationRoutes{h: h, owner: serverTargets}
 	mux.Handle("GET /admin/api/notifications", h.administrator(server.list))
 	mux.Handle("POST /admin/api/notifications/targets", h.administrator(server.create))
 	mux.Handle("PATCH /admin/api/notifications/targets/{id}", h.administrator(server.update))
 	mux.Handle("DELETE /admin/api/notifications/targets/{id}", h.administrator(server.remove))
 	mux.Handle("POST /admin/api/notifications/targets/{id}/test", h.administrator(server.test))
+	mux.Handle("GET /admin/api/notifications/targets/{id}/deliveries", h.administrator(server.deliveries))
+	mux.Handle("GET /admin/api/notifications/preview", h.administrator(h.summaryPreview))
 	allPlays := statisticsRoutes{h: h, scope: func(*http.Request) *accounts.ID { return nil }}
 	mux.Handle("GET /admin/api/statistics", h.administrator(allPlays.statistics))
 	mux.Handle("GET /admin/api/history", h.administrator(allPlays.history))
@@ -380,7 +618,9 @@ func New(options Options) http.Handler {
 	mux.Handle("PUT /admin/api/scopes/{scope}/addons/order", h.signedIn(h.reorderAddons))
 	mux.Handle("PATCH /admin/api/scopes/{scope}/addons/{id}", h.signedIn(h.updateAddon))
 	mux.Handle("POST /admin/api/scopes/{scope}/addons/{id}/refresh", h.signedIn(h.refreshAddon))
+	mux.Handle("POST /admin/api/scopes/{scope}/addons/{id}/refresh-all", h.signedIn(h.refreshAddonAll))
 	mux.Handle("DELETE /admin/api/scopes/{scope}/addons/{id}", h.signedIn(h.removeAddon))
+	mux.Handle("GET /admin/api/scopes/{scope}/addons/{id}/removal", h.signedIn(h.addonRemoval))
 	mux.Handle("PUT /admin/api/scopes/{scope}/addons/{id}/settings", h.signedIn(h.saveAddonSettings))
 	mux.Handle("POST /admin/api/scopes/{scope}/iptv", h.signedIn(h.addSource))
 	mux.Handle("PATCH /admin/api/scopes/{scope}/iptv/{id}", h.signedIn(h.updateSource))
@@ -391,6 +631,11 @@ func New(options Options) http.Handler {
 	mux.Handle("PATCH /admin/api/scopes/{scope}/folders/{id}", h.signedIn(h.updateFolder))
 	mux.Handle("POST /admin/api/scopes/{scope}/folders/{id}/scan", h.signedIn(h.startFolderScan))
 	mux.Handle("GET /admin/api/scopes/{scope}/folders/{id}/unmatched", h.signedIn(h.folderUnmatched))
+	mux.Handle("GET /admin/api/scopes/{scope}/folders/{id}/looser", h.signedIn(h.folderLooser))
+	mux.Handle("GET /admin/api/scopes/{scope}/folders/{id}/unlisted", h.signedIn(h.folderUnlisted))
+	mux.Handle("GET /admin/api/scopes/{scope}/folders/{id}/shows", h.signedIn(h.folderShows))
+	mux.Handle("PUT /admin/api/scopes/{scope}/folders/{id}/shows/{show}/numbering", h.signedIn(h.setShowNumbering))
+	mux.Handle("GET /admin/api/scopes/{scope}/folders/{id}/shows/{show}/groups", h.signedIn(h.showNumberingGroups))
 	mux.Handle("GET /admin/api/scopes/{scope}/folders/{id}/titles", h.signedIn(h.searchFolderTitles))
 	mux.Handle("PUT /admin/api/scopes/{scope}/folders/{id}/links", h.signedIn(h.linkFolderFile))
 	mux.Handle("DELETE /admin/api/scopes/{scope}/folders/{id}/links", h.signedIn(h.unlinkFolderFile))
@@ -398,6 +643,14 @@ func New(options Options) http.Handler {
 	mux.Handle("GET /admin/api/scopes/{scope}/libraries", h.signedIn(h.listLibraries))
 	mux.Handle("PUT /admin/api/scopes/{scope}/libraries", h.signedIn(h.saveLibraries))
 	mux.Handle("PUT /admin/api/scopes/{scope}/libraries/image", h.signedIn(h.saveLibraryImage))
+	mux.Handle("POST /admin/api/scopes/shared/libraries/refresh", h.administrator(h.refreshLibrary))
+	mux.Handle("POST /admin/api/scopes/shared/libraries/refresh/stop", h.administrator(h.stopLibraryRefresh))
+	mux.Handle("GET /admin/api/scopes/shared/libraries/user-orders", h.administrator(h.libraryOrders))
+	mux.Handle("DELETE /admin/api/scopes/shared/libraries/user-orders", h.administrator(h.clearLibraryOrders))
+	mux.Handle("GET /admin/api/episode-orders", h.administrator(h.episodeOrders))
+	mux.Handle("GET /admin/api/episode-orders/series", h.administrator(h.searchOrderedSeries))
+	mux.Handle("GET /admin/api/titles/{id}/episode-order", h.administrator(h.episodeOrder))
+	mux.Handle("PUT /admin/api/titles/{id}/episode-order", h.administrator(h.setEpisodeOrder))
 	mux.Handle("GET /admin/api/scopes/{scope}/smart-lists", h.signedIn(h.smartLists))
 	mux.Handle("POST /admin/api/scopes/{scope}/smart-lists", h.signedIn(h.createSmartList))
 	mux.Handle("GET /admin/api/scopes/{scope}/smart-lists/catalogs", h.signedIn(h.smartCatalogs))
@@ -438,7 +691,7 @@ func New(options Options) http.Handler {
 	mux.HandleFunc("/admin/api/", func(w http.ResponseWriter, _ *http.Request) {
 		writeError(w, http.StatusNotFound, "not_found")
 	})
-	return sameOrigin(mux)
+	return sameOrigin(h.forgetSecretsOnWrites(mux))
 }
 
 // NewSetupCode returns a random code formatted XXXX-XXXX, without letters
@@ -503,14 +756,16 @@ func decodeUpTo(w http.ResponseWriter, r *http.Request, into any, limit int64) b
 	return true
 }
 
+// internalError answers a request that failed, and logs it with its
+// route, never its path: an invite's and a configure link's hold them.
 func (h *handler) internalError(w http.ResponseWriter, r *http.Request, err error) {
 	// The admin app leaving a page cancels the requests it polls with:
 	// nothing failed, and nobody reads the answer.
 	if r.Context().Err() != nil {
-		h.Logger.Debug("The admin app abandoned a request", "method", r.Method, "path", r.URL.Path)
+		h.Logger.Debug("The admin app abandoned a request", "method", r.Method, "path", logs.Route(r))
 		return
 	}
-	h.Logger.Error("Admin API request failed", "method", r.Method, "path", r.URL.Path, "error", err)
+	h.Logger.Error("Admin API request failed", "method", r.Method, "path", logs.Route(r), "error", err)
 	writeError(w, http.StatusInternalServerError, "internal")
 }
 
@@ -529,9 +784,11 @@ func accountError(w http.ResponseWriter, err error) bool {
 		{accounts.ErrInvalidGroupCopy, http.StatusBadRequest, "invalid_copy_from"},
 		{accounts.ErrAdministratorGroup, http.StatusConflict, "admin_cannot_join_group"},
 		{accounts.ErrFollowsGroup, http.StatusConflict, "follows_group"},
+		{accounts.ErrInvalidOwnSections, http.StatusBadRequest, "invalid_own_sections"},
 		{accounts.ErrInvalidPassword, http.StatusBadRequest, "invalid_password"},
 		{accounts.ErrInvalidServerName, http.StatusBadRequest, "invalid_server_name"},
 		{accounts.ErrInvalidLanguage, http.StatusBadRequest, "invalid_language"},
+		{accounts.ErrInvalidRatingCountry, http.StatusBadRequest, "invalid_rating_country"},
 		{accounts.ErrInvalidCatalogLimit, http.StatusBadRequest, "invalid_catalog_limit"},
 		{accounts.ErrInvalidChannelLimit, http.StatusBadRequest, "invalid_channel_limit"},
 		{accounts.ErrInvalidPlayedPercent, http.StatusBadRequest, "invalid_played_percent"},
@@ -544,6 +801,9 @@ func accountError(w http.ResponseWriter, err error) bool {
 		{accounts.ErrInvalidMDBListRatingsKey, http.StatusBadRequest, "invalid_mdblist_ratings_key"},
 		{accounts.ErrInvalidTMDBKey, http.StatusBadRequest, "invalid_tmdb_key"},
 		{accounts.ErrInvalidCriticRatingShows, http.StatusBadRequest, "invalid_critic_rating_shows"},
+		{accounts.ErrInvalidVersionNames, http.StatusBadRequest, "invalid_version_names"},
+		{accounts.ErrInvalidPosterBadgeSize, http.StatusBadRequest, "invalid_poster_badge_size"},
+		{accounts.ErrInvalidPosterTemplate, http.StatusBadRequest, "invalid_poster_template"},
 		{accounts.ErrInvalidMeasureLoudness, http.StatusBadRequest, "invalid_measure_loudness"},
 		{accounts.ErrInvalidSegmentOrder, http.StatusBadRequest, "invalid_segment_order"},
 		{accounts.ErrInvalidSegmentSourcesOff, http.StatusBadRequest, "invalid_segment_sources_off"},
@@ -566,13 +826,18 @@ func accountError(w http.ResponseWriter, err error) bool {
 		{accounts.ErrInvalidHideVersionsLarger, http.StatusBadRequest, "invalid_hide_versions_larger"},
 		{accounts.ErrInvalidHiddenVersionCodecs, http.StatusBadRequest, "invalid_hidden_version_codecs"},
 		{accounts.ErrInvalidHiddenVersionWords, http.StatusBadRequest, "invalid_hidden_version_words"},
-		{accounts.ErrInvalidHiddenRipTypes, http.StatusBadRequest, "invalid_hidden_rip_types"},
+		{accounts.ErrInvalidHiddenReleases, http.StatusBadRequest, "invalid_hidden_releases"},
+		{accounts.ErrInvalidVersionEditionOrder, http.StatusBadRequest, "invalid_version_edition_order"},
+		{accounts.ErrInvalidVersionMBPerMinute, http.StatusBadRequest, "invalid_version_mb_per_minute"},
+		{accounts.ErrInvalidVersionLabelRules, http.StatusBadRequest, "invalid_version_label_rules"},
+		{accounts.ErrInvalidMaxConversions, http.StatusBadRequest, "invalid_max_conversions"},
+		{accounts.ErrInvalidMaxConversionHeight, http.StatusBadRequest, "invalid_max_conversion_height"},
+		{accounts.ErrInvalidSubtitleOCR, http.StatusBadRequest, "invalid_subtitle_ocr"},
+		{accounts.ErrInvalidSubtitleOCRTracks, http.StatusBadRequest, "invalid_subtitle_ocr_tracks"},
 		{accounts.ErrInvalidDefaultLanguage, http.StatusBadRequest, "invalid_default_language"},
 		{accounts.ErrTooManyRegistrationCodes, http.StatusConflict, "too_many_registration_codes"},
 		{accounts.ErrRegistrationCodeUnknown, http.StatusNotFound, "registration_code_not_found"},
 		{accounts.ErrInvalidRegistrationCodeUses, http.StatusBadRequest, "invalid_max_uses"},
-		{accounts.ErrInvalidMaxConversions, http.StatusBadRequest, "invalid_max_conversions"},
-		{accounts.ErrInvalidMaxConversionHeight, http.StatusBadRequest, "invalid_max_conversion_height"},
 		{accounts.ErrInvalidEncoderPreset, http.StatusBadRequest, "invalid_encoder_preset"},
 		{accounts.ErrInvalidVideoQuality, http.StatusBadRequest, "invalid_video_quality"},
 		{accounts.ErrInvalidHardwareAcceleration, http.StatusBadRequest, "invalid_hardware_acceleration"},
@@ -585,6 +850,7 @@ func accountError(w http.ResponseWriter, err error) bool {
 		{accounts.ErrInvalidDeinterlaceMethod, http.StatusBadRequest, "invalid_deinterlace_method"},
 		{accounts.ErrInvalidDownmixAlgorithm, http.StatusBadRequest, "invalid_downmix_algorithm"},
 		{accounts.ErrInvalidDownmixBoost, http.StatusBadRequest, "invalid_downmix_boost"},
+		{accounts.ErrInvalidDynamicRange, http.StatusBadRequest, "invalid_dynamic_range_compression"},
 		{accounts.ErrInvalidMaxAudioChannels, http.StatusBadRequest, "invalid_max_audio_channels"},
 		{accounts.ErrInvalidAudioBitrate, http.StatusBadRequest, "invalid_audio_bitrate_per_channel"},
 		{accounts.ErrInvalidEncodingThreads, http.StatusBadRequest, "invalid_encoding_threads"},
@@ -598,6 +864,9 @@ func accountError(w http.ResponseWriter, err error) bool {
 		{accounts.ErrInvalidPlaybackHistoryDays, http.StatusBadRequest, "invalid_playback_history_days"},
 		{accounts.ErrInvalidLiveTvRefreshHours, http.StatusBadRequest, "invalid_live_tv_refresh_hours"},
 		{accounts.ErrInvalidLocalScanHours, http.StatusBadRequest, "invalid_local_scan_hours"},
+		{accounts.ErrInvalidWatchlistCheckHours, http.StatusBadRequest, "invalid_watchlist_check_hours"},
+		{accounts.ErrInvalidWebTheme, http.StatusBadRequest, "invalid_web_theme"},
+		{accounts.ErrWebThemeLocked, http.StatusForbidden, "web_theme_locked"},
 		{accounts.ErrInvalidCustomCss, http.StatusBadRequest, "invalid_custom_css"},
 		{accounts.ErrInvalidCustomJs, http.StatusBadRequest, "invalid_custom_js"},
 		{accounts.ErrInvalidLoginDisclaimer, http.StatusBadRequest, "invalid_login_disclaimer"},
@@ -607,7 +876,6 @@ func accountError(w http.ResponseWriter, err error) bool {
 		{accounts.ErrInvalidLastFMApp, http.StatusBadRequest, "invalid_lastfm_app"},
 		{accounts.ErrInvalidAniListApp, http.StatusBadRequest, "invalid_anilist_app"},
 		{accounts.ErrInvalidMyAnimeListApp, http.StatusBadRequest, "invalid_myanimelist_app"},
-		{accounts.ErrInvalidBackupHour, http.StatusBadRequest, "invalid_backup_hour"},
 		{accounts.ErrInvalidBackupsKept, http.StatusBadRequest, "invalid_backups_kept"},
 		{accounts.ErrInvalidPublicAddress, http.StatusBadRequest, "invalid_public_address"},
 		{accounts.ErrInvalidLocalAddress, http.StatusBadRequest, "invalid_local_address"},
@@ -620,22 +888,35 @@ func accountError(w http.ResponseWriter, err error) bool {
 		{accounts.ErrInvalidWeeklySummaryDay, http.StatusBadRequest, "invalid_weekly_summary_day"},
 		{accounts.ErrInvalidWeeklySummaryHour, http.StatusBadRequest, "invalid_weekly_summary_hour"},
 		{accounts.ErrInvalidImportEveryMinutes, http.StatusBadRequest, "invalid_import_every_minutes"},
-		{accounts.ErrInvalidCollectionReadHour, http.StatusBadRequest, "invalid_collection_read_hour"},
 		{accounts.ErrInvalidCollectionLibraryApps, http.StatusBadRequest, "invalid_collection_library_apps"},
 		{accounts.ErrInvalidRemuxDBURL, http.StatusBadRequest, "invalid_remuxdb_url"},
+		{accounts.ErrInvalidUpdateToolURL, http.StatusBadRequest, "invalid_update_tool_url"},
+		{accounts.ErrInvalidUpdateToolToken, http.StatusBadRequest, "invalid_update_tool_token"},
+		{accounts.ErrInvalidProvider, http.StatusBadRequest, "invalid_provider"},
+		{accounts.ErrProviderLinkRefused, http.StatusConflict, "provider_link_refused"},
 		{accounts.ErrInvalidCacheSize, http.StatusBadRequest, "invalid_cache_size"},
+		{accounts.ErrInvalidSourceCache, http.StatusBadRequest, "invalid_source_cache"},
+		{accounts.ErrInvalidPreload, http.StatusBadRequest, "invalid_preload"},
 		{accounts.ErrInvalidTorrentRoute, http.StatusBadRequest, "invalid_torrent_route"},
 		{accounts.ErrInvalidTorrentLimit, http.StatusBadRequest, "invalid_torrent_limit"},
+		{accounts.ErrInvalidTorrentTrackers, http.StatusBadRequest, "invalid_torrent_trackers"},
 		{accounts.ErrInvalidVAAPIDevice, http.StatusBadRequest, "invalid_vaapi_device"},
 		{accounts.ErrInvalidRecordingsFolder, http.StatusBadRequest, "invalid_recordings_folder"},
 		{accounts.ErrInvalidBackupFolder, http.StatusBadRequest, "invalid_backup_folder"},
+		{accounts.ErrInvalidBackupPassphrase, http.StatusBadRequest, "invalid_backup_passphrase"},
+		{accounts.ErrInvalidConversionFolder, http.StatusBadRequest, "invalid_conversion_folder"},
+		{accounts.ErrInvalidReadingFolder, http.StatusBadRequest, "invalid_reading_folder"},
+		{accounts.ErrInvalidCacheFolder, http.StatusBadRequest, "invalid_cache_folder"},
 		{accounts.ErrInvalidParentalControl, http.StatusBadRequest, "invalid_parental_control"},
 		{accounts.ErrInvalidMaxPlaybacks, http.StatusBadRequest, "invalid_max_playbacks"},
 		{accounts.ErrInvalidMaxBitrate, http.StatusBadRequest, "invalid_max_bitrate"},
 		{accounts.ErrInvalidSyncPlay, http.StatusBadRequest, "invalid_sync_play"},
 		{accounts.ErrInvalidQualityGroup, http.StatusBadRequest, "invalid_quality_group"},
 		{accounts.ErrInvalidBlockedGenres, http.StatusBadRequest, "invalid_blocked_genres"},
+		{accounts.ErrInvalidChannelRule, http.StatusBadRequest, "invalid_live_tv_channels"},
 		{accounts.ErrInvalidMetadataLanguage, http.StatusBadRequest, "invalid_language"},
+		{accounts.ErrInvalidAudioRegion, http.StatusBadRequest, "invalid_audio_region"},
+		{accounts.ErrInvalidInterfaceSize, http.StatusBadRequest, "invalid_interface_size"},
 		{accounts.ErrInvalidAccessSchedule, http.StatusBadRequest, "invalid_access_schedules"},
 		{accounts.ErrNameTaken, http.StatusConflict, "name_taken"},
 		{accounts.ErrLastAdministrator, http.StatusConflict, "last_administrator"},

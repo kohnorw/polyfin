@@ -96,6 +96,7 @@ func (e env) albumTitles(id accounts.ID) map[string]eclipse.Album {
 }
 
 func TestNamesCompleteTags(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		path   string
 		tags   trackInfo
@@ -135,6 +136,7 @@ func TestNamesCompleteTags(t *testing.T) {
 // image beside them. It answers as an Eclipse addon: its row of albums,
 // album and artist pages, searches and streams.
 func TestMusicFoldersAreReadAndGrouped(t *testing.T) {
+	t.Parallel()
 	ffmpeg, ffprobe := musicTools(t)
 	e := newEnv(t)
 	e.service.UseTools(ffprobe, ffmpeg)
@@ -238,6 +240,7 @@ func TestMusicFoldersAreReadAndGrouped(t *testing.T) {
 // A rescan reads again the tracks whose files changed, forgets those gone
 // and the artwork of albums gone, and reads no other.
 func TestMusicRescans(t *testing.T) {
+	t.Parallel()
 	ffmpeg, ffprobe := musicTools(t)
 	e := newEnv(t)
 	e.service.UseTools(ffprobe, ffmpeg)
@@ -279,6 +282,7 @@ func TestMusicRescans(t *testing.T) {
 // A share's tracks are read from the share, their tags and covers through
 // the loopback server.
 func TestShareMusic(t *testing.T) {
+	t.Parallel()
 	ffmpeg, ffprobe := musicTools(t)
 	e := newEnv(t)
 	e.service.UseTools(ffprobe, ffmpeg)
@@ -317,6 +321,7 @@ func TestShareMusic(t *testing.T) {
 // album artist is its artist as written. Its lyrics are its lyrics tag's,
 // an ID3 tag's too.
 func TestArtistsAndLyricsTags(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		name                  string
 		tags                  string
@@ -350,11 +355,69 @@ func TestArtistsAndLyricsTags(t *testing.T) {
 	}
 }
 
+// A lyrics tag is kept up to the size of the largest lyrics file read;
+// a larger one is left out, as the file is, and the track has no lyrics
+// of its own.
+func TestLyricsTagsLargerThanALyricsFileAreLeftOut(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name, tag string
+		size      int
+		kept      bool
+	}{
+		{"a lyrics tag of the most text", "LYRICS", maxText, true},
+		{"a lyrics tag over it", "LYRICS", maxText + 1, false},
+		{"an ID3 lyrics tag over it", "lyrics-eng", maxText + 1, false},
+	} {
+		words := strings.Repeat("a", tc.size)
+		info, err := readProbe([]byte(`{"streams": [{"codec_type": "audio", "codec_name": "flac"}], "format": {"tags": {"title": "T", "` +
+			tc.tag + `": "` + words + `"}}}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if kept := info.lyrics == words; kept != tc.kept || !kept && info.lyrics != "" || info.title != "T" {
+			t.Errorf("%s: kept %v, %d bytes of lyrics, title %q", tc.name, kept, len(info.lyrics), info.title)
+		}
+	}
+}
+
+// A lyrics tag stored before tags were bounded, larger than a lyrics file
+// may be, is left out as a scan now leaves it out: its track has no
+// lyrics. One of the most text is read as it is.
+func TestStoredLyricsTagsLargerThanALyricsFileAreLeftOut(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	addon, _ := e.folder(KindMusic, nil)
+	album := nameID("al", "Ann", "Debut")
+	sizes := map[string]int{"Ann/Debut/01 Most.flac": maxText, "Ann/Debut/02 Over.flac": maxText + 1}
+	for rel, size := range sizes {
+		if _, err := e.pool.Exec(t.Context(), `INSERT INTO local_tracks (addon_id, path, size, modified, title, album, album_artist, album_id, lyrics)
+			VALUES ($1, $2, 1, now(), $3, 'Debut', 'Ann', $4, repeat('a', $5))`, addon.ID, rel, path.Base(rel), album, size); err != nil {
+			t.Fatal(err)
+		}
+	}
+	tracks, err := e.service.tracks(t.Context(), addon.ID, "ORDER BY t.path")
+	if err != nil || len(tracks) != len(sizes) {
+		t.Fatalf("the tracks: %+v %v", tracks, err)
+	}
+	for i, track := range tracks {
+		kept := i == 0
+		text, err := e.service.MusicLyrics(t.Context(), addon.ID, track.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if track.Lyrics != kept || (len(text) == maxText) != kept || !kept && text != "" {
+			t.Errorf("%s: has lyrics %v, %d bytes of them, want them kept: %v", track.Title, track.Lyrics, len(text), kept)
+		}
+	}
+}
+
 // A playlist's lines name tracks by paths relative to its folder, or
 // absolute within the folder, as paths or file: addresses, with slashes
 // or backslashes; those leading out of it are left out. Its title is its
 // #PLAYLIST line's, else its name.
 func TestM3UPlaylistsAreRead(t *testing.T) {
+	t.Parallel()
 	text := "#EXTM3U\n#PLAYLIST:Evening Mix\n#EXTINF:123,Ann - Evening\nEvening.flac\n\n  ../Other/Night.mp3  \n/media/music/Ann/Debut/Morning.flac\n" +
 		"/srv/real/Ann/Debut/Noon.flac\nfile:///media/music/Ann/Debut/Dusk%20Song.flac\nAnn\\Live\\Encore.flac\n/elsewhere/Song.flac\n" +
 		"../../../outside.flac\nhttps://radio.example/stream.mp3\nC:\\Music\\Song.flac\n"
@@ -374,6 +437,7 @@ func TestM3UPlaylistsAreRead(t *testing.T) {
 // playlist's absolute lines give in any letter case, with backslashes or
 // slashes, as paths or file: addresses.
 func TestM3UPlaylistsOfAWindowsFolder(t *testing.T) {
+	t.Parallel()
 	text := "D:\\Music\\Ann\\Debut\\Morning.flac\nd:/music/Ann/Debut/Noon.flac\nfile:///D:/Music/Ann/Debut/Dusk%20Song.flac\n" +
 		"\\\\nas\\media\\Music\\Ann\\Live\\Encore.flac\nfile://nas/media/Music/Ann/Live/Bis.flac\nE:\\Music\\Ann\\Song.flac\nD:Ann\\Song.flac\n" +
 		"D:\\Music\\..\\Other\\Song.flac\nEvening.flac\n"
@@ -394,6 +458,7 @@ func TestM3UPlaylistsOfAWindowsFolder(t *testing.T) {
 // An artist's folder holds the folders of their albums, and of no album
 // of another artist or of several.
 func TestArtistFolders(t *testing.T) {
+	t.Parallel()
 	got := artistFolders(map[string][]string{
 		"Ann/Debut/01.flac":       {"ann"},
 		"Ann/Live/CD2/01.flac":    {"ann"},
@@ -416,6 +481,7 @@ func TestArtistFolders(t *testing.T) {
 // lyrics file's, else its lyrics tag's; an artist's picture is the image
 // in their folder. Rescans read them again when they change.
 func TestMusicPlaylistsArtistsLyricsAndPictures(t *testing.T) {
+	t.Parallel()
 	ffmpeg, ffprobe := musicTools(t)
 	e := newEnv(t)
 	e.service.UseTools(ffprobe, ffmpeg)
@@ -561,10 +627,11 @@ func TestMusicPlaylistsArtistsLyricsAndPictures(t *testing.T) {
 
 // The tracks a scan first finds count among the files added, by album.
 func TestAddedTracksAreCountedByAlbum(t *testing.T) {
+	t.Parallel()
 	ffmpeg, ffprobe := musicTools(t)
 	e := newEnv(t)
 	e.service.UseTools(ffprobe, ffmpeg)
-	since := time.Now().Add(-time.Second)
+	since := e.service.now().Add(-time.Second)
 	dir := t.TempDir()
 	for _, name := range []string{"01 One.flac", "02 Two.flac"} {
 		tone(t, ffmpeg, filepath.Join(dir, "Band", "Early", name), map[string]string{"artist": "Band", "album": "Early"}, "")
@@ -572,7 +639,7 @@ func TestAddedTracksAreCountedByAlbum(t *testing.T) {
 	tone(t, ffmpeg, filepath.Join(dir, "stray.flac"), nil, "")
 	e.folder(KindMovies, map[string]int{"The General (1926).mkv": 10})
 	e.musicFolder(dir)
-	added, total, err := e.service.Added(t.Context(), since, time.Now().Add(time.Minute), 10)
+	added, total, err := e.service.Added(t.Context(), since, e.service.now().Add(time.Minute), 10)
 	if err != nil || total != 4 || len(added) != 2 || added[0] != (Added{Name: "Early", Kind: KindMusic, Files: 2}) || added[1].Kind != KindMovies {
 		t.Errorf("added: %+v, %d files, %v", added, total, err)
 	}

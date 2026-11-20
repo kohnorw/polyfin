@@ -4,6 +4,7 @@ import (
 	"slices"
 	"strings"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/moodiness/polyfin/internal/localization"
 )
@@ -25,12 +26,49 @@ const (
 // by RemuxDB: its video codec, of accounts.VersionCodecs, empty when they
 // name none, or several; its dynamic range; and its audio languages, by
 // their ISO 639-2/B codes, with Multi for labels saying it has several
-// (MULTI, DUAL) without naming them all.
+// (MULTI, DUAL) without naming them all. The languages the labels name as
+// its subtitles' are not its audio's (see subtitleWords).
+//
+// Regions are the regional variants of its audio languages the labels
+// name, of localization.AudioVariants, in the order they name them ("VFQ"
+// gives fr-CA); their languages are among Languages.
+//
+// Releases are the kinds of low-quality releases, of
+// accounts.ReleaseKinds, the labels tag the stream as, in the order they
+// tag them (see ReleaseKinds); none for most.
+//
+// Elsewhere is set when the labels name another title than the stream's:
+// the marker naming it, such as "S01E03", "S02" or "1998" (see
+// OtherTitle); empty for most.
+//
+// Tier, Audio and Edition are its source tier, of Tiers, its best audio
+// format and its edition, of accounts.VersionEditions, empty or zero when
+// the labels name none (see ReadRelease).
+//
+// HDR is the kind of HDR video the labels name, the best of HDRKinds they
+// name: empty when they name none, as "HDR" alone does. HDR10Base is set
+// when labels naming Dolby Vision also name HDR, HDR10 or HDR10+: an
+// HDR10 base layer, which Dolby Vision profiles 7 and 8.1 carry and
+// profile 5 lacks.
+//
+// AudioCodecs are the audio codecs the labels name, of the Label audio
+// codecs, in the order they name them (see ReadAudioCodecs): what an
+// estimate of how an app plays the version reads while its tracks are
+// unknown (see LabelAnalyses).
 type Labels struct {
-	Codec     string
-	Range     DynamicRange
-	Languages []string
-	Multi     bool
+	Codec       string
+	Range       DynamicRange
+	HDR         string
+	HDR10Base   bool
+	Languages   []string
+	Multi       bool
+	Regions     []string
+	Releases    []string
+	Elsewhere   string
+	Tier        string
+	Audio       AudioFormat
+	Edition     string
+	AudioCodecs []string
 }
 
 // labelCodecs are the video codecs labels name, by the words naming them;
@@ -48,6 +86,17 @@ var (
 // highRangeWords name HDR video in labels; "sdr" names SDR video.
 var highRangeWords = map[string]bool{"hdr": true, "hdr10": true, "hdr10plus": true, "hdr10p": true, "hlg": true,
 	"dv": true, "dovi": true, "dolbyvision": true}
+
+// HDRKinds are the kinds of HDR video, best first: Dolby Vision, HDR10+,
+// HDR10 and HLG. A version with Dolby Vision over an HDR10 base layer is
+// Dolby Vision.
+var HDRKinds = []string{"dv", "hdr10plus", "hdr10", "hlg"}
+
+// hdrWords are the words naming a kind of HDRKinds, in lower case: Dolby
+// Vision is also "Dolby Vision", in two words, and HDR10+ "HDR10+", whose
+// sign is no word's (see hdrKind).
+var hdrWords = map[string]string{"dv": "dv", "dovi": "dv", "dolbyvision": "dv", "hdr10plus": "hdr10plus", "hdr10p": "hdr10plus",
+	"hdr10": "hdr10", "hlg": "hlg"}
 
 // multiWords say a stream has several audio languages.
 var multiWords = map[string]bool{"multi": true, "dual": true, "multilang": true, "multiaudio": true}
@@ -113,7 +162,7 @@ func ReadLabels(title string, labels ...string) Labels {
 	for _, word := range labelWords(title) {
 		inTitle[strings.ToLower(word)] = true
 	}
-	codecClash, standard := false, false
+	codecClash, standard, hdr10 := false, false, false
 	setCodec := func(codec string) {
 		if read.Codec != "" && read.Codec != codec {
 			codecClash = true
@@ -125,11 +174,23 @@ func ReadLabels(title string, labels ...string) Labels {
 			read.Languages = append(read.Languages, code)
 		}
 	}
+	addRegion := func(variant string) {
+		addLanguage(localization.VariantLanguage(variant))
+		if !slices.Contains(read.Regions, variant) {
+			read.Regions = append(read.Regions, variant)
+		}
+	}
 	for _, label := range labels {
-		for _, code := range labelFlags(label) {
-			addLanguage(code)
+		for _, country := range labelFlags(label) {
+			if code, ok := flagLanguages[country]; ok {
+				addLanguage(code)
+			}
+			if variant := flagVariant(country); variant != "" {
+				addRegion(variant)
+			}
 		}
 		words := labelWords(label)
+		subtitles := subtitleWords(words, inTitle)
 		for i, word := range words {
 			lower := strings.ToLower(word)
 			next := ""
@@ -144,13 +205,24 @@ func ReadLabels(title string, labels ...string) Labels {
 			switch {
 			case highRangeWords[lower] || lower == "dolby" && next == "vision":
 				read.Range = HighRange
+				kind := hdrKind(label, lower, next)
+				if kind != "" && listRank(HDRKinds, kind) < listRank(HDRKinds, read.HDR) {
+					read.HDR = kind
+				}
+				hdr10 = hdr10 || lower == "hdr" || kind == "hdr10" || kind == "hdr10plus"
 			case lower == "sdr":
 				standard = true
-			case multiWords[lower]:
+			case multiWords[lower] && !subtitles[i]:
 				read.Multi = true
 			}
-			if inTitle[lower] {
+			if inTitle[lower] || subtitles[i] {
 				continue
+			}
+			for _, variant := range localization.ReleaseVariants(lower) {
+				addRegion(variant)
+			}
+			if variant := tagVariant(word, words, i, inTitle); variant != "" {
+				addRegion(variant)
 			}
 			if code, ok := labelLanguages[lower]; ok {
 				addLanguage(code)
@@ -162,6 +234,7 @@ func ReadLabels(title string, labels ...string) Labels {
 	if codecClash {
 		read.Codec = ""
 	}
+	read.HDR10Base = read.HDR == "dv" && hdr10
 	if read.Range == UnknownRange && (standard || read.Codec != "" || LabelHeight(labels...) > 0) {
 		read.Range = StandardRange
 	}
@@ -174,10 +247,52 @@ func labelWords(label string) []string {
 	return strings.FieldsFunc(label, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
 }
 
-// labelFlags lists the languages of the flags a label holds, in order:
-// two regional indicator symbols make a flag.
+// hdrKind is the kind of HDRKinds a word of label names, in lower case,
+// next being the word after it: "dolby" before "vision" names Dolby
+// Vision, and "hdr10" followed by "+" in the label, or by the word
+// "plus", HDR10+. Empty for another word.
+func hdrKind(label, word, next string) string {
+	if word == "dolby" && next == "vision" {
+		return "dv"
+	}
+	kind := hdrWords[word]
+	if kind == "hdr10" && (next == "plus" || plusAfter(label, "hdr10")) {
+		return "hdr10plus"
+	}
+	return kind
+}
+
+// plusAfter reports whether label holds word, in lower case, as the start
+// of a word in any letter case, right followed by "+": "HDR10+", "DD+5.1".
+func plusAfter(label, word string) bool {
+	lower := strings.ToLower(label)
+	for from := 0; ; {
+		i := strings.Index(lower[from:], word+"+")
+		if i < 0 {
+			return false
+		}
+		i += from
+		before, _ := utf8.DecodeLastRuneInString(lower[:i])
+		if i == 0 || !unicode.IsLetter(before) && !unicode.IsDigit(before) {
+			return true
+		}
+		from = i + len(word)
+	}
+}
+
+// listRank is value's place in list, len(list) when it is not there.
+func listRank(list []string, value string) int {
+	if i := slices.Index(list, value); i >= 0 {
+		return i
+	}
+	return len(list)
+}
+
+// labelFlags lists the countries of the flags a label holds, by their
+// ISO 3166-1 codes in capitals, in order: two regional indicator symbols
+// make a flag.
 func labelFlags(label string) []string {
-	var codes []string
+	var countries []string
 	var first rune
 	for _, r := range label {
 		if r < 0x1F1E6 || r > 0x1F1FF {
@@ -188,11 +303,108 @@ func labelFlags(label string) []string {
 			first = r
 			continue
 		}
-		country := string([]rune{'A' + first - 0x1F1E6, 'A' + r - 0x1F1E6})
-		if code, ok := flagLanguages[country]; ok {
-			codes = append(codes, code)
-		}
+		countries = append(countries, string([]rune{'A' + first - 0x1F1E6, 'A' + r - 0x1F1E6}))
 		first = 0
 	}
-	return codes
+	return countries
+}
+
+// releaseTags are the tags naming low-quality releases, in lower case, by
+// their kind of accounts.ReleaseKinds: camera copies, telesyncs,
+// telecines, screeners and early copies.
+var releaseTags = map[string]string{
+	"cam": "cam", "hdcam": "cam",
+	"ts": "telesync", "hdts": "telesync", "telesync": "telesync",
+	"tc": "telecine", "telecine": "telecine",
+	"scr": "screener", "dvdscr": "screener",
+	"r5": "early", "workprint": "early",
+}
+
+// ReleaseKinds reads the kinds of low-quality releases the labels of a
+// stream tag it as, each once, in the order they come: an addon's name,
+// title, description or file name, each line of them apart. titles are
+// the names of what the stream plays, the movie's or the series', and the
+// episode's: a tag is a whole word of a line (see labelWords), in any
+// letter case, after the title's own words, so that a title named "Cam"
+// is not a camera copy. The title's words end where the line names one of
+// titles, after the last of them it names; in a line naming none, at its
+// first year or episode number (2018, S01E01, 1x01), which follows the
+// title's words in a release's name; in a line holding neither, every
+// word may be a tag. A line ending with ".ts" names an MPEG-TS file: the
+// extension is no telesync.
+func ReleaseKinds(titles []string, labels ...string) []string {
+	var named [][]string
+	for _, title := range titles {
+		if words := lowerWords(title); len(words) > 0 {
+			named = append(named, words)
+		}
+	}
+	var kinds []string
+	for _, label := range labels {
+		for line := range strings.Lines(label) {
+			line = strings.TrimSpace(line)
+			words := lowerWords(line)
+			if len(words) > 0 && strings.HasSuffix(strings.ToLower(line), ".ts") {
+				words = words[:len(words)-1]
+			}
+			for _, word := range words[titleEnd(words, named):] {
+				if kind, ok := releaseTags[word]; ok && !slices.Contains(kinds, kind) {
+					kinds = append(kinds, kind)
+				}
+			}
+		}
+	}
+	return kinds
+}
+
+// lowerWords are the words of a label (see labelWords), in lower case.
+func lowerWords(label string) []string {
+	words := labelWords(label)
+	for i, word := range words {
+		words[i] = strings.ToLower(word)
+	}
+	return words
+}
+
+// titleEnd is where the title's words end among the words of a line (see
+// ReleaseKinds): after the last of titles the line names, each where it
+// first does; else at the line's first year or episode number; else at
+// its start.
+func titleEnd(words []string, titles [][]string) int {
+	end := -1
+	for _, title := range titles {
+		for i := 0; i+len(title) <= len(words); i++ {
+			if slices.Equal(words[i:i+len(title)], title) {
+				end = max(end, i+len(title))
+				break
+			}
+		}
+	}
+	if end >= 0 {
+		return end
+	}
+	if i := slices.IndexFunc(words, releaseMark); i >= 0 {
+		return i + 1
+	}
+	return 0
+}
+
+// releaseMark reports whether a word of a release's name, in lower case,
+// is a year, from 1900 to 2099, or an episode number: S01, S01E01,
+// S01E01E02 or 1x01.
+func releaseMark(word string) bool {
+	digits := func(s string) bool {
+		return s != "" && !strings.ContainsFunc(s, func(r rune) bool { return r < '0' || r > '9' })
+	}
+	if len(word) == 4 && digits(word) {
+		return word[:2] == "19" || word[:2] == "20"
+	}
+	if season, episode, ok := strings.Cut(word, "x"); ok {
+		return len(season) <= 2 && digits(season) && digits(episode)
+	}
+	if rest, ok := strings.CutPrefix(word, "s"); ok {
+		season, episodes, numbered := strings.Cut(rest, "e")
+		return digits(season) && (!numbered || digits(strings.ReplaceAll(episodes, "e", "")))
+	}
+	return false
 }

@@ -16,11 +16,13 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
+	"github.com/moodiness/polyfin/internal/importlinks"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/testdb/migrated"
 	"github.com/moodiness/polyfin/internal/userdata"
 	"github.com/moodiness/polyfin/internal/watchlist"
+	"github.com/moodiness/polyfin/internal/watchlist/watchlisttest"
 )
 
 // exportZip zips files, by their path in the ZIP.
@@ -125,6 +127,7 @@ type harness struct {
 	titles *fakeTitles
 	data   *userdata.Store
 	lists  *watchlist.Store
+	links  *importlinks.Store
 	user   accounts.User
 }
 
@@ -139,14 +142,16 @@ func newHarness(t *testing.T) harness {
 	client := stremio.NewClient("test")
 	lib := library.New(pool, addons.New(pool, client), client, logger, store.Settings)
 	titles := &fakeTitles{Service: lib, searches: map[string]int{}}
-	data, lists := userdata.New(pool), watchlist.New(pool)
-	s := New(Options{Titles: titles, UserData: data, Watchlist: lists, Logger: logger})
+	data, lists := userdata.New(pool), watchlisttest.Store(pool)
+	links := importlinks.New(importlinks.Options{DB: pool, Settings: store.Settings, Titles: titles, UserData: data,
+		Watchlist: lists, Logger: logger})
+	s := New(Options{Titles: titles, UserData: data, Watchlist: lists, Logger: logger, Links: links})
 	t.Cleanup(s.Close)
 	user, err := store.CreateUser(t.Context(), accounts.NewUser{Name: "mira", Password: "correct horse"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	return harness{Service: s, titles: titles, data: data, lists: lists, user: user}
+	return harness{Service: s, titles: titles, data: data, lists: lists, links: links, user: user}
 }
 
 // imported imports export with choice into the user's account, and waits
@@ -219,7 +224,8 @@ func noon(day string) time.Time {
 // diary's when ratings.csv lacks the movie, and a rating Polyfin has
 // stays; the watchlist goes to the Watchlist until started; the movies
 // liked become favorites only with the switch on; the movies not found are
-// listed with why and their link; and importing again adds nothing.
+// kept with why, by their link, else their name and year, with what the
+// import would have brought of them; and importing again adds nothing.
 func TestImport(t *testing.T) {
 	t.Parallel()
 	h := newHarness(t)
@@ -241,18 +247,31 @@ func TestImport(t *testing.T) {
 			t.Errorf("%s searched %d times", name, got)
 		}
 	}
-	want := []Unmatched{
-		{Name: "Twin Rivers", Year: 2014, Link: "https://boxd.it/aaa5", Reason: ReasonAmbiguous},
-		{Name: "Unknown Shore", Year: 2001, Link: "https://boxd.it/aaa6", Reason: ReasonNotFound},
-		// Its link is not a web address: it is not shown.
-		{Name: "Broken Compass", Year: 1990, Reason: ReasonSearchFailed},
+	if first.UnmatchedCount != 3 {
+		t.Errorf("not found: %d", first.UnmatchedCount)
 	}
-	if first.UnmatchedCount != len(want) || len(first.Unmatched) != len(want) {
-		t.Fatalf("unmatched: %+v", first.Unmatched)
+	rows, err := h.links.List(t.Context(), h.user.ID, linksSource)
+	if err != nil {
+		t.Fatal(err)
 	}
-	for i := range want {
-		if first.Unmatched[i] != want[i] {
-			t.Errorf("unmatched %d: %+v, want %+v", i, first.Unmatched[i], want[i])
+	want := []importlinks.Entry{
+		// Its link is not a web address: its name and year name it.
+		{Key: "name:broken compass:1990", Label: importlinks.Label{Kind: importlinks.KindMovie, Name: "Broken Compass", Year: 1990},
+			Reason: ReasonSearchFailed, Played: true, PlayedAt: new(noon("2021-07-11")), Plays: 1},
+		{Key: "https://boxd.it/aaa5", Label: importlinks.Label{Kind: importlinks.KindMovie, Name: "Twin Rivers", Year: 2014},
+			Reason: ReasonAmbiguous, Played: true, PlayedAt: new(noon("2021-07-09")), Plays: 1},
+		{Key: "https://boxd.it/aaa6", Label: importlinks.Label{Kind: importlinks.KindMovie, Name: "Unknown Shore", Year: 2001},
+			Reason: ReasonNotFound, Played: true, PlayedAt: new(noon("2021-07-10")), Plays: 1},
+	}
+	if len(rows) != len(want) {
+		t.Fatalf("kept: %+v", rows)
+	}
+	for i, w := range want {
+		got := rows[i]
+		if got.Key != w.Key || got.Label != w.Label || got.Reason != w.Reason || got.Played != w.Played ||
+			got.PlayedAt == nil || !got.PlayedAt.Equal(*w.PlayedAt) || got.Plays != w.Plays || got.Rating != nil ||
+			got.Watchlist != "" || got.Link != nil {
+			t.Errorf("kept %d: %+v, want %+v", i, got, w)
 		}
 	}
 
@@ -304,16 +323,66 @@ func TestImport(t *testing.T) {
 	if bay := h.dataOf(t, "tt7100007")["tt7100007"]; !bay.Favorite {
 		t.Errorf("Lantern Bay, liked, with the switch on: %+v", bay)
 	}
+}
 
-	// Glass Orchard leaves the watchlist once started.
-	if _, err := h.data.Change(t.Context(), h.user.ID, []userdata.Item{{ID: orchard}}, func(d *userdata.Data) {
-		d.Start(time.Now(), true)
-		d.Position, d.Runtime = 10*time.Minute, time.Hour
-	}); err != nil {
-		t.Fatal(err)
+// linkedExport is an export of Unknown Shore, which the addons do not
+// know, watched on days, the last rated 4 stars, and of Quiet Harbour.
+func linkedExport(t *testing.T, days ...string) []byte {
+	t.Helper()
+	diary := "Date,Name,Year,Letterboxd URI,Rating,Rewatch,Tags,Watched Date\n"
+	for i, day := range days {
+		rating := ""
+		if i == len(days)-1 {
+			rating = "4"
+		}
+		diary += fmt.Sprintf("%s,Unknown Shore,2001,https://boxd.it/d%d,%s,,,%s\n", day, i, rating, day)
 	}
-	if listed, err := h.lists.Titles(t.Context(), h.user.ID); err != nil || len(listed) != 0 {
-		t.Errorf("watchlist once started: %v %v", listed, err)
+	return exportZip(t, map[string]string{
+		"watched.csv": "Date,Name,Year,Letterboxd URI\n2021-03-04,Unknown Shore,2001,https://boxd.it/aaa6\n" +
+			"2022-05-06,Quiet Harbour,1999,https://boxd.it/aaa2\n",
+		"diary.csv": diary,
+	})
+}
+
+// A movie not found, linked by hand to an IMDb title, is that title at
+// once: played at its latest date, as many times as the export logs it,
+// rated. The next import of an export holding it does not search it: it
+// is the title of its link, played again, and not counted as not found,
+// while it stays listed with its link.
+func TestLinkedMovie(t *testing.T) {
+	t.Parallel()
+	h := newHarness(t)
+	first := h.imported(t, linkedExport(t, "2021-03-04", "2023-06-10"), Choice{Ratings: true})
+	if first.UnmatchedCount != 1 || first.Played != 1 || h.titles.searched("Unknown Shore") != 1 {
+		t.Fatalf("first import: %+v", first)
+	}
+	rows, err := h.links.List(t.Context(), h.user.ID, linksSource)
+	if err != nil || len(rows) != 1 || rows[0].Key != "https://boxd.it/aaa6" || rows[0].Plays != 2 || rows[0].Rating == nil ||
+		*rows[0].Rating != 8 {
+		t.Fatalf("kept: %+v %v", rows, err)
+	}
+
+	link, err := h.links.Link(t.Context(), h.user.ID, h.user.ID, linksSource, "https://boxd.it/aaa6", "tt7100009")
+	if err != nil || link.Kind != importlinks.KindMovie || link.IMDb != "tt7100009" {
+		t.Fatalf("link: %+v %v", link, err)
+	}
+	shore := h.dataOf(t, "tt7100009")["tt7100009"]
+	if !shore.Played || shore.PlayCount != 2 || shore.LastPlayed == nil || !shore.LastPlayed.Equal(noon("2023-06-10")) ||
+		shore.Rating == nil || *shore.Rating != 8 {
+		t.Errorf("Unknown Shore, linked: %+v", shore)
+	}
+
+	again := h.imported(t, linkedExport(t, "2021-03-04", "2023-06-10", "2024-02-03"), Choice{Ratings: true})
+	if again.UnmatchedCount != 0 || again.Searched != 2 || h.titles.searched("Unknown Shore") != 1 {
+		t.Errorf("the next import: %+v, Unknown Shore searched %d times", again, h.titles.searched("Unknown Shore"))
+	}
+	shore = h.dataOf(t, "tt7100009")["tt7100009"]
+	if shore.PlayCount != 3 || shore.LastPlayed == nil || !shore.LastPlayed.Equal(noon("2024-02-03")) {
+		t.Errorf("Unknown Shore, imported again: %+v", shore)
+	}
+	rows, err = h.links.List(t.Context(), h.user.ID, linksSource)
+	if err != nil || len(rows) != 1 || rows[0].Link == nil || rows[0].Link.IMDb != "tt7100009" {
+		t.Errorf("kept after the next import: %+v %v", rows, err)
 	}
 }
 
@@ -482,5 +551,132 @@ func TestParseSkipsLongValues(t *testing.T) {
 	}
 	if len(export.Movies) != 1 || export.Movies[0].Name != "Quiet Harbour" || export.Movies[0].Rating != nil || export.Skipped != 4 {
 		t.Errorf("movies %+v, %d skipped", export.Movies, export.Skipped)
+	}
+}
+
+// Lines of an export file for the tests of the lines' bounds, each naming
+// Quiet Harbour: exportLine is size bytes long, its tags filling it;
+// spanningLine too, its tags quoted and over lines of 80 bytes; wideLine
+// has columns columns.
+const quietHarbour = "2020-01-01,Quiet Harbour,1999,https://boxd.it/aaa2"
+
+func exportLine(size int) string {
+	return quietHarbour + "," + strings.Repeat("x", size-len(quietHarbour)-2) + "\n"
+}
+
+func spanningLine(size int) string {
+	tags := strings.Repeat(strings.Repeat("x", 79)+"\n", size/80+1)
+	return quietHarbour + ",\"" + tags[:size-len(quietHarbour)-4] + "\"\n"
+}
+
+func wideLine(columns int) string {
+	return quietHarbour + strings.Repeat(",", columns-4) + "\n"
+}
+
+// A file with a line longer than maxLineBytes or of more than maxColumns
+// columns is not an export's, whether the line names the columns or a
+// movie, and whether it is one line or a quoted value over many. Lines at
+// the bounds are read, wherever they start in the file.
+func TestParseRefusesLongLines(t *testing.T) {
+	t.Parallel()
+	const header = "Date,Name,Year,Letterboxd URI,Tags\n"
+	for _, before := range []int{0, 60, 61, lineBlock - 1, lineBlock, lineBlock + 1, 3*lineBlock - len(header), maxLineBytes} {
+		watched := header
+		if before > 0 {
+			watched += exportLine(before)
+		}
+		watched += exportLine(maxLineBytes) + spanningLine(maxLineBytes) + wideLine(maxColumns)
+		export, err := Parse(exportZip(t, map[string]string{"watched.csv": watched}))
+		if err != nil || len(export.Movies) != 1 || export.Movies[0].Name != "Quiet Harbour" || export.Skipped != 0 {
+			t.Errorf("lines at the bounds, %d bytes after the first: %+v, %v", before, export, err)
+		}
+	}
+	atBounds := "Name" + strings.Repeat(",", maxColumns-2) + "," + strings.Repeat("x", maxLineBytes-maxColumns-4) + "\nQuiet Harbour\n"
+	if export, err := Parse(exportZip(t, map[string]string{"watched.csv": atBounds})); err != nil || len(export.Movies) != 1 {
+		t.Errorf("a first line at the bounds: %+v, %v", export, err)
+	}
+
+	for name, files := range map[string]map[string]string{
+		"a first line too long":             {"watched.csv": "Name,Year," + strings.Repeat("x", maxLineBytes-10) + "\nQuiet Harbour,1999\n"},
+		"a first line of too many columns":  {"watched.csv": "Name" + strings.Repeat(",", maxColumns) + "\nQuiet Harbour\n"},
+		"a first line of a million columns": {"watched.csv": "Name" + strings.Repeat(",", 1<<20) + "\nQuiet Harbour\n"},
+		"a line too long":                   {"watched.csv": header + exportLine(100) + exportLine(maxLineBytes+1)},
+		"a line of too many columns":        {"watched.csv": header + exportLine(100) + wideLine(maxColumns+1)},
+		"a line of a million columns":       {"watched.csv": header + exportLine(100) + wideLine(1<<20)},
+		"a quoted value over too many lines": {
+			"watched.csv": header + exportLine(100) + spanningLine(maxLineBytes+1),
+		},
+		"a quoted value without an end": {
+			"watched.csv": header + exportLine(100) + quietHarbour + ",\"" + strings.Repeat(strings.Repeat("x", 79)+"\n", 1<<14),
+		},
+		"a line too long of a file read later": {
+			"watched.csv": header + exportLine(100),
+			"diary.csv":   header + exportLine(maxLineBytes+1),
+		},
+	} {
+		if export, err := Parse(exportZip(t, files)); !errors.Is(err, ErrInvalidExport) || export.Movies != nil {
+			t.Errorf("%s: %d movies, %v", name, len(export.Movies), err)
+		}
+	}
+}
+
+// countedReader counts the bytes read through it.
+type countedReader struct {
+	r    io.Reader
+	read int
+}
+
+func (c *countedReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.read += n
+	return n, err
+}
+
+// A line past maxLineBytes is given up before it is read whole: of a file
+// of megabytes, no more is read than the lines before it, maxLineBytes
+// and what is read ahead.
+func TestALineTooLongIsGivenUpBeforeItIsRead(t *testing.T) {
+	t.Parallel()
+	const header = "Date,Name,Year,Letterboxd URI,Tags\n"
+	before := header + exportLine(100)
+	for name, tc := range map[string]struct {
+		before, line string
+		movies       int
+	}{
+		"the first line, of commas":   {"", "Name" + strings.Repeat(",", 4<<20) + "\n", 0},
+		"the first line, of one name": {"", "Name,Year," + strings.Repeat("x", 4<<20) + "\n", 0},
+		"a later line, of commas":     {before, wideLine(4 << 20), 1},
+		"a later line, of one value":  {before, exportLine(4 << 20), 1},
+		"a quoted value over lines":   {before, spanningLine(4 << 20), 1},
+	} {
+		content := &countedReader{r: strings.NewReader(tc.before + tc.line + exportLine(100))}
+		movies, skipped := 0, 0
+		err := readTable(content, func(row) error { movies++; return nil }, &skipped)
+		if !errors.Is(err, ErrInvalidExport) || movies != tc.movies || skipped != 0 {
+			t.Errorf("%s: %v, %d movies, %d skipped", name, err, movies, skipped)
+		}
+		if most := len(tc.before) + maxLineBytes + 2*lineBlock; content.read > most {
+			t.Errorf("%s: %d bytes of the file were read, over %d", name, content.read, most)
+		}
+	}
+}
+
+// A file of the export longer than 16 MiB once unpacked is refused, light
+// as its ZIP is; one of 16 MiB is read.
+func TestParseRefusesAFileTooLarge(t *testing.T) {
+	t.Parallel()
+	const header = "Date,Name,Year,Letterboxd URI,Tags\n"
+	lines := strings.Repeat(exportLine(1<<10), 16<<10)
+	full := header + exportLine(1<<10-len(header)) + lines[1<<10:]
+	export, err := Parse(exportZip(t, map[string]string{"watched.csv": full}))
+	if err != nil || len(export.Movies) != 1 {
+		t.Errorf("a file of %d bytes: %d movies, %v", len(full), len(export.Movies), err)
+	}
+	packed := exportZip(t, map[string]string{"watched.csv": header + lines})
+	if len(packed) > MaxExportBytes/100 {
+		t.Fatalf("the ZIP weighs %d bytes", len(packed))
+	}
+	if export, err := Parse(packed); !errors.Is(err, ErrInvalidExport) || export.Movies != nil {
+		t.Errorf("a file of %d bytes: %d movies, %v", len(header)+len(lines), len(export.Movies), err)
 	}
 }

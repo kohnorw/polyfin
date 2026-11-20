@@ -14,6 +14,7 @@ import (
 // The Go defaults are those of the columns: a server set up anew, and a
 // row the database fills with its defaults, both hold DefaultSettings.
 func TestDefaultSettingsAreTheColumnDefaults(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	if got := store.Settings(); !reflect.DeepEqual(got, DefaultSettings()) {
@@ -37,9 +38,10 @@ func TestDefaultSettingsAreTheColumnDefaults(t *testing.T) {
 // boundField is the field of Settings named name in the admin API.
 func boundField(settings *Settings, name string) (reflect.Value, bool) {
 	value := reflect.ValueOf(settings).Elem()
-	for i := range value.NumField() {
-		if strings.EqualFold(value.Type().Field(i).Name, name) {
-			return value.Field(i), true
+	// This fork's settings are those of the embedded ForkSettings.
+	for _, field := range reflect.VisibleFields(value.Type()) {
+		if !field.Anonymous && strings.EqualFold(field.Name, name) {
+			return value.FieldByIndex(field.Index), true
 		}
 	}
 	return reflect.Value{}, false
@@ -49,6 +51,7 @@ func boundField(settings *Settings, name string) (reflect.Value, bool) {
 // entry, its default is DefaultSettings', its bounds and choices are
 // accepted, and what lies past them is refused.
 func TestSettingsBoundsAreThoseChecked(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	base := store.Settings()
@@ -61,14 +64,12 @@ func TestSettingsBoundsAreThoseChecked(t *testing.T) {
 	// The host names of Known proxies share the bounds of knownProxies,
 	// the admin API's list of both.
 	named["knownproxynames"] = true
-	// Retired from the admin API when this fork kept to the subtitles
-	// inside the files: stored, always off, and never served.
-	for _, retired := range []string{"syncaddonsubtitles", "subtitleocr", "subtitleocrtracks"} {
-		named[retired] = true
-	}
-	for i := range fields.NumField() {
-		if name := fields.Field(i).Name; !named[strings.ToLower(name)] {
-			t.Errorf("no bounds for %s", name)
+	// This fork's settings are those of the embedded ForkSettings.
+	for _, field := range reflect.VisibleFields(fields) {
+		// Unexported fields are state read with the settings, not
+		// settings.
+		if field.IsExported() && !field.Anonymous && !named[strings.ToLower(field.Name)] {
+			t.Errorf("no bounds for %s", field.Name)
 		}
 	}
 	try := func(name string, value any) error {
@@ -77,6 +78,9 @@ func TestSettingsBoundsAreThoseChecked(t *testing.T) {
 		// Each way of serving HTTPS needs what it serves with.
 		changed.HTTPSCertificate, changed.HTTPSPrivateKey = systemPath("/certs/fullchain.pem"), systemPath("/certs/privkey.pem")
 		changed.ACMEHosts, changed.ACMETerms = []string{"media.example.org"}, true
+		// The source cache's limits are checked as set, which only the
+		// custom preset keeps.
+		changed.SourceCachePreset = SourceCacheCustom
 		field, _ := boundField(&changed, name)
 		field.Set(reflect.ValueOf(value).Convert(field.Type()))
 		_, err := store.UpdateSettings(ctx, changed)
@@ -126,15 +130,23 @@ func TestSettingsBoundsAreThoseChecked(t *testing.T) {
 				// An image as a data URL, not any text: see
 				// TestBrandLogoImage.
 				continue
-			case "remuxDbUrl", "publicAddress", "localAddress":
+			case "remuxDbUrl", "publicAddress", "localAddress", "updateToolUrl", "providerIssuer":
 				start = "https://"
-			case "recordingsFolder", "backupFolder", "httpsCertificate", "httpsPrivateKey":
+			case "recordingsFolder", "backupFolder", "httpsCertificate", "httpsPrivateKey", "conversionFolder", "readingFolder", "cacheFolder":
 				start = systemPath("/")
 			case "smtpFrom", "acmeEmail":
 				start = "polyfin@"
 			case "torrentProxy":
 				// A proxy is a host and a port.
 				end = ":1080"
+			case "posterTemplate":
+				// The template names an identifier to fill in.
+				start, end = "https://", "/{imdb_id}"
+			case "torrentWireGuard":
+				// A WireGuard configuration, a comment ending it.
+				key := "yAnz5TF+lXXJte14tji3zlMNq+hd2rYUIgJBgB3fBmk="
+				start = "[Interface]\nPrivateKey = " + key + "\nAddress = 10.2.0.2/32\n[Peer]\nPublicKey = " + key +
+					"\nEndpoint = 203.0.113.5:51820\nAllowedIPs = 0.0.0.0/0\n# "
 			case "torrentInterface":
 				// Only Linux binds sockets to an interface.
 				if !InterfaceRoutes {
@@ -173,10 +185,14 @@ func TestSettingsBoundsAreThoseChecked(t *testing.T) {
 				switch {
 				case name == "acmeHosts":
 					entries = append(entries, "host-"+strconv.Itoa(i)+".example.org")
+				case name == "torrentTrackers":
+					entries = append(entries, "udp://tracker.example:"+strconv.Itoa(1000+i)+"/announce")
 				case field.Type().Elem().Kind() == reflect.String:
 					entries = append(entries, "App "+strconv.Itoa(i))
 				case field.Type().Elem() == reflect.TypeFor[ID]():
 					entries = append(entries, ID{byte(i >> 8), byte(i), 1})
+				case field.Type().Elem() == reflect.TypeFor[VersionLabelRule]():
+					entries = append(entries, VersionLabelRule{Text: "rule " + strconv.Itoa(i), Hide: true})
 				default:
 					entries = append(entries, netip.PrefixFrom(netip.AddrFrom4([4]byte{10, 0, byte(i >> 8), byte(i)}), 32))
 				}
@@ -222,6 +238,7 @@ func TestSettingsBoundsAreThoseChecked(t *testing.T) {
 }
 
 func TestEnvironmentIsAdoptedOnce(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	method := HardwareAccelerations[1]
@@ -246,16 +263,16 @@ func TestEnvironmentIsAdoptedOnce(t *testing.T) {
 	}
 	// The databases POLYFIN_SEGMENTS names come first, in its order, the
 	// others after them, turned off.
-	adopted := []string{"introdb", "theintrodb", "publicmetadb"}
-	check("the first start", store, method, adopted, []string{"publicmetadb"})
+	adopted := []string{"introdb", "theintrodb", "publicmetadb", "skipdb"}
+	check("the first start", store, method, adopted, []string{"publicmetadb", "skipdb"})
 	// A start with other values changes nothing.
 	if err := store.AdoptEnvironment(ctx, Environment{Hardware: "none", Segments: []string{"publicmetadb"}}); err != nil {
 		t.Fatal(err)
 	}
-	check("a start with other values", store, method, adopted, []string{"publicmetadb"})
+	check("a start with other values", store, method, adopted, []string{"publicmetadb", "skipdb"})
 	// An administrator's choice stays chosen.
 	chosen := store.Settings()
-	chosen.HardwareAcceleration, chosen.SegmentOrder, chosen.SegmentSourcesOff = "none", []string{"publicmetadb", "theintrodb", "introdb"}, []string{}
+	chosen.HardwareAcceleration, chosen.SegmentOrder, chosen.SegmentSourcesOff = "none", []string{"publicmetadb", "skipdb", "theintrodb", "introdb"}, []string{}
 	if _, err := store.UpdateSettings(ctx, chosen); err != nil {
 		t.Fatal(err)
 	}
@@ -278,23 +295,25 @@ func TestEnvironmentIsAdoptedOnce(t *testing.T) {
 // turned off from the environment; POLYFIN_SEGMENTS=none turns them all
 // off.
 func TestEnvironmentFillsOnlyWhatFollowedIt(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	if _, err := store.db.Exec(ctx, "UPDATE settings SET hardware_acceleration = 'none', "+
-		"segment_order = '{publicmetadb,introdb,theintrodb}', environment_pending = '{segment_sources_off}'"); err != nil {
+		"segment_order = '{publicmetadb,introdb,theintrodb,skipdb}', environment_pending = '{segment_sources_off}'"); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.AdoptEnvironment(ctx, Environment{Hardware: HardwareAccelerations[1], Segments: []string{}}); err != nil {
 		t.Fatal(err)
 	}
 	got := store.Settings()
-	if got.HardwareAcceleration != "none" || !slices.Equal(got.SegmentOrder, []string{"publicmetadb", "introdb", "theintrodb"}) ||
+	if got.HardwareAcceleration != "none" || !slices.Equal(got.SegmentOrder, []string{"publicmetadb", "introdb", "theintrodb", "skipdb"}) ||
 		!slices.Equal(got.SegmentSourcesOff, SegmentSources) {
 		t.Errorf("adopted: %+v", got)
 	}
 }
 
 func TestSegmentSourcesStayValid(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	for _, tc := range []struct {
@@ -303,8 +322,8 @@ func TestSegmentSourcesStayValid(t *testing.T) {
 		err        error
 	}{
 		{"no order", []string{}, []string{}, ErrInvalidSegmentOrder},
-		{"a database missing", []string{"theintrodb", "introdb"}, []string{}, ErrInvalidSegmentOrder},
-		{"a database twice", []string{"theintrodb", "introdb", "introdb"}, []string{}, ErrInvalidSegmentOrder},
+		{"a database missing", []string{"theintrodb", "introdb", "publicmetadb"}, []string{}, ErrInvalidSegmentOrder},
+		{"a database twice", []string{"theintrodb", "introdb", "publicmetadb", "introdb"}, []string{}, ErrInvalidSegmentOrder},
 		{"an unknown database turned off", SegmentSources, []string{"other"}, ErrInvalidSegmentSourcesOff},
 		{"a database turned off twice", SegmentSources, []string{"introdb", "introdb"}, ErrInvalidSegmentSourcesOff},
 	} {
@@ -317,9 +336,9 @@ func TestSegmentSourcesStayValid(t *testing.T) {
 	// The databases turned off are kept in their usual order, and none is
 	// an empty list.
 	changed := store.Settings()
-	changed.SegmentOrder, changed.SegmentSourcesOff = []string{"publicmetadb", "introdb", "theintrodb"}, []string{"publicmetadb", "theintrodb"}
+	changed.SegmentOrder, changed.SegmentSourcesOff = []string{"publicmetadb", "skipdb", "introdb", "theintrodb"}, []string{"skipdb", "publicmetadb", "theintrodb"}
 	saved, err := store.UpdateSettings(ctx, changed)
-	if err != nil || !slices.Equal(saved.SegmentSourcesOff, []string{"theintrodb", "publicmetadb"}) {
+	if err != nil || !slices.Equal(saved.SegmentSourcesOff, []string{"theintrodb", "publicmetadb", "skipdb"}) {
 		t.Errorf("saved: %v %v", saved.SegmentSourcesOff, err)
 	}
 	changed.SegmentSourcesOff = nil

@@ -57,12 +57,19 @@ func newMosaicAddon(t *testing.T) *mosaicAddon {
 			_ = json.NewEncoder(w).Encode(map[string]any{"metas": metas})
 		case strings.HasPrefix(path, "/catalog/collection/sets"):
 			_ = json.NewEncoder(w).Encode(map[string]any{"metas": []stremio.Meta{
-				{ID: "set:plain", Type: "collection", Name: "Été indien"},
+				// A shape without a poster: the generated one is 2:3.
+				{ID: "set:plain", Type: "collection", Name: "Été indien", PosterShape: "landscape"},
 				{ID: "set:posted", Type: "collection", Name: "Posted", Poster: a.url + "/p/99.png"}}})
 		case strings.HasPrefix(path, "/meta/collection/"):
 			id := strings.TrimSuffix(strings.TrimPrefix(path, "/meta/collection/"), ".json")
 			_ = json.NewEncoder(w).Encode(map[string]any{"meta": stremio.Meta{ID: id, Type: "collection",
 				Collection: &stremio.Collection{Sources: []stremio.CollectionSource{{Type: "movie", CatalogID: "top"}}}}})
+		case strings.HasPrefix(path, "/meta/movie/"):
+			id := strings.TrimSuffix(strings.TrimPrefix(path, "/meta/movie/"), ".json")
+			var n int
+			_, _ = fmt.Sscanf(id, "tt%d", &n)
+			_ = json.NewEncoder(w).Encode(map[string]any{"meta": stremio.Meta{ID: id, Type: "movie", Name: fmt.Sprint("Movie ", n),
+				Poster: a.url + fmt.Sprintf("/p/%d.png", n)}})
 		case strings.HasPrefix(path, "/p/"):
 			var n int
 			_, _ = fmt.Sscanf(path, "/p/%d.png", &n)
@@ -212,6 +219,12 @@ func TestCollectionsWithoutAPosterGetGeneratedImages(t *testing.T) {
 	var item BaseItemDto
 	if g.get(t, "/Items/"+plain.Id, g.member, &item); item.ImageTags["Primary"] != primary || item.ImageTags["Thumb"] != thumb {
 		t.Errorf("the collection as an item: %v", item.ImageTags)
+	}
+	// The generated poster is 2:3, whatever shape the addon declares.
+	for what, dto := range map[string]BaseItemDto{"listed": plain, "as an item": item} {
+		if ratio := aspectRatio(dto); ratio != 2.0/3.0 {
+			t.Errorf("the generated poster's ratio, %s: %v", what, ratio)
+		}
 	}
 	if posted = g.collections(t, g.member)["Posted"]; posted.ImageTags["Primary"] != library.ImageTag(g.addon.url+"/p/99.png") {
 		t.Errorf("a collection with a poster, after: %v", posted.ImageTags)
@@ -509,12 +522,47 @@ func TestAddonsCannotGiveGeneratedImages(t *testing.T) {
 		if item.Name == "Through the scheme" && item.ImageTags["Primary"] != "" {
 			t.Errorf("the poster in the scheme of generated images is listed: %v", item.ImageTags)
 		}
-		statuses[item.Name], _, _ = s.send(http.MethodGet, "/Items/"+item.Id+"/Images/Primary", "", "", "")
+		// Apps ask by the tag the title gave, without credentials.
+		statuses[item.Name], _, _ = s.send(http.MethodGet, "/Items/"+item.Id+"/Images/Primary?tag="+item.ImageTags["Primary"], "", "", "")
 	}
 	if statuses["Direct"] != http.StatusForbidden || directHits.Load() != 0 {
 		t.Errorf("the confined addon's local poster: %d, reached %d times", statuses["Direct"], directHits.Load())
 	}
 	if statuses["Through the scheme"] == http.StatusOK || secretHits.Load() != 0 {
 		t.Errorf("the poster in the scheme of generated images: %d, its poster reached %d times", statuses["Through the scheme"], secretHits.Load())
+	}
+}
+
+// A movie or series library made from now on shows a generated image
+// without anyone choosing it, as Jellyfin draws one for its libraries:
+// apps see a wide Primary image on its tile. A user blocking genres still
+// gets none, and a collection library keeps no image.
+func TestNewLibrariesGetAGeneratedImage(t *testing.T) {
+	t.Parallel()
+	g := newGenerating(t)
+	g.titlesOf(t, g.views["Top"])
+	g.later()
+	views := func(token string) map[string]BaseItemDto {
+		t.Helper()
+		var page QueryResult
+		g.get(t, "/UserViews", token, &page)
+		byName := map[string]BaseItemDto{}
+		for _, view := range page.Items {
+			byName[view.Name] = view
+		}
+		return byName
+	}
+	top := views(g.member)["Top"]
+	if top.ImageTags["Primary"] == "" || top.PrimaryImageAspectRatio == nil || *top.PrimaryImageAspectRatio != 16.0/9.0 {
+		t.Fatalf("the new movie library: tags %v, ratio %v", top.ImageTags, top.PrimaryImageAspectRatio)
+	}
+	if status, picture, _ := g.download(t, "/Items/"+g.views["Top"]+"/Images/Primary"); status != http.StatusOK || !named(picture) {
+		t.Errorf("the new library's image: %d", status)
+	}
+	if sets := views(g.member)["Sets"]; sets.ImageTags["Primary"] != "" {
+		t.Errorf("the collection library: %v", sets.ImageTags)
+	}
+	if kid := views(g.kid)["Top"]; kid.ImageTags["Primary"] != "" {
+		t.Errorf("a user blocking genres: %v", kid.ImageTags)
 	}
 }

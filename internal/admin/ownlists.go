@@ -13,11 +13,17 @@ import (
 
 // Watching is what My account shows of the user's lists and changes in
 // them, as the Jellyfin API's Polyfin routes do: Continue Watching, whose
-// titles can be taken off it, and the titles hidden from every list, which
-// can be shown again.
+// titles can be taken off it, Next Up, whose series can be taken off it and
+// put back, with the series dropped on a tracking service it leaves out,
+// and the titles hidden from every list, which can be shown again.
 type Watching interface {
 	ResumeItems(ctx context.Context, user accounts.User) ([]jellyfin.ResumeItem, error)
 	RemoveResume(ctx context.Context, user accounts.User, id accounts.ID) error
+	NextUpItems(ctx context.Context, user accounts.User) ([]library.Item, error)
+	NextUpRemovals(ctx context.Context, user accounts.User) ([]jellyfin.NextUpRemoval, error)
+	RemoveFromNextUp(ctx context.Context, user accounts.User, id accounts.ID) error
+	NextUpDropped(ctx context.Context, user accounts.User) ([]jellyfin.DroppedSeries, error)
+	PutBackOnNextUp(ctx context.Context, user accounts.User, id accounts.ID) error
 	HiddenTitles(ctx context.Context, user accounts.User) ([]jellyfin.HiddenTitle, error)
 	ShowTitle(ctx context.Context, user accounts.User, id accounts.ID) error
 }
@@ -36,6 +42,31 @@ type resumeJSON struct {
 type hiddenJSON struct {
 	Item     *liveItemJSON `json:"item"`
 	HiddenAt time.Time     `json:"hiddenAt"`
+}
+
+// nextUpJSON is the user's Next Up: its episodes, the series they took off
+// it and that are still off it, those they dropped on a tracking service,
+// and whether taking an episode off Continue Watching also takes its
+// series off Next Up.
+type nextUpJSON struct {
+	Items      []*liveItemJSON `json:"items"`
+	Removed    []removedJSON   `json:"removed"`
+	Dropped    []droppedJSON   `json:"dropped"`
+	WithResume bool            `json:"withResume"`
+}
+
+// droppedJSON is a series dropped on tracking services, the services in
+// the Tracking page's order, and the latest of their drop dates.
+type droppedJSON struct {
+	Item      *liveItemJSON `json:"item"`
+	Services  []string      `json:"services"`
+	DroppedAt time.Time     `json:"droppedAt"`
+}
+
+// removedJSON is a series taken off Next Up, and when it was.
+type removedJSON struct {
+	Item      *liveItemJSON `json:"item"`
+	RemovedAt time.Time     `json:"removedAt"`
 }
 
 func (h *handler) ownResume(w http.ResponseWriter, r *http.Request) {
@@ -111,4 +142,102 @@ func (h *handler) showOwnHidden(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *handler) ownNextUp(w http.ResponseWriter, r *http.Request) {
+	user := sessionFrom(r.Context()).User
+	result := nextUpJSON{Items: []*liveItemJSON{}, Removed: []removedJSON{}, Dropped: []droppedJSON{}, WithResume: user.NextUpWithResume}
+	if h.Watching == nil {
+		writeJSON(w, http.StatusOK, result)
+		return
+	}
+	items, err := h.Watching.NextUpItems(r.Context(), user)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	for _, item := range items {
+		result.Items = append(result.Items, newLiveItemJSON(item))
+	}
+	removals, err := h.Watching.NextUpRemovals(r.Context(), user)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	for _, removal := range removals {
+		result.Removed = append(result.Removed, removedJSON{Item: newLiveItemJSON(removal.Item), RemovedAt: removal.At})
+	}
+	dropped, err := h.Watching.NextUpDropped(r.Context(), user)
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	for _, d := range dropped {
+		result.Dropped = append(result.Dropped, droppedJSON{Item: newLiveItemJSON(d.Item), Services: d.Services, DroppedAt: d.At})
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (h *handler) removeOwnNextUp(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	if h.Watching == nil {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	err := h.Watching.RemoveFromNextUp(r.Context(), sessionFrom(r.Context()).User, id)
+	switch {
+	case errors.Is(err, library.ErrNotFound):
+		writeError(w, http.StatusNotFound, "not_found")
+	case errors.Is(err, jellyfin.ErrNoNextUp):
+		writeError(w, http.StatusBadRequest, "invalid_request")
+	case err != nil:
+		h.internalError(w, r, err)
+	default:
+		w.WriteHeader(http.StatusNoContent)
+	}
+}
+
+func (h *handler) putBackOwnNextUp(w http.ResponseWriter, r *http.Request) {
+	id, ok := pathID(w, r, "id")
+	if !ok {
+		return
+	}
+	if h.Watching == nil {
+		writeError(w, http.StatusNotFound, "not_found")
+		return
+	}
+	if err := h.Watching.PutBackOnNextUp(r.Context(), sessionFrom(r.Context()).User, id); err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+// setOwnNextUpWithResume turns on or off whether taking an episode off
+// Continue Watching also takes its series off the caller's Next Up (see
+// accounts.User.NextUpWithResume).
+func (h *handler) setOwnNextUpWithResume(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		WithResume *bool `json:"withResume"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	if body.WithResume == nil {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	session := sessionFrom(r.Context())
+	user, err := h.Accounts.UpdateUser(r.Context(), session.User.ID, accounts.UserChanges{NextUpWithResume: body.WithResume}, session.TokenHash)
+	if accountError(w, err) {
+		return
+	}
+	if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"withResume": user.NextUpWithResume})
 }

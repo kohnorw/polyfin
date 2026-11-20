@@ -408,7 +408,7 @@ type musicCaches struct {
 	artists   musicCache[eclipse.Artist]
 	playlists musicCache[eclipse.Playlist]
 	searches  musicCache[eclipse.Results]
-	fetches   *addonSlots
+	fetches   *addonSlots[accounts.ID]
 }
 
 func newMusicCaches(s *Service) musicCaches {
@@ -420,7 +420,7 @@ func newMusicCaches(s *Service) musicCaches {
 		artists:   newMusicCache(2000, 8<<20, cache.JSONSize[eclipse.Artist], fixed(metaTTL), staleMusic, clock),
 		playlists: newMusicCache(1000, 16<<20, cache.JSONSize[eclipse.Playlist], fixed(metaTTL), staleMusic, clock),
 		searches:  newMusicCache(500, 4<<20, cache.JSONSize[eclipse.Results], fixed(searchTTL), 0, clock),
-		fetches:   &addonSlots{slots: map[accounts.ID]chan struct{}{}},
+		fetches:   newAddonSlots[accounts.ID](addonFetches),
 	}
 }
 
@@ -446,26 +446,91 @@ func newMusicCache[V any](capacity, maxBytes int, size func(V) int, life func() 
 	return musicCache[V]{answers: answers, life: life}
 }
 
-// addonSlots bounds the requests under way to each addon.
-type addonSlots struct {
+// addonSlots bounds the requests under way to each addon, or each host,
+// to size at once. A request waiting for a place gets it before every
+// request of a read no one waits for (see withYielding) that waits too,
+// and those of each kind in turn.
+type addonSlots[K comparable] struct {
+	size  int
 	mu    sync.Mutex
-	slots map[accounts.ID]chan struct{}
+	slots map[K]*slotQueue
+}
+
+// slotQueue is the places of one addon or host: those taken, and the
+// requests waiting for one, those someone waits for first.
+type slotQueue struct {
+	taken          int
+	first, yielded []chan struct{}
+}
+
+func newAddonSlots[K comparable](size int) *addonSlots[K] {
+	return &addonSlots[K]{size: size, slots: map[K]*slotQueue{}}
 }
 
 // acquire waits for a place for a request to addon, which release frees.
-func (a *addonSlots) acquire(ctx context.Context, addon accounts.ID) (release func(), err error) {
+// A request whose ctx ended gets none, so that it asks nothing.
+func (a *addonSlots[K]) acquire(ctx context.Context, addon K) (release func(), err error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	release = func() { a.release(addon) }
+	yields := yielding(ctx)
 	a.mu.Lock()
-	slots, ok := a.slots[addon]
+	q, ok := a.slots[addon]
 	if !ok {
-		slots = make(chan struct{}, addonFetches)
-		a.slots[addon] = slots
+		q = &slotQueue{}
+		a.slots[addon] = q
+	}
+	if q.taken < a.size {
+		q.taken++
+		a.mu.Unlock()
+		return release, nil
+	}
+	turn := make(chan struct{})
+	if yields {
+		q.yielded = append(q.yielded, turn)
+	} else {
+		q.first = append(q.first, turn)
 	}
 	a.mu.Unlock()
 	select {
-	case slots <- struct{}{}:
-		return func() { <-slots }, nil
+	case <-turn:
+		// ctx may have ended as the place came.
+		if err := ctx.Err(); err != nil {
+			a.release(addon)
+			return nil, err
+		}
+		return release, nil
 	case <-ctx.Done():
-		return nil, ctx.Err()
+	}
+	a.mu.Lock()
+	waiting := len(q.first) + len(q.yielded)
+	q.first = slices.DeleteFunc(q.first, func(c chan struct{}) bool { return c == turn })
+	q.yielded = slices.DeleteFunc(q.yielded, func(c chan struct{}) bool { return c == turn })
+	handed := len(q.first)+len(q.yielded) == waiting
+	a.mu.Unlock()
+	// The place was handed over as ctx ended: it goes to the next.
+	if handed {
+		a.release(addon)
+	}
+	return nil, ctx.Err()
+}
+
+// release frees a place of addon: it goes to the request waiting first,
+// one someone waits for before one no one does.
+func (a *addonSlots[K]) release(addon K) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	q := a.slots[addon]
+	switch {
+	case len(q.first) > 0:
+		close(q.first[0])
+		q.first = q.first[1:]
+	case len(q.yielded) > 0:
+		close(q.yielded[0])
+		q.yielded = q.yielded[1:]
+	default:
+		q.taken--
 	}
 }
 
@@ -491,13 +556,14 @@ func remember[V any](ctx context.Context, s *Service, c musicCache[V], key music
 	}
 	if kept, ok := c.answers.Get(key); ok {
 		if s.now().Sub(kept.at) > c.life() {
-			detached := context.WithoutCancel(ctx)
-			s.flight.DoChan(flightKey, func() (any, error) {
+			s.doShared(flightKey, func() (any, error) {
 				// A refresh that ended between the read above and this one
 				// already asked the addon.
 				if newer, ok := c.answers.Get(key); ok && newer.at.After(kept.at) {
 					return newer.value, nil
 				}
+				detached, done := s.detached(ctx)
+				defer done()
 				value, err := ask(detached)
 				if err != nil {
 					s.logger.Debug("A music page could not be read again", "resource", key.resource, "error", err)
@@ -525,7 +591,7 @@ func (s *Service) musicCatalogPage(ctx context.Context, entry installed, catalog
 	}
 	return remember(ctx, s, s.musicCache.pages, entry.musicKey("catalog", catalog.ID, skip), func(ctx context.Context) (musicPage, error) {
 		items, length, err := s.music.Catalog(ctx, entry.eclipseAddon(), catalog, skip)
-		return musicPage{items: items, length: length}, err
+		return musicPage{items: items, length: length}, failedAt(entry, catalog.ID, err)
 	})
 }
 
@@ -534,7 +600,8 @@ func (s *Service) albumPage(ctx context.Context, entry installed, id string) (ec
 		return s.local.MusicAlbum(ctx, entry.addon.ID, id)
 	}
 	return remember(ctx, s, s.musicCache.albums, entry.musicKey("album", id, 0), func(ctx context.Context) (eclipse.Album, error) {
-		return s.music.Album(ctx, entry.eclipseAddon(), id)
+		album, err := s.music.Album(ctx, entry.eclipseAddon(), id)
+		return album, failedAt(entry, "", err)
 	})
 }
 
@@ -543,7 +610,8 @@ func (s *Service) artistPage(ctx context.Context, entry installed, id string) (e
 		return s.local.MusicArtist(ctx, entry.addon.ID, id)
 	}
 	return remember(ctx, s, s.musicCache.artists, entry.musicKey("artist", id, 0), func(ctx context.Context) (eclipse.Artist, error) {
-		return s.music.Artist(ctx, entry.eclipseAddon(), id)
+		artist, err := s.music.Artist(ctx, entry.eclipseAddon(), id)
+		return artist, failedAt(entry, "", err)
 	})
 }
 
@@ -552,7 +620,8 @@ func (s *Service) playlistPage(ctx context.Context, entry installed, id string) 
 		return s.local.MusicPlaylist(ctx, entry.addon.ID, id)
 	}
 	return remember(ctx, s, s.musicCache.playlists, entry.musicKey("playlist", id, 0), func(ctx context.Context) (eclipse.Playlist, error) {
-		return s.music.Playlist(ctx, entry.eclipseAddon(), id)
+		playlist, err := s.music.Playlist(ctx, entry.eclipseAddon(), id)
+		return playlist, failedAt(entry, "", err)
 	})
 }
 
@@ -561,7 +630,8 @@ func (s *Service) musicSearch(ctx context.Context, entry installed, term string)
 		return s.local.MusicSearch(ctx, entry.addon.ID, term)
 	}
 	return remember(ctx, s, s.musicCache.searches, entry.musicKey("search", musicName(term), 0), func(ctx context.Context) (eclipse.Results, error) {
-		return s.music.Search(ctx, entry.eclipseAddon(), term)
+		results, err := s.music.Search(ctx, entry.eclipseAddon(), term)
+		return results, failedAt(entry, "", err)
 	})
 }
 
@@ -589,7 +659,7 @@ func (s *Service) musicCatalog(ctx context.Context, v view, entry installed, cat
 			if skip == 0 {
 				return nil, err
 			}
-			s.logger.Warn("A music catalog could not be read further", "addon", entry.addon.Manifest.Name, "error", err)
+			s.logger.Warn("A music catalog could not be read further", "addon", entry.addon.LogName(), "error", err)
 			break
 		}
 		items = append(items, page.items...)
@@ -863,7 +933,7 @@ func (s *Service) expand(ctx context.Context, v view, entry installed, folders [
 				}
 			}
 			if err != nil && ctx.Err() == nil {
-				s.logger.Debug("A music page could not be read", "addon", entry.addon.Manifest.Name, "error", err)
+				s.logger.Debug("A music page could not be read", "addon", entry.addon.LogName(), "error", err)
 			}
 			return nil
 		})
@@ -950,7 +1020,7 @@ func (s *Service) Music(ctx context.Context, user accounts.User, q MusicQuery) (
 					list, err = s.artistRecords(ctx, v, entry, r, kind != KindAlbum)
 				}
 				if err != nil {
-					s.logger.Debug("A music page could not be read", "addon", entry.addon.Manifest.Name, "error", err)
+					s.logger.Debug("A music page could not be read", "addon", entry.addon.LogName(), "error", err)
 					continue
 				}
 				add(entry, list)
@@ -963,7 +1033,7 @@ func (s *Service) Music(ctx context.Context, user accounts.User, q MusicQuery) (
 			}
 			list, err := s.musicLibrary(ctx, v, l, q.Kinds, true, q.Shallow)
 			if err != nil {
-				s.logger.Debug("A music library could not be listed", "addon", l.addon.addon.Manifest.Name, "error", err)
+				s.logger.Debug("A music library could not be listed", "addon", l.addon.addon.LogName(), "error", err)
 				continue
 			}
 			add(l.addon, list)
@@ -1437,7 +1507,7 @@ func (s *Service) SearchMusic(ctx context.Context, user accounts.User, term stri
 			results, err := s.musicSearch(ctx, entry, term)
 			if err != nil {
 				if ctx.Err() == nil {
-					s.logger.Warn("A music addon could not search", "addon", entry.addon.Manifest.Name, "error", err)
+					s.logger.Warn("A music addon could not search", "addon", entry.addon.LogName(), "error", err)
 				}
 				return
 			}
@@ -1636,7 +1706,7 @@ func trackVersionID(item accounts.ID) accounts.ID {
 // track at the same time share one request to the stream resource.
 func (s *Service) resolveTrack(ctx context.Context, entry installed, r record, renew bool) (Version, error) {
 	e := r.Music
-	version := Version{ID: trackVersionID(r.ID), Item: r.ID, Name: e.Title, Addon: entry.addon.Manifest.Name,
+	version := Version{ID: trackVersionID(r.ID), Item: r.ID, Name: e.Title, Addon: entry.addon.Name(), AddonLog: entry.addon.LogName(),
 		Origin: Origin{Addon: entry.addon.ID, Type: originEclipse, ID: e.ID}, Confined: entry.confined,
 		Runtime: time.Duration(e.Duration * float64(time.Second))}
 	if !renew && e.StreamURL != "" {
@@ -1652,7 +1722,7 @@ func (s *Service) resolveTrack(ctx context.Context, entry installed, r record, r
 			return Version{}, ErrNotFound
 		}
 		if err != nil {
-			return Version{}, &StreamError{Addon: version.Addon, Err: err}
+			return Version{}, &StreamError{Addon: version.AddonLog, Err: err}
 		}
 		version.URL, version.Expires = stream.URL, stream.Expires
 		version.Name = cmpOr(stream.Quality, e.Title)
@@ -1668,7 +1738,8 @@ func (s *Service) resolveTrack(ctx context.Context, entry installed, r record, r
 // StreamError reports a track whose addon gave no stream: it could not be
 // reached, or its answer was no stream.
 type StreamError struct {
-	// Addon is the name of the track's addon.
+	// Addon names the track's addon as logs name it (see
+	// addons.Addon.LogName).
 	Addon string
 	Err   error
 }

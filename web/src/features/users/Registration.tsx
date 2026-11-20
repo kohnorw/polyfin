@@ -23,7 +23,7 @@ const useLimits = [1, 2, 3, 5, 10, 25, 50, 100, 0]
  */
 export default function Registration() {
   const { t } = useI18n()
-  const s = t.users
+  const s = t.fork.users
   const client = useQueryClient()
   const settings = useQuery({
     queryKey: queryKeys.settings,
@@ -84,7 +84,7 @@ export default function Registration() {
 
 function Codes() {
   const { t } = useI18n()
-  const s = t.users
+  const s = t.fork.users
   const client = useQueryClient()
   const [copied, setCopied] = useState('')
   const codes = useQuery({

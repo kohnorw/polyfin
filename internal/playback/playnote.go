@@ -3,6 +3,8 @@ package playback
 import (
 	"fmt"
 	"slices"
+
+	"github.com/moodiness/polyfin/internal/i18n"
 )
 
 // noteWords are the endings of version names telling how a version plays,
@@ -10,17 +12,27 @@ import (
 // none named, or not at all.
 type noteWords struct {
 	directPlay, directStream, converted, convertedFor, cannotPlay string
-	hdr, quality, subtitles, video, audio                         string
+	app, hdr, quality, subtitles, video, audio                    string
 }
 
-var (
-	englishNotes = noteWords{"(direct play)", "(direct stream)", "(converted)", "(converted: %s)", "(cannot play here)",
-		"HDR", "quality limit", "subtitles", "video", "audio"}
-	// frenchNotes set the colon off with a no-break space, which keeps it
-	// on the line of the word before.
-	frenchNotes = noteWords{"(lecture directe)", "(flux direct)", "(converti)", "(converti\u00a0: %s)", "(illisible ici)",
-		"HDR", "limite de qualité", "sous-titres", "vidéo", "audio"}
-)
+// playNotes are the notes of each server language. The French set the
+// colon off with a narrow no-break space, which keeps it on the line of
+// the word before; the Spanish, Italian and Portuguese agree with
+// "version", which is feminine there.
+var playNotes = map[string]noteWords{
+	"en": {"(direct play)", "(direct stream)", "(converted)", "(converted: %s)", "(cannot play here)",
+		"app’s request", "HDR", "quality limit", "subtitles", "video", "audio"},
+	"fr": {"(lecture directe)", "(flux direct)", "(converti)", "(converti\u202f: %s)", "(illisible ici)",
+		"demande de l’app", "HDR", "limite de qualité", "sous-titres", "vidéo", "audio"},
+	"de": {"(direktes Abspielen)", "(direkter Stream)", "(konvertiert)", "(konvertiert: %s)", "(hier nicht abspielbar)",
+		"Wunsch der App", "HDR", "Qualitätslimit", "Untertitel", "Video", "Audio"},
+	"es": {"(reproducción directa)", "(transmisión directa)", "(convertida)", "(convertida: %s)", "(no se puede reproducir aquí)",
+		"pedido de la app", "HDR", "calidad máxima", "subtítulos", "vídeo", "audio"},
+	"it": {"(riproduzione diretta)", "(stream diretto)", "(convertita)", "(convertita: %s)", "(non riproducibile qui)",
+		"richiesta app", "HDR", "limite qualità", "sottotitoli", "video", "audio"},
+	"pt-BR": {"(reprodução direta)", "(stream direto)", "(convertida)", "(convertida: %s)", "(não reproduzível aqui)",
+		"pedido do app", "HDR", "qualidade", "legendas", "vídeo", "áudio"},
+}
 
 // videoReasons are the TranscodeReasons about the video.
 var videoReasons = []string{"VideoCodecNotSupported", "VideoProfileNotSupported", "VideoLevelNotSupported", "VideoResolutionNotSupported",
@@ -31,8 +43,10 @@ var videoReasons = []string{"VideoCodecNotSupported", "VideoProfileNotSupported"
 // PlayNote is the ending of a version's name telling how a decision plays
 // it, in the server language: "(direct play)" as it is; "(direct stream)"
 // copied into HLS; "(converted: reason)" with the first reason that
-// applies of HDR (VideoRangeTypeNotSupported, the video converted), the
-// quality limit (VideoResolutionNotSupported, VideoBitrateNotSupported or
+// applies of the app's request (the app turned direct play off for a
+// version that would have played as it is, see Decision.DirectPlayOff),
+// HDR (VideoRangeTypeNotSupported, the video converted), the quality
+// limit (VideoResolutionNotSupported, VideoBitrateNotSupported or
 // ContainerBitrateExceedsLimit, the video converted), subtitles (a
 // subtitle burned into the video), the video (another reason about it),
 // or the audio (the audio converted, the video copied); "(converted)" for
@@ -40,10 +54,50 @@ var videoReasons = []string{"VideoCodecNotSupported", "VideoProfileNotSupported"
 // decision needs a conversion the server or the user may not have, or
 // none plays the version. It is 30 characters at most.
 func PlayNote(decision Decision, playable bool, language string) string {
-	w := &englishNotes
-	if wordsFor(language) == &frenchWords {
-		w = &frenchNotes
+	w, ok := playNotes[i18n.Match(language)]
+	if !ok {
+		w = playNotes["en"]
 	}
+	return note(w, decision, playable)
+}
+
+// likelyNotes are the endings of each server language that tell how a
+// version likely plays, estimated from its labels: as playNotes, the
+// reasons the same.
+var likelyNotes = map[string]noteWords{
+	"en": {directPlay: "(likely direct play)", directStream: "(likely direct stream)", converted: "(likely converted)",
+		convertedFor: "(likely converted: %s)", cannotPlay: "(likely cannot play here)"},
+	"fr": {directPlay: "(lecture directe probable)", directStream: "(flux direct probable)", converted: "(conversion probable)",
+		convertedFor: "(conversion probable\u202f: %s)", cannotPlay: "(probablement illisible ici)"},
+	"de": {directPlay: "(vermutlich direktes Abspielen)", directStream: "(vermutlich direkter Stream)", converted: "(vermutlich konvertiert)",
+		convertedFor: "(vermutlich konvertiert: %s)", cannotPlay: "(vermutlich nicht abspielbar)"},
+	"es": {directPlay: "(probable reproducción directa)", directStream: "(probable transmisión directa)", converted: "(probablemente convertida)",
+		convertedFor: "(probablemente convertida: %s)", cannotPlay: "(probablemente no reproducible)"},
+	"it": {directPlay: "(probabile riproduzione diretta)", directStream: "(probabile stream diretto)", converted: "(probabilmente convertita)",
+		convertedFor: "(probabilmente convertita: %s)", cannotPlay: "(probabilmente non riproducibile)"},
+	"pt-BR": {directPlay: "(provável reprodução direta)", directStream: "(provável stream direto)", converted: "(provavelmente convertida)",
+		convertedFor: "(provavelmente convertida: %s)", cannotPlay: "(provavelmente não reproduzível)"},
+}
+
+// LikelyNote is PlayNote for a decision made on the tracks a version's
+// labels suggest while its own are unknown: the same ending, worded as an
+// estimate, "(likely direct play)" or "(likely converted: audio)". It is
+// 45 characters at most.
+func LikelyNote(decision Decision, playable bool, language string) string {
+	match := i18n.Match(language)
+	w, ok := playNotes[match]
+	likely, known := likelyNotes[match]
+	if !ok || !known {
+		w, likely = playNotes["en"], likelyNotes["en"]
+	}
+	w.directPlay, w.directStream, w.converted, w.convertedFor, w.cannotPlay =
+		likely.directPlay, likely.directStream, likely.converted, likely.convertedFor, likely.cannotPlay
+	return note(w, decision, playable)
+}
+
+// note is the ending in w telling how a decision plays a version (see
+// PlayNote).
+func note(w noteWords, decision Decision, playable bool) string {
 	has := func(reasons ...string) bool {
 		return slices.ContainsFunc(decision.Reasons, func(reason string) bool { return slices.Contains(reasons, reason) })
 	}
@@ -56,6 +110,8 @@ func PlayNote(decision Decision, playable bool, language string) string {
 		return w.directPlay
 	case decision.Video == nil && decision.Audio == nil:
 		return w.directStream
+	case decision.DirectPlayOff:
+		reason = w.app
 	case decision.Video != nil && has("VideoRangeTypeNotSupported"):
 		reason = w.hdr
 	case decision.Video != nil && has("VideoResolutionNotSupported", "VideoBitrateNotSupported", "ContainerBitrateExceedsLimit"):

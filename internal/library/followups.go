@@ -2,10 +2,12 @@ package library
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"time"
 
+	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/cache"
 	"github.com/moodiness/polyfin/internal/stremio"
 )
@@ -27,6 +29,16 @@ var followUpDelays = []time.Duration{10 * time.Second, 30 * time.Second}
 // (see VersionsNow), while requests that wait for every version wait for
 // the answer instead.
 const staleLists = 24 * time.Hour
+
+// streamListBytes is the memory the stream lists kept may take, and
+// subtitleListBytes that of the subtitle lists, and of the answers of
+// notices alone (see listSize). The largest list an addon's answer
+// decodes to is smaller, with what it keeps of the list it replaces (see
+// stremio.MaxListed and merge).
+const (
+	streamListBytes   = 128 << 20
+	subtitleListBytes = 32 << 20
+)
 
 // The lists followed up.
 const (
@@ -53,6 +65,10 @@ func (l list[T]) state(now time.Time, life time.Duration) (fresh, kept bool) {
 	age := now.Sub(l.at)
 	return age <= life && !l.restored, age <= life+staleLists
 }
+
+// listSize is the size of a list kept: the memory its items hold,
+// whatever they are written in (see cache.MemorySize).
+func listSize[T any](l list[T]) int { return cache.MemorySize(l.items) }
 
 // listKind names the lists of T, and tells how to merge them: usable picks
 // the items that count, playable streams or subtitles that can be
@@ -92,7 +108,9 @@ func (k listKind[T]) count(items []T) int {
 }
 
 // merge lists answer, given at, followed by the usable items of extras it
-// lacks.
+// lacks, up to stremio.MaxListed items in all: answers that replace one
+// another before their follow-ups end do not make a list grow without
+// end.
 func (k listKind[T]) merge(answer, extras []T, at time.Time) list[T] {
 	merged := list[T]{items: answer, answer: len(answer), at: at}
 	if len(extras) == 0 {
@@ -104,6 +122,9 @@ func (k listKind[T]) merge(answer, extras []T, at time.Time) list[T] {
 	}
 	var lacking []T
 	for _, item := range extras {
+		if len(answer)+len(lacking) >= stremio.MaxListed {
+			break
+		}
 		if id := k.identity(item); k.usable(item) && !listed[id] {
 			listed[id] = true
 			lacking = append(lacking, item)
@@ -183,10 +204,55 @@ func newFollowUp() *followUp {
 // answered closes f.asked, once.
 func (f *followUp) answered() { f.once.Do(func() { close(f.asked) }) }
 
-// followUps holds the schedule running for each list, at most one.
+// followUps holds the schedule running for each list, at most one, and
+// the number of the request asking an addon for each list (see ask).
 type followUps struct {
 	mu      sync.Mutex
 	running map[followKey]*followUp
+	asking  map[followKey]uint64
+	asked   uint64
+	// carry, when tests set it, carries the identities of an addon's
+	// streams in place of carryIdentities (see followStreams): they count
+	// what it takes, or hold it.
+	carry func(answer, before []stremio.Stream) []stremio.Stream
+}
+
+// errForgotten is the answer to a request forgotten while the addon was
+// asked (see ask): the answer is left out, as it may be what a refresh is
+// to replace, and the addon is asked again.
+var errForgotten = errors.New("the list was forgotten while the addon was asked for it")
+
+// ask records that an addon is asked for a list for a title, and returns
+// the request's number, which its answer is stored with (see
+// followUpList), and what ends the request. A refresh that forgets the
+// list meanwhile forgets the request too (see forgetLists), and a request
+// asked since, once the one under way is no longer joined (see
+// forgetStreams), replaces it: the answer of a request forgotten or
+// replaced is not stored, it is errForgotten.
+func (s *Service) ask(key followKey) (asked uint64, done func()) {
+	s.followUps.mu.Lock()
+	defer s.followUps.mu.Unlock()
+	if s.followUps.asking == nil {
+		s.followUps.asking = map[followKey]uint64{}
+	}
+	s.followUps.asked++
+	asked = s.followUps.asked
+	s.followUps.asking[key] = asked
+	return asked, func() {
+		s.followUps.mu.Lock()
+		defer s.followUps.mu.Unlock()
+		if s.followUps.asking[key] == asked {
+			delete(s.followUps.asking, key)
+		}
+	}
+}
+
+// askingFor reports whether a request for a list is under way (see ask).
+func (s *Service) askingFor(key followKey) bool {
+	s.followUps.mu.Lock()
+	defer s.followUps.mu.Unlock()
+	_, ok := s.followUps.asking[key]
+	return ok
 }
 
 // SetFollowUps replaces the delays of the follow-ups, 10 and 30 seconds,
@@ -195,61 +261,78 @@ type followUps struct {
 func (s *Service) SetFollowUps(delays ...time.Duration) { s.followUpDelays = delays }
 
 // followStreams stores the streams an addon just listed for a title under
-// key, follows them up (see followUpList), and returns those listed. Each
-// change of the list is saved, and told to whoever follows the title's
-// versions (see streamsChanged).
-func (s *Service) followStreams(ctx context.Context, entry installed, key streamKey, streams []stremio.Stream) []stremio.Stream {
-	return followUpList(ctx, s, s.streamLists, streamKind, key, entry.addon.Manifest.Name, streams,
+// key, in answer to request asked (see ask), follows them up (see
+// followUpList), and returns those listed. Each change of the list is
+// saved, and told to whoever follows the title's versions (see
+// streamsChanged).
+func (s *Service) followStreams(ctx context.Context, entry installed, key streamKey, asked uint64, streams []stremio.Stream) ([]stremio.Stream, error) {
+	kind := streamKind
+	if s.followUps.carry != nil {
+		kind.carry = s.followUps.carry
+	}
+	return followUpList(ctx, s, s.streamLists, kind, key, entry.addon.LogName(), asked, streams,
 		func(ctx context.Context) ([]stremio.Stream, error) {
 			return s.fetchStreams(ctx, entry, key.contentType, key.id)
 		}, func() { s.streamsChanged(key) })
 }
 
 // followSubtitles stores the subtitles an addon just listed for a title
-// under key, follows them up (see followUpList), and returns those listed.
-func (s *Service) followSubtitles(ctx context.Context, entry installed, key streamKey, subtitles []stremio.Subtitle) []stremio.Subtitle {
-	return followUpList(ctx, s, s.subtitleLists, subtitleKind, key, entry.addon.Manifest.Name, subtitles,
+// under key, in answer to request asked (see ask), follows them up (see
+// followUpList), and returns those listed.
+func (s *Service) followSubtitles(ctx context.Context, entry installed, key streamKey, asked uint64, subtitles []stremio.Subtitle) ([]stremio.Subtitle, error) {
+	return followUpList(ctx, s, s.subtitleLists, subtitleKind, key, entry.addon.LogName(), asked, subtitles,
 		func(ctx context.Context) ([]stremio.Subtitle, error) {
 			return s.fetchSubtitles(ctx, entry, key.contentType, key.id)
 		}, nil)
 }
 
-// followUpList stores answer, a list an addon just gave for a title, under
-// key in lists (see keepAnswer), and returns the items listed. It then asks
-// the addon again after each of the service's followUpDelays in turn,
-// detached from ctx's end, as shared does. An answer that counts more than
-// the previous answer replaces it, its items keeping what they carry of
-// the list they replace (see listKind), followed by the items still kept
-// from the list the first answer replaced; the schedule stops at the first
-// answer that does not, at an error, after the last delay, or once the
-// list is no longer fresh: a refresh or its expiry forgot it, and a late
-// answer never brings it back. The list just stored is a new first answer:
-// its schedule replaces the one running for key, which stops. changed,
-// unless nil, runs after the list is stored, after each answer that
-// replaces it, and once the schedule ends.
+// followUpList stores answer, a list an addon just gave for a title in
+// answer to request asked (see ask), under key in lists (see keepAnswer),
+// and returns the items listed; an answer to a request a refresh forgot
+// is not stored, it is errForgotten. It then asks the addon again after
+// each of the service's followUpDelays in turn, detached from ctx's end,
+// as shared does. An answer that counts more than the previous answer
+// replaces it, its items keeping what they carry of the list they replace
+// (see listKind), followed by the items still kept from the list the
+// first answer replaced; the schedule stops at the first answer that does
+// not, at an error, after the last delay, or once the list is no longer
+// fresh: a refresh or its expiry forgot it, and a late answer never
+// brings it back. The list just stored is a new first answer: its
+// schedule replaces the one running for key, which stops. changed, unless
+// nil, runs after the list is stored, after each answer that replaces it,
+// and once the schedule ends. Follow-ups are background work, paced after
+// the rest (see laterBackground), but for one hurried by a renewal, which
+// a play waits for.
 func followUpList[T any](ctx context.Context, s *Service, lists *cache.Cache[streamKey, list[T]], kind listKind[T], key streamKey, addon string,
-	answer []T, fetch func(context.Context) ([]T, error), changed func()) []T {
+	asked uint64, answer []T, fetch func(context.Context) ([]T, error), changed func()) ([]T, error) {
 	notify := func() {
 		if changed != nil {
 			changed()
 		}
 	}
 	delays := s.followUpDelays
-	if len(delays) == 0 {
-		items := keepAnswer(s, lists, kind, key, answer, false)
-		notify()
-		return items
-	}
-	// The schedule replaces the one running before the answer is stored:
-	// the end of the one it replaces leaves the new list as it is.
 	followed := followKey{kind.name, key}
-	f := newFollowUp()
+	var f *followUp
+	// Checked and stored together: a refresh that forgets the request
+	// first has the answer left out, and one after drops the list stored.
 	s.followUps.mu.Lock()
-	s.followUps.running[followed] = f
+	if s.followUps.asking[followed] != asked {
+		s.followUps.mu.Unlock()
+		return nil, errForgotten
+	}
+	if len(delays) > 0 {
+		// The schedule replaces the one running before the answer is
+		// stored: the end of the one it replaces leaves the new list as
+		// it is.
+		f = newFollowUp()
+		s.followUps.running[followed] = f
+	}
+	items := keepAnswer(s, lists, kind, key, answer, f != nil)
 	s.followUps.mu.Unlock()
-	items := keepAnswer(s, lists, kind, key, answer, true)
 	notify()
-	detached := context.WithoutCancel(ctx)
+	if f == nil {
+		return items, nil
+	}
 	flightKey := "follow-up " + kind.name + " " + key.addon.String() + " " + key.contentType + " " + key.id
 	go func() {
 		defer func() {
@@ -257,39 +340,65 @@ func followUpList[T any](ctx context.Context, s *Service, lists *cache.Cache[str
 			f.answered()
 			notify()
 		}()
+		// The request ending does not stop the schedule, the server
+		// stopping does (see detached).
+		detached, done := s.detached(ctx)
+		defer done()
 		for _, delay := range delays {
+			asking := laterBackground(detached)
 			timer := time.NewTimer(delay)
 			select {
 			case <-timer.C:
 			case <-f.hurry:
 				timer.Stop()
+				asking = foreground(detached)
+			case <-detached.Done():
+				timer.Stop()
+				return
 			}
 			if _, fresh, _ := listOf(s, lists, key); !fresh || !s.followingUp(followed, f) {
 				return
 			}
-			answer, err := shared(detached, s, flightKey, fetch)
+			answer, err := shared(asking, s, flightKey, fetch)
 			if err != nil {
 				s.logger.Debug("An addon asked again for a list failed", "addon", addon, "list", kind.name, "error", err)
 				return
 			}
 			now, life := s.now(), s.listLife()
 			before, after := 0, kind.count(answer)
-			// Checked and replaced together: a refresh that stops the
-			// schedule first forgets the list after, or finds it stopped.
-			s.followUps.mu.Lock()
-			grew := s.followUps.running[followed] == f && lists.Update(key, func(kept list[T], ok bool) (list[T], bool) {
-				if fresh, _ := kept.state(now, life); !ok || !fresh {
-					return kept, false
+			// The answer is compared with the list it may replace with no
+			// lock held: that takes a while for long lists, and the locks
+			// are those of every title's lists. It then replaces the list
+			// only if that is still the one compared, and is compared
+			// again with a list that changed meanwhile.
+			grew := false
+			for range followUpTries {
+				compared, ok := lists.Get(key)
+				if fresh, _ := compared.state(now, life); !ok || !fresh {
+					break
 				}
 				// Compared with the previous answer: the items kept from
 				// the list replaced are not the addon's.
-				before = kind.count(kept.items[:kept.answer])
+				before = kind.count(compared.items[:compared.answer])
 				if after <= before {
-					return kept, false
+					break
 				}
-				return kind.merge(kind.carried(answer, kept.items), kept.items[kept.answer:], now), true
-			})
-			s.followUps.mu.Unlock()
+				longer := kind.merge(kind.carried(answer, compared.items), compared.items[compared.answer:], now)
+				changed := false
+				// Checked and replaced together: a refresh that stops the
+				// schedule first forgets the list after, or finds it stopped.
+				s.followUps.mu.Lock()
+				grew = s.followUps.running[followed] == f && lists.Update(key, func(kept list[T], ok bool) (list[T], bool) {
+					if changed = !ok || !kept.same(compared); changed {
+						return kept, false
+					}
+					return longer, true
+				})
+				s.followUps.mu.Unlock()
+				if !changed {
+					break
+				}
+			}
 			if !grew {
 				return
 			}
@@ -298,7 +407,20 @@ func followUpList[T any](ctx context.Context, s *Service, lists *cache.Cache[str
 			f.answered()
 		}
 	}()
-	return items
+	return items, nil
+}
+
+// followUpTries is how many times a follow-up's answer is compared with
+// the list it may replace, the list changing meanwhile each time: the
+// schedule then ends, the list left as it is.
+const followUpTries = 3
+
+// same reports whether l is other itself rather than a list alike: a list
+// kept is replaced, never changed, so the same items given at the same
+// time are the same list.
+func (l list[T]) same(other list[T]) bool {
+	return len(l.items) == len(other.items) && (len(l.items) == 0 || &l.items[0] == &other.items[0]) &&
+		l.answer == other.answer && l.at.Equal(other.at) && l.restored == other.restored
 }
 
 // hurryFollowUp has the next follow-up of an addon's streams for a title
@@ -357,18 +479,128 @@ func (s *Service) stopFollowUps(key streamKey, kinds ...string) {
 
 // forgetLists forgets an addon's lists for a title, which a refresh asks
 // for: their follow-ups stop, and the stream list saved is deleted too, so
-// that a restart does not bring it back (see savedStreams).
+// that a restart does not bring it back (see savedStreams). Requests
+// asking the addon since before are not joined any more, and their
+// answers, which may be what the refresh is to replace, are not stored:
+// the addon is asked anew (see ask).
 func (s *Service) forgetLists(ctx context.Context, key streamKey) {
+	s.followUps.mu.Lock()
+	for _, kind := range []string{listSubtitles, listStreams} {
+		delete(s.followUps.asking, followKey{kind, key})
+	}
+	s.followUps.mu.Unlock()
 	s.stopFollowUps(key, listSubtitles)
+	s.flight.Forget(subtitlesFlight(key))
 	s.subtitleLists.Delete(key)
 	s.forgetStreams(ctx, key)
 }
 
 // forgetStreams forgets an addon's stream list for a title as forgetLists
-// does, its subtitle list kept (see AskAgain). A request asking the addon
-// since before is not joined any more: the next one asks it anew.
+// does, its subtitle list kept (see AskAgain), and its failure to give it
+// lately. A request asking the addon since before is not joined any more:
+// the next one asks it anew.
 func (s *Service) forgetStreams(ctx context.Context, key streamKey) {
 	s.stopFollowUps(key, listStreams)
 	s.flight.Forget(streamsFlight(key))
+	s.noticed.Delete(key)
+	s.failedLately.Delete(key)
 	s.dropStreams(ctx, key)
+}
+
+// ForgetVersionLists forgets the version lists of every addon (see
+// forgetVersionLists), as the task Forget the version lists asks, and
+// returns how many it forgot.
+func (s *Service) ForgetVersionLists(ctx context.Context) (int, error) {
+	return s.forgetVersionLists(ctx, nil)
+}
+
+// ForgetAddonVersionLists forgets an addon's version lists (see
+// forgetVersionLists), and returns how many it forgot: an addon whose
+// address is replaced, once reconfigured, may list other streams.
+func (s *Service) ForgetAddonVersionLists(ctx context.Context, addon accounts.ID) (int, error) {
+	return s.forgetVersionLists(ctx, &addon)
+}
+
+// forgetVersionLists forgets the lists the addons gave for titles, every
+// addon's, or addon's alone unless it is nil, as forgetLists does for a
+// title: their stream lists, saved ones included, their subtitle lists,
+// their answers of notices alone, their failures remembered (see
+// failedFor), and the versions known from them or with a mirror of
+// theirs. Their follow-ups stop, and the requests asking them since
+// before are not joined any more: their answers, which may be
+// what the forgetting is to replace, are not stored, the addons are asked
+// anew (see ask). The lists are dropped under every list's lock (see
+// listLocks): a save or a read back under way ends first, and none after
+// brings a list back. The items of the titles whose lists were forgotten
+// are told, for their pages (see versionsChanged). Pins and blocks stay:
+// they are choices, not lists. It returns how many stream lists it
+// forgot, in memory or saved; those in memory stay forgotten when
+// deleting the saved ones fails.
+func (s *Service) forgetVersionLists(ctx context.Context, addon *accounts.ID) (int, error) {
+	of := func(id accounts.ID) bool { return addon == nil || id == *addon }
+	var flights []string
+	s.followUps.mu.Lock()
+	for key := range s.followUps.asking {
+		if !of(key.addon) {
+			continue
+		}
+		delete(s.followUps.asking, key)
+		if key.list == listStreams {
+			flights = append(flights, streamsFlight(key.streamKey))
+		} else {
+			flights = append(flights, subtitlesFlight(key.streamKey))
+		}
+	}
+	for key := range s.followUps.running {
+		if of(key.addon) {
+			delete(s.followUps.running, key)
+		}
+	}
+	s.followUps.mu.Unlock()
+	for _, flight := range flights {
+		s.flight.Forget(flight)
+	}
+	tracked := s.tracked()
+	unlock := tracked.saving.lockAll()
+	forgotten := map[streamKey]bool{}
+	s.streamLists.DeleteFunc(func(key streamKey, _ list[stremio.Stream]) bool {
+		if !of(key.addon) {
+			return false
+		}
+		forgotten[key] = true
+		return true
+	})
+	dropAll(s.subtitleLists, of)
+	dropAll(s.noticed, of)
+	dropAll(s.failedLately, of)
+	s.versions.DeleteFunc(func(_ accounts.ID, version Version) bool {
+		return of(version.Origin.Addon) || slices.ContainsFunc(version.Mirrors, func(mirror Version) bool { return of(mirror.Origin.Addon) })
+	})
+	// The items told, those of the titles whose lists were forgotten.
+	told := map[accounts.ID]bool{}
+	tell := func(key streamKey) {
+		if item, ok := tracked.titles.Get(listedTitle{key.contentType, key.id}); ok {
+			told[item] = true
+		}
+	}
+	for key := range forgotten {
+		tell(key)
+	}
+	n := len(forgotten)
+	err := s.deleteSavedLists(ctx, addon, func(key streamKey) {
+		if !forgotten[key] {
+			n++
+			tell(key)
+		}
+	})
+	unlock()
+	for item := range told {
+		s.versionsChanged(item)
+	}
+	return n, err
+}
+
+// dropAll drops the entries of lists kept for the addons of reports.
+func dropAll[T any](lists *cache.Cache[streamKey, T], of func(accounts.ID) bool) {
+	lists.DeleteFunc(func(key streamKey, _ T) bool { return of(key.addon) })
 }

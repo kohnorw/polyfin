@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -15,11 +16,13 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
+	"github.com/moodiness/polyfin/internal/importlinks"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/testdb/migrated"
 	"github.com/moodiness/polyfin/internal/userdata"
 	"github.com/moodiness/polyfin/internal/watchlist"
+	"github.com/moodiness/polyfin/internal/watchlist/watchlisttest"
 )
 
 type harness struct {
@@ -31,6 +34,8 @@ type harness struct {
 	addons *addons.Store
 	// watchlist holds the users' watchlists the imports fill.
 	watchlist *watchlist.Store
+	// links keeps the titles the imports did not find.
+	links *importlinks.Store
 	// personalAddons is the server's switch of users' own addons.
 	personalAddons *atomic.Bool
 }
@@ -49,7 +54,7 @@ func newHarness(t *testing.T, configure ...func(*Options)) harness {
 	addonStore := addons.New(pool, client)
 	lib := library.New(pool, addonStore, client, logger, store.Settings)
 	data := userdata.New(pool)
-	lists := watchlist.New(pool)
+	lists := watchlisttest.Store(pool)
 	personalAddons := &atomic.Bool{}
 	personalAddons.Store(true)
 	settings := func() accounts.Settings {
@@ -57,13 +62,15 @@ func newHarness(t *testing.T, configure ...func(*Options)) harness {
 		s.PersonalAddons = personalAddons.Load()
 		return s
 	}
-	options := Options{Settings: settings, Titles: lib, UserData: data, Addons: addonStore, Logger: logger, DB: pool, Watchlist: lists}
+	links := importlinks.New(importlinks.Options{DB: pool, Settings: settings, Titles: lib, UserData: data, Watchlist: lists, Logger: logger})
+	options := Options{Settings: settings, Titles: lib, UserData: data, Addons: addonStore, Logger: logger, DB: pool, Watchlist: lists,
+		Links: links}
 	for _, c := range configure {
 		c(&options)
 	}
 	s := New(options)
 	t.Cleanup(s.Close)
-	return harness{Service: s, pool: pool, store: store, lib: lib, data: data, addons: addonStore, watchlist: lists,
+	return harness{Service: s, pool: pool, store: store, lib: lib, data: data, addons: addonStore, watchlist: lists, links: links,
 		personalAddons: personalAddons}
 }
 
@@ -106,8 +113,7 @@ func (h harness) dataOf(t *testing.T, user accounts.ID, ref library.TitleRef) us
 	return got[id]
 }
 
-// watchlistOf lists user's watchlist as the Watchlist view does: the
-// titles not started, the latest added first.
+// watchlistOf lists the entries of user's watchlist playlist, in order.
 func (h harness) watchlistOf(t *testing.T, user accounts.ID) []accounts.ID {
 	t.Helper()
 	ids, err := h.watchlist.Titles(t.Context(), user)
@@ -115,6 +121,22 @@ func (h harness) watchlistOf(t *testing.T, user accounts.ID) []accounts.ID {
 		t.Fatal(err)
 	}
 	return ids
+}
+
+// sameIDs reports whether a and b hold the same identifiers, in any order.
+func sameIDs(a, b []accounts.ID) bool {
+	return len(a) == len(b) && !slices.ContainsFunc(a, func(id accounts.ID) bool { return !slices.Contains(b, id) })
+}
+
+// unfound is what user's imports from source kept of the titles they did
+// not find.
+func (h harness) unfound(t *testing.T, user accounts.ID, source string) []importlinks.Row {
+	t.Helper()
+	rows, err := h.links.List(t.Context(), user, source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return rows
 }
 
 // imported holds account for by, imports choice of it into user's
@@ -218,18 +240,19 @@ func TestEntriesAreMatchedAndOnlyAddedTo(t *testing.T) {
 	}
 	// Newly played: by TMDB, the episode, the anime's episode, and the
 	// movie past the threshold; the movie by IMDb was played already. Of
-	// the library, the movie played and the series started are not added
-	// to the Watchlist view.
-	if status.Read != 11 || status.Played != 4 || status.Resumed != 1 || status.Watchlist != 1 || status.UnmatchedCount != 3 {
+	// the library's three titles, the two left to watch go on the
+	// watchlist playlist; the movie by TMDB, played, adds nothing.
+	if status.Read != 11 || status.Played != 4 || status.Resumed != 1 || status.Watchlist != 2 || status.UnmatchedCount != 3 {
 		t.Errorf("counts: %+v", status)
 	}
 	reasons := map[string]string{}
-	for _, u := range status.Unmatched {
+	kept := h.unfound(t, alice.ID, "test")
+	for _, u := range kept {
 		reasons[u.Name] = u.Reason
 	}
 	if len(reasons) != 3 || reasons["Holiday"] != ReasonOtherIdentifier || reasons["Unknown"] != ReasonNotFound ||
 		reasons["Series"] != ReasonEpisodeList {
-		t.Errorf("unmatched: %+v", status.Unmatched)
+		t.Errorf("unmatched: %+v", kept)
 	}
 
 	check := func(name string, ref library.TitleRef, want func(userdata.Data) bool) {
@@ -251,12 +274,11 @@ func TestEntriesAreMatchedAndOnlyAddedTo(t *testing.T) {
 	})
 	check("newer here", newerHere, func(d userdata.Data) bool { return d.Position == 50*time.Minute })
 	check("nearly done", nearlyDone, func(d userdata.Data) bool { return d.Played && d.Position == 0 })
-	// The library sets no favorite: it goes on the watchlist, where the
-	// titles started are left out.
+	// The library sets no favorite: it goes on the watchlist.
 	check("series of the library", series, func(d userdata.Data) bool { return !d.Favorite })
 	check("movie of the library", listed, func(d userdata.Data) bool { return !d.Favorite })
-	if got := h.watchlistOf(t, alice.ID); len(got) != 1 || got[0] != h.idOf(t, listed).ID {
-		t.Errorf("watchlist: %v", got)
+	if got, want := h.watchlistOf(t, alice.ID), []accounts.ID{h.idOf(t, series).ID, h.idOf(t, listed).ID}; !sameIDs(got, want) {
+		t.Errorf("watchlist: %v, want %v in any order", got, want)
 	}
 
 	// Watched on in Polyfin since, then imported again: nothing is added
@@ -304,6 +326,16 @@ func TestAddonsAreInstalledOnlyWhenAllowedAndChosen(t *testing.T) {
 	noOwn.PersonalAddons = false
 	if _, err := h.Start(root, noOwn, key, Choice{Profile: "1", Addons: []int{0}}); !errors.Is(err, ErrAddonsNotAllowed) {
 		t.Errorf("user's permission off: %v", err)
+	}
+	// Parental control or blocked genres keep a user to the server's
+	// addons: theirs would be kept but not used, so none is chosen.
+	limited, blocking := bob, bob
+	limited.Parental = accounts.ParentalControl{MaxRating: new(13)}
+	blocking.BlockedGenres = []string{"Horror"}
+	for _, user := range []accounts.User{limited, blocking} {
+		if _, err := h.Start(root, user, key, Choice{Profile: "1", Addons: []int{0}}); !errors.Is(err, ErrAddonsParentalControl) {
+			t.Errorf("parental control %+v, blocked genres %v: %v", user.Parental, user.BlockedGenres, err)
+		}
 	}
 	for _, chosen := range [][]int{{2}, {-1}, {0, 0}} {
 		if _, err := h.Start(root, bob, key, Choice{Profile: "1", Addons: chosen}); !errors.Is(err, ErrUnknownAddon) {
@@ -413,7 +445,8 @@ func TestTitlesAreNamedByTheIdentifiersAppsUse(t *testing.T) {
 		{"kitsu:12", false, 1, 3, library.TitleRef{Episode: true, Anime: library.AnimeRef{Kitsu: 12, Episode: 3}}, true},
 		{"kitsu:7", true, 0, 0, library.TitleRef{Anime: library.AnimeRef{Kitsu: 7}}, true},
 		{"tmdb:x", true, 0, 0, library.TitleRef{}, false},
-		{"mal:5", true, 0, 0, library.TitleRef{}, false},
+		{"mal:5", true, 0, 0, library.TitleRef{Anime: library.AnimeRef{MyAnimeList: 5}}, true},
+		{"anidb:6", false, 1, 2, library.TitleRef{Episode: true, Anime: library.AnimeRef{AniDB: 6, Episode: 2}}, true},
 		{"srv1:abc", true, 0, 0, library.TitleRef{}, false},
 		{"custom-prefix:1", false, 1, 1, library.TitleRef{}, false},
 	} {

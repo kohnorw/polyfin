@@ -1,14 +1,18 @@
 package library
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"golang.org/x/sync/errgroup"
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/stremio"
@@ -23,7 +27,9 @@ import (
 // user, wherever the item shows (see overridden), and parental control
 // judges titles by the ratings and genres set (see overriddenTraits). A
 // field cleared, or set back to the value it would have otherwise, follows
-// the addon again. People and provider identifiers are the addons' only.
+// the addon again. People are the addons' only, and so are provider
+// identifiers but a movie's or series' TMDB and TVDB ones, which every
+// reader of them takes with the edit (see providerIDs).
 
 // UploadedImageTypes are the image types an administrator may upload for
 // an item.
@@ -35,6 +41,11 @@ const (
 	// MaxUploadedImageSide is the longest side uploaded artwork is kept at:
 	// a backdrop's on a 4K screen.
 	MaxUploadedImageSide = 3840
+	// MaxUploadedImageMemory bounds what normalizing uploaded artwork may
+	// hold (see accounts.NormalizeImage), most of it to scale a larger
+	// picture down to MaxUploadedImageSide: an 8K one fits, 7,680 by
+	// 4,320, and one of 6,000 by 4,000 at 16 bits a channel.
+	MaxUploadedImageMemory = 768 << 20
 	// uploadedScheme starts the URL standing for uploaded artwork in
 	// Images, which images are served and tagged by (see UploadedImage).
 	uploadedScheme = "polyfin-upload:"
@@ -59,12 +70,27 @@ type Overrides struct {
 	PremiereDate    *time.Time `json:"premiereDate,omitempty"`
 	EndDate         *time.Time `json:"endDate,omitempty"`
 	ProductionYear  *int       `json:"productionYear,omitempty"`
+	// DisplayOrder, EpisodeGroup and Specials are a series' order of
+	// episodes (see episodeorder.go): DisplayOrder as Jellyfin's metadata
+	// editor names it, EpisodeGroup the TMDB episode group an
+	// administrator chose in the admin app, and Specials where the
+	// specials show, SpecialsLast or SpecialsHidden.
+	DisplayOrder *string `json:"displayOrder,omitempty"`
+	EpisodeGroup *string `json:"episodeGroup,omitempty"`
+	Specials     *string `json:"specials,omitempty"`
+	// TmdbID and TvdbID are a movie's or series' TMDB identifier and a
+	// series' TVDB one, as decimal text (see providerNumber), which win
+	// over every source of them (see identifiers). The identifier a
+	// "tmdb:" or "tvdb:" title is, its identity, is never set.
+	TmdbID *string `json:"tmdbId,omitempty"`
+	TvdbID *string `json:"tvdbId,omitempty"`
 }
 
 func (o Overrides) empty() bool {
 	return o.Name == nil && o.OriginalTitle == nil && o.SortName == nil && o.Overview == nil && o.Taglines == nil &&
 		o.Genres == nil && o.Tags == nil && o.Studios == nil && o.OfficialRating == nil && o.CustomRating == nil &&
-		o.CommunityRating == nil && o.CriticRating == nil && o.PremiereDate == nil && o.EndDate == nil && o.ProductionYear == nil
+		o.CommunityRating == nil && o.CriticRating == nil && o.PremiereDate == nil && o.EndDate == nil && o.ProductionYear == nil &&
+		o.DisplayOrder == nil && o.EpisodeGroup == nil && o.Specials == nil && o.TmdbID == nil && o.TvdbID == nil
 }
 
 // apply sets the fields overridden on item.
@@ -104,6 +130,64 @@ func (o Overrides) apply(item *Item) {
 	if o.ProductionYear != nil {
 		item.ProductionYear = *o.ProductionYear
 	}
+	if o.DisplayOrder != nil && item.Kind == KindSeries {
+		item.DisplayOrder = *o.DisplayOrder
+	}
+}
+
+// identifiers returns the provider identifiers of the title meta
+// describes, those set laid over its source's (see sourceIDs). The TMDB
+// identifier a title shows is, first to last:
+//  1. the one an administrator set;
+//  2. the source's _tmdbId, or the identifier a "tmdb:" title is, which
+//     is never set;
+//  3. the source's moviedb_id, as its check corrected it (see
+//     tmdbidcheck.go), which corrects the description as it enters.
+func (o Overrides) identifiers(meta stremio.Meta) map[string]string {
+	ids := sourceIDs(meta)
+	o.laidOver(ids, meta.ID)
+	return ids
+}
+
+// identify gives item, a movie or series fromMeta filled from meta, the
+// identifiers set, keeping its source's apart, and a TMDB identifier set
+// is no moviedb_id.
+func (o Overrides) identify(item *Item, meta stremio.Meta) {
+	if o.TmdbID == nil && o.TvdbID == nil {
+		return
+	}
+	item.sourceIDs, item.ProviderIDs = item.ProviderIDs, maps.Clone(item.ProviderIDs)
+	o.laidOver(item.ProviderIDs, meta.ID)
+	if o.TmdbID != nil {
+		item.TMDBFromMoviedb = false
+	}
+}
+
+// laidOver sets the identifiers set in ids, those of the title of the
+// Stremio identifier stremioID, but its identity.
+func (o Overrides) laidOver(ids map[string]string, stremioID string) {
+	if o.TmdbID != nil && !strings.HasPrefix(stremioID, "tmdb:") {
+		ids["Tmdb"] = *o.TmdbID
+	}
+	if o.TvdbID != nil && !strings.HasPrefix(stremioID, "tvdb:") {
+		ids["Tvdb"] = *o.TvdbID
+	}
+}
+
+// providerNumber returns a TMDB or TVDB identifier typed as Polyfin keeps
+// it: decimal digits, spaces around them aside, of a positive number
+// within PostgreSQL's integer, which the tables keyed by them hold, with
+// no leading zero; false for any other text.
+func providerNumber(text string) (string, bool) {
+	text = strings.TrimSpace(text)
+	if text == "" || strings.Trim(text, "0123456789") != "" {
+		return "", false
+	}
+	n, err := strconv.ParseInt(text, 10, 32)
+	if err != nil || n <= 0 {
+		return "", false
+	}
+	return strconv.FormatInt(n, 10), true
 }
 
 // parentalRating is the rating set that parental control judges a title
@@ -121,7 +205,10 @@ func (o Overrides) parentalRating() (string, bool) {
 // against returns the overrides an edit makes of an item whose addon gives
 // base, current being those set before. Text left empty, lists emptied and
 // values equal to the addon's follow the addon; lists not sent (nil) stay
-// as they were.
+// as they were. A TMDB or TVDB identifier left empty, or equal to the
+// source's, follows the source too; one that is no identifier (see
+// providerNumber), the identity of a "tmdb:" or "tvdb:" title, and a
+// movie's TVDB identifier change nothing.
 func (o Overrides) against(base Item, current Overrides) Overrides {
 	text := func(value *string, addon string) *string {
 		if value == nil {
@@ -192,6 +279,43 @@ func (o Overrides) against(base Item, current Overrides) Overrides {
 	if o.ProductionYear != nil && *o.ProductionYear > 0 && *o.ProductionYear != base.ProductionYear {
 		result.ProductionYear = new(*o.ProductionYear)
 	}
+	// Only a series has an order of episodes. Jellyfin's API sets its
+	// DisplayOrder alone: the group chosen of it stays while the order
+	// does, and where the specials show stays.
+	if base.Kind == KindSeries {
+		result.DisplayOrder = text(o.DisplayOrder, "")
+		if result.DisplayOrder != nil && current.DisplayOrder != nil && *result.DisplayOrder == *current.DisplayOrder {
+			result.EpisodeGroup = current.EpisodeGroup
+		}
+		result.Specials = current.Specials
+	}
+	// The source's identifiers, which an edit is made against, are those
+	// base shows but for the identifiers set.
+	source := base.ProviderIDs
+	if base.sourceIDs != nil {
+		source = base.sourceIDs
+	}
+	identifier := func(value *string, provider string, editable bool, kept *string) *string {
+		switch {
+		case !editable:
+			return nil
+		case value == nil:
+			return kept
+		case strings.TrimSpace(*value) == "":
+			return nil
+		}
+		id, ok := providerNumber(*value)
+		if !ok {
+			return kept
+		}
+		if own, ok := providerNumber(source[provider]); ok && own == id {
+			return nil
+		}
+		return &id
+	}
+	title := base.Kind == KindMovie || base.Kind == KindSeries
+	result.TmdbID = identifier(o.TmdbID, "Tmdb", title && !strings.HasPrefix(base.StremioID, "tmdb:"), current.TmdbID)
+	result.TvdbID = identifier(o.TvdbID, "Tvdb", base.Kind == KindSeries && !strings.HasPrefix(base.StremioID, "tvdb:"), current.TvdbID)
 	return result
 }
 
@@ -201,6 +325,23 @@ func (o Overrides) against(base Item, current Overrides) Overrides {
 type overrideSet struct {
 	fields map[accounts.ID]Overrides
 	images map[accounts.ID]map[string]string
+	// identified are the items whose TMDB or TVDB identifier is set, by
+	// "Tmdb:" or "Tvdb:" and the identifier, which imports find titles by
+	// (see knownTitles).
+	identified map[string][]accounts.ID
+}
+
+// index lists the items by the identifiers set of them.
+func (set *overrideSet) index() {
+	set.identified = map[string][]accounts.ID{}
+	for id, o := range set.fields {
+		if o.TmdbID != nil {
+			set.identified["Tmdb:"+*o.TmdbID] = append(set.identified["Tmdb:"+*o.TmdbID], id)
+		}
+		if o.TvdbID != nil {
+			set.identified["Tvdb:"+*o.TvdbID] = append(set.identified["Tvdb:"+*o.TvdbID], id)
+		}
+	}
 }
 
 // overridesNow returns the overrides, loaded on first use. If they cannot
@@ -269,6 +410,7 @@ func (s *Service) loadOverrides(ctx context.Context) (*overrideSet, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	set.index()
 	s.overrides.Store(set)
 	return set, nil
 }
@@ -293,6 +435,7 @@ func (s *Service) changeOverrides(ctx context.Context, write func(*overrideSet) 
 		next.images[id] = images
 	}
 	change(next)
+	next.index()
 	s.overrides.Store(next)
 	return nil
 }
@@ -304,13 +447,43 @@ func (s *Service) Overrides(id accounts.ID) Overrides {
 
 // SaveOverrides keeps an administrator's edit of an item whose addon
 // describes it as base (see Original): the fields of requested that differ
-// from the addon's, the others following the addon again.
+// from the addon's, the others following the addon again. A movie's or
+// series' TMDB identifier changed drops or asks again what was learnt by
+// the one it showed (see titleTMDBChanged).
 func (s *Service) SaveOverrides(ctx context.Context, base Item, requested Overrides) error {
+	var saved Overrides
+	err := s.changeOwnOverrides(ctx, base.ID, func(current Overrides) Overrides {
+		saved = requested.against(base, current)
+		return saved
+	})
+	if err != nil {
+		return err
+	}
+	if base.Kind != KindMovie && base.Kind != KindSeries {
+		return nil
+	}
+	now := maps.Clone(base.ProviderIDs)
+	if base.sourceIDs != nil {
+		now = maps.Clone(base.sourceIDs)
+	}
+	if now == nil {
+		now = map[string]string{}
+	}
+	saved.laidOver(now, base.StremioID)
+	if now["Tmdb"] == base.ProviderIDs["Tmdb"] {
+		return nil
+	}
+	return s.titleTMDBChanged(ctx, base, base.ProviderIDs, now)
+}
+
+// changeOwnOverrides keeps the overrides of the item id that change
+// returns from those set before.
+func (s *Service) changeOwnOverrides(ctx context.Context, id accounts.ID, change func(Overrides) Overrides) error {
 	var result Overrides
 	return s.changeOverrides(ctx, func(current *overrideSet) error {
-		result = requested.against(base, current.fields[base.ID])
+		result = change(current.fields[id])
 		if result.empty() {
-			_, err := s.db.Exec(ctx, "DELETE FROM item_overrides WHERE item_id = $1", base.ID)
+			_, err := s.db.Exec(ctx, "DELETE FROM item_overrides WHERE item_id = $1", id)
 			return err
 		}
 		encoded, err := json.Marshal(result)
@@ -318,13 +491,13 @@ func (s *Service) SaveOverrides(ctx context.Context, base Item, requested Overri
 			return err
 		}
 		_, err = s.db.Exec(ctx, `INSERT INTO item_overrides (item_id, fields) VALUES ($1, $2)
-			ON CONFLICT (item_id) DO UPDATE SET fields = excluded.fields, updated_at = now()`, base.ID, encoded)
+			ON CONFLICT (item_id) DO UPDATE SET fields = excluded.fields, updated_at = now()`, id, encoded)
 		return err
 	}, func(next *overrideSet) {
 		if result.empty() {
-			delete(next.fields, base.ID)
+			delete(next.fields, id)
 		} else {
-			next.fields[base.ID] = result
+			next.fields[id] = result
 		}
 	})
 }
@@ -351,7 +524,7 @@ func (s *Service) UploadImage(ctx context.Context, id accounts.ID, imageType str
 	if !ok {
 		return ErrUnsupportedImageType
 	}
-	picture, err := accounts.NormalizeImage(data, MaxUploadedImageBytes, MaxUploadedImageSide)
+	picture, err := accounts.NormalizeImage(ctx, data, MaxUploadedImageBytes, MaxUploadedImageSide, MaxUploadedImageMemory)
 	if err != nil {
 		return err
 	}
@@ -392,22 +565,6 @@ func (s *Service) DeleteUploadedImage(ctx context.Context, id accounts.ID, image
 			delete(next.images, id)
 		} else {
 			next.images[id] = images
-		}
-	})
-}
-
-// deleteUploadedImages drops every uploaded artwork of items, of any image
-// type; there may be none.
-func (s *Service) deleteUploadedImages(ctx context.Context, items []accounts.ID) error {
-	if len(items) == 0 {
-		return nil
-	}
-	return s.changeOverrides(ctx, func(*overrideSet) error {
-		_, err := s.db.Exec(ctx, "DELETE FROM item_images WHERE item_id = ANY($1::uuid[])", items)
-		return err
-	}, func(next *overrideSet) {
-		for _, id := range items {
-			delete(next.images, id)
 		}
 	})
 }
@@ -481,6 +638,19 @@ func setImage(images *Images, imageType, url string) {
 	}
 }
 
+// outline sets on an episode's outline what apply sets of it on the
+// episode's item: its air date, and its season's name where it shows
+// (see EpisodeOutline). What apply changes of an episode must change here
+// too.
+func (set *overrideSet) outline(o *EpisodeOutline) {
+	if own, ok := set.fields[o.ID]; ok && own.PremiereDate != nil {
+		o.PremiereDate = new(*own.PremiereDate)
+	}
+	if season, ok := set.fields[o.Place.SeasonID]; ok && season.Name != nil {
+		o.Place.SeasonName = *season.Name
+	}
+}
+
 // apply sets on item what administrators changed of it and of the items
 // it shows: its series, season and album, its channel, the people it
 // credits and its artists. Seasons and episodes follow the ratings set on
@@ -493,6 +663,9 @@ func (set *overrideSet) apply(item *Item) {
 	}
 	for imageType, tag := range set.images[item.ID] {
 		setImage(&item.Images, imageType, uploadedURL(item.ID, imageType, tag))
+		if imageType == "Primary" {
+			item.WidePrimary, item.PosterShape = false, ""
+		}
 	}
 	if item.SeriesID != (accounts.ID{}) {
 		if series, ok := set.fields[item.SeriesID]; ok {
@@ -522,6 +695,13 @@ func (set *overrideSet) apply(item *Item) {
 		}
 		if url, ok := set.uploadedArtwork(item.SeasonID, "Primary"); ok {
 			item.SeasonPoster = url
+		}
+	}
+	if item.Shown != nil {
+		if season, ok := set.fields[item.Shown.SeasonID]; ok && season.Name != nil {
+			shown := *item.Shown
+			shown.SeasonName = *season.Name
+			item.Shown = &shown
 		}
 	}
 	if item.AlbumID != (accounts.ID{}) {
@@ -578,20 +758,25 @@ func (set *overrideSet) rename(c *Credit) {
 	}
 }
 
-// overridden returns items with their local artwork (see applyLocal), the
-// ratings MDBList gives them (see keptScores), and what administrators
-// changed of them (see overrideSet.apply). Items may come from caches:
-// they are copied, never changed in place.
+// overridden returns items with the poster of the poster address template
+// (see templatePoster), their local artwork (see applyLocal), the ratings
+// MDBList gives them (see keptScores), what administrators changed of
+// them (see overrideSet.apply), and TMDB's poster and backdrop in place of
+// those they lack (see withTMDBArtwork). Items may come from caches: they
+// are copied, never changed in place.
 func (s *Service) overridden(items []Item) []Item {
 	set := s.overridesNow()
 	local := s.localArtwork()
 	scores := s.keptScores(items)
-	if len(set.fields) == 0 && len(set.images) == 0 && len(local) == 0 && scores == nil {
+	template := s.settings().PosterTemplate
+	tmdbArtwork := s.titleArtworkShown()
+	if len(set.fields) == 0 && len(set.images) == 0 && len(local) == 0 && scores == nil && template == "" && !tmdbArtwork {
 		return items
 	}
 	audience := scores != nil && s.audienceShown()
 	result := slices.Clone(items)
 	for i := range result {
+		_, templated := templatePoster(&result[i], template)
 		if len(local) > 0 {
 			applyLocal(&result[i], local)
 		}
@@ -599,18 +784,25 @@ func (s *Service) overridden(items []Item) []Item {
 			rate(&result[i], scores[i], audience)
 		}
 		set.apply(&result[i])
+		if tmdbArtwork {
+			s.withTMDBArtwork(context.Background(), &result[i], templated)
+		}
 	}
 	return result
 }
 
-// overriddenItem returns an item with its local artwork, its ratings from
-// MDBList and what administrators changed of it.
+// overriddenItem returns an item with the poster of the poster address
+// template, its local artwork, its ratings from MDBList, what
+// administrators changed of it and TMDB's artwork in place of what it
+// lacks.
 func (s *Service) overriddenItem(item Item) Item {
+	_, templated := templatePoster(&item, s.settings().PosterTemplate)
 	if local := s.localArtwork(); len(local) > 0 {
 		applyLocal(&item, local)
 	}
 	item = s.rated(item)
 	s.overridesNow().apply(&item)
+	s.withTMDBArtwork(context.Background(), &item, templated)
 	return item
 }
 
@@ -623,7 +815,13 @@ func (s *Service) Overridden(items ...Item) []Item {
 // overriddenTraits returns the traits parental control judges a title by
 // once what administrators set of it applies: its rating and genres.
 func (s *Service) overriddenTraits(id accounts.ID, t traits) traits {
-	o, ok := s.overridesNow().fields[id]
+	return s.overridesNow().traits(id, t)
+}
+
+// traits returns the traits parental control judges the title id by,
+// those of t but for the rating and genres administrators set of it.
+func (set *overrideSet) traits(id accounts.ID, t traits) traits {
+	o, ok := set.fields[id]
 	if !ok {
 		return t
 	}
@@ -660,10 +858,56 @@ type RemoteResult struct {
 	Provider string
 }
 
+// SearchFailure is a search catalog RemoteSearch could not read: the name
+// of its addon, why, as stremio.FailureOf names it, SearchFailed for
+// another error, and the error.
+type SearchFailure struct {
+	Addon   string
+	Failure string
+	Err     error
+}
+
+// SearchFailed names the failure of a search catalog that is no addon's
+// answer.
+const SearchFailed = "failed"
+
+// SearchError reports the search catalogs RemoteSearch could not read, in
+// the order of their addons; what the others found is returned with it.
+// Asked counts the catalogs asked, those read included.
+type SearchError struct {
+	Failures []SearchFailure
+	Asked    int
+}
+
+// AllFailed reports whether no catalog asked could be read: the search
+// found nothing because none answered, not because none knew the name.
+func (e *SearchError) AllFailed() bool {
+	return len(e.Failures) > 0 && len(e.Failures) >= e.Asked
+}
+
+func (e *SearchError) Error() string {
+	parts := make([]string, 0, len(e.Failures))
+	for _, f := range e.Failures {
+		parts = append(parts, f.Addon+": "+f.Err.Error())
+	}
+	return "search catalogs could not be read: " + strings.Join(parts, "; ")
+}
+
+func (e *SearchError) Unwrap() []error {
+	errs := make([]error, 0, len(e.Failures))
+	for _, f := range e.Failures {
+		errs = append(errs, f.Err)
+	}
+	return errs
+}
+
 // RemoteSearch looks a name up for titles of kind in the search catalogs of
-// the server's addons that describe titles, as Jellyfin asks its metadata
-// providers when an administrator identifies an item. Without such an
-// addon, it finds nothing.
+// the server's addons that describe titles (see remoteSources), as Jellyfin
+// asks its metadata providers when an administrator identifies an item:
+// the first page of each, together, as Stremio apps search, their titles
+// interleaved. Without such an addon, it finds nothing. When catalogs
+// could not be read, it returns a *SearchError that tells which, with the
+// titles the others found: one failing catalog fails no other.
 func (s *Service) RemoteSearch(ctx context.Context, kind Kind, name string, limit int) ([]RemoteResult, error) {
 	name = strings.TrimSpace(name)
 	if name == "" || limit <= 0 {
@@ -678,22 +922,48 @@ func (s *Service) RemoteSearch(ctx context.Context, kind Kind, name string, limi
 	if len(sources) == 0 {
 		return nil, nil
 	}
-	titles, _, err := s.merged(ctx, v, sources, 0, limit)
-	if err != nil {
+	lists := make([][]stremio.Meta, len(sources))
+	errs := make([]error, len(sources))
+	var group errgroup.Group
+	group.SetLimit(catalogFetches)
+	for i, src := range sources {
+		group.Go(func() error {
+			lists[i], _, errs[i] = s.window(ctx, v, src, 0, limit)
+			return nil
+		})
+	}
+	_ = group.Wait()
+	if err := ctx.Err(); err != nil {
 		return nil, err
 	}
+	var failures []SearchFailure
+	for i, err := range errs {
+		if err != nil {
+			src := sources[i]
+			s.logger.Debug("A search catalog could not be read", "addon", src.addon.addon.LogName(), "catalog", src.catalog.ID, "error", err)
+			failures = append(failures, SearchFailure{Addon: src.addon.addon.Name(), Failure: cmp.Or(stremio.FailureOf(err), SearchFailed), Err: err})
+		}
+	}
+	titles := interleave(sources, lists)
 	var results []RemoteResult
 	var records []record
-	for _, title := range titles {
-		item, r, err := title.title(accounts.ID{})
+	for _, title := range titles[:min(len(titles), limit)] {
+		item, r, err := title.title(s, accounts.ID{}, v.country)
 		if err != nil {
 			continue
 		}
 		r.Parent = nil
-		results = append(results, RemoteResult{Item: item, Provider: title.src.addon.addon.Manifest.Name})
+		results = append(results, RemoteResult{Item: item, Provider: title.src.addon.addon.Name()})
 		records = append(records, r)
 	}
-	return results, s.save(ctx, records)
+	err = s.save(ctx, records)
+	switch {
+	case len(failures) > 0 && err != nil:
+		return results, errors.Join(&SearchError{Failures: failures, Asked: len(sources)}, err)
+	case len(failures) > 0:
+		return results, &SearchError{Failures: failures, Asked: len(sources)}
+	}
+	return results, err
 }
 
 // RemoteSearches reports whether RemoteSearch can find titles of kind: a
@@ -706,14 +976,18 @@ func (s *Service) RemoteSearches(ctx context.Context, kind Kind) (bool, error) {
 	return len(remoteSources(v, kind, "")) > 0, nil
 }
 
-// remoteSources are the search catalogs of titles of kind of the addons of
-// v that describe titles, searching name: of those given a language, which
-// describe titles for their language's users only, none, unless no addon
-// without a language offers such a catalog (see standInCatalogs). A local
-// folder's titles are those this search finds.
+// remoteSources are the title search catalogs of titles of kind of the
+// addons of v that describe titles, those a search alone can ask (see
+// searchable), searching name on their first page: of those given a
+// language, which describe titles for their language's users only, none,
+// unless no addon without a language offers such a catalog (see
+// standInCatalogs). People searches, which look up who is credited in a
+// title, and Polyfin's own sources, whose titles are not those of the
+// metadata addons, are left out. A local folder's titles are those this
+// search finds.
 func remoteSources(v view, kind Kind, name string) []source {
 	return standInCatalogs(v, []Kind{kind}, false, func(entry installed, catalog stremio.Catalog) (source, bool) {
-		return source{addon: entry, catalog: catalog, search: name},
-			entry.addon.Manifest.HasResource("meta") && !entry.addon.Local() && searchable(catalog)
+		return source{addon: entry, catalog: catalog, search: name, first: true},
+			entry.addon.Manifest.HasResource("meta") && !own(entry.addon) && searchable(catalog) && !searchesPeople(catalog)
 	})
 }

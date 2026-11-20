@@ -1,0 +1,168 @@
+import type en from '../en/livetv'
+
+const livetv: typeof en = {
+  livetv: {
+    title: 'TV ao Vivo',
+    description:
+      'Os catálogos de TV vêm das suas fontes. Abra os guias de um catálogo para dar uma programação aos canais dele.',
+    recordings: 'Configurações de gravação',
+    settings: 'Configurações da TV ao Vivo',
+    catalogsTitle: 'Catálogos de TV',
+    catalogsHelp:
+      'Um catálogo de TV exibido como biblioteca coloca os canais dele na TV ao Vivo dos aplicativos Jellyfin. Os guias dele dão a programação aos canais.',
+    catalogsLabel: 'Catálogos de TV',
+    catalogsLoading: 'Carregando catálogos de TV…',
+    catalogsEmptyTitle: 'Nenhum catálogo de TV ainda',
+    catalogsEmpty:
+      'Instale um complemento que tenha um catálogo de TV, ou adicione uma fonte IPTV, em Fontes: os canais dele são listados aqui.',
+    addSource: 'Adicionar uma fonte',
+    kinds: { stremio: 'Complemento Stremio', iptv: 'Fonte IPTV' },
+    guides: (count: number) => (count === 1 ? '1 guia' : `${count} guias`),
+    guideNone: 'Nenhum guia de programação',
+    failing: (count: number) =>
+      count === 1
+        ? 'O último download de 1 guia falhou.'
+        : `O último download de ${count} guias falhou.`,
+    mapped: (mapped: string, channels: string) => `${mapped} de ${channels} canais com guia`,
+    guideLine: (position: number, message: string) => `Guia ${position}: ${message}`,
+    manage: 'Guias e mapeamento',
+    lineup: 'Lista de canais e guias',
+    lineupLabel: (name: string) => `Lista de canais e guias de ${name}`,
+    manageLabel: (name: string) => `Guias e mapeamento de ${name}`,
+    notShownHelp:
+      'Exiba-o como biblioteca para colocar os canais dele na TV ao Vivo e dar guias a ele.',
+    openLibraries: 'Abrir bibliotecas',
+    states: {
+      notShown: 'Fora da TV ao Vivo',
+      addonOff: 'Complemento desativado',
+      missing: 'Não está mais disponível',
+      failed: 'Falha no download do guia',
+      noGuide: 'Sem guia',
+      notFetched: 'Ainda não obtido',
+      incomplete: 'Guia incompleto',
+      complete: 'Guia completo',
+    },
+    iptvTitle: 'Canais IPTV',
+    iptvHelp: 'Os canais ao vivo de cada fonte IPTV, conforme a lista de canais dela os mantém.',
+    iptvLoading: 'Carregando fontes IPTV…',
+    iptvEmptyTitle: 'Nenhuma fonte IPTV ainda',
+    iptvEmpty:
+      'Adicione uma lista de reprodução M3U ou uma conta Xtream Codes em Fontes: os canais dela são contados aqui.',
+    kindM3u: 'Lista de reprodução M3U',
+    kindXtream: 'Conta Xtream Codes',
+    kindTuner: 'Sintonizador HDHomeRun',
+    turnedOff: 'Desativada',
+    downloadFailed: 'Falha no download',
+    active: 'Ativa',
+    lastDownload: 'Último download',
+    nextDownload: 'próximo',
+    never: 'nunca',
+    figuresLabel: (name: string) => `Canais de ${name}`,
+    figures: {
+      enabled: 'Canais ativados',
+      shown: 'Exibidos nos aplicativos',
+      mapped: 'Com guia',
+      unmapped: 'Sem guia',
+    },
+    noLiveTv: 'Esta fonte não importa nenhum canal ao vivo.',
+    importOptions: 'Opções de importação',
+    openMapping: 'Abrir o mapeamento de guias',
+    recordingsTitle: 'Gravações',
+    recordingsLoading: 'Carregando gravações…',
+    recordingsOffTitle: 'A gravação está desativada',
+    recordingsOff:
+      'Ative-a e escolha as margens e por quanto tempo as gravações são mantidas em Configurações › Gravações.',
+    noTimersTitle: 'Nenhuma gravação agendada',
+    noTimers:
+      'As gravações são agendadas a partir do guia de programação nos aplicativos Jellyfin. Elas aparecem aqui até terminarem.',
+    recordingNow: 'Gravando',
+    scheduled: 'Agendada',
+    failed: 'Falhou',
+    series: 'Série',
+    scheduledBy: (name: string) => `Agendada por ${name}`,
+    unknownChannel: 'Canal não encontrado',
+    tunersShort: 'Sintonizadores insuficientes',
+    tunersShortHelp:
+      'Mais gravações nos canais deste sintonizador do que ele tem sintonizadores acontecem ao mesmo tempo: uma delas pode falhar.',
+    guidesOf: (name: string) => `Guias de ${name}`,
+    spaceSaved: (count: number, saved: string) =>
+      count === 1
+        ? `1 gravação convertida para HEVC: ${saved} economizados.`
+        : `${count} gravações convertidas para HEVC: ${saved} economizados.`,
+  },
+  ownChannels: {
+    title: 'Canais dos seus títulos',
+    help: 'Canais que exibem seus filmes e episódios dia e noite, a partir de uma coleção, uma lista inteligente, uma série ou títulos que você escolhe. Os apps Jellyfin os listam com os outros canais, e seus programas no guia.',
+    add: 'Adicionar um canal',
+    loading: 'Carregando canais…',
+    label: 'Canais dos seus títulos',
+    emptyTitle: 'Nenhum canal próprio ainda',
+    empty:
+      'Crie um a partir de uma coleção, uma lista inteligente, uma série ou títulos que você escolher: ele os exibe um após o outro, o dia todo.',
+    off: 'Desativado',
+    entries: (count: number, formatted: string) =>
+      count === 1 ? '1 filme ou episódio' : `${formatted} filmes e episódios`,
+    blockCount: (count: number) =>
+      count === 1 ? '1 faixa de horário' : `${count} faixas de horário`,
+    now: (name: string) => `Agora: ${name}`,
+    back: 'TV ao vivo',
+    newTitle: 'Novo canal',
+    lede: 'Os títulos são lidos quando o canal é salvo, para que o guia continue o mesmo: leia-os de novo para incluir os adicionados depois.',
+    notFound: 'Este canal não existe mais.',
+    name: 'Nome',
+    number: 'Número',
+    numberHelp: 'Vazio: depois dos outros canais.',
+    enabled: 'Mostrado nos apps',
+    programmes: 'Programas',
+    programmesHelp:
+      'O que o canal exibe. Séries exibem seus episódios em ordem, sem os especiais. Um título sem duração conta 90 minutos para um filme, 30 para um episódio.',
+    kind: 'A partir de',
+    kinds: {
+      collection: 'Coleção',
+      smartlist: 'Lista inteligente',
+      series: 'Série',
+      titles: 'Títulos',
+    },
+    collection: 'Coleção',
+    smartList: 'Lista inteligente',
+    choose: 'Escolher…',
+    noCollections: 'Nenhuma coleção ainda: crie uma em um app Jellyfin.',
+    noSmartLists: 'Nenhuma lista inteligente ainda: crie uma em Bibliotecas.',
+    search: 'Pesquisar',
+    searchTitles: 'Pesquisar filmes e séries',
+    searchSeries: 'Pesquisar uma série',
+    noResults: 'Nada encontrado.',
+    pick: (name: string) => `Adicionar ${name}`,
+    remove: (name: string) => `Remover ${name}`,
+    picked: 'Escolhidos',
+    pickedNone: 'Nada escolhido ainda.',
+    movie: 'Filme',
+    series: 'Série',
+    shuffle: 'Ordem aleatória',
+    shuffleHelp: 'Exibe os títulos em uma nova ordem a cada rodada, em vez da deles.',
+    blocks: 'Faixas de horário',
+    blocksHelp:
+      'Todos os dias, uma faixa exibe seus próprios títulos do início ao fim, no fuso horário do servidor, e os programas do canal preenchem o resto do dia. Um programa cortado pelo fim de uma faixa é exibido inteiro no dia seguinte.',
+    addBlock: 'Adicionar uma faixa de horário',
+    removeBlock: (n: number) => `Remover a faixa ${n}`,
+    block: (n: number) => `Faixa ${n}`,
+    from: 'De',
+    until: 'Até',
+    airing: 'No ar',
+    airingHelp: 'O que o canal exibe agora, e depois.',
+    nothing: 'Nada no ar.',
+    rebuild: 'Ler os títulos de novo',
+    rebuildHelp:
+      'Lê as fontes de novo para os títulos adicionados ou removidos desde então. A programação recomeça hoje.',
+    create: 'Criar o canal',
+    created: 'Canal criado',
+    saved: 'Canal salvo',
+    delete: 'Excluir',
+    deleted: 'Canal excluído',
+    deleteTitle: (name: string) => `Excluir ${name}?`,
+    deleteBody:
+      'Seus programas saem do guia, e as gravações agendadas nele não podem mais ser feitas.',
+  },
+}
+
+export default livetv

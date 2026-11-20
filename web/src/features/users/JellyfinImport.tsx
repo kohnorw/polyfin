@@ -10,16 +10,19 @@ import {
   queryKeys,
   startJellyfinImport,
   stopJellyfinImport,
+  type ImportExtras,
   type JellyfinConnection,
   type JellyfinCredentials,
   type JellyfinImportEntry,
   type JellyfinImportStatus,
   type JellyfinUser,
   type JellyfinUserImport,
+  type PlexAccess,
   type ServerKind,
 } from '@/api'
 import { PageLayout } from '@/app/PageLayout'
-import { errorMessage, formatEpisode } from '@/format'
+import { TitlesNotFound } from '@/features/imports/TitlesNotFound'
+import { errorMessage } from '@/format'
 import { useI18n, type Messages } from '@/i18n'
 import {
   Avatar,
@@ -28,7 +31,6 @@ import {
   Checkbox,
   Field,
   InlineError,
-  Modal,
   Notice,
   Panel,
   PanelFooter,
@@ -39,12 +41,13 @@ import {
   Select,
   SkeletonRows,
   StatusPill,
-  Table,
   TextInput,
   useToast,
   type SelectOption,
   type StatusTone,
 } from '@/ui'
+import { allExtras, ExtrasChoice } from './ImportExtras'
+import { PlexOwnerSignIn } from './PlexOwnerSignIn'
 
 /** How often the import is read while it runs. */
 const importPollMs = 2000
@@ -66,6 +69,8 @@ const signInCodes = [
   'jellyfin_other_user',
   'jellyfin_key_owner_only',
 ]
+/** Codes about a Plex Home profile's PIN, shown under that row's PIN. */
+const plexPinCodes = ['plex_profile_pin_refused', 'plex_profile_forbidden']
 
 const importTones: Record<JellyfinImportStatus['state'], StatusTone> = {
   running: 'live',
@@ -112,6 +117,8 @@ type Choice = {
   jellyfinPassword: string
   /** Whether a new user keeps that password in Polyfin. */
   keepPassword: boolean
+  /** A Plex Home profile's PIN, for an import the owner signed in to Plex for. */
+  plexPin: string
 }
 
 /**
@@ -210,7 +217,6 @@ export function ImportProgress({
 }) {
   const { t } = useI18n()
   const text = t.users.jellyfinImport
-  const [shownId, setShownId] = useState<string | null>(null)
   const running = current.state === 'running'
   const product = text.servers[current.server.kind]
   const title = running
@@ -224,8 +230,6 @@ export function ImportProgress({
       queryClient.setQueryData(queryKeys.jellyfinImport, stopped)
     },
   })
-  // Looked up in each poll's answer, so an open list follows the import.
-  const shown = current.users.find((user) => user.jellyfinId === shownId)
 
   return (
     <Panel
@@ -256,7 +260,7 @@ export function ImportProgress({
       }
     >
       <div className="flex flex-col gap-4">
-        {running && <p className="text-small text-ink-3">{text.runningHelp}</p>}
+        {running && <p className="text-small text-ink-3">{t.common.importRunningHelp}</p>}
         {current.problem !== null && (
           <Notice tone="danger">{text.problems[current.problem](product)}</Notice>
         )}
@@ -271,20 +275,12 @@ export function ImportProgress({
               key={user.jellyfinId}
               user={user}
               product={product}
+              kind={current.server.kind}
+              own={own}
               finished={!running}
-              onShowUnmatched={() => setShownId(user.jellyfinId)}
             />
           ))}
         </RowList>
-        <Modal
-          open={shown !== undefined}
-          onClose={() => setShownId(null)}
-          title={shown === undefined ? '' : text.unmatchedTitle(shown.jellyfinName)}
-          width={640}
-          footer={<Button onClick={() => setShownId(null)}>{t.users.close}</Button>}
-        >
-          {shown !== undefined && <UnmatchedList user={shown} />}
-        </Modal>
       </div>
     </Panel>
   )
@@ -292,23 +288,38 @@ export function ImportProgress({
 
 /**
  * One user of an import: the Polyfin user it went into, its state, what it read while it reads,
- * then what it added. A finished import's users still waiting were never reached.
+ * then what it read and added, the titles it did not find, which open the user's list of titles
+ * not found of that kind of server, and why it added nothing when it did not. A finished import's
+ * users still waiting were never reached. `own` is the user's own import, under My account.
  */
 function ImportedUserRow({
   user,
   product,
+  kind,
+  own,
   finished,
-  onShowUnmatched,
 }: {
   user: JellyfinUserImport
   /** The kind of server's name, such as Emby. */
   product: string
+  kind: ServerKind
+  own: boolean
   finished: boolean
-  onShowUnmatched: () => void
 }) {
   const { t } = useI18n()
   const text = t.users.jellyfinImport
   const notReached = finished && user.state === 'waiting'
+  const ended = [
+    text.read(user.read),
+    text.counts(user.played, user.resumed, user.favorites),
+    ...(user.ratings > 0 ? [text.ratings(user.ratings)] : []),
+    ...(user.watchlist > 0 ? [text.watchlist(user.watchlist)] : []),
+    ...(user.collections > 0 ? [text.collections(user.collections)] : []),
+    ...(user.playlists > 0 ? [text.playlists(user.playlists)] : []),
+    ...(user.listTitles > 0 ? [text.listTitles(user.listTitles)] : []),
+    ...(user.upToDate > 0 ? [text.upToDate(user.upToDate)] : []),
+    ...(user.undated > 0 ? [text.undated(user.undated)] : []),
+  ].join(' · ')
   return (
     <Row
       leading={<Avatar name={user.userName} size="lg" />}
@@ -318,73 +329,36 @@ function ImportedUserRow({
           ? text.read(user.read)
           : user.state === 'waiting'
             ? undefined
-            : text.counts(user.played, user.resumed, user.favorites)
+            : ended
       }
       trailing={
         <>
           <StatusPill tone={notReached ? 'muted' : userTones[user.state]}>
             {notReached ? text.notImported : text.userStates[user.state]}
           </StatusPill>
-          {user.unmatchedCount > 0 && (
-            <Button variant="ghost" size="sm" onClick={onShowUnmatched}>
-              {text.unmatched(user.unmatchedCount)}
-            </Button>
-          )}
+          <TitlesNotFound
+            scope={own ? 'own' : { userId: user.userId }}
+            source={kind}
+            stamp={`${user.state}:${user.unmatchedCount}`}
+          />
         </>
       }
     >
       {user.problem !== null ? (
         <Notice tone="danger">{text.problems[user.problem](product)}</Notice>
+      ) : user.nothingAdded !== null ? (
+        <Notice>{text.nothingAdded[user.nothingAdded](product)}</Notice>
       ) : undefined}
+      {user.skipped.length > 0 && (
+        <Notice>
+          <ul className="space-y-1">
+            {user.skipped.map((list, index) => (
+              <li key={index}>{text.skipped[list.kind](list.name)}</li>
+            ))}
+          </ul>
+        </Notice>
+      )}
     </Row>
-  )
-}
-
-/** The titles of a user's watch data that no Polyfin title matched, and why. */
-function UnmatchedList({ user }: { user: JellyfinUserImport }) {
-  const { t } = useI18n()
-  const text = t.users.jellyfinImport
-  // The server lists the first 500 only.
-  const more = user.unmatchedCount - user.unmatched.length
-  return (
-    <div className="space-y-4 p-5">
-      <p className="text-small text-ink-3">{text.unmatchedHelp}</p>
-      <Table label={text.unmatchedTitle(user.jellyfinName)} minWidth={520}>
-        <thead>
-          <tr>
-            <th scope="col">{text.titleColumn}</th>
-            <th scope="col">{text.kindColumn}</th>
-            <th scope="col" className="figures text-right">
-              {text.yearColumn}
-            </th>
-            <th scope="col">{text.reasonColumn}</th>
-          </tr>
-        </thead>
-        <tbody>
-          {user.unmatched.map((entry, index) => {
-            // "Series · S01 · E03", with what Jellyfin knows of the episode's place.
-            const place =
-              entry.type !== 'episode' || entry.series === null
-                ? ''
-                : entry.season === null || entry.episode === null
-                  ? entry.series
-                  : `${entry.series} · ${formatEpisode(entry.season, entry.episode)}`
-            return (
-              <tr key={index}>
-                <td>
-                  <span className="block text-ink">{entry.name}</span>
-                  {place !== '' && <span className="block text-small text-ink-3">{place}</span>}
-                </td>
-                <td>{text.kinds[entry.type]}</td>
-                <td className="figures text-right">{entry.year}</td>
-                <td>{text.reasons[entry.reason]}</td>
-              </tr>
-            )
-          })}
-        </tbody>
-      </Table>
-      {more > 0 && <p className="text-small text-ink-3">{text.more(more)}</p>}
-    </div>
   )
 }
 
@@ -432,7 +406,7 @@ function ConnectForm({
   return (
     <Panel title={text.connectTitle(product)} description={text.connectHelp} flush>
       <form onSubmit={submit} noValidate>
-        <div className="flex max-w-lg flex-col gap-5 px-6 pb-6 max-sm:px-4">
+        <div className="flex max-w-[38rem] flex-col gap-4 px-5 max-md:px-4">
           <div className="flex flex-col gap-2">
             <span aria-hidden className="text-control font-medium text-ink">
               {text.serverKind}
@@ -598,10 +572,14 @@ function ChooseUsers({
           watchData: true,
           jellyfinPassword: '',
           keepPassword: true,
+          plexPin: '',
         },
       ]),
     ),
   )
+  // Once the owner signs in to Plex: what is read of each account but the owner's.
+  const [access, setAccess] = useState<Record<string, PlexAccess> | null>(null)
+  const [extras, setExtras] = useState<ImportExtras>(allExtras)
 
   const start = useMutation({
     mutationFn: startJellyfinImport,
@@ -632,7 +610,9 @@ function ChooseUsers({
           ? 'password'
           : signInCodes.includes(failed.code)
             ? 'jellyfinPassword'
-            : null
+            : plexPinCodes.includes(failed.code)
+              ? 'plexPin'
+              : null
   const otherError = field === null ? message : undefined
 
   const options: SelectOption<Target>[] = [
@@ -646,10 +626,12 @@ function ChooseUsers({
     const choice = choices[user.id]
     if (choice.target === 'skip' || (choice.target !== 'new' && !choice.watchData)) return []
     const signIn = signsIn(user) && choice.watchData
+    const pin = access?.[user.id] === 'pin' && choice.watchData && choice.plexPin !== ''
     const entry: JellyfinImportEntry = {
       jellyfinId: user.id,
       watchData: choice.watchData,
       ...(signIn && { jellyfinPassword: choice.jellyfinPassword }),
+      ...(pin && { plexPin: choice.plexPin }),
     }
     if (choice.target !== 'new') return [{ ...entry, userId: choice.target.slice('user:'.length) }]
     const create = {
@@ -668,7 +650,14 @@ function ChooseUsers({
 
   function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
-    start.mutate({ kind, address: connection.server.address, ...credentials, users: entries })
+    start.mutate({
+      kind,
+      address: connection.server.address,
+      ...credentials,
+      ...(access !== null && { plexOwner: true }),
+      ...extras,
+      users: entries,
+    })
   }
 
   return (
@@ -713,34 +702,58 @@ function ChooseUsers({
                   : text.ownerNotice(ownerName, 'account' in credentials)}
               </Notice>
             )}
+            {kind === 'plex' && (
+              <PlexOwnerSignIn
+                address={connection.server.address}
+                credentials={credentials}
+                onAccess={(read) => {
+                  start.reset()
+                  setAccess(read)
+                }}
+              />
+            )}
             {/* Plex's owner's token reads the other accounts' played history, not their resume points. */}
-            {kind === 'plex' && <Notice>{text.plexNotice}</Notice>}
+            {kind === 'plex' && access === null && <Notice>{text.plexNotice}</Notice>}
             <RowList variant="plain" aria-label={text.chooseTitle}>
-              {connection.users.map((user) => (
-                <ChoiceRow
-                  key={user.id}
-                  user={user}
-                  server={connection.server.name}
-                  activity={kind !== 'plex'}
-                  dataHelp={
-                    kind !== 'plex'
-                      ? text.watchDataHelp
-                      : user.isAdministrator
-                        ? text.plexOwnerWatchDataHelp
-                        : text.plexWatchDataHelp
-                  }
-                  choice={choices[user.id]}
-                  options={options}
-                  signsIn={signsIn(user)}
-                  error={
-                    field !== null && message !== undefined && failed?.jellyfinId === user.id
-                      ? { field, message }
-                      : undefined
-                  }
-                  onChange={(patch) => update(user.id, patch)}
-                />
-              ))}
+              {connection.users.map((user) => {
+                const read = access?.[user.id]
+                return (
+                  <ChoiceRow
+                    key={user.id}
+                    user={user}
+                    server={connection.server.name}
+                    activity={kind !== 'plex'}
+                    dataHelp={
+                      kind !== 'plex'
+                        ? text.watchDataHelp
+                        : read !== undefined
+                          ? text.plexOwner[read]
+                          : user.isAdministrator
+                            ? text.plexOwnerWatchDataHelp
+                            : text.plexWatchDataHelp
+                    }
+                    plexAccess={read}
+                    choice={choices[user.id]}
+                    options={options}
+                    signsIn={signsIn(user)}
+                    error={
+                      field !== null && message !== undefined && failed?.jellyfinId === user.id
+                        ? { field, message }
+                        : undefined
+                    }
+                    onChange={(patch) => update(user.id, patch)}
+                  />
+                )
+              })}
             </RowList>
+            <ExtrasChoice
+              value={extras}
+              onChange={(value) => {
+                start.reset()
+                setExtras(value)
+              }}
+              plex={kind === 'plex'}
+            />
           </>
         )}
         {otherError && (
@@ -754,7 +767,7 @@ function ChooseUsers({
 }
 
 /** An error the server answered about a field of a row. */
-type RowError = { field: 'name' | 'password' | 'jellyfinPassword'; message: string }
+type RowError = { field: 'name' | 'password' | 'jellyfinPassword' | 'plexPin'; message: string }
 
 /** One user of the server: who it is, what it becomes in Polyfin, and whether its data comes along. */
 function ChoiceRow({
@@ -762,6 +775,7 @@ function ChoiceRow({
   server,
   dataHelp,
   activity,
+  plexAccess,
   choice,
   options,
   signsIn,
@@ -775,6 +789,8 @@ function ChoiceRow({
   dataHelp: string
   /** Whether the server tells when its users last used it: Plex does not. */
   activity: boolean
+  /** What is read of this Plex account once the owner signed in to Plex; else undefined. */
+  plexAccess: PlexAccess | undefined
   choice: Choice
   options: SelectOption<Target>[]
   /** The connection is another user's: this user's watch data is read signed in as them. */
@@ -789,6 +805,8 @@ function ChoiceRow({
   const signIn = signsIn && choice.watchData
   // A new user keeping their password on the server has no other.
   const keeps = signIn && choice.target === 'new' && choice.keepPassword
+  // Once the owner signed in to Plex: whether all of this account's watch data is read.
+  const everything = plexAccess === 'all' || (plexAccess === 'pin' && choice.plexPin !== '')
   const lastActivity =
     user.lastActivityAt === null ? t.common.never : <RelativeTime iso={user.lastActivityAt} />
   return (
@@ -800,6 +818,11 @@ function ChoiceRow({
         <>
           {user.isAdministrator && <Badge tone="accent">{t.users.administrator}</Badge>}
           {user.isDisabled && <Badge>{t.users.disabled}</Badge>}
+          {plexAccess !== undefined && choice.target !== 'skip' && choice.watchData && (
+            <Badge tone={everything ? 'ok' : 'neutral'}>
+              {everything ? text.plexOwner.everything : text.plexOwner.playsOnly}
+            </Badge>
+          )}
         </>
       }
       meta={
@@ -811,7 +834,7 @@ function ChoiceRow({
       }
     >
       <div className="flex flex-col gap-4">
-        <Field label={text.importAs} className="max-w-sm">
+        <Field label={text.importAs} className="max-w-[28.5rem]">
           <Select
             value={choice.target}
             options={options}
@@ -877,7 +900,7 @@ function ChoiceRow({
                   ? error.message
                   : undefined
               }
-              className="max-w-sm"
+              className="max-w-[28.5rem]"
             >
               <TextInput
                 type="password"
@@ -896,6 +919,23 @@ function ChoiceRow({
               />
             )}
           </>
+        )}
+        {choice.target !== 'skip' && choice.watchData && plexAccess === 'pin' && (
+          <Field
+            label={text.plexOwner.pinLabel}
+            help={text.plexOwner.pinHelp(user.name)}
+            error={error?.field === 'plexPin' ? error.message : undefined}
+            className="max-w-[28.5rem]"
+          >
+            <TextInput
+              type="password"
+              inputMode="numeric"
+              revealable
+              value={choice.plexPin}
+              onValue={(plexPin) => onChange({ plexPin })}
+              autoComplete="off"
+            />
+          </Field>
         )}
       </div>
     </Row>

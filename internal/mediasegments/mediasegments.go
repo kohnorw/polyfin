@@ -1,7 +1,7 @@
 // Package mediasegments finds where the intro, recap, credits and preview of
 // a movie or an episode are, for the skip buttons of Jellyfin apps. It asks
-// community databases, TheIntroDB, IntroDB and PublicMetaDB, by the title's
-// IMDb or TMDB identifier, and keeps their answers in the database.
+// community databases, TheIntroDB, IntroDB, PublicMetaDB and SkipDB, by the
+// title's IMDb or TMDB identifier, and keeps their answers in the database.
 package mediasegments
 
 import (
@@ -28,6 +28,7 @@ import (
 	"golang.org/x/sync/singleflight"
 
 	"github.com/moodiness/polyfin/internal/accounts"
+	"github.com/moodiness/polyfin/internal/pace"
 )
 
 // The databases, by the names POLYFIN_SEGMENTS gives them.
@@ -35,6 +36,7 @@ const (
 	TheIntroDB   = "theintrodb"
 	IntroDB      = "introdb"
 	PublicMetaDB = "publicmetadb"
+	SkipDB       = "skipdb"
 )
 
 // publicURLs are the base URLs of the databases' APIs.
@@ -42,6 +44,7 @@ var publicURLs = map[string]string{
 	TheIntroDB:   "https://api.theintrodb.org/v3",
 	IntroDB:      "https://api.introdb.app",
 	PublicMetaDB: "https://publicmetadb.com",
+	SkipDB:       "https://api.skipdb.tv",
 }
 
 const (
@@ -83,10 +86,39 @@ const (
 // commercials).
 const Commercial Type = "Commercial"
 
-// Segment is a part of a title that apps offer to skip.
+// Segment is a part of a title that apps offer to skip, and where it
+// comes from.
 type Segment struct {
 	Type       Type
 	Start, End time.Duration
+	Origin     Origin
+}
+
+// Finder is how a segment was found.
+type Finder string
+
+// The ways Polyfin finds segments.
+const (
+	// InDatabase is a segment a database gave (see Service.Segments).
+	InDatabase Finder = "database"
+	// InChapters is one a version's chapters name.
+	InChapters Finder = "chapters"
+	// InAudio is one found in the audio of a season's episodes (see
+	// package audiosegments).
+	InAudio Finder = "audio"
+)
+
+// Origin tells where a segment comes from: how it was found, empty when
+// unknown, and for a database's, which one and its own rating of the
+// segment.
+type Origin struct {
+	Found Finder
+	// Database names the database of a segment found InDatabase, by the
+	// name POLYFIN_SEGMENTS gives it.
+	Database string
+	// Confidence is the database's rating of the segment, from 0 to 1;
+	// nil when it gives none.
+	Confidence *float64
 }
 
 // Title identifies a movie or an episode to the databases.
@@ -100,6 +132,11 @@ type Title struct {
 	// Season and Episode number an episode within its series; both are
 	// zero for a movie.
 	Season, Episode int
+	// TMDBSeason and TMDBEpisode number the episode as TMDB does, which
+	// PublicMetaDB is asked with (see SetTMDBNumbers): TMDBEpisode is 0
+	// when TMDB numbers it Season and Episode too, -1 when no episode of
+	// TMDB is surely it, and otherwise TMDB's number, in TMDBSeason.
+	TMDBSeason, TMDBEpisode int
 	// Runtime is the title's length when known: it picks the release the
 	// segments were timed on, and ends the segments that last until the
 	// end.
@@ -107,6 +144,49 @@ type Title struct {
 }
 
 func (t Title) movie() bool { return t.Season == 0 && t.Episode == 0 }
+
+// SetTMDBNumbers sets how TMDB numbers the episode t is, from the season
+// and number TMDB gives it and whether TMDB surely has it, as
+// library.EpisodeNumbering.ToTMDB tells them.
+func (t *Title) SetTMDBNumbers(season, episode int, ok bool) {
+	switch {
+	case t.movie():
+		return
+	case !ok:
+		t.TMDBSeason, t.TMDBEpisode = 0, -1
+	case season != t.Season || episode != t.Episode:
+		t.TMDBSeason, t.TMDBEpisode = season, episode
+	default:
+		t.TMDBSeason, t.TMDBEpisode = 0, 0
+	}
+}
+
+// tmdbPlace is the season and number PublicMetaDB is asked an episode
+// with, TMDB's, and false when no episode of TMDB is surely it.
+func (t Title) tmdbPlace() (season, episode int, ok bool) {
+	switch {
+	case t.TMDBEpisode < 0:
+		return 0, 0, false
+	case t.TMDBEpisode > 0:
+		return t.TMDBSeason, t.TMDBEpisode, true
+	}
+	return t.Season, t.Episode, true
+}
+
+// askedAs names the episode PublicMetaDB is asked about, as its answer
+// is kept with (see answer.Asked); empty for a movie.
+func (t Title) askedAs() string {
+	if t.movie() {
+		return ""
+	}
+	season, episode, _ := t.tmdbPlace()
+	return placeName(season, episode)
+}
+
+// placeName names an episode's season and number: "2x3".
+func placeName(season, episode int) string {
+	return strconv.Itoa(season) + "x" + strconv.Itoa(episode)
+}
 
 // Source is a database and the base URL of its API.
 type Source struct {
@@ -150,20 +230,61 @@ type Service struct {
 	// limited holds, by database, when one that answered 429 with a
 	// Retry-After may be asked again.
 	limited map[string]time.Time
+	// publicMetaDBPace spaces the requests to PublicMetaDB, nil none (see
+	// UsePublicMetaDBPace).
+	publicMetaDBPace *pace.Pace
 }
 
 // New returns a service asking those of sources the settings turn on, in
 // the order of preference they save, and keeping their answers in db.
-// PublicMetaDB is asked only while settings hold a key for it.
+// PublicMetaDB is asked only while settings hold a key for it. Its
+// transport is its own, a clone of the default one: whoever closes the
+// idle connections of http.DefaultTransport cannot break its requests
+// (#958).
 func New(db *pgxpool.Pool, sources []Source, version string, logger *slog.Logger, settings func() accounts.Settings) *Service {
-	return &Service{db: db, sources: sources, settings: settings, client: &http.Client{}, userAgent: "Polyfin/" + version, logger: logger,
-		now: time.Now, refused: map[string]string{}, limited: map[string]time.Time{}}
+	return &Service{db: db, sources: sources, settings: settings, client: &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()},
+		userAgent: "Polyfin/" + version, logger: logger, now: time.Now, refused: map[string]string{}, limited: map[string]time.Time{}}
+}
+
+// UsePublicMetaDBPace has each request to PublicMetaDB wait for its turn
+// on p, which the other parts of the server asking PublicMetaDB share:
+// its limit counts every request of the server's address. A rate limit it
+// answers holds p too. Call it before the service is used.
+func (s *Service) UsePublicMetaDBPace(p *pace.Pace) {
+	s.publicMetaDBPace = p
+}
+
+// getPublicMetaDB asks PublicMetaDB as get does, once its pace, if any,
+// gives the request its turn: an error if ctx ends first, or its deadline
+// comes before the turn. A rate limit it answers holds the pace until its
+// Retry-After.
+func (s *Service) getPublicMetaDB(ctx context.Context, target, key string, body any) (found bool, err error) {
+	p := s.publicMetaDBPace
+	if p == nil {
+		return s.get(ctx, target, key, body)
+	}
+	if err := p.Wait(ctx); err != nil {
+		return false, err
+	}
+	found, err = s.get(ctx, target, key, body)
+	var limited *rateLimited
+	if errors.As(err, &limited) {
+		p.Hold(limited.until.Sub(s.now()))
+	}
+	return found, err
 }
 
 // Asks reports whether the settings turn a segment database on; a nil
 // service asks none.
 func (s *Service) Asks() bool {
 	return s != nil && len(s.on(s.settings())) > 0
+}
+
+// AsksPublicMetaDB reports whether the settings have PublicMetaDB asked,
+// which knows episodes by TMDB's numbers (see Title.SetTMDBNumbers); a
+// nil service asks it not.
+func (s *Service) AsksPublicMetaDB() bool {
+	return s != nil && slices.ContainsFunc(s.used(s.settings()), func(source Source) bool { return source.Name == PublicMetaDB })
 }
 
 // on are the sources settings turn on, in the order of preference they
@@ -184,12 +305,19 @@ type mark struct {
 	StartMS int64 `json:"start_ms"`
 	// EndMS is nil for a segment that lasts until the end of the title.
 	EndMS *int64 `json:"end_ms,omitempty"`
+	// Confidence is the database's rating of the segment, from 0 to 1,
+	// when it gives one. Answers kept before it was read have none.
+	Confidence *float64 `json:"confidence,omitempty"`
 }
 
 // answer is what a database said about a title, and when to ask again.
 type answer struct {
 	Marks   []mark    `json:"marks"`
 	Expires time.Time `json:"expires"`
+	// Asked names the episode PublicMetaDB was asked about, by TMDB's
+	// numbers ("2x3", see Title.askedAs). Answers kept before it was
+	// written have none: they were asked with the episode's own numbers.
+	Asked string `json:"asked,omitempty"`
 }
 
 var (
@@ -210,13 +338,22 @@ func (s *Service) Segments(ctx context.Context, title Title) []Segment {
 	}
 	settings := s.settings()
 	sources := s.used(settings)
+	if _, _, ok := title.tmdbPlace(); !ok {
+		// No episode of TMDB is surely this one: PublicMetaDB, which
+		// knows episodes by TMDB's numbers, is not asked.
+		sources = slices.DeleteFunc(sources, func(source Source) bool { return source.Name == PublicMetaDB })
+	}
 	if len(sources) == 0 || (title.IMDb == "" && title.TMDB == "") ||
 		(!title.movie() && (title.Season < 1 || title.Episode < 1)) {
 		return nil
 	}
 	answers := s.load(ctx, title.Item)
+	forgetOtherEpisode(answers, title)
 	if stale := s.stale(sources, answers, settings.PublicMetaDBKey); len(stale) > 0 {
-		result, _, _ := s.flight.Do(title.Item.String(), func() (any, error) {
+		// The numbers PublicMetaDB is asked with are part of the key, so
+		// that a request renumbered meanwhile is not given the answers
+		// about another episode.
+		result, _, _ := s.flight.Do(title.Item.String()+"|"+title.askedAs(), func() (any, error) {
 			// The answers are kept even once the request that asked is
 			// canceled, as when an app stops waiting.
 			return s.refresh(context.WithoutCancel(ctx), title, answers, stale, settings), nil
@@ -224,6 +361,22 @@ func (s *Service) Segments(ctx context.Context, title Title) []Segment {
 		answers = result.(map[string]answer)
 	}
 	return merge(answers, sources, title.Runtime)
+}
+
+// forgetOtherEpisode drops from the answers kept about an episode
+// PublicMetaDB's, when it was asked about another episode than TMDB's
+// place of it now, as before its series' numbering was known or changed,
+// or when no episode of TMDB is surely it: it is then asked again, if at
+// all, and its segments of another episode are neither given nor kept.
+func forgetOtherEpisode(answers map[string]answer, title Title) {
+	kept, ok := answers[PublicMetaDB]
+	if !ok || title.movie() {
+		return
+	}
+	_, _, placed := title.tmdbPlace()
+	if !placed || cmp.Or(kept.Asked, placeName(title.Season, title.Episode)) != title.askedAs() {
+		delete(answers, PublicMetaDB)
+	}
 }
 
 // used are the sources whose answers count: those the settings turn on, in
@@ -314,6 +467,9 @@ func (s *Service) refresh(ctx context.Context, title Title, answers map[string]a
 			case len(marks) > 0:
 				result.Expires = now.Add(foundFor)
 			}
+			if source.Name == PublicMetaDB {
+				result.Asked = title.askedAs()
+			}
 			mu.Lock()
 			fresh[source.Name] = result
 			mu.Unlock()
@@ -380,7 +536,8 @@ func merge(answers map[string]answer, sources []Source, runtime time.Duration) [
 				if m.Type != kind {
 					continue
 				}
-				segment := Segment{Type: kind, Start: time.Duration(m.StartMS) * time.Millisecond, End: runtime}
+				segment := Segment{Type: kind, Start: time.Duration(m.StartMS) * time.Millisecond, End: runtime,
+					Origin: Origin{Found: InDatabase, Database: source.Name, Confidence: m.Confidence}}
 				if m.EndMS != nil {
 					segment.End = time.Duration(*m.EndMS) * time.Millisecond
 				}
@@ -407,6 +564,8 @@ func (s *Service) ask(ctx context.Context, source Source, title Title, settings 
 		return s.askIntroDB(ctx, source.URL, title)
 	case PublicMetaDB:
 		return s.askPublicMetaDB(ctx, source.URL, title, settings.PublicMetaDBKey)
+	case SkipDB:
+		return s.askSkipDB(ctx, source.URL, title)
 	default:
 		return nil, nil
 	}
@@ -558,21 +717,23 @@ func (r skipRecord) marks() []mark {
 }
 
 // askPublicMetaDB asks PublicMetaDB, which knows titles by TMDB identifier
-// only, with the server's key.
+// only, and episodes by TMDB's numbers, with the server's key. An episode
+// no episode of TMDB is surely is not asked about.
 func (s *Service) askPublicMetaDB(ctx context.Context, base string, title Title, key string) ([]mark, error) {
-	if title.TMDB == "" {
+	season, episode, placed := title.tmdbPlace()
+	if title.TMDB == "" || !placed {
 		return nil, nil
 	}
 	query := url.Values{"tmdb_id": {title.TMDB}, "media_type": {"movie"}, "perPage": {strconv.Itoa(skipRecords)}}
 	if !title.movie() {
 		query.Set("media_type", "tv")
-		query.Set("season", strconv.Itoa(title.Season))
-		query.Set("episode", strconv.Itoa(title.Episode))
+		query.Set("season", strconv.Itoa(season))
+		query.Set("episode", strconv.Itoa(episode))
 	}
 	var body struct {
 		Items []skipRecord `json:"items"`
 	}
-	if found, err := s.get(ctx, base+"/api/external/skips?"+query.Encode(), key, &body); err != nil || !found {
+	if found, err := s.getPublicMetaDB(ctx, base+"/api/external/skips?"+query.Encode(), key, &body); err != nil || !found {
 		return nil, err
 	}
 	return pickSkips(body.Items), nil
@@ -601,7 +762,7 @@ func pickSkips(records []skipRecord) []mark {
 			continue
 		}
 		// An unreadable date counts as the oldest.
-		c.created, _ = time.Parse(time.RFC3339, record.Created)
+		c.created = created(record.Created)
 		if best == nil || cmp.Or(
 			-compareBool(c.streaming, best.streaming),
 			-cmp.Compare(len(c.marks), len(best.marks)),
@@ -617,6 +778,18 @@ func pickSkips(records []skipRecord) []mark {
 	return best.marks
 }
 
+// created reads a record's creation date: RFC 3339, or with a space between
+// the day and the time, as PublicMetaDB writes it. It is the zero time when
+// unreadable.
+func created(text string) time.Time {
+	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05.999999999Z07:00"} {
+		if t, err := time.Parse(layout, text); err == nil {
+			return t
+		}
+	}
+	return time.Time{}
+}
+
 // compareBool orders false before true.
 func compareBool(a, b bool) int {
 	switch {
@@ -627,6 +800,73 @@ func compareBool(a, b bool) int {
 	default:
 		return -1
 	}
+}
+
+// skipDBSegment is a segment as SkipDB gives it, in milliseconds, with how
+// it was matched to the duration asked with, and SkipDB's confidence in it.
+type skipDBSegment struct {
+	StartMS float64 `json:"start_ms"`
+	// EndMS is nil for credits or a preview lasting until the end.
+	EndMS      *float64 `json:"end_ms"`
+	Match      string   `json:"match"`
+	Confidence *float64 `json:"confidence"`
+}
+
+// rating is a database's confidence in a segment when it is one, from 0
+// to 1; nil otherwise.
+func rating(confidence *float64) *float64 {
+	if confidence == nil || !(*confidence >= 0 && *confidence <= 1) {
+		return nil
+	}
+	return new(*confidence)
+}
+
+// skipDBTypes are SkipDB's segment types, by the keys of its answers.
+var skipDBTypes = map[string]Type{"intro": Intro, "recap": Recap, "outro": Outro, "preview": Preview}
+
+// askSkipDB asks SkipDB, which knows titles by IMDb identifier only, with
+// the title's runtime in seconds when known: SkipDB then gives the segments
+// timed on the release of the closest duration, shifted earlier when it
+// differs by a few seconds. A segment whose release differs too much is
+// "out-of-range" and left out, as its times may not fit the version played.
+// SkipDB answers null for a type never submitted, and 0 to 0 for one it
+// knows the title lacks.
+func (s *Service) askSkipDB(ctx context.Context, base string, title Title) ([]mark, error) {
+	if title.IMDb == "" {
+		return nil, nil
+	}
+	query := url.Values{"imdb_id": {title.IMDb}}
+	if !title.movie() {
+		query.Set("season", strconv.Itoa(title.Season))
+		query.Set("episode", strconv.Itoa(title.Episode))
+	}
+	if seconds := math.Round(title.Runtime.Seconds()); seconds > 0 {
+		query.Set("duration", strconv.FormatFloat(seconds, 'f', 0, 64))
+	}
+	var body struct {
+		Segments map[string]*skipDBSegment `json:"segments"`
+	}
+	if found, err := s.get(ctx, base+"/api/segments?"+query.Encode(), "", &body); err != nil || !found {
+		return nil, err
+	}
+	var marks []mark
+	for key, sg := range body.Segments {
+		kind, ok := skipDBTypes[key]
+		if !ok || sg == nil || sg.Match == "out-of-range" {
+			continue
+		}
+		start, confidence := int64(math.Round(sg.StartMS)), rating(sg.Confidence)
+		if sg.EndMS == nil {
+			if (kind == Outro || kind == Preview) && start > 0 {
+				marks = append(marks, mark{Type: kind, StartMS: start, Confidence: confidence})
+			}
+			continue
+		}
+		if end := int64(math.Round(*sg.EndMS)); start >= 0 && end > start {
+			marks = append(marks, mark{Type: kind, StartMS: start, EndMS: &end, Confidence: confidence})
+		}
+	}
+	return marks, nil
 }
 
 // CheckKey asks database, TheIntroDB or PublicMetaDB, one question with
@@ -647,7 +887,7 @@ func (s *Service) CheckKey(ctx context.Context, database, key string) error {
 	case PublicMetaDB:
 		// The skip timestamps of a known movie, which take a key.
 		var body json.RawMessage
-		_, err = s.get(ctx, base+"/api/external/skips?media_type=movie&perPage=1&tmdb_id=550", key, &body)
+		_, err = s.getPublicMetaDB(ctx, base+"/api/external/skips?media_type=movie&perPage=1&tmdb_id=550", key, &body)
 	case TheIntroDB:
 		err = s.checkTheIntroDBKey(ctx, base, key)
 	default:
@@ -668,9 +908,11 @@ func (s *Service) CheckKey(ctx context.Context, database, key string) error {
 // answers ignore a key they do not know, while a submission checks the key
 // before its body: an empty body, which submits nothing, is refused as
 // invalid (400 or 422) once the key is accepted, and the key refused with
-// 401 or 403. Any other answer leaves the key unchecked.
+// 401, or 403 for a locked account. Any other answer leaves the key
+// unchecked. Submissions are /v4's alone: the frozen /v3 that base names,
+// whose media answers are still read, keeps GET /media only.
 func (s *Service) checkTheIntroDBKey(ctx context.Context, base, key string) error {
-	request, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/submit", strings.NewReader("{}"))
+	request, err := http.NewRequestWithContext(ctx, http.MethodPost, theIntroDBv4(base)+"/submit", strings.NewReader("{}"))
 	if err != nil {
 		return err
 	}
@@ -692,6 +934,20 @@ func (s *Service) checkTheIntroDBKey(ctx context.Context, base, key string) erro
 	default:
 		return fmt.Errorf("HTTP %d", status)
 	}
+}
+
+// theIntroDBv4 is the /v4 address of TheIntroDB whose /v3 is base: base
+// with its version replaced, or followed by /v4 when it names none, as a
+// test's address.
+func theIntroDBv4(base string) string {
+	base = strings.TrimRight(base, "/")
+	if i := strings.LastIndex(base, "/"); i >= 0 {
+		last := base[i+1:]
+		if len(last) > 1 && last[0] == 'v' && strings.Trim(last[1:], "0123456789") == "" {
+			base = base[:i]
+		}
+	}
+	return base + "/v4"
 }
 
 // rateLimited reports a database that answered 429 with a Retry-After, and

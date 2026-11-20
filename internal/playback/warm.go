@@ -16,6 +16,7 @@ import (
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/media"
 	"github.com/moodiness/polyfin/internal/source"
+	"github.com/moodiness/polyfin/internal/torrent"
 )
 
 // Reading ahead of a play what it reads first.
@@ -107,29 +108,39 @@ func (s *Service) warm(version library.Version, start time.Duration, replace, ur
 	run := &warmRun{start: start, started: time.Now(), urgent: urgent, cancel: cancel}
 	s.warming[version.ID] = run
 	s.warmMu.Unlock()
-	go func() {
-		defer cancel()
-		started := time.Now()
-		err := s.warmFrom(ctx, version, start)
-		s.warmMu.Lock()
-		if s.warming[version.ID] == run {
-			delete(s.warming, version.ID)
-		}
-		s.warmMu.Unlock()
-		if err != nil {
-			s.logger.Debug("A version's first bytes could not be read ahead", "addon", version.Addon, "error", err)
-			return
-		}
-		s.warmed.Put(version.ID, start)
-		s.logger.Debug("Read a version's first bytes ahead", "addon", version.Addon, "from", start, "duration", time.Since(started))
+	go s.runWarm(ctx, cancel, version, start, run)
+}
+
+// runWarm runs a warm of version from start, run, until ctx ends, then
+// forgets it. A panic of it, of what reads the version's source, is
+// logged with its stack and fails that warm only.
+func (s *Service) runWarm(ctx context.Context, cancel func(), version library.Version, start time.Duration, run *warmRun) {
+	defer cancel()
+	started := time.Now()
+	err := func() (err error) {
+		defer s.panicked(&err, "Reading a version's first bytes ahead ended on a panic", "addon", version.AddonLog)
+		return s.warmFrom(ctx, version, start)
 	}()
+	s.warmMu.Lock()
+	if s.warming[version.ID] == run {
+		delete(s.warming, version.ID)
+	}
+	s.warmMu.Unlock()
+	if err != nil {
+		s.logger.Debug("A version's first bytes could not be read ahead", "addon", version.AddonLog, "error", err)
+		return
+	}
+	s.warmed.Put(version.ID, start)
+	s.logger.Debug("Read a version's first bytes ahead", "addon", version.AddonLog, "from", start, "duration", time.Since(started))
 }
 
 // warmFrom reads what a play of version from start reads first, as a
-// playback's reads unless ctx is marked Background.
+// playback's reads unless ctx is marked Background. A version cut on a
+// grid, or one FFmpeg searches (see hls.Plan.Searched), has no index
+// that tells where its keyframes are: it is not warmed.
 func (s *Service) warmFrom(ctx context.Context, version library.Version, start time.Duration) error {
 	plan, err := s.plan(ctx, version)
-	if err != nil || plan.Grid() {
+	if err != nil || plan.Grid() || plan.IsSearched() {
 		return err
 	}
 	analysis, err := s.Analyze(ctx, version)
@@ -156,11 +167,17 @@ func (s *Service) warmFrom(ctx context.Context, version library.Version, start t
 }
 
 // keyframeOffsets returns where a version's keyframes start: kept since its
-// index was read, or read again from its head and index.
+// index was read, or read again from its head and index, in a slot for
+// index reads (see indexSlot).
 func (s *Service) keyframeOffsets(ctx context.Context, version library.Version, src *source.Source, size int64) ([]container.Keyframe, error) {
 	if offsets, ok := s.offsets.Get(version.ID); ok {
 		return offsets, nil
 	}
+	release, err := s.indexSlot(ctx, version)
+	if err != nil {
+		return nil, err
+	}
+	defer release()
 	offsets, err := container.KeyframeOffsets(ctx, src, size)
 	if err != nil {
 		return nil, err
@@ -210,7 +227,8 @@ var ebmlMagic = []byte{0x1A, 0x45, 0xDF, 0xA3}
 // is a Matroska file, by its name or its first bytes: its index needs only
 // its size, and an HLS play reads it next. The read is shared with Plan's,
 // and kept the same way. It is background work: a play reading the index
-// meanwhile has it read as a playback.
+// meanwhile has it read as a playback, and a torrent's file is read only
+// once a playback joined its swarm.
 func (s *Service) indexAhead(version library.Version) {
 	if _, ok := s.indexes.Get(version.ID); ok {
 		return
@@ -218,7 +236,10 @@ func (s *Service) indexAhead(version library.Version) {
 	if _, failed := s.unindexed.Get(version.ID); failed {
 		return
 	}
-	s.flight.DoChan("index ahead "+version.ID.String(), func() (any, error) {
+	if s.idleTorrent(Background(context.Background()), version) {
+		return
+	}
+	s.doShared("index ahead "+version.ID.String(), func() (any, error) {
 		ctx, cancel := context.WithTimeout(Background(context.Background()), indexAheadTime)
 		defer cancel()
 		src := s.open(version)
@@ -249,7 +270,8 @@ func matroskaName(name string) bool {
 
 // watchSource keeps a version as failed once its source fails, until done
 // is closed: the next PlaybackInfo plays another version. A host asking to
-// slow down tells nothing of the file: the version is kept.
+// slow down tells nothing of the file: the version is kept. A torrent's
+// route failing is told as such, without the addon, which was not asked.
 func (s *Service) watchSource(version library.Version, src *source.Source, done <-chan struct{}) {
 	failed := src.Failed()
 	select {
@@ -258,7 +280,11 @@ func (s *Service) watchSource(version library.Version, src *source.Source, done 
 		if errors.Is(err, source.ErrUnavailable) && !errors.Is(err, source.ErrSlowDown) {
 			s.fail(version, err)
 		}
-		s.logger.Info("A version's source failed while it played", "addon", version.Addon, "answer", source.Answer(err))
+		if torrent.RouteFailure(err) {
+			s.logger.Info("A version's source failed while it played", "answer", source.Answer(err), "error", err)
+			return
+		}
+		s.logger.Info("A version's source failed while it played", "addon", version.AddonLog, "answer", source.Answer(err))
 	case <-done:
 	}
 }

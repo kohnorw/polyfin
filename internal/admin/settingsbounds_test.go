@@ -47,7 +47,7 @@ func TestSettingsAnswerTheirBounds(t *testing.T) {
 	if got := entry("prepareAhead"); !reflect.DeepEqual(got, map[string]any{"default": true}) {
 		t.Errorf("prepareAhead: %v", got)
 	}
-	if got := entry("segmentOrder"); !reflect.DeepEqual(got["default"], []any{"theintrodb", "introdb", "publicmetadb"}) {
+	if got := entry("segmentOrder"); !reflect.DeepEqual(got["default"], []any{"theintrodb", "introdb", "publicmetadb", "skipdb"}) {
 		t.Errorf("segmentOrder: %v", got)
 	}
 	if got := entry("customCss"); got["max"] != float64(accounts.MaxCustomCodeBytes) {
@@ -66,10 +66,14 @@ func TestSettingsAnswerTheirBounds(t *testing.T) {
 	readOnly := map[string]bool{"bounds": true, "conversionHardware": true, "recordingsFolderDefault": true, "backupFolderDefault": true,
 		"renderNodes": true, "publicMetaDbKeySet": true, "theIntroDbKeySet": true, "mdblistRatingsKeySet": true, "tmdbKeySet": true,
 		"traktClientSecretSet": true, "lastFmSecretSet": true, "aniListClientSecretSet": true, "myAnimeListClientSecretSet": true,
-		"smtpPasswordSet": true, "metricsTokenSet": true, "versionSources": true, "torrentProxyPasswordSet": true, "interfaceRoutes": true}
+		"smtpPasswordSet": true, "metricsTokenSet": true, "versionSources": true, "torrentProxyPasswordSet": true, "torrentWireGuardSaved": true,
+		"interfaceRoutes": true, "lumaaGlaass": true, "aioStreams": true, "updateToolTokenSet": true, "cacheFolderDefault": true,
+		"trackLanguages": true, "providerClientSecretSet": true, "providerRedirectUri": true, "backupPassphraseSet": true,
+		"sourceCachePresetLimits": true, "readingFree": true}
 	secrets := map[string]bool{"publicMetaDbKey": true, "theIntroDbKey": true, "mdblistRatingsKey": true, "tmdbKey": true,
 		"traktClientSecret": true, "lastFmSecret": true, "aniListClientSecret": true, "myAnimeListClientSecret": true,
-		"smtpPassword": true, "metricsToken": true, "torrentProxyPassword": true}
+		"smtpPassword": true, "metricsToken": true, "torrentProxyPassword": true, "torrentWireGuard": true, "updateToolToken": true,
+		"providerClientSecret": true, "backupPassphrase": true}
 	for name := range body {
 		if _, found := bounds[name]; !found && !readOnly[name] {
 			t.Errorf("no bounds for %s", name)

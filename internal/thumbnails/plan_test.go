@@ -1,9 +1,12 @@
 package thumbnails
 
 import (
+	"math"
 	"slices"
 	"testing"
 	"time"
+
+	"github.com/moodiness/polyfin/internal/accounts"
 )
 
 func secondsOf(values ...float64) []time.Duration {
@@ -18,6 +21,7 @@ func secondsOf(values ...float64) []time.Duration {
 // coarse to fine: however many the budget lets through, they cover the
 // whole runtime.
 func TestChooseKeyframes(t *testing.T) {
+	t.Parallel()
 	keyframes := make([]time.Duration, 3600)
 	for i := range keyframes {
 		keyframes[i] = time.Duration(i) * time.Second
@@ -53,6 +57,7 @@ func TestChooseKeyframes(t *testing.T) {
 // Every thumbnail shows the keyframe read nearest its time, the earlier
 // of two as near, whatever the order they were read in.
 func TestShownCoversEveryThumbnail(t *testing.T) {
+	t.Parallel()
 	read := secondsOf(30, 0, 14, 6)
 	asked := make([]time.Duration, 8)
 	for i := range asked {
@@ -71,10 +76,52 @@ func TestShownCoversEveryThumbnail(t *testing.T) {
 	}
 }
 
+// Each chapter keeps the image of the keyframe read nearest its start,
+// as shown chooses it among every keyframe read, the earlier of two as
+// near, whatever the order they come in: the others are dropped as they
+// come.
+func TestChapterImagesKeepTheNearestKeyframe(t *testing.T) {
+	t.Parallel()
+	read := secondsOf(30, 0, 14, 6)
+	starts := secondsOf(0, 5, 10, 15, 20, 25, 30, 35)
+	images := make([][]byte, len(read))
+	for i := range read {
+		data, err := encodeJPEG(thumbnail(16, 16, uint8(40*(i+1))))
+		if err != nil {
+			t.Fatal(err)
+		}
+		images[i] = data
+	}
+	var orders func(prefix, left []int)
+	orders = func(prefix, left []int) {
+		if len(left) == 0 {
+			chapters := newChapterImages(starts)
+			var times []time.Duration
+			for _, k := range prefix {
+				if err := chapters.offer(read[k], thumbnail(16, 16, uint8(40*(k+1)))); err != nil {
+					t.Fatal(err)
+				}
+				times = append(times, read[k])
+			}
+			for c, k := range shown(times, starts) {
+				if want := images[prefix[k]]; !slices.Equal(chapters.data[c], want) {
+					t.Errorf("read in the order %v: chapter %d shows another keyframe than the one at %v", prefix, c, times[k])
+				}
+			}
+			return
+		}
+		for i, k := range left {
+			orders(append(slices.Clone(prefix), k), slices.Delete(slices.Clone(left), i, i+1))
+		}
+	}
+	orders(nil, []int{0, 1, 2, 3})
+}
+
 // Thumbnails come every interval asked while the reads give each its own
 // keyframe; a longer version spreads them over its runtime, one per read,
 // in whole seconds, rather than repeating images.
 func TestTheStepGrowsWithTheRuntime(t *testing.T) {
+	t.Parallel()
 	for _, tc := range []struct {
 		duration time.Duration
 		reads    int
@@ -98,5 +145,69 @@ func TestTheStepGrowsWithTheRuntime(t *testing.T) {
 	}
 	if got := thumbnailTimes(25*time.Second, 10*time.Second); !slices.Equal(got, secondsOf(0, 10, 20)) {
 		t.Errorf("times %v", got)
+	}
+}
+
+// A version has 172,800 thumbnails at most, those of ten days at the
+// shortest interval of the settings: one of ten days has all of them at
+// every interval, and one whose duration gives more has none, whatever
+// the duration, and nothing is sized by it.
+func TestThumbnailsAreCountedWithinABound(t *testing.T) {
+	t.Parallel()
+	const shortest, longest = accounts.MinTrickplayInterval * time.Second, accounts.MaxTrickplayInterval * time.Second
+	if longestVersion != 240*time.Hour || maxThumbnails != 172_800 || time.Duration(maxThumbnails)*shortest != longestVersion {
+		t.Fatalf("%d thumbnails at most, for %v at one every %v", maxThumbnails, longestVersion, shortest)
+	}
+	// Ten days, and what is shorter, at every interval of the settings.
+	for seconds := accounts.MinTrickplayInterval; seconds <= accounts.MaxTrickplayInterval; seconds++ {
+		interval := time.Duration(seconds) * time.Second
+		for _, duration := range []time.Duration{time.Nanosecond, 2 * time.Hour, longestVersion - time.Nanosecond, longestVersion} {
+			if count := thumbnailCount(duration, interval); !spreads(duration, interval) || count < 1 || count > maxThumbnails {
+				t.Fatalf("%v at one every %v: %d thumbnails, none made", duration, interval, count)
+			}
+		}
+	}
+	// At the bound, every thumbnail: ten days at both ends of the
+	// settings, and the longest version the longest interval allows.
+	for _, tc := range []struct {
+		duration, interval time.Duration
+		want               int
+	}{
+		{longestVersion, shortest, maxThumbnails},
+		{longestVersion, longest, 14_400},
+		{time.Duration(maxThumbnails) * longest, longest, maxThumbnails},
+	} {
+		times := thumbnailTimes(tc.duration, tc.interval)
+		if len(times) != tc.want || times[len(times)-1] != tc.duration-tc.interval {
+			t.Errorf("%v at one every %v: %d thumbnail times, want %d up to %v", tc.duration, tc.interval, len(times), tc.want, tc.duration-tc.interval)
+		}
+	}
+	// Past it, none: by one thumbnail, by 104 days, by 285 years and by
+	// the longest time there is, which is counted without wrapping.
+	const declared = 9_000_000_000 * time.Second
+	for _, tc := range []struct{ duration, interval time.Duration }{
+		{longestVersion + time.Nanosecond, shortest},
+		{time.Duration(maxThumbnails)*longest + time.Nanosecond, longest},
+		{declared / 1000, 10 * time.Second},
+		{declared, shortest},
+		{declared, 10 * time.Second},
+		{declared, longest},
+		{math.MaxInt64, shortest},
+		{math.MaxInt64, longest},
+	} {
+		if count := thumbnailCount(tc.duration, tc.interval); count <= maxThumbnails {
+			t.Errorf("%v at one every %v counts %d thumbnails", tc.duration, tc.interval, count)
+		}
+		// Checked first: the times are asked for only once known to be
+		// none.
+		if spreads(tc.duration, tc.interval) {
+			t.Fatalf("%v at one every %v has thumbnails", tc.duration, tc.interval)
+		}
+		if times := thumbnailTimes(tc.duration, tc.interval); times != nil {
+			t.Errorf("%v at one every %v: %d thumbnail times", tc.duration, tc.interval, len(times))
+		}
+	}
+	if thumbnailCount(0, shortest) != 0 || thumbnailCount(-time.Hour, shortest) != 0 || spreads(0, shortest) || spreads(time.Hour, 0) {
+		t.Error("a version without a duration, or thumbnails without an interval, are counted")
 	}
 }

@@ -1,0 +1,1422 @@
+package silo
+
+import (
+	"cmp"
+	"encoding/base64"
+	"net/http"
+	"net/url"
+	"slices"
+	"strconv"
+	"strings"
+	"time"
+
+	"golang.org/x/sync/errgroup"
+
+	"github.com/moodiness/polyfin/internal/accounts"
+)
+
+func (s *Server) browseRoutes() {
+	s.mux.HandleFunc("GET /api/v2/user/libraries", s.signedIn(s.libraries))
+	s.mux.HandleFunc("GET /api/v2/home/sections", s.profiled(s.homeSections))
+	s.mux.HandleFunc("GET /api/v2/home/sections/{id}/items", s.profiled(s.homeSection))
+	s.mux.HandleFunc("GET /api/v2/home/capabilities", s.profiled(s.homeCapabilities))
+	s.mux.HandleFunc("GET /api/v2/home/layout", s.profiled(s.homeLayout))
+	s.mux.HandleFunc("GET /api/v2/catalog", s.profiled(s.catalog))
+	s.mux.HandleFunc("GET /api/v2/catalog/search/capabilities", s.profiled(s.searchCapabilities))
+	s.mux.HandleFunc("GET /api/v2/catalog/items/{id}", s.profiled(s.catalogItem))
+	s.mux.HandleFunc("GET /api/v2/catalog/items/{id}/versions", s.profiled(s.catalogVersions))
+	s.mux.HandleFunc("GET /api/v2/catalog/items/{id}/episodes", s.profiled(s.itemEpisodes))
+	s.mux.HandleFunc("GET /api/v2/catalog/series/{id}/seasons", s.profiled(s.seasons))
+	s.mux.HandleFunc("GET /api/v2/catalog/series/{id}/seasons/{num}/episodes", s.profiled(s.seasonEpisodes))
+	s.mux.HandleFunc("GET /api/v2/watch/{id}", s.profiled(s.watch))
+	s.mux.HandleFunc("POST /api/v2/watched/{id}", s.profiled(s.watched(true)))
+	s.mux.HandleFunc("DELETE /api/v2/watched/{id}", s.profiled(s.watched(false)))
+	// Jellyfin apps load artwork without credentials, and so do Silo's.
+	s.mux.HandleFunc("GET /api/v2/artwork/{id}/{kind}", s.artwork)
+}
+
+// The fields the descriptions of the Jellyfin API are asked with.
+const (
+	listFields   = "Overview,Genres,DateCreated,ProviderIds,Studios,ChildCount,RecursiveItemCount"
+	detailFields = listFields + ",People,Taglines,OriginalTitle,MediaSources,MediaStreams"
+)
+
+// pageInfo tells whether more follows, and where from.
+type pageInfo struct {
+	HasMore    bool   `json:"has_more"`
+	NextCursor string `json:"next_cursor,omitempty"`
+}
+
+type catalogItem struct {
+	ContentID         string     `json:"content_id"`
+	Title             string     `json:"title"`
+	Type              string     `json:"type"`
+	Status            string     `json:"status"`
+	Genres            []string   `json:"genres"`
+	Keywords          []string   `json:"keywords"`
+	Year              int        `json:"year,omitempty"`
+	ReleaseDate       string     `json:"release_date,omitempty"`
+	AddedAt           string     `json:"added_at,omitempty"`
+	Overview          string     `json:"overview,omitempty"`
+	ContentRating     string     `json:"content_rating,omitempty"`
+	DurationSeconds   float64    `json:"duration_seconds,omitempty"`
+	Runtime           int        `json:"runtime,omitempty"`
+	Studios           []string   `json:"studios,omitempty"`
+	PosterURL         string     `json:"poster_url,omitempty"`
+	BackdropURL       string     `json:"backdrop_url,omitempty"`
+	LogoURL           string     `json:"logo_url,omitempty"`
+	SeriesPosterURL   string     `json:"series_poster_url,omitempty"`
+	SeriesBackdropURL string     `json:"series_backdrop_url,omitempty"`
+	SeasonPosterURL   string     `json:"season_poster_url,omitempty"`
+	SeriesID          string     `json:"series_id,omitempty"`
+	SeriesTitle       string     `json:"series_title,omitempty"`
+	SeasonNumber      *int       `json:"season_number,omitempty"`
+	EpisodeNumber     *int       `json:"episode_number,omitempty"`
+	ShowStatus        string     `json:"show_status,omitempty"`
+	ItemSource        string     `json:"item_source,omitempty"`
+	PositionSeconds   float64    `json:"position_seconds,omitempty"`
+	ProgressUpdatedAt string     `json:"progress_updated_at,omitempty"`
+	UserState         *userState `json:"user_state,omitempty"`
+	PosterIsStill     *bool      `json:"poster_is_episode_still,omitempty"`
+	BackdropIsStill   *bool      `json:"backdrop_is_episode_still,omitempty"`
+}
+
+type userState struct {
+	InWatchlist   bool `json:"in_watchlist"`
+	IsFavorite    bool `json:"is_favorite"`
+	NotInterested bool `json:"not_interested"`
+	Played        bool `json:"played"`
+}
+
+// kinds are the types of the API, by the Jellyfin API's types.
+var kinds = map[string]string{"Movie": "movie", "Series": "series", "Season": "season", "Episode": "episode", "Video": "movie"}
+
+// artworkWidths are the widths of the image sizes the apps may ask.
+var artworkWidths = map[string]int{"small": 240, "medium": 480, "large": 960}
+
+// maxArtworkWidth is the widest artwork the apps may ask.
+const maxArtworkWidth = 7680
+
+// artworkWidth is the width the request asks for a slot (poster,
+// backdrop, logo, still, photo), 0 for the original.
+func artworkWidth(r *http.Request, slot string) int {
+	if width, err := strconv.Atoi(r.URL.Query().Get(slot + "_width")); err == nil && width > 0 && width <= maxArtworkWidth {
+		return width
+	}
+	if width, ok := artworkWidths[r.URL.Query().Get("image_size")]; ok {
+		return width
+	}
+	return 0
+}
+
+// artworkURL is the address of an item's image of a kind, as Jellyfin's
+// tag identifies it; empty without one.
+func artworkURL(id, kind, tag string, width int) string {
+	if id == "" || tag == "" {
+		return ""
+	}
+	query := url.Values{"tag": {tag}}
+	if width > 0 {
+		query.Set("width", strconv.Itoa(width))
+	}
+	return "/api/v2/artwork/" + url.PathEscape(id) + "/" + kind + "?" + query.Encode()
+}
+
+// artworkKinds are the Jellyfin image types the artwork route serves.
+var artworkKinds = []string{"Primary", "Backdrop", "Logo", "Thumb"}
+
+// artwork serves an item's image, as the Jellyfin API serves it to
+// Jellyfin apps.
+func (s *Server) artwork(w http.ResponseWriter, r *http.Request) {
+	kind := r.PathValue("kind")
+	id, err := accounts.ParseID(r.PathValue("id"))
+	if err != nil || !slices.Contains(artworkKinds, kind) {
+		problem(w, http.StatusNotFound, "not_found", "No such artwork.")
+		return
+	}
+	query := url.Values{}
+	if tag := r.URL.Query().Get("tag"); tag != "" {
+		query.Set("tag", tag)
+	}
+	if width, err := strconv.Atoi(r.URL.Query().Get("width")); err == nil && width > 0 && width <= 7680 {
+		query.Set("maxWidth", strconv.Itoa(width))
+	}
+	s.relay(w, r, "/Items/"+id.String()+"/Images/"+kind+"?"+query.Encode(), "")
+}
+
+func date(t *time.Time) string {
+	if t == nil || t.IsZero() {
+		return ""
+	}
+	return t.UTC().Format(time.DateOnly)
+}
+
+func seconds(ticks *int64) float64 {
+	if ticks == nil {
+		return 0
+	}
+	return float64(*ticks) / 1e7
+}
+
+// catalogItemOf describes an item of the Jellyfin API as a card.
+func catalogItemOf(r *http.Request, i item) catalogItem {
+	c := catalogItem{ContentID: i.Id, Title: i.Name, Type: cmp.Or(kinds[i.Type], strings.ToLower(i.Type)), Status: "matched",
+		Genres: []string{}, Keywords: []string{}, ContentRating: i.OfficialRating, ReleaseDate: date(i.PremiereDate),
+		SeriesID: i.SeriesId, SeriesTitle: i.SeriesName, ShowStatus: i.Status}
+	c.Genres = append(c.Genres, i.Genres...)
+	if i.ProductionYear != nil {
+		c.Year = *i.ProductionYear
+	}
+	if i.DateCreated != nil {
+		c.AddedAt = instant(*i.DateCreated)
+	}
+	if i.Overview != nil {
+		c.Overview = *i.Overview
+	}
+	if duration := seconds(i.RunTimeTicks); duration > 0 {
+		c.DurationSeconds, c.Runtime = duration, int(duration/60+0.5)
+	}
+	for _, studio := range i.Studios {
+		c.Studios = append(c.Studios, studio.Name)
+	}
+	switch i.Type {
+	case "Episode":
+		c.SeasonNumber, c.EpisodeNumber = i.ParentIndexNumber, i.IndexNumber
+	case "Season":
+		c.SeasonNumber = i.IndexNumber
+	}
+	c.PosterURL, c.BackdropURL, c.LogoURL = artworkOf(r, i)
+	if i.Type == "Episode" {
+		c.SeriesPosterURL, c.SeriesBackdropURL, c.SeasonPosterURL = parentArtworkOf(r, i)
+		if c.PosterURL != "" {
+			c.PosterIsStill = new(true)
+		}
+	}
+	if i.UserData != nil {
+		c.UserState = &userState{IsFavorite: i.UserData.IsFavorite, Played: i.UserData.Played, InWatchlist: inWatchlist(r, i)}
+		if i.UserData.PlaybackPositionTicks > 0 {
+			c.PositionSeconds = float64(i.UserData.PlaybackPositionTicks) / 1e7
+		}
+		if i.UserData.LastPlayedDate != nil {
+			c.ProgressUpdatedAt = instant(*i.UserData.LastPlayedDate)
+		}
+	}
+	return c
+}
+
+// artworkOf are the poster, backdrop and logo of an item: an episode's
+// poster is its still, a season's or episode's backdrop and logo its
+// series'.
+func artworkOf(r *http.Request, i item) (poster, backdrop, logo string) {
+	poster = artworkURL(i.Id, "Primary", i.ImageTags["Primary"], artworkWidth(r, "poster"))
+	if poster == "" && i.Type == "Season" {
+		poster = artworkURL(i.SeriesId, "Primary", i.SeriesPrimaryImageTag, artworkWidth(r, "poster"))
+	}
+	if len(i.BackdropImageTags) > 0 {
+		backdrop = artworkURL(i.Id, "Backdrop", i.BackdropImageTags[0], artworkWidth(r, "backdrop"))
+	} else if len(i.ParentBackdropImageTags) > 0 {
+		backdrop = artworkURL(i.ParentBackdropItemId, "Backdrop", i.ParentBackdropImageTags[0], artworkWidth(r, "backdrop"))
+	}
+	logo = artworkURL(i.Id, "Logo", i.ImageTags["Logo"], artworkWidth(r, "logo"))
+	if logo == "" {
+		logo = artworkURL(i.ParentLogoItemId, "Logo", i.ParentLogoImageTag, artworkWidth(r, "logo"))
+	}
+	return poster, backdrop, logo
+}
+
+// parentArtworkOf is an episode's series poster and backdrop, and its
+// season's poster, as the Jellyfin API names them for it: the season's is
+// the episode's nearest parent poster when that is its season's, which an
+// episode of another order shows none of (see the Jellyfin API's items).
+func parentArtworkOf(r *http.Request, i item) (seriesPoster, seriesBackdrop, seasonPoster string) {
+	seriesPoster = artworkURL(i.SeriesId, "Primary", i.SeriesPrimaryImageTag, artworkWidth(r, "poster"))
+	if i.ParentBackdropItemId == i.SeriesId && len(i.ParentBackdropImageTags) > 0 {
+		seriesBackdrop = artworkURL(i.SeriesId, "Backdrop", i.ParentBackdropImageTags[0], artworkWidth(r, "backdrop"))
+	}
+	if i.SeasonId != "" && i.ParentPrimaryImageItemId == i.SeasonId {
+		seasonPoster = artworkURL(i.SeasonId, "Primary", i.ParentPrimaryImageTag, artworkWidth(r, "poster"))
+	}
+	return seriesPoster, seriesBackdrop, seasonPoster
+}
+
+// browsable are the Jellyfin API's types Silo's apps browse and play.
+var browsable = []string{"Movie", "Series", "Season", "Episode", "Video"}
+
+func cards(r *http.Request, items []item) []catalogItem {
+	result := []catalogItem{}
+	for _, i := range items {
+		if slices.Contains(browsable, i.Type) {
+			result = append(result, catalogItemOf(r, i))
+		}
+	}
+	return result
+}
+
+// userLibrary is a library as the apps list it. BoxSetsEnabled is set on
+// the libraries of movies while box sets are on: their movies' pages and
+// searches show their box sets, and their grids list each movie (see
+// boxsets.go).
+type userLibrary struct {
+	ID             string `json:"id"`
+	Name           string `json:"name"`
+	Type           string `json:"type"`
+	SortOrder      int    `json:"sort_order"`
+	PosterURL      string `json:"poster_url,omitempty"`
+	BoxSetsEnabled bool   `json:"box_sets_enabled"`
+}
+
+// libraryTypes are the types of the libraries Silo's apps list, by the
+// Jellyfin API's collection types: those of movies, of series, and of
+// both, libraries of collections among them (see libraries.go).
+var libraryTypes = map[string]string{"movies": "movies", "tvshows": "shows", "": "mixed", "homevideos": "mixed", boxsets: "mixed"}
+
+// views are the user's libraries Silo's apps browse, as the Jellyfin API
+// lists them to the user, with their numbers.
+func (s *Server) views(r *http.Request, v viewer) ([]item, map[accounts.ID]int32, answer, error) {
+	var result queryResult
+	a, err := s.call(r, v, http.MethodGet, "/UserViews", nil, &result)
+	if err != nil || !a.ok() {
+		return nil, nil, a, err
+	}
+	var views []item
+	var ids []accounts.ID
+	for _, view := range result.Items {
+		id, err := accounts.ParseID(view.Id)
+		if _, ok := libraryTypes[view.CollectionType]; ok && err == nil {
+			views, ids = append(views, view), append(ids, id)
+		}
+	}
+	numbers, err := s.numbers.of(r.Context(), ids...)
+	return views, numbers, a, err
+}
+
+// libraries lists the libraries the user sees, as the Jellyfin API lists
+// them to Jellyfin apps: those the user may see and has not hidden.
+func (s *Server) libraries(w http.ResponseWriter, r *http.Request, v viewer) {
+	if s.profileRefused(w, r, v, false) {
+		return
+	}
+	views, numbers, a, err := s.views(r, v)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if !a.ok() {
+		s.jellyfinRefusal(w, r, a)
+		return
+	}
+	libraries := []userLibrary{}
+	for i, view := range views {
+		id, _ := accounts.ParseID(view.Id)
+		libraries = append(libraries, userLibrary{ID: strconv.Itoa(int(numbers[id])), Name: view.Name,
+			Type: libraryTypes[view.CollectionType], SortOrder: i,
+			PosterURL:      artworkURL(view.Id, "Primary", view.ImageTags["Primary"], artworkWidth(r, "poster")),
+			BoxSetsEnabled: s.boxSetLibrary(view)})
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Items []userLibrary `json:"items"`
+	}{libraries})
+}
+
+// library is the Jellyfin view a library number stands for; ok is false,
+// the request answered, when it is none of the user's.
+func (s *Server) library(w http.ResponseWriter, r *http.Request, v viewer, number string) (item, bool) {
+	id, err := s.numbers.id(r.Context(), number)
+	if err != nil && err != errUnknownNumber {
+		s.internalError(w, r, err)
+		return item{}, false
+	}
+	views, _, a, err := s.views(r, v)
+	if err != nil {
+		s.internalError(w, r, err)
+		return item{}, false
+	}
+	if !a.ok() {
+		s.jellyfinRefusal(w, r, a)
+		return item{}, false
+	}
+	for _, view := range views {
+		if view.Id == id.String() {
+			return view, true
+		}
+	}
+	problem(w, http.StatusNotFound, "not_found", "Library not found.")
+	return item{}, false
+}
+
+type section struct {
+	ID         string        `json:"id"`
+	Title      string        `json:"title"`
+	Type       string        `json:"section_type"`
+	Items      []catalogItem `json:"items"`
+	ItemLimit  int           `json:"item_limit"`
+	TotalCount int           `json:"total_count"`
+	Customized bool          `json:"customized"`
+	Featured   bool          `json:"featured"`
+	IsCustom   bool          `json:"is_custom"`
+	// HasMore tells, of a section read alone with item_limit, that the
+	// limit left cards out.
+	HasMore bool `json:"has_more,omitempty"`
+}
+
+// sectionLimit is how many titles a Home section lists.
+const sectionLimit = 24
+
+// maxItemLimit is the largest item_limit the section reads take, as the
+// contract's: each section then lists at most that many of its titles.
+const maxItemLimit = 100
+
+// itemLimitAsked is the item_limit a section read asks, 0 for none,
+// answering the request when it cannot read it.
+func itemLimitAsked(w http.ResponseWriter, r *http.Request) (int, bool) {
+	text := r.URL.Query().Get("item_limit")
+	if text == "" {
+		return 0, true
+	}
+	limit, err := strconv.Atoi(text)
+	if err != nil || limit < 1 || limit > maxItemLimit {
+		validationProblem(w, "query.item_limit", "out_of_range", "item_limit is between 1 and 100.")
+		return 0, false
+	}
+	return limit, true
+}
+
+// cut keeps the first limit cards of a section, all of them for 0, its
+// item_limit the smaller of its own and limit, its total_count still
+// counting them all. It reports whether it left cards out.
+func (sec *section) cut(limit int) bool {
+	if limit == 0 {
+		return false
+	}
+	sec.ItemLimit = min(sec.ItemLimit, limit)
+	if len(sec.Items) <= limit {
+		return false
+	}
+	sec.Items = sec.Items[:limit]
+	return true
+}
+
+// homeCapabilities tells the apps the section reads take item_limit, up to
+// maxItemLimit, and the layout include_items, up to maxIncludeItems: the
+// apps then ask each row's first cards only.
+func (s *Server) homeCapabilities(w http.ResponseWriter, _ *http.Request, _ viewer) {
+	writeJSON(w, http.StatusOK, struct {
+		State               string `json:"state"`
+		Allowed             bool   `json:"allowed"`
+		Revision            string `json:"revision"`
+		SectionItemLimitMax int    `json:"section_item_limit_max"`
+		RowItemLimitMax     int    `json:"row_item_limit_max"`
+		IncludeItemsMax     int    `json:"include_items_max"`
+	}{"available", true, revision, maxItemLimit, maxItemLimit, maxIncludeItems})
+}
+
+// sectionTitles are the titles of the Home sections, by the server's
+// language: Continue Watching, Next Up, and the latest of a library.
+var sectionTitles = map[string][3]string{
+	"en":    {"Continue Watching", "Next Up", "Latest in %s"},
+	"fr":    {"Reprendre", "À suivre", "Derniers ajouts dans %s"},
+	"de":    {"Weiterschauen", "Als Nächstes", "Neu in %s"},
+	"es":    {"Seguir viendo", "A continuación", "Lo último en %s"},
+	"it":    {"Continua a guardare", "Prossimo", "Ultimi in %s"},
+	"pt-BR": {"Continuar assistindo", "A seguir", "Novidades em %s"},
+}
+
+func (s *Server) titles() [3]string {
+	if titles, ok := sectionTitles[s.options.Accounts.Settings().Language]; ok {
+		return titles
+	}
+	return sectionTitles["en"]
+}
+
+// The Home sections: what the user is watching, the next episodes, then
+// the latest titles of each library, as the Jellyfin API's lists of those
+// names give them to Jellyfin apps' home pages; and the administrator's
+// home rows (Settings › Web player › Home rows), at their places, as the
+// web player shows them.
+const (
+	resumeSection = "continue_watching"
+	nextUpSection = "next_up"
+	latestPrefix  = "latest-"
+	rowPrefix     = "row-"
+)
+
+// homeRow is a home row the user sees, as GET /Polyfin/HomeRows lists it:
+// its folder's Id, which lists the whole row, and its first Items.
+type homeRow struct {
+	Id    string
+	Name  string
+	Place string
+	Kind  string
+	Items []item
+}
+
+// rowTypes are the apps' section types of the home rows' kinds.
+var rowTypes = map[string]string{"Catalog": "catalog", "Collection": "collection", "BecauseYouWatched": "because_you_watched",
+	"New": "new_to_library"}
+
+// homeRows are the home rows the user sees, in order, with their first
+// titles; those without any are left out.
+func (s *Server) homeRows(r *http.Request, v viewer) ([]homeRow, answer, error) {
+	var result struct{ Items []homeRow }
+	a, err := s.call(r, v, http.MethodGet, "/Polyfin/HomeRows?Limit="+strconv.Itoa(sectionLimit)+"&Fields="+listFields, nil, &result)
+	return result.Items, a, err
+}
+
+// rowSection is the Home section of a home row.
+func rowSection(r *http.Request, row homeRow) section {
+	sec := section{ID: rowPrefix + row.Id, Title: row.Name, Type: cmp.Or(rowTypes[row.Kind], "custom"), Items: sectionCards(r, row.Items),
+		ItemLimit: sectionLimit}
+	sec.TotalCount = len(sec.Items)
+	return sec
+}
+
+// sectionOf reads what the user is watching, in a library when library
+// names one, or the next episodes.
+func (s *Server) sectionOf(r *http.Request, v viewer, id, title string, library string) (section, answer, error) {
+	query := url.Values{"Limit": {strconv.Itoa(sectionLimit)}, "Fields": {listFields}}
+	sec := section{ID: id, Title: title, ItemLimit: sectionLimit, Type: resumeSection}
+	path := "/Shows/NextUp?"
+	if id == nextUpSection {
+		sec.Type = nextUpSection
+	} else {
+		path = "/UserItems/Resume?"
+		query.Set("MediaTypes", "Video")
+		if library != "" {
+			query.Set("ParentId", library)
+		}
+	}
+	var result queryResult
+	a, err := s.call(r, v, http.MethodGet, path+query.Encode(), nil, &result)
+	if err != nil || !a.ok() {
+		return sec, a, err
+	}
+	sec.Items = sectionCards(r, result.Items)
+	for i := range sec.Items {
+		sec.Items[i].ItemSource = "in_progress"
+		if sec.Type == nextUpSection {
+			sec.Items[i].ItemSource = "next_up"
+		}
+	}
+	sec.TotalCount = len(sec.Items)
+	return sec, a, nil
+}
+
+// homeSections are the sections of the Home page (see homeList), each cut
+// to its first titles by item_limit.
+func (s *Server) homeSections(w http.ResponseWriter, r *http.Request, v viewer) {
+	limit, ok := itemLimitAsked(w, r)
+	if !ok {
+		return
+	}
+	sections, ok := s.homeList(w, r, v)
+	if !ok {
+		return
+	}
+	for i := range sections {
+		sections[i].cut(limit)
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Sections []section `json:"sections"`
+	}{sections})
+}
+
+// layoutEntry is a Home section as the layout names it, without its
+// cards.
+type layoutEntry struct {
+	ID         string `json:"id"`
+	Type       string `json:"section_type"`
+	Title      string `json:"title"`
+	Featured   bool   `json:"featured"`
+	ItemLimit  int    `json:"item_limit"`
+	IsCustom   bool   `json:"is_custom"`
+	Customized bool   `json:"customized"`
+}
+
+// maxIncludeItems is the largest include_items the layout takes, as the
+// contract's.
+const maxIncludeItems = 4
+
+// homeLayout names the sections of the Home page, in order, without their
+// cards: those homeSections lists, under the same identifiers and types
+// as their own reads (GET /api/v2/home/sections/{id}/items), which Silo's
+// Android TV app compares to fill the system's Watch Next row and Apple
+// TV's Top Shelf. include_items also answers the first sections with
+// their cards, each as its own read with the same item_limit answers it;
+// item_limit cuts only those.
+func (s *Server) homeLayout(w http.ResponseWriter, r *http.Request, v viewer) {
+	include := 0
+	if text := r.URL.Query().Get("include_items"); text != "" {
+		n, err := strconv.Atoi(text)
+		if err != nil || n < 0 || n > maxIncludeItems {
+			validationProblem(w, "query.include_items", "out_of_range", "include_items is between 0 and 4.")
+			return
+		}
+		include = n
+	}
+	limit, ok := itemLimitAsked(w, r)
+	if !ok {
+		return
+	}
+	sections, ok := s.homeList(w, r, v)
+	if !ok {
+		return
+	}
+	layout := struct {
+		Sections []layoutEntry `json:"sections"`
+		Included []section     `json:"included_sections"`
+	}{Sections: make([]layoutEntry, 0, len(sections)), Included: []section{}}
+	for i, sec := range sections {
+		layout.Sections = append(layout.Sections, layoutEntry{ID: sec.ID, Type: sec.Type, Title: sec.Title, Featured: sec.Featured,
+			ItemLimit: sec.ItemLimit, IsCustom: sec.IsCustom, Customized: sec.Customized})
+		if i < include {
+			sec.HasMore = sec.cut(limit)
+			layout.Included = append(layout.Included, sec)
+		}
+	}
+	writeJSON(w, http.StatusOK, layout)
+}
+
+// homeList are the sections of the Home page: those with titles. The row
+// of each library follows the user's home screen settings, as
+// jellyfin-web's latest titles do: the libraries in the order they set,
+// without those they left out of their latest titles. It answers the
+// request when they cannot be read.
+func (s *Server) homeList(w http.ResponseWriter, r *http.Request, v viewer) ([]section, bool) {
+	views, numbers, a, err := s.views(r, v)
+	var rows []homeRow
+	if err == nil && a.ok() {
+		rows, a, err = s.homeRows(r, v)
+	}
+	var me struct {
+		Configuration struct{ LatestItemsExcludes []string }
+	}
+	if err == nil && a.ok() {
+		a, err = s.call(r, v, http.MethodGet, "/Users/Me", nil, &me)
+	}
+	if err == nil && !a.ok() {
+		s.jellyfinRefusal(w, r, a)
+		return nil, false
+	}
+	if err != nil {
+		s.internalError(w, r, err)
+		return nil, false
+	}
+	views = slices.DeleteFunc(views, func(view item) bool { return slices.Contains(me.Configuration.LatestItemsExcludes, view.Id) })
+	libraries := make([]section, len(views))
+	answers := make([]answer, len(views))
+	var group errgroup.Group
+	group.SetLimit(collectionReads)
+	for i, view := range views {
+		group.Go(func() error {
+			id, _ := accounts.ParseID(view.Id)
+			var err error
+			libraries[i], answers[i], err = s.libraryRow(r, v, view, strconv.Itoa(int(numbers[id])))
+			return err
+		})
+	}
+	if err := group.Wait(); err != nil {
+		s.internalError(w, r, err)
+		return nil, false
+	}
+	sections := []section{}
+	add := func(sec section) {
+		if len(sec.Items) > 0 {
+			sections = append(sections, sec)
+		}
+	}
+	rowsAt := func(place string) {
+		for _, row := range rows {
+			if row.Place == place {
+				add(rowSection(r, row))
+			}
+		}
+	}
+	titles := s.titles()
+	rowsAt("Top")
+	for _, want := range []struct{ id, title, rowsAfter string }{{resumeSection, titles[0], "AfterResume"}, {nextUpSection, titles[1], "AfterNextUp"}} {
+		sec, a, err := s.sectionOf(r, v, want.id, want.title, "")
+		if err != nil {
+			s.internalError(w, r, err)
+			return nil, false
+		}
+		if !a.ok() {
+			s.jellyfinRefusal(w, r, a)
+			return nil, false
+		}
+		add(sec)
+		rowsAt(want.rowsAfter)
+	}
+	for i, sec := range libraries {
+		if !answers[i].ok() {
+			s.jellyfinRefusal(w, r, answers[i])
+			return nil, false
+		}
+		add(sec)
+	}
+	rowsAt("Bottom")
+	return sections, true
+}
+
+// homeSection is one section of the Home page, by its identifier, cut to
+// its first titles by item_limit.
+func (s *Server) homeSection(w http.ResponseWriter, r *http.Request, v viewer) {
+	limit, ok := itemLimitAsked(w, r)
+	if !ok {
+		return
+	}
+	sec, ok := s.namedSection(w, r, v, r.PathValue("id"))
+	if ok {
+		sec.HasMore = sec.cut(limit)
+		writeJSON(w, http.StatusOK, sec)
+	}
+}
+
+// namedSection reads a section of Home or of a library's landing, by its
+// identifier.
+func (s *Server) namedSection(w http.ResponseWriter, r *http.Request, v viewer, id string) (section, bool) {
+	titles := s.titles()
+	var sec section
+	var a answer
+	var err error
+	switch {
+	case id == resumeSection:
+		sec, a, err = s.sectionOf(r, v, id, titles[0], "")
+	case id == nextUpSection:
+		sec, a, err = s.sectionOf(r, v, id, titles[1], "")
+	case strings.HasPrefix(id, latestPrefix), strings.HasPrefix(id, resumePrefix):
+		number := strings.TrimPrefix(strings.TrimPrefix(id, latestPrefix), resumePrefix)
+		view, ok := s.library(w, r, v, number)
+		if !ok {
+			return section{}, false
+		}
+		if strings.HasPrefix(id, resumePrefix) {
+			sec, a, err = s.sectionOf(r, v, id, titles[0], view.Id)
+		} else {
+			sec, a, err = s.libraryRow(r, v, view, number)
+		}
+	case strings.HasPrefix(id, collectionPrefix):
+		var collection item
+		a, err = s.call(r, v, http.MethodGet, "/Items/"+url.PathEscape(strings.TrimPrefix(id, collectionPrefix)), nil, &collection)
+		if err == nil && a.ok() && collection.Type != "BoxSet" {
+			problem(w, http.StatusNotFound, "not_found", "Section not found.")
+			return section{}, false
+		}
+		if err == nil && a.ok() {
+			sec, a, err = s.collectionRow(r, v, collection)
+		}
+	case strings.HasPrefix(id, rowPrefix):
+		var rows []homeRow
+		rows, a, err = s.homeRows(r, v)
+		found := slices.IndexFunc(rows, func(row homeRow) bool { return rowPrefix+row.Id == id })
+		if err == nil && a.ok() && found < 0 {
+			problem(w, http.StatusNotFound, "not_found", "Section not found.")
+			return section{}, false
+		}
+		if found >= 0 {
+			sec = rowSection(r, rows[found])
+		}
+	default:
+		problem(w, http.StatusNotFound, "not_found", "Section not found.")
+		return section{}, false
+	}
+	if err != nil {
+		s.internalError(w, r, err)
+		return section{}, false
+	}
+	if !a.ok() {
+		s.jellyfinRefusal(w, r, a)
+		return section{}, false
+	}
+	return sec, true
+}
+
+// catalogTypes are the Jellyfin API's types a catalog's type stands for.
+var catalogTypes = map[string]string{"movie": "Movie", "series": "Series", "episode": "Episode", "video": "Movie,Series",
+	"video_with_episodes": "Movie,Series,Episode"}
+
+// catalogSorts are the Jellyfin API's orders a catalog's sort stands for.
+// The apps offer every sort of Silo's web client (Apple CatalogSortKey,
+// Screens/Browse/Filtering/CatalogSortKey.swift; Android CatalogSortField,
+// shared catalog/sort/CatalogSort.kt), and keep the one picked. Jellyfin
+// keeps one rating, so both ratings order by it. The sorts Jellyfin has
+// no order for list in the default order, as with no sort, so that a
+// library opens whichever sort the app kept.
+var catalogSorts = map[string]string{"title": "SortName", "year": "ProductionYear,SortName", "release_date": "PremiereDate,SortName",
+	"added_at": "DateCreated,SortName", "rating": "CommunityRating,SortName", "runtime": "Runtime,SortName", "random": "Random",
+	"content_rating": "OfficialRating,SortName", "rating_imdb": "CommunityRating,SortName", "rating_tmdb": "CommunityRating,SortName",
+	"date_viewed": "DatePlayed,SortName", "plays": "PlayCount,SortName", "latest_episode_added": "DateLastContentAdded,SortName",
+	"resolution": "", "bitrate": "", "progress": "", "last_air_date": ""}
+
+// cursor is where a catalog page starts, written for the apps.
+func cursor(start int) string {
+	return base64.RawURLEncoding.EncodeToString([]byte("start:" + strconv.Itoa(start)))
+}
+
+func startOf(text string) (int, bool) {
+	data, err := base64.RawURLEncoding.DecodeString(text)
+	if err != nil {
+		return 0, false
+	}
+	value, ok := strings.CutPrefix(string(data), "start:")
+	start, err := strconv.Atoi(value)
+	return start, ok && err == nil && start >= 0
+}
+
+type catalogPage struct {
+	Items        []catalogItem `json:"items"`
+	Page         pageInfo      `json:"page"`
+	Total        int           `json:"total"`
+	TotalExact   bool          `json:"total_exact"`
+	WindowCursor string        `json:"window_cursor"`
+}
+
+// pageAsked reads the page a request asks: where it starts, by its
+// cursor, and how many titles it lists. It answers the problem of one it
+// cannot read.
+func pageAsked(w http.ResponseWriter, q url.Values) (start, limit int, ok bool) {
+	limit = 50
+	if text := q.Get("limit"); text != "" {
+		value, err := strconv.Atoi(text)
+		if err != nil || value < 1 || value > 200 {
+			validationProblem(w, "query.limit", "out_of_range", "limit is between 1 and 200.")
+			return 0, 0, false
+		}
+		limit = value
+	}
+	if text := q.Get("cursor"); text != "" {
+		if start, ok = startOf(text); !ok {
+			problem(w, http.StatusBadRequest, "invalid_cursor", "This cursor is not one of this server's.")
+			return 0, 0, false
+		}
+	}
+	return start, limit, true
+}
+
+// listing is what a catalog request lists, as the Jellyfin API lists it.
+type listing struct {
+	source string
+	// query is the Jellyfin API's listing, without its paging.
+	query url.Values
+	// section is a section of Home or of a library's landing, read whole.
+	section *section
+	// whole is set for a folder listed whole, query's parent: a
+	// collection, the watchlist's playlist, or a row of Home or of a
+	// library's landing past its first titles.
+	whole bool
+	// view is the library asked, if any.
+	view item
+	term string
+	// none is set for a listing known to hold nothing: the watchlist of a
+	// user who deleted its playlist.
+	none bool
+}
+
+// libraryTitles reports whether the listing is a library's titles,
+// those of its favorites or of a search among them.
+func (l listing) libraryTitles() bool {
+	return !l.whole && l.view.Id != "" && (l.source == "query" || l.source == "favorites")
+}
+
+// keep keeps the titles of a library's collections the listing keeps:
+// those of its search, and its favorites when asked.
+func (l listing) keep(i item) bool {
+	return (l.term == "" || strings.Contains(strings.ToLower(i.Name), strings.ToLower(l.term))) &&
+		(l.source != "favorites" || i.UserData != nil && i.UserData.IsFavorite)
+}
+
+// listingAsked reads what a catalog request q lists, answering the
+// request when it cannot.
+func (s *Server) listingAsked(w http.ResponseWriter, r *http.Request, v viewer, q url.Values) (listing, bool) {
+	types, ok := catalogTypes[cmp.Or(q.Get("type"), "video")]
+	if !ok {
+		validationProblem(w, "query.type", "unsupported", "This server lists movies, series and episodes.")
+		return listing{}, false
+	}
+	sort := strings.TrimPrefix(q.Get("sort"), "-")
+	order, ok := catalogSorts[sort]
+	if sort != "" && !ok {
+		validationProblem(w, "query.sort", "unknown_sort_field", "This server does not know this sort.")
+		return listing{}, false
+	}
+	l := listing{source: cmp.Or(q.Get("source"), "query")}
+	folder := ""
+	var person string
+	switch l.source {
+	case "section":
+		id := q.Get("section_id")
+		if row, ok := strings.CutPrefix(id, rowPrefix); ok {
+			folder, l.whole = row, true
+			break
+		}
+		if collection, ok := strings.CutPrefix(id, collectionPrefix); ok {
+			folder, l.whole = collection, true
+			break
+		}
+		sec, ok := s.namedSection(w, r, v, id)
+		if !ok {
+			return listing{}, false
+		}
+		l.section = &sec
+		return l, true
+	case "library_collection", "user_collection":
+		folder, l.whole = q.Get("collection_id"), true
+	case "watchlist":
+		got := watchlistOf(r)
+		if got.err != nil {
+			s.internalError(w, r, got.err)
+			return listing{}, false
+		}
+		folder, l.whole, l.none = got.playlist, true, got.playlist == ""
+	case "history":
+		if types, ok = historyTypes[q.Get("type")]; !ok {
+			validationProblem(w, "query.type", "unsupported", "This server's history lists movies and episodes.")
+			return listing{}, false
+		}
+	case "person":
+		if person, ok = s.personID(w, r, q.Get("person_id")); !ok {
+			return listing{}, false
+		}
+	case "favorites", "query":
+	default:
+		validationProblem(w, "query.source", "unsupported",
+			"This server lists libraries, sections, collections, favorites, the watchlist, the history, people's titles and searches.")
+		return listing{}, false
+	}
+	query := url.Values{"Fields": {listFields}, "IncludeItemTypes": {types}}
+	switch l.source {
+	case "favorites":
+		query.Set("Filters", "IsFavorite")
+		query.Set("Recursive", "true")
+	case "history":
+		query = historyQuery(types)
+		query.Set("Fields", listFields)
+	case "person":
+		query.Set("PersonIds", person)
+		query.Set("Recursive", "true")
+	}
+	if order != "" {
+		query.Set("SortBy", order)
+		query.Set("SortOrder", "Ascending")
+		if strings.HasPrefix(q.Get("sort"), "-") {
+			query.Set("SortOrder", "Descending")
+		}
+	}
+	if sort == "title" {
+		// Title order sorts by the sort name (see letters.go).
+		query.Set("Fields", query.Get("Fields")+",SortName")
+	}
+	l.term = strings.TrimSpace(cmp.Or(q.Get("q"), q.Get("name_prefix")))
+	if l.term != "" {
+		query.Set("SearchTerm", l.term)
+		query.Set("Recursive", "true")
+	}
+	if library := q.Get("library_id"); library != "" {
+		if l.view, ok = s.library(w, r, v, library); !ok {
+			return listing{}, false
+		}
+	}
+	if l.whole && !l.none {
+		if _, err := accounts.ParseID(folder); err != nil {
+			problem(w, http.StatusNotFound, "not_found", "Not found.")
+			return listing{}, false
+		}
+		query.Set("ParentId", folder)
+	}
+	l.query = query
+	return l, true
+}
+
+// catalog pages through a library, a Home section, a collection or a
+// search, as the Jellyfin API lists them to Jellyfin apps.
+func (s *Server) catalog(w http.ResponseWriter, r *http.Request, v viewer) {
+	s.catalogOf(w, r, v, r.URL.Query(), "query")
+}
+
+// catalogOf answers the catalog request q, sent in the request's query or
+// body (in), narrowed by the filter it asks (see filters.go).
+func (s *Server) catalogOf(w http.ResponseWriter, r *http.Request, v viewer, q url.Values, in string) {
+	start, limit, ok := pageAsked(w, q)
+	if !ok {
+		return
+	}
+	seek, seeking, ok := seekAsked(w, q, in)
+	if !ok {
+		return
+	}
+	if seeking {
+		start = seek
+	}
+	f, ok := filterAsked(w, q, in)
+	if !ok {
+		return
+	}
+	l, ok := s.listingAsked(w, r, v, q)
+	if !ok {
+		return
+	}
+	if l.none {
+		writeJSON(w, http.StatusOK, pageOf(nil, start, limit, 0))
+		return
+	}
+	if titleOrdered(q) && l.section == nil {
+		// A library Polyfin stores pages in its order by name; another list
+		// keeps its order (see letters.go).
+		page, handled, a, err := s.titlePage(r, v, l, f, strings.HasPrefix(q.Get("sort"), "-"), start, limit)
+		if handled {
+			s.writePage(w, r, page, a, err)
+			return
+		}
+	}
+	switch {
+	case l.section != nil:
+		if f.narrows() {
+			problem(w, http.StatusNotImplemented, "capability_unsupported", "This server does not filter the sections of Home and of a library.")
+			return
+		}
+		writeJSON(w, http.StatusOK, pageOf(l.section.Items, start, limit, len(l.section.Items)))
+		return
+	case f.narrows():
+		page, a, err := s.filteredPage(r, v, l, f, start, limit)
+		s.writePage(w, r, page, a, err)
+		return
+	case l.libraryTitles():
+		// A library's titles, which those it gathers keep to the search.
+		page, a, err := s.libraryPage(r, v, l.view, l.query, start, limit, l.keep)
+		s.writePage(w, r, page, a, err)
+		return
+	}
+	l.query.Set("StartIndex", strconv.Itoa(start))
+	l.query.Set("Limit", strconv.Itoa(limit))
+	l.query.Set("EnableTotalRecordCount", "true")
+	page, a, err := s.listPage(r, v, l.query, start)
+	s.writePage(w, r, page, a, err)
+}
+
+// partialTotal is the header the Jellyfin API's listing answers with when
+// its total counts only the titles read so far of an addon's catalog,
+// which may list more (see library.Page.Partial).
+const partialTotal = "X-Polyfin-Partial-Total"
+
+// listPage reads a page of the Jellyfin API's listing query, which starts
+// at start. Its total is exact but for an addon's catalog read in part:
+// the Android app shows a library's count, read from a page of one title,
+// only when total_exact is not false (see silotest.CheckLibraryCount).
+func (s *Server) listPage(r *http.Request, v viewer, query url.Values, start int) (catalogPage, answer, error) {
+	var result queryResult
+	a, err := s.call(r, v, http.MethodGet, "/Items?"+query.Encode(), nil, &result)
+	if err != nil || !a.ok() {
+		return catalogPage{}, a, err
+	}
+	items := cards(r, result.Items)
+	total := max(result.TotalRecordCount, start+len(result.Items))
+	page := catalogPage{Items: items, Total: total, TotalExact: a.header.Get(partialTotal) != "true", WindowCursor: cursor(0)}
+	if next := start + len(result.Items); len(result.Items) > 0 && next < total {
+		page.Page = pageInfo{HasMore: true, NextCursor: cursor(next)}
+	}
+	return page, a, nil
+}
+
+// writePage answers a page read, or why it could not be.
+func (s *Server) writePage(w http.ResponseWriter, r *http.Request, page catalogPage, a answer, err error) {
+	switch {
+	case err != nil:
+		s.internalError(w, r, err)
+	case !a.ok():
+		s.jellyfinRefusal(w, r, a)
+	default:
+		writeJSON(w, http.StatusOK, page)
+	}
+}
+
+// pageOf is a page of a list read whole.
+func pageOf(all []catalogItem, start, limit, total int) catalogPage {
+	page := catalogPage{Items: []catalogItem{}, Total: total, TotalExact: true, WindowCursor: cursor(0)}
+	if start < len(all) {
+		page.Items = all[start:min(start+limit, len(all))]
+	}
+	if next := start + len(page.Items); next < len(all) {
+		page.Page = pageInfo{HasMore: true, NextCursor: cursor(next)}
+	}
+	return page
+}
+
+// searchCapabilities tells the apps searches are available, through the
+// catalog's q, and people searches, among the people credited in titles
+// the user may see (people_media_scope: the Apple app searches people only
+// then), box sets while they are on (box_sets: the Apple app reads a
+// movie's box set only then), and the letters of a list in title order
+// (letter_index, see letters.go), which neither app reads: both ask for
+// the letters, which a library Polyfin does not store declines with 501,
+// and take a 404, 405 or 501 as no index.
+func (s *Server) searchCapabilities(w http.ResponseWriter, _ *http.Request, _ viewer) {
+	writeJSON(w, http.StatusOK, struct {
+		Allowed          bool   `json:"allowed"`
+		State            string `json:"state"`
+		Revision         string `json:"revision"`
+		PeopleMediaScope bool   `json:"people_media_scope"`
+		BoxSets          bool   `json:"box_sets"`
+		LetterIndex      bool   `json:"letter_index"`
+	}{true, "available", "polyfin-1", true, s.boxSetsOn(), true})
+}
+
+// itemOf reads an item's description, answering the request when the
+// user may not see it.
+func (s *Server) itemOf(w http.ResponseWriter, r *http.Request, v viewer, id string) (item, bool) {
+	if _, err := accounts.ParseID(id); err != nil {
+		problem(w, http.StatusNotFound, "not_found", "Item not found.")
+		return item{}, false
+	}
+	var i item
+	a, err := s.call(r, v, http.MethodGet, "/Items/"+id+"?Fields="+detailFields, nil, &i)
+	if err != nil {
+		s.internalError(w, r, err)
+		return item{}, false
+	}
+	if !a.ok() {
+		s.jellyfinRefusal(w, r, a)
+		return item{}, false
+	}
+	if !slices.Contains(browsable, i.Type) {
+		problem(w, http.StatusNotFound, "not_found", "Item not found.")
+		return item{}, false
+	}
+	return i, true
+}
+
+type castCredit struct {
+	Name      string `json:"name"`
+	Character string `json:"character"`
+	Order     int    `json:"order"`
+	PersonID  string `json:"person_id,omitempty"`
+	PhotoURL  string `json:"photo_url,omitempty"`
+}
+
+type crewCredit struct {
+	Name     string `json:"name"`
+	Job      string `json:"job"`
+	PersonID string `json:"person_id,omitempty"`
+	PhotoURL string `json:"photo_url,omitempty"`
+}
+
+type subtitleInfo struct {
+	Language        string `json:"language"`
+	Codec           string `json:"codec,omitempty"`
+	Title           string `json:"title,omitempty"`
+	Source          string `json:"source"`
+	Forced          bool   `json:"forced"`
+	HearingImpaired bool   `json:"hearing_impaired"`
+}
+
+type rollup struct {
+	Played          bool    `json:"played"`
+	PositionSeconds float64 `json:"position_seconds,omitempty"`
+	DurationSeconds float64 `json:"duration_seconds,omitempty"`
+	IsInProgress    bool    `json:"is_in_progress,omitempty"`
+	InProgressCount int     `json:"in_progress_count"`
+	UnplayedCount   int     `json:"unplayed_count"`
+	WatchedCount    int     `json:"watched_count"`
+}
+
+// rollupOf is the user's progress on an item: a title's position, or a
+// series' or season's episodes left.
+func rollupOf(i item) *rollup {
+	if i.UserData == nil {
+		return nil
+	}
+	data := i.UserData
+	result := &rollup{Played: data.Played, DurationSeconds: seconds(i.RunTimeTicks)}
+	if data.PlaybackPositionTicks > 0 {
+		result.PositionSeconds, result.IsInProgress, result.InProgressCount = float64(data.PlaybackPositionTicks)/1e7, true, 1
+	}
+	if data.UnplayedItemCount != nil {
+		result.UnplayedCount = *data.UnplayedItemCount
+		if total := i.RecursiveItemCount; total != nil {
+			result.WatchedCount = max(*total-*data.UnplayedItemCount, 0)
+		}
+	} else if data.Played {
+		result.WatchedCount = 1
+	} else {
+		result.UnplayedCount = 1
+	}
+	return result
+}
+
+type itemDetail struct {
+	catalogItem
+	OriginalTitle string         `json:"original_title,omitempty"`
+	Tagline       string         `json:"tagline,omitempty"`
+	Cast          []castCredit   `json:"cast"`
+	Crew          []crewCredit   `json:"crew"`
+	Ratings       []rating       `json:"ratings"`
+	Subtitles     []subtitleInfo `json:"subtitles"`
+	Versions      []fileVersion  `json:"versions"`
+	SeasonCount   *int           `json:"season_count,omitempty"`
+	EpisodeCount  *int           `json:"episode_count,omitempty"`
+	ImdbID        string         `json:"imdb_id,omitempty"`
+	TmdbID        string         `json:"tmdb_id,omitempty"`
+	TvdbID        string         `json:"tvdb_id,omitempty"`
+	UserData      *rollup        `json:"user_data,omitempty"`
+}
+
+type rating struct {
+	Source  string  `json:"source"`
+	Name    string  `json:"name"`
+	Score   float64 `json:"score"`
+	Display string  `json:"display"`
+}
+
+// ratingsOf are the ratings an item's page shows: the community's and the
+// critics', on a scale of 100.
+func ratingsOf(i item) []rating {
+	ratings := []rating{}
+	if i.CommunityRating != nil && *i.CommunityRating > 0 {
+		score := min(*i.CommunityRating*10, 100)
+		ratings = append(ratings, rating{Source: "community", Name: "Community", Score: score,
+			Display: strconv.FormatFloat(*i.CommunityRating, 'f', 1, 64)})
+	}
+	if i.CriticRating != nil && *i.CriticRating > 0 {
+		score := min(*i.CriticRating, 100)
+		ratings = append(ratings, rating{Source: "critics", Name: "Critics", Score: score,
+			Display: strconv.FormatFloat(*i.CriticRating, 'f', 0, 64) + "%"})
+	}
+	return ratings
+}
+
+// catalogItem describes a title for its page.
+func (s *Server) catalogItem(w http.ResponseWriter, r *http.Request, v viewer) {
+	i, ok := s.itemOf(w, r, v, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	versions, err := s.versionsOf(r.Context(), i)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	detail := itemDetail{catalogItem: catalogItemOf(r, i), OriginalTitle: i.OriginalTitle, Cast: []castCredit{}, Crew: []crewCredit{},
+		Ratings: ratingsOf(i), Subtitles: subtitlesOf(i.MediaSources), Versions: versions, UserData: rollupOf(i),
+		ImdbID: i.ProviderIds["Imdb"], TmdbID: i.ProviderIds["Tmdb"], TvdbID: i.ProviderIds["Tvdb"]}
+	if len(i.Taglines) > 0 {
+		detail.Tagline = i.Taglines[0]
+	}
+	// People are numbered, as the apps open their pages.
+	numbers, err := s.personNumbers(r, i.People)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	for _, p := range i.People {
+		photo := artworkURL(p.Id, "Primary", p.PrimaryImageTag, artworkWidth(r, "photo"))
+		number := personNumber(numbers, p)
+		if p.Type == "Actor" || p.Type == "GuestStar" {
+			detail.Cast = append(detail.Cast, castCredit{Name: p.Name, Character: p.Role, Order: len(detail.Cast), PersonID: number, PhotoURL: photo})
+		} else {
+			detail.Crew = append(detail.Crew, crewCredit{Name: p.Name, Job: p.Type, PersonID: number, PhotoURL: photo})
+		}
+	}
+	if i.Type == "Series" {
+		detail.SeasonCount, detail.EpisodeCount = i.ChildCount, i.RecursiveItemCount
+	}
+	writeJSON(w, http.StatusOK, detail)
+}
+
+// catalogVersions lists a title's versions.
+func (s *Server) catalogVersions(w http.ResponseWriter, r *http.Request, v viewer) {
+	i, ok := s.itemOf(w, r, v, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	versions, err := s.versionsOf(r.Context(), i)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Items []fileVersion `json:"items"`
+	}{versions})
+}
+
+type season struct {
+	ContentID     string  `json:"content_id"`
+	Title         string  `json:"title"`
+	SeasonNumber  int     `json:"season_number"`
+	EpisodeCount  int     `json:"episode_count"`
+	Overview      string  `json:"overview,omitempty"`
+	PosterURL     string  `json:"poster_url,omitempty"`
+	AirDate       string  `json:"air_date,omitempty"`
+	IsSpecials    bool    `json:"is_specials,omitempty"`
+	UserData      *rollup `json:"user_data,omitempty"`
+	PlayContentID string  `json:"play_content_id,omitempty"`
+}
+
+// seriesSeasons reads a series' seasons, answering the request when the
+// user may not see the series.
+func (s *Server) seriesSeasons(w http.ResponseWriter, r *http.Request, v viewer, series string) ([]item, bool) {
+	if _, err := accounts.ParseID(series); err != nil {
+		problem(w, http.StatusNotFound, "not_found", "Series not found.")
+		return nil, false
+	}
+	var result queryResult
+	a, err := s.call(r, v, http.MethodGet, "/Shows/"+series+"/Seasons?Fields="+listFields, nil, &result)
+	if err != nil {
+		s.internalError(w, r, err)
+		return nil, false
+	}
+	if !a.ok() {
+		s.jellyfinRefusal(w, r, a)
+		return nil, false
+	}
+	return result.Items, true
+}
+
+func (s *Server) seasons(w http.ResponseWriter, r *http.Request, v viewer) {
+	items, ok := s.seriesSeasons(w, r, v, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	seasons := []season{}
+	for _, i := range items {
+		row := season{ContentID: i.Id, Title: i.Name, AirDate: date(i.PremiereDate), UserData: rollupOf(i)}
+		if i.IndexNumber != nil {
+			row.SeasonNumber = *i.IndexNumber
+		}
+		row.IsSpecials = row.SeasonNumber == 0
+		if i.ChildCount != nil {
+			row.EpisodeCount = *i.ChildCount
+		}
+		if i.Overview != nil {
+			row.Overview = *i.Overview
+		}
+		if r.URL.Query().Get("include_artwork") != "false" {
+			row.PosterURL, _, _ = artworkOf(r, i)
+		}
+		seasons = append(seasons, row)
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Items []season `json:"items"`
+	}{seasons})
+}
+
+type episodeFile struct {
+	FileID       string `json:"file_id"`
+	FileSize     int64  `json:"file_size"`
+	Container    string `json:"container,omitempty"`
+	CodecVideo   string `json:"codec_video,omitempty"`
+	Resolution   string `json:"resolution,omitempty"`
+	AudioChannel int    `json:"audio_channels,omitempty"`
+	HDR          bool   `json:"hdr"`
+}
+
+type episode struct {
+	ContentID     string        `json:"content_id"`
+	Title         string        `json:"title"`
+	SeasonNumber  int           `json:"season_number"`
+	EpisodeNumber int           `json:"episode_number"`
+	Runtime       int           `json:"runtime"`
+	Overview      string        `json:"overview,omitempty"`
+	AirDate       string        `json:"air_date,omitempty"`
+	StillURL      string        `json:"still_url,omitempty"`
+	Files         []episodeFile `json:"files,omitempty"`
+	UserData      *rollup       `json:"user_data,omitempty"`
+	ImdbID        string        `json:"imdb_id,omitempty"`
+	TmdbID        string        `json:"tmdb_id,omitempty"`
+	TvdbID        string        `json:"tvdb_id,omitempty"`
+}
+
+// episodesOf lists episodes, from the Jellyfin API's episodes of a series
+// asked with query.
+func (s *Server) episodesOf(w http.ResponseWriter, r *http.Request, v viewer, series, query string) {
+	if _, err := accounts.ParseID(series); err != nil {
+		problem(w, http.StatusNotFound, "not_found", "Series not found.")
+		return
+	}
+	var result queryResult
+	a, err := s.call(r, v, http.MethodGet, "/Shows/"+series+"/Episodes?Fields="+listFields+",MediaSources&"+query, nil, &result)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	if !a.ok() {
+		s.jellyfinRefusal(w, r, a)
+		return
+	}
+	// The versions of every episode are numbered at once.
+	numbers, err := s.versionNumbers(r.Context(), result.Items)
+	if err != nil {
+		s.internalError(w, r, err)
+		return
+	}
+	episodes := []episode{}
+	for _, i := range result.Items {
+		row := episode{ContentID: i.Id, Title: i.Name, AirDate: date(i.PremiereDate), UserData: rollupOf(i),
+			Runtime: int(seconds(i.RunTimeTicks)/60 + 0.5), ImdbID: i.ProviderIds["Imdb"], TmdbID: i.ProviderIds["Tmdb"], TvdbID: i.ProviderIds["Tvdb"]}
+		if i.ParentIndexNumber != nil {
+			row.SeasonNumber = *i.ParentIndexNumber
+		}
+		if i.IndexNumber != nil {
+			row.EpisodeNumber = *i.IndexNumber
+		}
+		if i.Overview != nil {
+			row.Overview = *i.Overview
+		}
+		row.StillURL = artworkURL(i.Id, "Primary", i.ImageTags["Primary"], artworkWidth(r, "still"))
+		for _, version := range versionsWith(i, numbers) {
+			row.Files = append(row.Files, episodeFile{FileID: version.FileID, FileSize: version.FileSize, Container: version.Container,
+				CodecVideo: version.CodecVideo, Resolution: version.Resolution, HDR: version.HDR})
+		}
+		episodes = append(episodes, row)
+	}
+	writeJSON(w, http.StatusOK, struct {
+		Items []episode `json:"items"`
+	}{episodes})
+}
+
+func (s *Server) seasonEpisodes(w http.ResponseWriter, r *http.Request, v viewer) {
+	number, err := strconv.Atoi(r.PathValue("num"))
+	if err != nil || number < 0 {
+		validationProblem(w, "path.num", "out_of_range", "A season number is 0 or more.")
+		return
+	}
+	s.episodesOf(w, r, v, r.PathValue("id"), "Season="+strconv.Itoa(number))
+}
+
+// itemEpisodes lists the episodes of a season, or of a series.
+func (s *Server) itemEpisodes(w http.ResponseWriter, r *http.Request, v viewer) {
+	i, ok := s.itemOf(w, r, v, r.PathValue("id"))
+	if !ok {
+		return
+	}
+	switch i.Type {
+	case "Season":
+		s.episodesOf(w, r, v, i.SeriesId, "SeasonId="+i.Id)
+	case "Series":
+		s.episodesOf(w, r, v, i.Id, "")
+	default:
+		problem(w, http.StatusNotFound, "not_found", "This item has no episodes.")
+	}
+}
+
+// watched marks an item played or unplayed, as Jellyfin apps do.
+func (s *Server) watched(played bool) func(http.ResponseWriter, *http.Request, viewer) {
+	return func(w http.ResponseWriter, r *http.Request, v viewer) {
+		id, err := accounts.ParseID(r.PathValue("id"))
+		if err != nil {
+			problem(w, http.StatusNotFound, "not_found", "Item not found.")
+			return
+		}
+		method := http.MethodPost
+		if !played {
+			method = http.MethodDelete
+		}
+		a, err := s.call(r, v, method, "/UserPlayedItems/"+id.String(), nil, nil)
+		if err != nil {
+			s.internalError(w, r, err)
+			return
+		}
+		if !a.ok() {
+			s.jellyfinRefusal(w, r, a)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}
+}

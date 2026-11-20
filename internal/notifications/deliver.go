@@ -14,7 +14,9 @@ import (
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
+	"github.com/moodiness/polyfin/internal/i18n"
 	"github.com/moodiness/polyfin/internal/metrics"
+	"github.com/moodiness/polyfin/internal/redirect"
 	"github.com/moodiness/polyfin/internal/stremio"
 )
 
@@ -52,9 +54,20 @@ func (s *Service) dispatchAdministrators(ev Event) {
 	s.dispatch(ev, func(t target) bool { return t.owner == nil || s.admins[*t.owner] })
 }
 
-// push queues ev for the target id, and starts its lane. It is called with
-// s.mu held.
+// push queues ev for the target id, and starts its lane, or holds it for
+// the target's next group when the target groups events of its type. It
+// is called with s.mu held.
 func (s *Service) push(id accounts.ID, ev Event) {
+	if t, ok := s.targets[id]; ok && t.groupMinutes > 0 && groupable(ev.Type) {
+		s.hold(id, t, ev)
+		return
+	}
+	s.enqueue(id, ev)
+}
+
+// enqueue queues ev for the target id, and starts its lane. It is called
+// with s.mu held.
+func (s *Service) enqueue(id accounts.ID, ev Event) {
 	if s.closed {
 		return
 	}
@@ -65,12 +78,108 @@ func (s *Service) push(id accounts.ID, ev Event) {
 	}
 	if len(l.queue) >= maxQueue {
 		s.logger.Warn("Too many notifications wait for a target: the oldest was dropped", "target", id.String())
+		dropped := l.queue[0]
 		l.queue = l.queue[1:]
+		s.spawn(func() { s.record(id, dropped, DeliveryDropped, result{}) })
 	}
 	l.queue = append(l.queue, &delivery{event: ev, queued: s.now()})
 	if !l.running {
 		l.running = s.spawn(func() { s.drive(id, l) })
 	}
+}
+
+// group is the events a target holds for its next grouped message.
+type group struct {
+	events []Event
+}
+
+// hold keeps ev for the next group of the target id, t, which is sent
+// t.groupMinutes after the first event it holds, or at once when it holds
+// maxGroup. It is called with s.mu held.
+func (s *Service) hold(id accounts.ID, t target, ev Event) {
+	if s.closed {
+		return
+	}
+	g := s.held[id]
+	if g == nil {
+		g = &group{}
+		s.held[id] = g
+		wait := time.Duration(t.groupMinutes) * s.timing.minute
+		s.spawn(func() {
+			if s.sleep(wait) {
+				s.mu.Lock()
+				s.release(id, g)
+				s.mu.Unlock()
+			}
+		})
+	}
+	g.events = append(g.events, ev)
+	if len(g.events) >= maxGroup {
+		s.release(id, g)
+	}
+}
+
+// release queues g, the group of the target id, as one message, or its
+// event as it is when it holds one, unless it was sent or the target
+// deleted. It is called with s.mu held.
+func (s *Service) release(id accounts.ID, g *group) {
+	if s.held[id] != g {
+		return
+	}
+	delete(s.held, id)
+	if len(g.events) == 1 {
+		s.enqueue(id, g.events[0])
+		return
+	}
+	s.enqueue(id, s.groupedEvent(g.events))
+}
+
+// capWait is how long the target id, t, waits before its next message
+// for its cap of messages a minute: zero when it may send now. It forgets
+// the messages sent more than a minute ago, and counts the sends under
+// way (see begin). It is called with s.mu held.
+func (s *Service) capWait(id accounts.ID, t target) time.Duration {
+	now := s.now()
+	recent := s.recent[id]
+	for len(recent) > 0 && now.Sub(recent[0]) >= s.timing.minute {
+		recent = recent[1:]
+	}
+	if len(recent) == 0 {
+		delete(s.recent, id)
+	} else {
+		s.recent[id] = recent
+	}
+	if t.perMinute == 0 || len(recent)+s.underWay[id] < t.perMinute {
+		return 0
+	}
+	if len(recent) == 0 {
+		// Sends under way hold every place, and will for a minute once
+		// they are done.
+		return s.timing.minute
+	}
+	return recent[0].Add(s.timing.minute).Sub(now)
+}
+
+// begin holds a place in the cap of the target id, t, for a send that
+// capWait allowed, until sent counts it: a queued message and a test,
+// which are sent side by side, then never pass the cap together. It is
+// called with s.mu held.
+func (s *Service) begin(id accounts.ID, t target) {
+	if t.perMinute > 0 {
+		s.underWay[id]++
+	}
+}
+
+// sent counts toward the cap of the target id, t, the send that began,
+// from now, whatever came of it. It is called with s.mu held.
+func (s *Service) sent(id accounts.ID, t target) {
+	if t.perMinute == 0 {
+		return
+	}
+	if s.underWay[id]--; s.underWay[id] <= 0 {
+		delete(s.underWay, id)
+	}
+	s.recent[id] = append(s.recent[id], s.now())
 }
 
 // drive sends the messages of a lane until none waits.
@@ -88,9 +197,16 @@ func (s *Service) drive(id accounts.ID, l *lane) {
 		d := l.queue[0]
 		t, ok := s.targets[id]
 		confined := ok && t.owner != nil && !s.admins[*t.owner]
-		s.mu.Unlock()
+		// The cap holds the message until it allows one more; a target
+		// deleted or turned off drops it.
 		wait := time.Duration(0)
 		if ok && t.enabled {
+			if wait = s.capWait(id, t); wait == 0 {
+				s.begin(id, t)
+			}
+		}
+		s.mu.Unlock()
+		if wait == 0 && ok && t.enabled {
 			wait = s.attempt(id, l, t, d, confined)
 		}
 		if wait == 0 {
@@ -123,17 +239,22 @@ func (s *Service) attempt(id accounts.ID, l *lane, t target, d *delivery, confin
 		l.failures = 0
 	}
 	failures := l.failures
+	// Each request counts toward the cap, whatever came of it.
+	s.sent(id, t)
 	s.mu.Unlock()
 	switch res.outcome {
 	case delivered:
 		s.delivered(id)
+		s.record(id, d, DeliveryDelivered, res)
 		return 0
 	case unreadable:
+		s.record(id, d, DeliveryUnreadable, res)
 		return 0
 	case refused, rejected:
 		s.failing(id, res)
 		s.logger.Warn("A notification target refused a message, which was dropped", "target", id.String(), "kind", t.kind,
 			"event", d.event.Type, "status", res.status)
+		s.record(id, d, outcomeOf(res), res)
 		return 0
 	}
 	backoff := s.timing.retryFirst
@@ -152,6 +273,7 @@ func (s *Service) attempt(id accounts.ID, l *lane, t target, d *delivery, confin
 		s.failing(id, res)
 		s.logger.Warn("A notification could not be delivered in time and was dropped", "target", id.String(), "kind", t.kind,
 			"event", d.event.Type, "attempts", d.attempts, "status", res.status, "error", res.err)
+		s.record(id, d, DeliveryFailed, res)
 		return 0
 	}
 	return wait
@@ -175,7 +297,8 @@ const (
 
 // result is what came of a send: the status the target answered, zero
 // when it did not, how long it asked to wait, and why it could not be
-// reached, without its address.
+// reached, or the start of an answer that did not accept the message,
+// without its address or tokens.
 type result struct {
 	outcome outcome
 	status  int
@@ -210,13 +333,19 @@ func (s *Service) send(t target, ev Event, confined bool) result {
 	if t.kind == Email {
 		return s.sendEmail(ctx, t, ev)
 	}
-	response, err := client.Do(request.WithContext(ctx))
+	response, err := client.Do(request.WithContext(withSecrets(ctx, t.kind)))
 	if err != nil {
 		return result{outcome: retry, err: describeError(err)}
 	}
 	body, _ := io.ReadAll(io.LimitReader(response.Body, maxReply))
 	_ = response.Body.Close()
-	return classify(t.kind, response.StatusCode, response.Header, body)
+	res := classify(t.kind, response.StatusCode, response.Header, body)
+	if res.outcome != delivered {
+		// What the target said, for the log and the admin app: never
+		// its address, tokens or topic.
+		res.err = excerpt(body, secret, t.address, t.topic)
+	}
+	return res
 }
 
 // describeError says why a request failed in a few words, never with the
@@ -230,6 +359,8 @@ func describeError(err error) string {
 	switch {
 	case errors.Is(err, stremio.ErrPrivateNetwork):
 		return "on a local network"
+	case errors.Is(err, redirect.ErrSecretBody):
+		return "redirected to another host"
 	case errors.Is(err, context.DeadlineExceeded), errors.As(err, &timeout) && timeout.Timeout():
 		return "no answer in time"
 	}
@@ -351,22 +482,118 @@ func (s *Service) failing(id accounts.ID, res result) {
 }
 
 // TestResult is what came of "Send a test": whether the target accepted
-// the message, the status it answered, zero when it did not, and the
-// target as it stands after.
+// the message, the status it answered, zero when it did not, why it did
+// not accept it, the start of its answer or why it could not be reached,
+// without its address or tokens, and the target as it stands after.
 type TestResult struct {
 	Delivered bool
 	Status    int
+	Answer    string
 	Target    Target
 }
 
+// MaxTestsPerHour bounds the tests an owner may ask for in any hour, over
+// all their targets; the server's targets count together.
+const MaxTestsPerHour = 10
+
+// maxTestOwners bounds the owners whose tests of the last hour are kept:
+// past it, another owner's test waits until the hour of one has passed.
+const maxTestOwners = 1000
+
+var (
+	// ErrTestTooSoon reports a test asked of a target that was sent one a
+	// moment ago, or whose cap of messages a minute is reached.
+	ErrTestTooSoon = errors.New("notification target tested too soon")
+	// ErrTooManyTests reports a test asked by an owner whose tests of the
+	// last hour number MaxTestsPerHour.
+	ErrTooManyTests = errors.New("too many notification tests")
+)
+
+// TestRefused is a test that was not sent, for now: Reason is
+// ErrTestTooSoon or ErrTooManyTests, which it unwraps to, and Wait how
+// long until the test may be asked again.
+type TestRefused struct {
+	Reason error
+	Wait   time.Duration
+}
+
+func (e *TestRefused) Error() string { return e.Reason.Error() }
+
+func (e *TestRefused) Unwrap() error { return e.Reason }
+
+// askedTest is a test that was allowed: of which target, and when.
+type askedTest struct {
+	target accounts.ID
+	at     time.Time
+}
+
+// allowTest counts a test of the target id, t, asked by owner, nil for
+// the server's, or answers the TestRefused that tells why it may not be
+// sent now. A target is sent a test at most every timing.testEvery, the
+// targets of an owner MaxTestsPerHour tests in any hour, and a test takes
+// a place in the target's cap of messages a minute, as a message does
+// (see begin). A refused test counts for nothing. The tests are kept in
+// memory, an hour at most, for maxTestOwners owners at most: a restart
+// forgets them, as it does the caps' minutes.
+func (s *Service) allowTest(owner *accounts.User, id accounts.ID, t target) error {
+	var key accounts.ID
+	if owner != nil {
+		key = owner.ID
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	now := s.now()
+	// The tests of more than an hour ago are forgotten, and an owner with
+	// their last: leaves is how long until the next owner is.
+	leaves := time.Hour
+	for other, tests := range s.tests {
+		for len(tests) > 0 && now.Sub(tests[0].at) >= time.Hour {
+			tests = tests[1:]
+		}
+		if len(tests) == 0 {
+			delete(s.tests, other)
+			continue
+		}
+		s.tests[other] = tests
+		leaves = min(leaves, tests[len(tests)-1].at.Add(time.Hour).Sub(now))
+	}
+	tests := s.tests[key]
+	for _, test := range tests {
+		if since := now.Sub(test.at); test.target == id && since < s.timing.testEvery {
+			return &TestRefused{Reason: ErrTestTooSoon, Wait: s.timing.testEvery - since}
+		}
+	}
+	if len(tests) >= MaxTestsPerHour {
+		return &TestRefused{Reason: ErrTooManyTests, Wait: tests[0].at.Add(time.Hour).Sub(now)}
+	}
+	if len(tests) == 0 && len(s.tests) >= maxTestOwners {
+		return &TestRefused{Reason: ErrTooManyTests, Wait: leaves}
+	}
+	if wait := s.capWait(id, t); wait > 0 {
+		return &TestRefused{Reason: ErrTestTooSoon, Wait: wait}
+	}
+	s.tests[key] = append(tests, askedTest{target: id, at: now})
+	s.begin(id, t)
+	return nil
+}
+
 // Test sends a test message to the target id of owner, once, at once, and
-// records what came of it as a message would.
+// records what came of it as a message would. A test asked too soon after
+// another, or one too many, is not sent: the error is a TestRefused (see
+// allowTest).
 func (s *Service) Test(ctx context.Context, owner *accounts.User, id accounts.ID) (TestResult, error) {
 	t, err := s.load(ctx, owner, id)
 	if err != nil {
 		return TestResult{}, err
 	}
-	res := s.send(t, s.testEvent(), owner != nil && !owner.IsAdministrator)
+	if err := s.allowTest(owner, id, t); err != nil {
+		return TestResult{}, err
+	}
+	ev, queued := s.testEvent(), s.now()
+	res := s.send(t, ev, owner != nil && !owner.IsAdministrator)
+	s.mu.Lock()
+	s.sent(id, t)
+	s.mu.Unlock()
 	switch res.outcome {
 	case unreadable:
 		return TestResult{}, ErrUnreadable
@@ -377,10 +604,11 @@ func (s *Service) Test(ctx context.Context, owner *accounts.User, id accounts.ID
 		s.logger.Info("A notification target did not accept a test message", "target", id.String(), "kind", t.kind,
 			"status", res.status, "error", res.err)
 	}
+	s.record(id, &delivery{event: ev, queued: queued, attempts: 1}, outcomeOf(res), res)
 	if t, err = s.load(ctx, owner, id); err != nil {
 		return TestResult{}, err
 	}
-	return TestResult{Delivered: res.outcome == delivered, Status: res.status, Target: s.describe(t)}, nil
+	return TestResult{Delivered: res.outcome == delivered, Status: res.status, Answer: res.err, Target: s.describe(t)}, nil
 }
 
 // request builds the request that sends ev to t, whose secret is opened.
@@ -390,8 +618,15 @@ func (s *Service) request(t target, secret string, ev Event) (*http.Request, err
 	header := http.Header{}
 	switch t.kind {
 	case Webhook:
-		address, payload = secret, ev
-		header.Set("X-Polyfin-Event", ev.Type)
+		address = secret
+		// Discord refuses any other message: a Discord webhook pasted
+		// as a Webhook target is sent what a Discord target is.
+		if DiscordWebhook(secret) {
+			payload = discordMessage(ev)
+		} else {
+			payload = ev
+			header.Set("X-Polyfin-Event", ev.Type)
+		}
 	case Discord:
 		address, payload = secret, discordMessage(ev)
 	case Ntfy:
@@ -400,7 +635,7 @@ func (s *Service) request(t target, secret string, ev Event) (*http.Request, err
 			header.Set("Authorization", "Bearer "+secret)
 		}
 	case Telegram:
-		address, payload = s.telegramAPI+"/bot"+secret+"/sendMessage", telegramMessage(t.topic, ev, s.phrase("Open", "Ouvrir"))
+		address, payload = s.telegramAPI+"/bot"+secret+"/sendMessage", telegramMessage(t.topic, ev, s.phrase(i18n.Text{"Open", "Ouvrir", "Öffnen", "Abrir", "Apri", "Abrir"}))
 	case Gotify:
 		address, payload = t.address+"/message", gotifyMessage(ev)
 		header.Set("X-Gotify-Key", secret)
@@ -424,4 +659,19 @@ func (s *Service) request(t target, secret string, ev Event) (*http.Request, err
 	request.Header.Set("Content-Type", "application/json")
 	request.Header.Set("User-Agent", "Polyfin/"+s.version)
 	return request, nil
+}
+
+// withSecrets marks ctx with what the request to a target of kind holds for
+// the host it is sent to, which a redirect to another host is not given
+// (see redirect): Gotify's application token in its header, and a
+// Pushover user's key and app token in the body. Ntfy's token goes as
+// Authorization, which Go's client already keeps from another host.
+func withSecrets(ctx context.Context, kind string) context.Context {
+	switch kind {
+	case Gotify:
+		return redirect.SecretHeaders(ctx, "X-Gotify-Key")
+	case Pushover:
+		return redirect.SecretBody(ctx)
+	}
+	return ctx
 }

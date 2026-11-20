@@ -4,17 +4,19 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/activity"
 	"github.com/moodiness/polyfin/internal/library"
-	"github.com/moodiness/polyfin/internal/logs"
 	"github.com/moodiness/polyfin/internal/tasks"
 )
 
@@ -131,25 +133,116 @@ type TaskResult struct {
 	ErrorMessage string `json:",omitempty"`
 }
 
-// TaskTriggerInfo is what runs a task: at startup, every IntervalTicks, or
-// every day at TimeOfDayTicks.
+// TaskTriggerInfo is what runs a task, as Jellyfin's TaskTriggerInfo:
+// at startup, every IntervalTicks, every day at TimeOfDayTicks, or every
+// week on DayOfWeek at TimeOfDayTicks; MaxRuntimeTicks, when set, stops
+// the runs it starts after that long.
 type TaskTriggerInfo struct {
-	Type           string
-	IntervalTicks  int64 `json:",omitempty"`
-	TimeOfDayTicks int64 `json:",omitempty"`
+	Type            string
+	TimeOfDayTicks  *int64     `json:",omitempty"`
+	IntervalTicks   *int64     `json:",omitempty"`
+	DayOfWeek       *DayOfWeek `json:",omitempty"`
+	MaxRuntimeTicks *int64     `json:",omitempty"`
+}
+
+// DayOfWeek is a day as .NET's DayOfWeek: written by name, read by name
+// or number, 0 for Sunday.
+type DayOfWeek time.Weekday
+
+// MarshalJSON writes the day's name.
+func (d DayOfWeek) MarshalJSON() ([]byte, error) {
+	return json.Marshal(time.Weekday(d).String())
+}
+
+// UnmarshalJSON reads a name, in any case, or a number from 0 to 6; others
+// are left out of range, for the triggers' check to refuse.
+func (d *DayOfWeek) UnmarshalJSON(data []byte) error {
+	var name string
+	if json.Unmarshal(data, &name) == nil {
+		*d = -1
+		for day := time.Sunday; day <= time.Saturday; day++ {
+			if strings.EqualFold(name, day.String()) {
+				*d = DayOfWeek(day)
+			}
+		}
+		return nil
+	}
+	var number int
+	if err := json.Unmarshal(data, &number); err != nil {
+		return err
+	}
+	*d = DayOfWeek(number)
+	if number < 0 || number > 6 {
+		*d = -1
+	}
+	return nil
+}
+
+// jellyfinTriggerTypes are Jellyfin's trigger types, by Polyfin's.
+var jellyfinTriggerTypes = map[tasks.TriggerType]string{
+	tasks.DailyTrigger:    "DailyTrigger",
+	tasks.WeeklyTrigger:   "WeeklyTrigger",
+	tasks.IntervalTrigger: "IntervalTrigger",
+	tasks.StartupTrigger:  "StartupTrigger",
+}
+
+func newTaskTriggerInfo(t tasks.Trigger) TaskTriggerInfo {
+	info := TaskTriggerInfo{Type: jellyfinTriggerTypes[t.Type]}
+	switch t.Type {
+	case tasks.WeeklyTrigger:
+		info.DayOfWeek = new(DayOfWeek(t.Day))
+		fallthrough
+	case tasks.DailyTrigger:
+		info.TimeOfDayTicks = new(ticks(t.TimeOfDay))
+	case tasks.IntervalTrigger:
+		info.IntervalTicks = new(ticks(t.Interval))
+	}
+	if t.MaxRuntime > 0 {
+		info.MaxRuntimeTicks = new(ticks(t.MaxRuntime))
+	}
+	return info
+}
+
+// trigger is the trigger info describes; false for an unknown type. A
+// field its type needs and that is missing is left out of range, for the
+// triggers' check to refuse.
+func (info TaskTriggerInfo) trigger() (tasks.Trigger, bool) {
+	var t tasks.Trigger
+	for kind, name := range jellyfinTriggerTypes {
+		if strings.EqualFold(info.Type, name) {
+			t.Type = kind
+		}
+	}
+	if t.Type == "" {
+		return t, false
+	}
+	duration := func(ticks *int64, missing time.Duration) time.Duration {
+		if ticks == nil {
+			return missing
+		}
+		return time.Duration(*ticks) * 100
+	}
+	switch t.Type {
+	case tasks.WeeklyTrigger:
+		t.Day = -1
+		if info.DayOfWeek != nil {
+			t.Day = time.Weekday(*info.DayOfWeek)
+		}
+		fallthrough
+	case tasks.DailyTrigger:
+		t.TimeOfDay = duration(info.TimeOfDayTicks, -1)
+	case tasks.IntervalTrigger:
+		t.Interval = duration(info.IntervalTicks, 0)
+	}
+	t.MaxRuntime = duration(info.MaxRuntimeTicks, 0)
+	return t, true
 }
 
 func newTaskInfo(info tasks.Info) TaskInfo {
 	task := TaskInfo{Name: info.Name, State: info.State, Id: info.ID, Triggers: []TaskTriggerInfo{},
 		Description: info.Description, Category: info.Category, Key: info.Key}
-	if info.AtStart {
-		task.Triggers = append(task.Triggers, TaskTriggerInfo{Type: "StartupTrigger"})
-	}
-	if info.Interval > 0 {
-		task.Triggers = append(task.Triggers, TaskTriggerInfo{Type: "IntervalTrigger", IntervalTicks: int64(info.Interval / 100)})
-	}
-	if info.Daily != nil {
-		task.Triggers = append(task.Triggers, TaskTriggerInfo{Type: "DailyTrigger", TimeOfDayTicks: int64(time.Duration(*info.Daily) * time.Hour / 100)})
+	for _, t := range info.Triggers {
+		task.Triggers = append(task.Triggers, newTaskTriggerInfo(t))
 	}
 	if last := info.Last; last != nil {
 		task.LastExecutionResult = &TaskResult{StartTimeUtc: Time(last.Start), EndTimeUtc: Time(last.End), Status: last.Status,
@@ -211,12 +304,47 @@ func (h *Handler) stopTask(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-// updateTaskTriggers refuses new triggers: Polyfin's tasks run on fixed
-// schedules, which Jellyfin lets administrators change.
+// updateTaskTriggers replaces a task's triggers with the list of the
+// body, as Jellyfin does, but checks them first: a list outside the
+// task's limits is refused with 400 and saves nothing. A task whose
+// triggers are locked takes the list it has, as Jellyfin's dashboard posts
+// it back unchanged, and refuses any other.
 func (h *Handler) updateTaskTriggers(w http.ResponseWriter, r *http.Request) {
-	if _, ok := h.task(w, r); ok {
-		validationProblem(w, map[string][]string{"triggerInfos": {"Polyfin's tasks run on fixed schedules: their triggers cannot be changed."}})
+	info, ok := h.task(w, r)
+	if !ok {
+		return
 	}
+	var infos []*TaskTriggerInfo
+	if err := decode(r, &infos); err != nil {
+		badRequestProblem(w)
+		return
+	}
+	triggers := []tasks.Trigger{}
+	for i, t := range infos {
+		// Jellyfin drops the null entries.
+		if t == nil {
+			continue
+		}
+		trigger, known := t.trigger()
+		if !known {
+			validationProblem(w, map[string][]string{"triggerInfos": {fmt.Sprintf("Trigger %d has an unknown type: %q.", i, t.Type)}})
+			return
+		}
+		triggers = append(triggers, trigger)
+	}
+	switch err := h.Tasks.SetTriggers(r.Context(), info.ID, triggers); {
+	case errors.Is(err, tasks.ErrLocked):
+		validationProblem(w, map[string][]string{"triggerInfos": {"This task's triggers cannot be changed."}})
+		return
+	case errors.Is(err, tasks.ErrInvalidTriggers):
+		validationProblem(w, map[string][]string{"triggerInfos": {err.Error()}})
+		return
+	case err != nil:
+		h.internalError(w, r, err)
+		return
+	}
+	h.Logger.Info("A task's triggers were changed", "task", info.Key, "by", actor(callerFrom(r.Context())))
+	w.WriteHeader(http.StatusNoContent)
 }
 
 // logName is the name of the one log file Polyfin serves: the recent lines
@@ -264,9 +392,57 @@ type ClientLogDocumentResponseDto struct {
 	FileName string
 }
 
+// The logs a user's apps may upload: an app sends one after it failed,
+// seldom.
+const (
+	clientLogsAMinute = 3
+	clientLogsAnHour  = 20
+)
+
+// clientLogUploads remembers when each user's apps last uploaded logs.
+// Its zero value is ready.
+type clientLogUploads struct {
+	mu sync.Mutex
+	at map[accounts.ID][]time.Time
+}
+
+// allow reports whether an app of user may upload a log at now, and
+// records it, or how long until one may.
+func (u *clientLogUploads) allow(user accounts.ID, now time.Time) (bool, time.Duration) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if u.at == nil {
+		u.at = map[accounts.ID][]time.Time{}
+	}
+	for id, at := range u.at {
+		recent := 0
+		for recent < len(at) && now.Sub(at[recent]) >= time.Hour {
+			recent++
+		}
+		if recent == len(at) {
+			delete(u.at, id)
+		} else if recent > 0 {
+			u.at[id] = at[recent:]
+		}
+	}
+	at := u.at[user]
+	if len(at) >= clientLogsAnHour {
+		return false, at[len(at)-clientLogsAnHour].Add(time.Hour).Sub(now)
+	}
+	if len(at) >= clientLogsAMinute {
+		if wait := at[len(at)-clientLogsAMinute].Add(time.Minute).Sub(now); wait > 0 {
+			return false, wait
+		}
+	}
+	u.at[user] = append(at, now)
+	return true, 0
+}
+
 // clientLog takes the log an app uploads, as jellyfin-web's "send logs"
-// does. Jellyfin writes it to a file; Polyfin writes it to its own log, at
-// the Info level, redacted, under the file name it answers with.
+// does. Jellyfin writes it to a file; Polyfin keeps none of it: its own
+// log tells, in one line at the Info level, who sent how many bytes, under
+// the file name it answers with. Past what a user's apps may upload in a
+// minute and in an hour (see clientLogUploads), the answer is 429.
 func (h *Handler) clientLog(w http.ResponseWriter, r *http.Request) {
 	tooLarge := func() {
 		writeJSON(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("Payload must be less than %s bytes", "1,000,000"))
@@ -275,7 +451,14 @@ func (h *Handler) clientLog(w http.ResponseWriter, r *http.Request) {
 		tooLarge()
 		return
 	}
-	body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxClientLog))
+	c := callerFrom(r.Context())
+	if allowed, wait := h.uploads.allow(c.User.ID, h.now()); !allowed {
+		// Whole seconds, rounded up.
+		w.Header().Set("Retry-After", strconv.Itoa(int((wait+time.Second-1)/time.Second)))
+		processingError(w, http.StatusTooManyRequests)
+		return
+	}
+	size, err := io.Copy(io.Discard, http.MaxBytesReader(w, r.Body, maxClientLog))
 	var limit *http.MaxBytesError
 	if errors.As(err, &limit) {
 		tooLarge()
@@ -285,8 +468,10 @@ func (h *Handler) clientLog(w http.ResponseWriter, r *http.Request) {
 		processingError(w, http.StatusBadRequest)
 		return
 	}
-	c := callerFrom(r.Context())
-	client, version := c.Device.Client, c.Device.ClientVersion
+	// The app's name and version are the app's own words: they are cut,
+	// as the device's name is, for the file name and the log's line to
+	// stay short.
+	client, version := truncate(c.Device.Client), truncate(c.Device.ClientVersion)
 	if client == "" {
 		client = "unknown-client"
 	}
@@ -298,6 +483,6 @@ func (h *Handler) clientLog(w http.ResponseWriter, r *http.Request) {
 	var raw [16]byte
 	_, _ = rand.Read(raw[:])
 	name := fmt.Sprintf("upload_%s_%s_%s_%s.log", client, version, h.now().UTC().Format("20060102150405"), hex.EncodeToString(raw[:]))
-	h.Logger.Info("An app sent its log", "file", name, "user", c.User.Name, "document", logs.Redact(string(body)))
+	h.Logger.Info("An app sent its log, which is not kept", "file", name, "user", c.User.Name, "device", truncate(c.Device.DeviceName), "bytes", size)
 	writeJSON(w, http.StatusOK, ClientLogDocumentResponseDto{FileName: name})
 }

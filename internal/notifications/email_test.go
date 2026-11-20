@@ -255,6 +255,7 @@ func (h harness) useSMTP(t *testing.T, sink *smtpSink, password string) {
 // only once encrypted, with STARTTLS or TLS from the start, by PLAIN or by
 // LOGIN. None can be added without an SMTP server.
 func TestEmailTargetsReceiveMessagesInPlainTextAndHTML(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	inbox := Draft{Kind: Email, Name: new("Inbox"), Address: new("sam@example.org"), Events: []string{RecordingFinished}}
 	if _, err := h.Create(t.Context(), nil, inbox); err != ErrEmailUnavailable {
@@ -283,7 +284,7 @@ func TestEmailTargetsReceiveMessagesInPlainTextAndHTML(t *testing.T) {
 	subject, _ := new(mime.WordDecoder).DecodeHeader(message.Header.Get("Subject"))
 	from, _ := mail.ParseAddress(message.Header.Get("From"))
 	date, dateErr := mail.ParseDate(message.Header.Get("Date"))
-	if subject != "Enregistrement terminé : Late <Show>" || from == nil || from.Name != "Home server" || from.Address != "polyfin@example.org" ||
+	if subject != "Enregistrement terminé\u202f: Late <Show>" || from == nil || from.Name != "Home server" || from.Address != "polyfin@example.org" ||
 		dateErr != nil || time.Since(date) > time.Minute || !strings.HasSuffix(message.Header.Get("Message-Id"), "@example.org>") ||
 		message.Header.Get("Auto-Submitted") != "auto-generated" || message.Header.Get("To") != "<sam@example.org>" {
 		t.Errorf("headers: %v (subject %q)", message.Header, subject)
@@ -339,6 +340,7 @@ func TestEmailTargetsReceiveMessagesInPlainTextAndHTML(t *testing.T) {
 // to wait, as when too many messages are sent, gets the message again
 // later. The password is never logged.
 func TestEmailRefusedSignInAndBusyServer(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t)
 	sink := newSMTPSink(t, false, "PLAIN")
 	h.useSMTP(t, sink, "smtp-wrong-password")

@@ -12,6 +12,7 @@ import (
 	"sync"
 
 	"github.com/moodiness/polyfin/internal/accounts"
+	"github.com/moodiness/polyfin/internal/basepath"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/media"
 	"github.com/moodiness/polyfin/internal/playback"
@@ -60,13 +61,27 @@ type MediaSourceInfo struct {
 }
 
 // playable is a movie or an episode with its versions and the subtitle
-// files kept for it (see titleSubtitles), and the track preferences of the user it is
+// files addons offer for it, and the track preferences of the user it is
 // described for.
 type playable struct {
 	item      library.Item
 	versions  []library.Version
 	subtitles []library.ExternalSubtitle
 	tracks    trackPreferences
+	// unstarted tells a torrent version left out for a while, as it could
+	// not start (see playback.Service.Unstarted).
+	unstarted bool
+	// names are the short names of versions, by version, with Version
+	// names on Short (see versionNames); nil otherwise.
+	names map[accounts.ID]string
+}
+
+// name is a version's name: its short name, else the addon's.
+func (p playable) name(version library.Version) string {
+	if name, ok := p.names[version.ID]; ok {
+		return name
+	}
+	return version.Name
 }
 
 // playable gathers a title's versions and subtitles, both asked of the
@@ -74,7 +89,7 @@ type playable struct {
 // others are offered as the version rules and the user's quality group
 // have them (see offered); so are subtitles that cannot be listed.
 func (h *Handler) playable(ctx context.Context, user accounts.User, item library.Item) (playable, error) {
-	p := playable{item: item, tracks: h.trackPreferences(ctx, user)}
+	p := playable{item: item, tracks: h.titleTracks(ctx, user, item)}
 	if item.Kind == library.KindRecording {
 		p.versions = h.recordingVersions(ctx, item)
 		return p, nil
@@ -82,9 +97,14 @@ func (h *Handler) playable(ctx context.Context, user accounts.User, item library
 	var versionsErr error
 	var wg sync.WaitGroup
 	wg.Go(func() { p.versions, versionsErr = h.Library.Versions(ctx, user, item.ID) })
+	wg.Go(func() {
+		if subtitles, err := h.Library.Subtitles(ctx, user, item.ID); err == nil {
+			p.subtitles = subtitles
+		}
+	})
 	wg.Wait()
-	p.subtitles = h.titleSubtitles(item.ID)
-	p.versions = h.offered(ctx, user, p.versions)
+	h.offer(ctx, user, &p, p.versions)
+	h.keepSubtitles(user, item.ID, p.subtitles)
 	return p, versionsErr
 }
 
@@ -99,17 +119,22 @@ func (h *Handler) playable(ctx context.Context, user accounts.User, item library
 // versionsChanged). RemuxDB, when on, is asked about the versions it was
 // not asked about lately, for a moment at most (see remuxdb.Describe).
 func (h *Handler) knownPlayable(ctx context.Context, user accounts.User, item library.Item, opened accounts.ID) (playable, bool, error) {
-	p := playable{item: item, tracks: h.trackPreferences(ctx, user)}
+	p := playable{item: item, tracks: h.titleTracks(ctx, user, item)}
 	versions, complete, err := h.Library.VersionsNow(ctx, user, item.ID)
 	if err == nil {
 		h.watch(user, item.ID, opened)
 	}
 	h.RemuxDB.Describe(ctx, versions)
-	p.versions = h.offered(ctx, user, versions)
+	h.offer(ctx, user, &p, versions)
 	if err == nil {
-		h.watched.show(user.ID, item.ID, p.versions, h.rulesFor(ctx, user).key())
+		h.watched.show(user.ID, item.ID, p.versions, h.pageKey(ctx, user))
 	}
-	p.subtitles = h.titleSubtitles(item.ID)
+	if subtitles, listed, err := h.Library.SubtitlesNow(ctx, user, item.ID); err == nil {
+		p.subtitles = subtitles
+		if listed {
+			h.keepSubtitles(user, item.ID, subtitles)
+		}
+	}
 	return p, complete, err
 }
 
@@ -118,43 +143,128 @@ func (h *Handler) knownPlayable(ctx context.Context, user accounts.User, item li
 // title is too costly. Like playable, it offers them as the rules and the
 // user's group have them.
 func (h *Handler) cachedPlayable(ctx context.Context, user accounts.User, item library.Item) playable {
-	p := playable{item: item, tracks: h.trackPreferences(ctx, user)}
+	p := playable{item: item, tracks: h.titleTracks(ctx, user, item)}
 	if item.Kind == library.KindRecording {
 		p.versions = h.recordingVersions(ctx, item)
 		return p
 	}
 	if versions, ok := h.Library.CachedVersions(ctx, user, item.ID); ok {
-		p.versions = h.offered(ctx, user, versions)
+		h.offer(ctx, user, &p, versions)
 	}
-	p.subtitles = h.titleSubtitles(item.ID)
+	p.subtitles, _ = h.keptSubtitles(user, item.ID)
 	return p
 }
 
-// offered leaves out of a title's versions those that recently failed,
-// and, with the version rules or the user's quality group, those they
-// hide, ordering the others (see ordered).
-func (h *Handler) offered(ctx context.Context, user accounts.User, versions []library.Version) []library.Version {
-	versions = slices.DeleteFunc(versions, func(v library.Version) bool { return h.Playback.Failed(v.ID) })
-	if !h.reordered(user) {
+// offered leaves out of item's versions those that recently failed, but
+// the torrents that did not start in time (see playback.Unstarted), which
+// stay in place for the user to pick, a play that picks none skipping
+// them (see choose); and, with the version rules or the user's quality
+// group, or versions naming another title, those they hide, ordering the
+// others (see ordered), for the app asking (see appOrder). The version an
+// administrator pinned for the title comes first (see pinnedFirst).
+func (h *Handler) offered(ctx context.Context, user accounts.User, item library.Item, versions []library.Version) []library.Version {
+	versions = slices.DeleteFunc(versions, func(v library.Version) bool { return h.Playback.Failed(v.ID) && !h.didNotStart(v) })
+	if h.reordered(ctx, user) || slices.ContainsFunc(versions, elsewhere) {
+		versions = h.ordered(ctx, user, item, versions)
+	}
+	return h.pinnedFirst(ctx, versions)
+}
+
+// offer has p offer its title's versions, of versions, to user (see
+// offered), named as the setting has them (see versionNames).
+func (h *Handler) offer(ctx context.Context, user accounts.User, p *playable, versions []library.Version) {
+	p.versions = h.offered(ctx, user, p.item, versions)
+	p.names = h.versionNames(ctx, p.item, p.versions)
+}
+
+// pinnedFirst moves the version an administrator pinned for the title
+// first among its versions, the others keeping their order. A pin moves
+// only a version offered: it brings back none that failed lately, that a
+// rule hides or that the user's quality group leaves out, and a pinned
+// file no addon lists any more leaves the order as it is.
+func (h *Handler) pinnedFirst(ctx context.Context, versions []library.Version) []library.Version {
+	if len(versions) < 2 {
 		return versions
 	}
-	return h.ordered(ctx, user, versions)
+	pin, ok := h.Library.PinnedVersion(ctx, versions[0].Item)
+	if !ok {
+		return versions
+	}
+	if i := slices.IndexFunc(versions, func(v library.Version) bool { return v.ID == pin.Version }); i > 0 {
+		pinned := versions[i]
+		copy(versions[1:i+1], versions[:i])
+		versions[0] = pinned
+	}
+	return versions
 }
 
 // externals are the subtitle files a version offers as streams: its
 // title's, then its own (see versionFiles).
-func (p playable) externals(version library.Version) []playback.ExternalSubtitle {
-	return externalStreams(versionFiles(p.subtitles, version))
+func (h *Handler) externals(ctx context.Context, p playable, version library.Version) []playback.ExternalSubtitle {
+	return externalStreams(h.versionFiles(ctx, p.subtitles, version))
 }
 
 // versionFiles lists the subtitle files of a version, which come first
-// among its streams: its title's, followed by its own, beside a local
-// file.
-func versionFiles(files []library.ExternalSubtitle, version library.Version) []library.ExternalSubtitle {
-	if len(version.Subtitles) == 0 {
+// among its streams: its title's, files, those users added then the
+// addons', followed by its own: beside a local file or listed with its
+// stream, then inside its torrent (see playback.Service.TorrentSubtitles).
+func (h *Handler) versionFiles(ctx context.Context, files []library.ExternalSubtitle, version library.Version) []library.ExternalSubtitle {
+	inside := h.Playback.TorrentSubtitles(ctx, version)
+	if len(version.Subtitles) == 0 && len(inside) == 0 {
 		return files
 	}
-	return append(slices.Clip(files), version.Subtitles...)
+	return slices.Concat(files, version.Subtitles, inside)
+}
+
+// currentFile returns the subtitle file at index among files, version's
+// (see versionFiles), to serve now: one of the version's own as it is now,
+// as the links an addon lists with a stream expire with its version list
+// (see library.Service.VersionSubtitle). A file inside a torrent is served
+// as it is.
+func (h *Handler) currentFile(ctx context.Context, version library.Version, files []library.ExternalSubtitle, index int) (library.ExternalSubtitle, error) {
+	file := files[index]
+	if file.Torrent != nil || index < len(files)-len(version.Subtitles)-insideTorrent(files) {
+		return file, nil
+	}
+	return h.Library.VersionSubtitle(ctx, version, file)
+}
+
+// insideTorrent counts the files inside a version's torrent, which come
+// last among its subtitle files.
+func insideTorrent(files []library.ExternalSubtitle) int {
+	n := 0
+	for n < len(files) && files[len(files)-1-n].Torrent != nil {
+		n++
+	}
+	return n
+}
+
+// pictureCodecs are the codecs of the picture subtitle files beside local
+// files, by their format, as Jellyfin names them: PGS files, and VobSub
+// pairs, by their .idx file.
+var pictureCodecs = map[string]string{"sup": "PGSSUB", "idx": "DVDSUB"}
+
+// pictureFile reports whether a subtitle file is pictures, which Polyfin
+// serves as they are or burns in, but never converts.
+func pictureFile(file library.ExternalSubtitle) bool {
+	return pictureCodecs[file.Format] != ""
+}
+
+// externalStreams describes subtitle files as the streams they are.
+func externalStreams(files []library.ExternalSubtitle) []playback.ExternalSubtitle {
+	result := make([]playback.ExternalSubtitle, len(files))
+	for i, subtitle := range files {
+		// Addon files are served as SubRip whatever they are; a file a user
+		// added or a local file keeps its format, as Jellyfin names its
+		// external files.
+		codec := "subrip"
+		if subtitle.Format != "" {
+			codec = cmp.Or(subtitleCodecs[subtitle.Format], pictureCodecs[subtitle.Format])
+		}
+		result[i] = playback.ExternalSubtitle{Language: subtitle.Language, Title: subtitle.Title, Codec: codec,
+			Forced: subtitle.Forced, HearingImpaired: subtitle.HearingImpaired, Default: subtitle.Default}
+	}
+	return result
 }
 
 // openedIndex is the index, among versions, of the version an item opened
@@ -198,7 +308,8 @@ func (h *Handler) mediaSources(r *http.Request, p playable, opened accounts.ID) 
 // device profile: playable as it is, unless it is not one file, its tracks
 // as far as it was analyzed, or, until it is, as RemuxDB describes its
 // file. With n, a version whose tracks are known is named for n's profile
-// (see playName).
+// (see playName); one whose tracks are unknown, with an estimate from its
+// labels, which names it only (see likelyName).
 func (h *Handler) describedSource(r *http.Request, p playable, version library.Version, id accounts.ID, n *versionNamer) MediaSourceInfo {
 	analysis, analyzed := h.Playback.Analyzed(r.Context(), version.ID)
 	known := analyzed
@@ -206,6 +317,9 @@ func (h *Handler) describedSource(r *http.Request, p playable, version library.V
 		analysis, known = h.RemuxDB.Described(version)
 	}
 	source := h.baseSource(r, p, version, id, analysis, known)
+	if analyzed {
+		source.MediaStreams = h.withTextCopies(r.Context(), p, version, analysis, source.MediaStreams)
+	}
 	whole := !h.Playback.ReadsInput(version)
 	source.SupportsDirectPlay, source.SupportsDirectStream = whole, whole
 	if known {
@@ -214,6 +328,8 @@ func (h *Handler) describedSource(r *http.Request, p playable, version library.V
 		if n != nil {
 			source.Name = h.playName(n, p, version, source.MediaStreams, analysis)
 		}
+	} else if n != nil {
+		source.Name = h.likelyName(r.Context(), n, p, version)
 	}
 	source.DefaultSubtitleStreamIndex = p.tracks.subtitle(source.MediaStreams, source.DefaultAudioStreamIndex)
 	return source
@@ -233,13 +349,12 @@ func (h *Handler) placeholderSource(r *http.Request, item library.Item) MediaSou
 // tells the version's tracks when known: its analysis, or RemuxDB's
 // description of its file.
 func (h *Handler) baseSource(r *http.Request, p playable, version library.Version, id accounts.ID, analysis media.Analysis, known bool) MediaSourceInfo {
-	language := h.Accounts.Settings().Language
 	source := MediaSourceInfo{
 		Protocol:               "Http",
 		Id:                     id.String(),
 		Type:                   "Default",
 		Container:              containerOfName(version.Filename),
-		Name:                   version.Name,
+		Name:                   p.name(version),
 		IsRemote:               true,
 		ETag:                   version.ID.String(),
 		SupportsProbing:        true,
@@ -249,7 +364,7 @@ func (h *Handler) baseSource(r *http.Request, p playable, version library.Versio
 		RequiredHttpHeaders:    map[string]string{},
 		TranscodingSubProtocol: "http",
 	}
-	source.Path = h.streamURL(r, p.item.ID, id, version, source.Container, mustRelay(r, version))
+	source.Path = h.streamURL(r, p.item.ID, id, version, source.Container, mustRelay(r, version) || h.boostRelay(r))
 	// jellyfin-web asks for the segments of the version it plays only when
 	// the version says it has some: movies and episodes may, while the skip
 	// buttons are on and a segment database is asked, or the version's own
@@ -265,16 +380,14 @@ func (h *Handler) baseSource(r *http.Request, p playable, version library.Versio
 		source.HasSegments = h.Commercials.Has(r.Context(), p.item.ID)
 	}
 	size, runtime := version.Size, version.Runtime
+	source.MediaStreams = h.sourceStreams(r.Context(), p, version, analysis, known)
 	if known {
-		source.MediaStreams = playback.MediaStreams(analysis, p.externals(version), language)
 		source.MediaAttachments = mediaAttachments(analysis)
 		size = cmp.Or(analysis.Size, size)
 		runtime = cmp.Or(analysis.Duration, runtime)
 		if analysis.Bitrate > 0 {
 			source.Bitrate = new(analysis.Bitrate)
 		}
-	} else {
-		source.MediaStreams = playback.ExternalStreams(p.externals(version), language)
 	}
 	if size > 0 {
 		source.Size = new(size)
@@ -288,18 +401,72 @@ func (h *Handler) baseSource(r *http.Request, p playable, version library.Versio
 	return source
 }
 
+// sourceStreams lists a version's streams as baseSource describes them:
+// the subtitle files, then its tracks when analysis tells them.
+func (h *Handler) sourceStreams(ctx context.Context, p playable, version library.Version, analysis media.Analysis, known bool) []playback.MediaStream {
+	language := h.Accounts.Settings().Language
+	if known {
+		return playback.MediaStreams(analysis, h.externals(ctx, p, version), language)
+	}
+	return playback.ExternalStreams(h.externals(ctx, p, version), language)
+}
+
+// versionStreams lists a version's streams as describedSource describes
+// them, with the text copies of its picture subtitles.
+func (h *Handler) versionStreams(ctx context.Context, p playable, version library.Version) []playback.MediaStream {
+	analysis, analyzed := h.Playback.Analyzed(ctx, version.ID)
+	known := analyzed
+	if !known {
+		analysis, known = h.RemuxDB.Described(version)
+	}
+	streams := h.sourceStreams(ctx, p, version, analysis, known)
+	if analyzed {
+		streams = h.withTextCopies(ctx, p, version, analysis, streams)
+	}
+	return streams
+}
+
+// withTextCopies lists after a version's streams the text copies of its
+// picture subtitles that were read (see playback.Service.TextCopies).
+// They follow the version's own analysis, never RemuxDB's description.
+func (h *Handler) withTextCopies(ctx context.Context, p playable, version library.Version, analysis media.Analysis,
+	streams []playback.MediaStream) []playback.MediaStream {
+	copies := h.Playback.TextCopies(ctx, version, analysis, h.versionFiles(ctx, p.subtitles, version))
+	if len(copies) == 0 {
+		return streams
+	}
+	return playback.AppendTextCopies(streams, copies, h.Accounts.Settings().Language)
+}
+
+// textCopyOf is the index of the text copy of the subtitle of index
+// index among streams, -1 when it has none.
+func textCopyOf(streams []playback.MediaStream, index int) int {
+	for _, stream := range streams {
+		if stream.CopyOf != nil && *stream.CopyOf == index {
+			return stream.Index
+		}
+	}
+	return -1
+}
+
 // streamURL is the address players fetch a version from when they use a
 // media source's Path. Players send no credentials with it, so it carries a
 // grant signed for the caller, which tells whether Polyfin must relay the
-// source rather than redirect the player to it.
+// source rather than redirect the player to it; a relayed one also says
+// so in relayParameter, for Polyfin's script (see boostRelay). The grant
+// names the caller's device: the bytes of the address are that device's
+// playback's (see mediaDevice).
 func (h *Handler) streamURL(r *http.Request, item, sourceID accounts.ID, version library.Version, container string, relay bool) string {
-	user := callerFrom(r.Context()).User
-	grant := h.Playback.Signer().Sign(playback.Grant{Version: version.ID, User: user.ID, Relay: relay})
+	caller := callerFrom(r.Context())
+	grant := h.grant(playback.Grant{Version: version.ID, User: caller.User.ID, Device: caller.Device.ID, Relay: relay})
 	query := url.Values{
 		"static":        {"true"},
 		"mediaSourceId": {sourceID.String()},
 		"Tag":           {version.ID.String()},
 		grantParameter:  {grant},
+	}
+	if relay {
+		query.Set(relayParameter, "1")
 	}
 	extension := container
 	if container == "hls" {
@@ -312,6 +479,10 @@ func (h *Handler) streamURL(r *http.Request, item, sourceID accounts.ID, version
 // grantParameter carries a signed grant in the URLs Polyfin makes.
 const grantParameter = "PolyfinGrant"
 
+// relayParameter marks the address of a version Polyfin relays rather
+// than redirecting the player to its source.
+const relayParameter = "PolyfinRelay"
+
 // mustRelay reports whether a player cannot follow a redirect to the
 // version's source. Findroid's ExoPlayer refuses redirects from http to
 // https, so a server reached over http relays https sources to it.
@@ -321,13 +492,16 @@ func mustRelay(r *http.Request, version library.Version) bool {
 		requestScheme(r) == "http" && strings.HasPrefix(version.URL, "https:")
 }
 
-// baseURL is the address the player reached Polyfin at.
+// baseURL is the address the player reached Polyfin at, with the base
+// path it came under (see basepath): a reverse proxy that forwards only
+// /jellyfin to Polyfin then receives the requests to the addresses
+// Polyfin builds on it, as Jellyfin's own addresses carry its BaseUrl.
 func baseURL(r *http.Request) string {
 	host := r.Host
 	if forwarded := r.Header.Get("X-Forwarded-Host"); forwarded != "" {
 		host, _, _ = strings.Cut(forwarded, ",")
 	}
-	return requestScheme(r) + "://" + strings.TrimSpace(host)
+	return requestScheme(r) + "://" + strings.TrimSpace(host) + basepath.Of(r)
 }
 
 func requestScheme(r *http.Request) string {
@@ -349,8 +523,10 @@ func containerOfName(filename string) string {
 		return "avi"
 	case "mov":
 		return "mov"
-	case "ts", "m2ts", "mts":
+	case "ts", "m2ts", "mts", "m2t", "tp", "trp":
 		return "ts"
+	case "mpg", "mpeg", "vob":
+		return "mpeg"
 	case "m3u8":
 		return "hls"
 	default:

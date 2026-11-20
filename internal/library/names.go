@@ -6,17 +6,23 @@ import (
 
 	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/eclipse"
+	"github.com/moodiness/polyfin/internal/stremio"
 )
 
 // words are the names Polyfin generates, in one server language.
 type words struct {
-	season      string // followed by the season number
-	specials    string // season 0
-	episode     string // followed by the episode number, for untitled episodes
-	chapter     string // followed by the chapter number, for untitled chapters
-	movies      string
-	shows       string
-	collections string
+	season   string // followed by the season number
+	specials string // season 0
+	episode  string // followed by the episode number, for untitled episodes
+	// otherEpisodes names the season of an episode order that holds the
+	// episodes it leaves out (see episodeorder.go).
+	otherEpisodes string
+	video         string // followed by the video's number, for untitled videos of a folder
+	chapter       string // followed by the chapter number, for untitled chapters
+	movies        string
+	shows         string
+	videos        string
+	collections   string
 	// The content of music rows: songs, albums, artists and playlists.
 	songs, albums, artists, playlists string
 	// myMusic names a music addon's My music (see eclipse.MyMusic).
@@ -24,23 +30,44 @@ type words struct {
 	// replay names the Replay view (see ReplayViewID).
 	replay string
 	// tvCategories names the TV Categories view (see LiveCategoriesViewID);
-	// other, its folder of channels without a category.
+	// other, its folder of channels without a category; favorites, its
+	// folder of favorite channels (this fork).
 	tvCategories, other, favorites string
-	// watchlist names the Watchlist view (see WatchlistViewID).
+	// watchlist names a watchlist that keeps its default name (see
+	// WatchlistName).
 	watchlist string
-	// language is the language of the words, "en" or "fr".
+	// homeRelease tells, given the day, when a movie waiting for its
+	// digital release is out at home (see releases.go).
+	homeRelease string
+	// language is the language of the words, one of i18n.Languages.
 	language string
 }
 
 var vocabulary = map[string]words{
-	"en": {season: "Season", specials: "Specials", episode: "Episode", chapter: "Chapter",
-		movies: "Movies", shows: "Shows", collections: "Collections",
+	"en": {season: "Season", specials: "Specials", episode: "Episode", otherEpisodes: "Other episodes", video: "Video", chapter: "Chapter",
+		movies: "Movies", shows: "Shows", videos: "Videos", collections: "Collections",
 		songs: "Songs", albums: "Albums", artists: "Artists", playlists: "Playlists", myMusic: "My music", replay: "Replay",
-		tvCategories: "Live TV", other: "Other", favorites: "Favorites", watchlist: "Watchlist"},
-	"fr": {season: "Saison", specials: "Épisodes spéciaux", episode: "Épisode", chapter: "Chapitre",
-		movies: "Films", shows: "Séries", collections: "Collections",
-		songs: "Titres", albums: "Albums", artists: "Artistes", playlists: "Playlists", myMusic: "Ma musique", replay: "Replay",
-		tvCategories: "TV en direct", other: "Autres", favorites: "Favoris", watchlist: "À regarder"},
+		tvCategories: "Live TV", other: "Other", favorites: "Favorites", watchlist: "Watchlist", homeRelease: "Out at home on %s."},
+	"fr": {season: "Saison", specials: "Épisodes spéciaux", episode: "Épisode", otherEpisodes: "Autres épisodes", video: "Vidéo", chapter: "Chapitre",
+		movies: "Films", shows: "Séries", videos: "Vidéos", collections: "Collections",
+		songs: "Titres", albums: "Albums", artists: "Artistes", playlists: "Listes de lecture", myMusic: "Ma musique", replay: "Replay",
+		tvCategories: "TV en direct", other: "Autres", favorites: "Favoris", watchlist: "À regarder", homeRelease: "Sortie en vidéo le %s."},
+	"de": {season: "Staffel", specials: "Specials", episode: "Folge", otherEpisodes: "Weitere Folgen", video: "Video", chapter: "Kapitel",
+		movies: "Filme", shows: "Serien", videos: "Videos", collections: "Sammlungen",
+		songs: "Titel", albums: "Alben", artists: "Künstler", playlists: "Wiedergabelisten", myMusic: "Meine Musik", replay: "Replay",
+		tvCategories: "Live-TV", other: "Sonstige", favorites: "Favoriten", watchlist: "Merkliste", homeRelease: "Fürs Heimkino ab %s."},
+	"es": {season: "Temporada", specials: "Especiales", episode: "Episodio", otherEpisodes: "Otros episodios", video: "Vídeo", chapter: "Capítulo",
+		movies: "Películas", shows: "Series", videos: "Vídeos", collections: "Colecciones",
+		songs: "Canciones", albums: "Álbumes", artists: "Artistas", playlists: "Listas de reproducción", myMusic: "Mi música", replay: "Replay",
+		tvCategories: "TV en directo", other: "Otros", favorites: "Favoritos", watchlist: "Para ver", homeRelease: "Disponible en casa el %s."},
+	"it": {season: "Stagione", specials: "Speciali", episode: "Episodio", otherEpisodes: "Altri episodi", video: "Video", chapter: "Capitolo",
+		movies: "Film", shows: "Serie TV", videos: "Video", collections: "Collezioni",
+		songs: "Brani", albums: "Album", artists: "Artisti", playlists: "Playlist", myMusic: "La mia musica", replay: "Replay",
+		tvCategories: "TV in diretta", other: "Altri", favorites: "Preferiti", watchlist: "Da guardare", homeRelease: "Disponibile a casa dal %s."},
+	"pt-BR": {season: "Temporada", specials: "Especiais", episode: "Episódio", otherEpisodes: "Outros episódios", video: "Vídeo", chapter: "Capítulo",
+		movies: "Filmes", shows: "Séries", videos: "Vídeos", collections: "Coleções",
+		songs: "Músicas", albums: "Álbuns", artists: "Artistas", playlists: "Playlists", myMusic: "Minha música", replay: "Replay",
+		tvCategories: "TV ao vivo", other: "Outros", favorites: "Favoritos", watchlist: "Para assistir", homeRelease: "Disponível em casa em %s."},
 }
 
 // vocabularyOf returns the words of a server language, English when the
@@ -73,6 +100,16 @@ func ChapterName(language string, number int) string {
 	return vocabularyOf(language).chapter + " " + strconv.Itoa(number)
 }
 
+// CollectionsName names the Collections view in a server language.
+func CollectionsName(language string) string {
+	return vocabularyOf(language).collections
+}
+
+// PlaylistsName names the Playlists view in a server language.
+func PlaylistsName(language string) string {
+	return vocabularyOf(language).playlists
+}
+
 // contentType names the content of a catalog type for a library name, as
 // collectionType groups them, music rows by what they list; other types
 // are named as they are.
@@ -92,6 +129,8 @@ func (w words) contentType(catalogType string) string {
 		return w.movies
 	case "tvshows":
 		return w.shows
+	case "homevideos":
+		return w.videos
 	case "boxsets":
 		return w.collections
 	default:
@@ -132,11 +171,16 @@ func LibraryNames(libraries []addons.Library, language string) []string {
 			// Polyfin's own catalog, named in the server's language.
 			base = w.myMusic
 		}
+		if base == "" {
+			// A catalog with neither a name nor an id: its content type.
+			base = w.contentType(l.Catalog.Type)
+		}
 		if l.Name != nil {
 			base = strings.TrimSpace(*l.Name)
 		} else if genre := strings.TrimSpace(l.Genre); genre != "" {
 			base += " · " + genre
 		}
+		base = stremio.Cut(base, stremio.MaxName)
 		switch level[i] {
 		case 0:
 			return base

@@ -114,7 +114,7 @@ func peopleAddon(t *testing.T, peopleSearch bool, requests *addonRequests) strin
 			http.NotFound(w, r)
 		case strings.HasSuffix(path, ".jpg"):
 			w.Header().Set("Content-Type", "image/jpeg")
-			_, _ = w.Write([]byte("jpeg bytes"))
+			_, _ = w.Write([]byte(jpegBytes))
 		default:
 			http.NotFound(w, r)
 		}
@@ -208,7 +208,7 @@ func TestATitlesActorOpensAsAPersonWithTheirPhoto(t *testing.T) {
 	if status := p.get(t, "/Persons/Nobody", p.token, nil); status != http.StatusNotFound {
 		t.Errorf("unknown name: %d", status)
 	}
-	response, err := http.Get(p.url + "/Items/" + ann.Id + "/Images/Primary?tag=" + ann.PrimaryImageTag)
+	response, err := testClient.Get(p.url + "/Items/" + ann.Id + "/Images/Primary?tag=" + ann.PrimaryImageTag)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -681,7 +681,7 @@ func TestPeoplePagesOpenedAtOnceAllOpen(t *testing.T) {
 			wg.Go(func() {
 				request, _ := http.NewRequestWithContext(t.Context(), http.MethodGet, s.url+path(i, r), nil)
 				request.Header.Set("Authorization", app("tv", r.token))
-				response, err := http.DefaultClient.Do(request)
+				response, err := testClient.Do(request)
 				if err != nil {
 					t.Error(err)
 					return

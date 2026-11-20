@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -150,7 +151,7 @@ func TestMaxBitrateConvertsFallsBackOrRefuses(t *testing.T) {
 		t.Helper()
 		request, _ := http.NewRequest(http.MethodGet, p.url+target, nil)
 		request.Header.Set("Range", "bytes=0-3")
-		response, err := http.DefaultClient.Do(request)
+		response, err := testClient.Do(request)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -235,6 +236,72 @@ func TestMaxBitrateConvertsFallsBackOrRefuses(t *testing.T) {
 	setLimit(0)
 	if source := first(p.ask(t, p.token, p.movie, chrome, nil)); source.Id != heavy || !source.SupportsDirectPlay {
 		t.Errorf("once the limit is lifted: %+v", source)
+	}
+}
+
+// Under an app's bitrate limit, the video takes what the audio sent
+// leaves, which the TranscodingUrl writes as AudioBitrate: a lossless
+// track Chrome cannot take goes out as stereo AAC at 384 kb/s, so a 1080p
+// source keeps 1080p within 10 Mbit/s rather than giving the track's own
+// bitrate to the audio. The master playlist announces the limit itself:
+// the video's peak and average with that audio.
+func TestALosslessTrackConvertedLeavesTheVideoItsBitrate(t *testing.T) {
+	t.Parallel()
+	p := playing(t)
+	analysis := p.remuxable(t)
+	analysis.Bitrate = 24_200_000
+	analysis.Streams[0] = media.Stream{Index: 0, Type: "audio", Codec: "truehd", Default: true, Channels: 6, ChannelLayout: "5.1(side)",
+		SampleRate: 48000, Bitrate: 4_200_000}
+	analysis.Streams[1].Width, analysis.Streams[1].Height, analysis.Streams[1].Bitrate = 1920, 1080, 20_000_000
+	p.storeAnalysis(t, p.versions[0], analysis)
+	needsEncoders(t)
+	p.permit(t, p.user, true, true, false)
+	answer := p.ask(t, p.token, p.movie, p.profile(t, "jellyfin-web-chrome"), map[string]any{"MediaSourceId": p.movie, "MaxStreamingBitrate": 10_000_000})
+	if len(answer.MediaSources) != 1 {
+		t.Fatalf("answer: %+v", answer)
+	}
+	source := answer.MediaSources[0]
+	if source.SupportsDirectPlay || !strings.Contains(source.TranscodingUrl, "&VideoBitrate=9616000&AudioBitrate=384000&") ||
+		!strings.Contains(source.TranscodingUrl, "allowVideoStreamCopy=false") || videoHeightOf(source) != 1080 {
+		t.Fatalf("height %d, %s", videoHeightOf(source), source.TranscodingUrl)
+	}
+	status, _, master := fetchText(t, p.url+source.TranscodingUrl)
+	if status != http.StatusOK || !strings.Contains(master, "RESOLUTION=1920x1080") ||
+		!strings.Contains(master, "BANDWIDTH=10000000,AVERAGE-BANDWIDTH=10000000,") {
+		t.Errorf("master playlist: %d %s", status, master)
+	}
+}
+
+// Within the 120 Mbit/s an app asks for on the local network, video it
+// cannot take is converted at about its source's bitrate, as Jellyfin
+// does: a 15 Mbit/s 10-bit HEVC source becomes H.264 at 26.25 Mbit/s,
+// and its DTS 5.1 track AAC 5.1 at 640 kb/s, which the master playlist
+// announces with the video's peaks and on average.
+func TestConvertedVideoKeepsItsSourcesBitrate(t *testing.T) {
+	t.Parallel()
+	p := playing(t)
+	analysis := p.remuxable(t)
+	analysis.Bitrate = 16_509_000
+	analysis.Streams[0] = media.Stream{Index: 0, Type: "audio", Codec: "dts", Default: true, Channels: 6, ChannelLayout: "5.1(side)",
+		SampleRate: 48000, Bitrate: 1_509_000}
+	analysis.Streams[1] = media.Stream{Index: 1, Type: "video", Codec: "hevc", Profile: "Main 10", Width: 1920, Height: 1080, FrameRate: 24,
+		AverageRate: 24, PixelFormat: "yuv420p10le", BitDepth: 10, Bitrate: 15_000_000}
+	p.storeAnalysis(t, p.versions[0], analysis)
+	needsEncoders(t)
+	p.permit(t, p.user, true, true, false)
+	answer := p.ask(t, p.token, p.movie, p.profile(t, "minimal"), map[string]any{"MediaSourceId": p.movie})
+	if len(answer.MediaSources) != 1 {
+		t.Fatalf("answer: %+v", answer)
+	}
+	source := answer.MediaSources[0]
+	if source.SupportsDirectPlay || !strings.Contains(source.TranscodingUrl, "&VideoBitrate=119360000&AudioBitrate=640000&") ||
+		!strings.Contains(source.TranscodingUrl, "allowVideoStreamCopy=false") {
+		t.Fatalf("%s", source.TranscodingUrl)
+	}
+	status, _, master := fetchText(t, p.url+source.TranscodingUrl)
+	want := "BANDWIDTH=" + strconv.Itoa(26_250_000*3/2+640_000) + ",AVERAGE-BANDWIDTH=" + strconv.Itoa(26_250_000+640_000) + ","
+	if status != http.StatusOK || !strings.Contains(master, want) || !strings.Contains(master, "RESOLUTION=1920x1080") {
+		t.Errorf("master playlist: %d %s, want %s", status, master, want)
 	}
 }
 

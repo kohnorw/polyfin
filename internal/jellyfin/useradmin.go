@@ -11,6 +11,7 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/forwarded"
+	"github.com/moodiness/polyfin/internal/i18n"
 )
 
 // Users managed from Jellyfin apps.
@@ -263,15 +264,11 @@ func (h *Handler) updateUser(w http.ResponseWriter, r *http.Request) {
 
 // inLocalNetwork reports whether r comes from the server's machine
 // (local) or its local network (inNetwork, local included): loopback,
-// private and link-local addresses, as Jellyfin counts them by default.
+// private and link-local addresses, as Jellyfin counts them by default
+// (see forwarded.InLocalNetwork).
 func inLocalNetwork(r *http.Request) (local, inNetwork bool) {
 	address, err := netip.ParseAddr(forwarded.Client(r))
-	if err != nil {
-		return false, false
-	}
-	address = address.Unmap()
-	local = address.IsLoopback()
-	return local, local || address.IsPrivate() || address.IsLinkLocalUnicast()
+	return err == nil && address.Unmap().IsLoopback(), forwarded.InLocalNetwork(r)
 }
 
 // ForgotPasswordResult is Jellyfin's answer to a forgotten password.
@@ -290,10 +287,14 @@ type PinRedeemResult struct {
 // pinPlace tells, in the server language, where the administrator finds
 // the PIN: jellyfin-web shows it as the file Jellyfin writes the PIN to.
 func (h *Handler) pinPlace() string {
-	if h.Accounts.Settings().Language == "fr" {
-		return "la page Utilisateurs de l’interface d’administration de Polyfin, et son journal"
-	}
-	return "the Users page of the Polyfin admin interface, and its log"
+	return i18n.Text{
+		"the Users page of the Polyfin admin interface, and its log",
+		"la page Utilisateurs de l’interface d’administration de Polyfin, et son journal",
+		"die Seite „Benutzer“ der Polyfin-Verwaltungsoberfläche und ihr Protokoll",
+		"la página Usuarios de la interfaz de administración de Polyfin, y su registro",
+		"la pagina Utenti dell’interfaccia di amministrazione di Polyfin e il suo log",
+		"a página Usuários da interface de administração do Polyfin e o registro dele",
+	}.In(h.Accounts.Settings().Language)
 }
 
 // forgotPassword gives the user named a PIN valid 30 minutes, which the
@@ -338,10 +339,17 @@ func (h *Handler) forgotPassword(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// resetPINsKey counts the wrong PINs entered on the whole server, whichever
+// client entered them, beside those of each client.
+const resetPINsKey = "password-reset-pins"
+
 // redeemPasswordPin resets the password of the users whose PIN is
 // entered: it becomes the PIN, as entered. Like Jellyfin, a PIN that does
 // not match answers 404; unlike Jellyfin, wrong PINs count as failed
-// sign-ins, so that PINs are guessed no faster than passwords.
+// sign-ins, so that PINs are guessed no faster than passwords. No account
+// is named, so every client guesses at the same PINs: a wrong one counts
+// for its client (see signInFailures) and for the whole server, with the
+// same limit, whichever site had the browser send it.
 func (h *Handler) redeemPasswordPin(w http.ResponseWriter, r *http.Request) {
 	errs := bindErrors{}
 	raw, ok := requestBody(w, r, "forgotPasswordPinRequest", errs)
@@ -358,14 +366,20 @@ func (h *Handler) redeemPasswordPin(w http.ResponseWriter, r *http.Request) {
 		validationProblem(w, errs)
 		return
 	}
-	attempt := h.reserve(w, forwarded.Client(r))
+	attempt := h.reserve(w, h.signInFailures(r), forwarded.Client(r))
 	if attempt == nil {
 		return
 	}
 	defer attempt.Cancel()
+	everyone := h.reserve(w, h.SignIns, resetPINsKey)
+	if everyone == nil {
+		return
+	}
+	defer everyone.Cancel()
 	users, err := h.Accounts.RedeemPasswordResetPIN(r.Context(), pin)
 	if errors.Is(err, accounts.ErrNotFound) {
 		attempt.Fail()
+		everyone.Fail()
 		processingError(w, http.StatusNotFound)
 		return
 	}
@@ -374,6 +388,7 @@ func (h *Handler) redeemPasswordPin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	attempt.Succeed()
+	everyone.Succeed()
 	result := PinRedeemResult{Success: true, UsersReset: make([]string, 0, len(users))}
 	for _, user := range users {
 		result.UsersReset = append(result.UsersReset, user.Name)

@@ -39,6 +39,9 @@ func model(t *testing.T, store *Store) User {
 		SubtitleManagement:   new(false),
 		LiveTvManagement:     new(true),
 		QualityGroup:         new(720),
+		LocalFirst:           new(true),
+		WebTheme:             new(WebThemeNone),
+		WebThemeLocked:       new(true),
 	}
 	user, err := store.UpdateUser(t.Context(), user.ID, changes, nil)
 	if err != nil {
@@ -60,6 +63,7 @@ func mustInvite(t *testing.T, store *Store, invite NewInvite) string {
 // never its administrator status; without a model, it has those of a user
 // created from Create a user, hidden from the sign-in screen.
 func TestInvitedAccountsCopyTheirModelOrTakeNewUserDefaults(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	creator := mustCreate(t, store, NewUser{Name: "admin", Password: "correct horse", IsAdministrator: true})
@@ -93,6 +97,7 @@ func TestInvitedAccountsCopyTheirModelOrTakeNewUserDefaults(t *testing.T) {
 
 // Two guests racing on the last use of an invite create one account.
 func TestTheLastUseOfAnInviteGoesToOneGuest(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	creator := mustCreate(t, store, NewUser{Name: "admin", Password: "correct horse", IsAdministrator: true})
 	token := mustInvite(t, store, NewInvite{MaxUses: 1, Days: 1, CreatedBy: creator.ID})
@@ -128,6 +133,7 @@ func TestTheLastUseOfAnInviteGoesToOneGuest(t *testing.T) {
 // known invite included, is unknown. A guest refused for their name uses
 // nothing up.
 func TestInvitesRefuseGuestsOnceUsedUpExpiredOrRevoked(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	creator := mustCreate(t, store, NewUser{Name: "admin", Password: "correct horse", IsAdministrator: true})
@@ -194,6 +200,7 @@ func TestInvitesRefuseGuestsOnceUsedUpExpiredOrRevoked(t *testing.T) {
 // locks the group, then its members, and CreateInvite would otherwise lock
 // the model, then the group. The invite then names a deleted group.
 func TestAnInviteOfAMemberWaitsForTheDeletionOfTheirGroup(t *testing.T) {
+	t.Parallel()
 	store := newStore(t)
 	ctx := t.Context()
 	admin := mustCreate(t, store, NewUser{Name: "admin", Password: "correct horse", IsAdministrator: true})

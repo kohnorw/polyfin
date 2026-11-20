@@ -4,7 +4,8 @@
 // and keeps what LRCLIB answered in the database, lyrics or not, so that
 // each track is asked about once. A request that fails is not an answer:
 // the track is asked about again later, once LRCLIB has been left alone
-// for a while.
+// for a while. Administrators may also search LRCLIB for a track's lyrics
+// and choose them among its results (see Search and Choose).
 package lyrics
 
 import (
@@ -58,13 +59,14 @@ const (
 )
 
 // The kinds of answer kept for a track, as the track_lyrics table names
-// them: synced or plain lyrics, an instrumental, or a track LRCLIB does
-// not know.
+// them: synced or plain lyrics, an instrumental, a track LRCLIB does not
+// know, or lyrics an administrator removed (see Remove).
 const (
 	kindSynced       = "synced"
 	kindPlain        = "plain"
 	kindInstrumental = "instrumental"
 	kindMissing      = "missing"
+	kindRemoved      = "removed"
 )
 
 // Track is what LRCLIB is asked about: a music track, by its item, artist,
@@ -108,6 +110,9 @@ type Service struct {
 	mu sync.Mutex
 	// asking holds the tracks LRCLIB is being asked about.
 	asking map[accounts.ID]*lookup
+	// others counts the other requests to LRCLIB under way, searches and
+	// choices, which share maxAsking with look-ups.
+	others int
 	// pausedUntil is when LRCLIB may be asked again after it failed.
 	pausedUntil time.Time
 }
@@ -122,23 +127,29 @@ type lookup struct {
 }
 
 // answer is what LRCLIB said of a track, as kept: the kind of answer, the
-// lyrics of synced and plain answers (LRC text for synced ones), and when
-// LRCLIB was asked.
+// lyrics of synced and plain answers (LRC text for synced ones), when
+// LRCLIB was asked, whether an administrator chose them (see Choose), and
+// whether they were uploaded rather than found on LRCLIB (see Upload).
 type answer struct {
-	kind   string
-	lyrics string
-	at     time.Time
+	kind     string
+	lyrics   string
+	at       time.Time
+	chosen   bool
+	uploaded bool
 }
 
 // New returns a service asking LRCLIB at base, and keeping its answers in
 // db, while settings turn lyrics on. version is Polyfin's, which the
-// User-Agent sent to LRCLIB names with Polyfin's repository.
+// User-Agent sent to LRCLIB names with Polyfin's repository. Its
+// transport is its own, a clone of the default one: whoever closes the
+// idle connections of http.DefaultTransport cannot break its requests
+// (#958).
 func New(db *pgxpool.Pool, base, version string, logger *slog.Logger, settings func() accounts.Settings) *Service {
 	return &Service{
 		db:        db,
 		base:      strings.TrimSuffix(base, "/"),
 		settings:  settings,
-		client:    &http.Client{},
+		client:    &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()},
 		userAgent: "Polyfin/" + version + " (" + repository + ")",
 		logger:    logger,
 		now:       time.Now,
@@ -158,12 +169,18 @@ func (s *Service) on() bool {
 // comes later is kept for the next request. A track without lyrics, an
 // instrumental, one LRCLIB does not know or could not be asked about, or
 // one without an artist or title, has none, as do all tracks while the
-// settings turn lyrics off.
+// settings turn lyrics off, but those whose lyrics were uploaded.
 func (s *Service) Lyrics(ctx context.Context, track Track, wait time.Duration) (Lyrics, bool) {
-	if !s.on() {
+	if s == nil {
 		return Lyrics{}, false
 	}
 	kept, ok := s.load(ctx, track.ID)
+	if !s.on() {
+		if !ok || !kept.uploaded {
+			return Lyrics{}, false
+		}
+		return kept.parse()
+	}
 	if !ok || s.due(kept) {
 		if l := s.ask(track); l != nil && wait > 0 {
 			timer := time.NewTimer(wait)
@@ -199,13 +216,14 @@ func (s *Service) LookUp(track Track) {
 }
 
 // Known reports which of the tracks ids have lyrics, as LRCLIB gave them
-// when it was asked about them; none while the settings turn lyrics off.
-// It never asks LRCLIB.
+// when it was asked about them, or as they were uploaded; only uploaded
+// ones while the settings turn lyrics off. It never asks LRCLIB.
 func (s *Service) Known(ctx context.Context, ids []accounts.ID) map[accounts.ID]bool {
-	if !s.on() || len(ids) == 0 {
+	if s == nil || len(ids) == 0 {
 		return nil
 	}
-	rows, err := s.db.Query(ctx, "SELECT item_id FROM track_lyrics WHERE item_id = ANY($1) AND kind IN ('synced', 'plain')", ids)
+	rows, err := s.db.Query(ctx, "SELECT item_id FROM track_lyrics WHERE item_id = ANY($1) AND kind IN ('synced', 'plain') AND (uploaded OR $2)",
+		ids, s.on())
 	if err == nil {
 		var found []accounts.ID
 		if found, err = pgx.CollectRows(rows, pgx.RowTo[accounts.ID]); err == nil {
@@ -226,8 +244,8 @@ func (s *Service) Known(ctx context.Context, ids []accounts.ID) map[accounts.ID]
 // when it was not, or the database cannot be read.
 func (s *Service) load(ctx context.Context, id accounts.ID) (answer, bool) {
 	var kept answer
-	err := s.db.QueryRow(ctx, "SELECT kind, lyrics, looked_up_at FROM track_lyrics WHERE item_id = $1", id).
-		Scan(&kept.kind, &kept.lyrics, &kept.at)
+	err := s.db.QueryRow(ctx, "SELECT kind, lyrics, looked_up_at, chosen, uploaded FROM track_lyrics WHERE item_id = $1", id).
+		Scan(&kept.kind, &kept.lyrics, &kept.at, &kept.chosen, &kept.uploaded)
 	if err != nil {
 		if !errors.Is(err, pgx.ErrNoRows) && ctx.Err() == nil {
 			s.logger.Warn("Reading a track's lyrics failed", "error", err)
@@ -256,7 +274,7 @@ func (s *Service) ask(track Track) *lookup {
 	if l, asking := s.asking[track.ID]; asking {
 		return l
 	}
-	if s.now().Before(s.pausedUntil) || len(s.asking) >= maxAsking {
+	if s.now().Before(s.pausedUntil) || len(s.asking)+s.others >= maxAsking {
 		return nil
 	}
 	l := &lookup{done: make(chan struct{})}
@@ -280,9 +298,11 @@ func (s *Service) run(track Track, l *lookup) {
 		return
 	}
 	l.answer, l.answered = found.answer(s.now()), true
+	// Lyrics an administrator chose meanwhile stay.
 	ctx, cancel = context.WithTimeout(context.Background(), saveTimeout)
 	_, err = s.db.Exec(ctx, `INSERT INTO track_lyrics (item_id, kind, lyrics, looked_up_at) VALUES ($1, $2, $3, $4)
-		ON CONFLICT (item_id) DO UPDATE SET kind = excluded.kind, lyrics = excluded.lyrics, looked_up_at = excluded.looked_up_at`,
+		ON CONFLICT (item_id) DO UPDATE SET kind = excluded.kind, lyrics = excluded.lyrics, looked_up_at = excluded.looked_up_at
+		WHERE NOT track_lyrics.chosen`,
 		track.ID, l.answer.kind, l.answer.lyrics, l.answer.at)
 	cancel()
 	if err != nil {
@@ -366,7 +386,28 @@ func (s *Service) fetch(ctx context.Context, track Track) (*record, error) {
 	if seconds := int(math.Round(track.Duration.Seconds())); seconds > 0 {
 		query.Set("duration", strconv.Itoa(seconds))
 	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.base+"/api/get?"+query.Encode(), nil)
+	body, err := s.get(ctx, "/api/get?"+query.Encode(), maxAnswer)
+	if errors.Is(err, errUnknown) {
+		return &record{}, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var found record
+	if err := json.Unmarshal(body, &found); err != nil {
+		return nil, fmt.Errorf("read the answer: %w", err)
+	}
+	return &found, nil
+}
+
+// errUnknown reports LRCLIB's 404: it does not know what it was asked
+// about, which is an answer, not a failure.
+var errUnknown = errors.New("HTTP 404")
+
+// get asks LRCLIB for path, with Polyfin's User-Agent, and returns its
+// answer, limit bytes at most: an answer over it is refused.
+func (s *Service) get(ctx context.Context, path string, limit int) ([]byte, error) {
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, s.base+path, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -384,7 +425,7 @@ func (s *Service) fetch(ctx context.Context, track Track) (*record, error) {
 	defer response.Body.Close()
 	switch status := response.StatusCode; {
 	case status == http.StatusNotFound:
-		return &record{}, nil
+		return nil, errUnknown
 	case status == http.StatusTooManyRequests:
 		if until, ok := retryAfter(response.Header.Get("Retry-After"), s.now()); ok {
 			return nil, &rateLimited{until: until}
@@ -393,11 +434,14 @@ func (s *Service) fetch(ctx context.Context, track Track) (*record, error) {
 	case status != http.StatusOK:
 		return nil, fmt.Errorf("HTTP %d", status)
 	}
-	var found record
-	if err := json.NewDecoder(io.LimitReader(response.Body, maxAnswer)).Decode(&found); err != nil {
+	body, err := io.ReadAll(io.LimitReader(response.Body, int64(limit)+1))
+	if err != nil {
 		return nil, fmt.Errorf("read the answer: %w", err)
 	}
-	return &found, nil
+	if len(body) > limit {
+		return nil, fmt.Errorf("an answer over %d bytes", limit)
+	}
+	return body, nil
 }
 
 // retryAfter reads a Retry-After header, in seconds or as a date, into when

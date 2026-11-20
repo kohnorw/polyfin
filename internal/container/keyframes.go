@@ -40,9 +40,13 @@ const (
 	// maxIndex bounds what is allocated for one index structure, Cues or
 	// a sample table, so that a hostile file cannot exhaust memory.
 	maxIndex = 64 << 20
-	// maxKeyframes bounds the times returned, for files that claim every
-	// one of a huge number of samples is a keyframe.
-	maxKeyframes = 1 << 23
+	// maxKeyframes bounds the keyframes read from one index, which a few
+	// bytes of a file may claim: every one of a huge number of samples.
+	// Three hours of video whose every frame is a keyframe, at 60 frames
+	// a second, have 648,000; this many last 4 h 51 min so, and 12 days
+	// with a keyframe a second. What is built to read an index, kept of
+	// it and saved follows this bound, not a count a file declares.
+	maxKeyframes = 1 << 20
 	// maxTopLevel bounds the top-level elements or boxes walked to find
 	// the index: a few come before it, and each may cost a read.
 	maxTopLevel = 64
@@ -99,10 +103,17 @@ type held struct {
 	data  []byte
 }
 
+// spanStep is the first step of a span read: what a source fetches as one
+// block.
+const spanStep = 1 << 20
+
 // span returns the n bytes at off, from a span held when one has them,
 // else from a read of at least a window. Near the end of the file the
 // read is the file's last window: indexes written after the media often
-// come in pieces there, a SeekHead after the Cues it points to.
+// come in pieces there, a SeekHead after the Cues it points to. A read
+// longer than spanStep is made in steps, into a buffer that doubles as
+// they arrive: what is held for a file follows what its host sent, a step
+// or twice that, not the length the file declares.
 func (f *file) span(off, n int64) ([]byte, error) {
 	if off < 0 || n < 0 || off > f.size || n > f.size-off {
 		return nil, fmt.Errorf("reading %d bytes at %d of %d: %w", n, off, f.size, io.ErrUnexpectedEOF)
@@ -118,13 +129,21 @@ func (f *file) span(off, n int64) ([]byte, error) {
 		start = max(0, f.size-length)
 		length = f.size - start
 	}
-	p := make([]byte, length)
-	read, err := f.r.ReadAt(f.ctx, p, start)
-	if read < len(p) {
-		if err == nil || errors.Is(err, io.EOF) {
-			err = io.ErrUnexpectedEOF
+	p := make([]byte, min(length, spanStep))
+	for read := int64(0); ; {
+		got, err := f.r.ReadAt(f.ctx, p[read:], start+read)
+		if read += int64(got); read < int64(len(p)) {
+			if err == nil || errors.Is(err, io.EOF) {
+				err = io.ErrUnexpectedEOF
+			}
+			return nil, fmt.Errorf("reading %d bytes at %d: %w", length, start, err)
 		}
-		return nil, fmt.Errorf("reading %d bytes at %d: %w", len(p), start, err)
+		if read == length {
+			break
+		}
+		grown := make([]byte, min(length, 2*read))
+		copy(grown, p)
+		p = grown
 	}
 	f.spans[1], f.spans[0] = f.spans[0], held{start: start, data: p}
 	return p[off-start:][:n], nil

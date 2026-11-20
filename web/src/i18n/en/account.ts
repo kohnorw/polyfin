@@ -3,14 +3,22 @@ const account = {
   account: {
     title: 'My account',
     signedInAs: 'Signed in as ',
+    roles: { administrator: 'Administrator', member: 'Member' },
     sectionsLabel: 'Account sections',
     sections: {
       statistics: 'Statistics',
       tracking: 'Tracking',
       resume: 'Continue Watching',
+      nextUp: 'Next Up',
       hidden: 'Hidden titles',
       homeRows: 'Home rows',
+      trackChoices: 'Track choices',
+      taste: 'Taste profile',
       metadataLanguage: 'Metadata language',
+      webTheme: 'Web player theme',
+      audioRegion: 'Audio region',
+      interfaceSize: 'Interface size',
+      sound: 'Sound',
       sharedLinks: 'Shared links',
       reminders: 'Reminders',
       import: 'Import from another server',
@@ -19,24 +27,115 @@ const account = {
       devices: 'Devices',
       password: 'Password',
       twoStep: 'Two-step sign-in',
+      provider: 'Identity provider',
     },
     /** My account › Metadata language. */
     metadataLanguage: {
-      help: 'The language of titles’ names, overviews and images in your apps, when one of the server’s addons describes them in it; titles no addon describes in it keep the server’s description. Genres, ratings and people stay the same for everyone. The names Polyfin makes itself, such as seasons, follow it when it is English or French.',
+      help: 'The language of titles’ names, overviews and images in your apps, when one of the server’s addons describes them in it; titles no addon describes in it keep the server’s description. Genres, ratings and people stay the same for everyone. The names Polyfin makes itself, such as seasons, follow it when Polyfin speaks it: English, French, German, Spanish, Italian or Portuguese.',
       label: 'Metadata language',
       server: 'The server’s',
       noLanguage:
         'No addon of the server has a language yet, so titles are described in the server’s. An administrator gives addons a language under Content › Sources.',
       saved: 'Metadata language saved.',
     },
+    /** My account › Web player theme, and the choice of a user's on their page under Users. */
+    webTheme: {
+      help: 'The web player’s look on every browser you sign in with. jellyfin-web’s own look is lighter, for TVs and older phones; browsers too old for LumaaGlaass get it by themselves. A browser shows a change once the web player is opened again, or right after you sign in there.',
+      label: 'Web player theme',
+      server: (theme: string) => `The server’s (${theme})`,
+      choices: {
+        aiostreams: 'AIOStreams',
+        lumaaglaass: 'LumaaGlaass',
+        none: 'jellyfin-web’s own look',
+        custom: 'Custom',
+      },
+      saved: 'Web player theme saved.',
+    },
+    /** My account › Audio region, and the names of the regions offered there and on a user's page. */
+    audioRegion: {
+      help: 'The dub you prefer where a language is dubbed apart for a region: French for France or for Quebec, Spanish for Spain or for Latin America, Portuguese for Brazil or for Portugal. It applies to the audio language you chose in your apps, else the server’s, when that is the region’s language, and sets it when neither is set. In that language, the audio tracks of the region play first, and its versions come first where the server orders versions by language.',
+      label: 'Audio region',
+      none: 'None',
+      saved: 'Audio region saved.',
+      regions: {
+        'fr-FR': 'French (France)',
+        'fr-CA': 'French (Quebec)',
+        'es-ES': 'Spanish (Spain)',
+        'es-419': 'Spanish (Latin America)',
+        'pt-BR': 'Portuguese (Brazil)',
+        'pt-PT': 'Portuguese (Portugal)',
+      } as Record<string, string>,
+    },
+    /** My account › Interface size: the size the admin app shows in. */
+    interfaceSize: {
+      help: 'The size of this admin app’s text and controls, on every browser you sign in with. Compact shows more of a page on a computer; Large is easier to read on a TV, a tablet or from across a room. A phone shows both alike. Signed out, a browser keeps the last size it showed.',
+      label: 'Interface size',
+      compact: 'Compact',
+      large: 'Large',
+      saved: 'Interface size saved.',
+    },
+    /** My account › Sound. */
+    sound: {
+      help: 'Two ways to make your videos louder and more even than your apps play them, each with its cost. They apply from your next play.',
+      boostVolume: 'Boost the volume in the web player',
+      boostVolumeHelp:
+        'Makes videos louder in the web player, in a browser and in the Jellyfin apps for Android and iOS: about 8 dB on quiet passages and 5 dB on loud ones, a compressor holding the peaks, and the player’s volume still works. Your browser does the work, but for it to reach the streams of addons, the server sends your web player those streams itself rather than sending it to their source, which takes the server’s bandwidth. It does not reach the apps’ own players, nor streams an iPhone or iPad plays as HLS. The player’s settings menu turns it on and off too.',
+      convertSound: 'Convert the sound to even it',
+      convertSoundHelp:
+        'The server converts the audio of your videos and channels and evens it at -16 LUFS, the picture copied, so that every app plays it louder and evenly. The cost: nothing plays directly, each play takes a little of the server’s processor, and surround sound reaches a receiver converted rather than as the original track.',
+      saved: 'Sound saved.',
+      group: 'Your group sets these: an administrator changes them on the group’s page.',
+    },
+    /** My account › Taste profile. */
+    taste: {
+      help: 'What Polyfin learned of your taste from the movies and series you finished, watched again, stopped early, liked, disliked, marked as favorites and hid, the latest counting most. Once it knows you well enough, it ranks Top picks for you and orders similar titles and suggestions. It stays on the server: only you see it.',
+      notBuilt: 'Not built yet',
+      notBuiltHelp: 'Polyfin builds your profile in the background, every hour.',
+      certainty: 'How well it knows you',
+      builtFrom: (titles: number) => `Built from ${titles === 1 ? '1 title' : `${titles} titles`},`,
+      belowGate:
+        'Polyfin does not know you well enough yet: finish or like a few more movies and series. Until then, Top picks for you shows the most popular titles, and other lists keep their usual order.',
+      facets: {
+        genre: 'Genres',
+        director: 'Directors',
+        cast: 'Cast',
+        decade: 'Decades',
+        language: 'Languages',
+      },
+      liked: 'You like',
+      disliked: 'You like less',
+      vetoed: 'left out of Top picks',
+      taglines: 'Tell me why a title is for me',
+      taglinesHelp:
+        'A title’s page starts with “87% for you · because you like …”, once your profile knows you well enough.',
+      taglinesOn: 'Titles now tell why they are for you.',
+      taglinesOff: 'Titles no longer tell why they are for you.',
+    },
     /** My account › Home rows. */
     homeRows: {
       help: 'The rows the administrator adds to the web player’s home page for you. Turn one off to leave it out of your home page, and out of your libraries in other apps when it is one there too. The web player’s own sections stay in its Settings › Home.',
       empty: 'No home row',
       emptyHelp: 'The administrator added no row to the web player’s home page for you.',
-      shown: (name: string) => `Show ${name} on your home page`,
+      watchlistKind: 'Your Watchlist playlist',
+      playlistsKind: 'A row for each playlist you marked ♥',
       on: (name: string) => `${name} is back on your home page.`,
       off: (name: string) => `${name} is off your home page.`,
+    },
+    /** My account › Track choices. */
+    trackChoices: {
+      help: 'When you pick another audio track or other subtitles than those a series or a movie plays by default, its next plays keep that language, on every episode and in whichever version, in every app. This follows “Set audio track based on previous item” and “Set subtitle track based on previous item” in the web player’s playback settings, which are on unless you turned them off.',
+      none: 'No track choice is kept.',
+      kept: (count: number) =>
+        count === 1
+          ? 'Track choices are kept for 1 series or movie.'
+          : `Track choices are kept for ${count} series and movies.`,
+      forget: 'Forget my track choices',
+      title: 'Forget your track choices?',
+      confirmHelp:
+        'Every series and movie plays the tracks your language preferences choose again.',
+      confirm: 'Forget',
+      forgetting: 'Forgetting…',
+      done: 'Your track choices have been forgotten.',
     },
     /** My account › Continue Watching and Hidden titles. */
     watching: {
@@ -56,6 +155,25 @@ const account = {
       hiddenEmpty: 'No hidden title',
       hiddenEmptyHelp: 'Hide a title from its ⋮ menu in the web player.',
       hiddenOn: 'Hidden',
+      nextUpHelp:
+        'The next episode of each series you are watching, as your apps list Next Up. Remove takes a series off Next Up without changing what you watched, until you play one of its episodes or a new one comes out; its page still opens on its next episode. In the web player, a Next Up card’s ⋮ menu does the same.',
+      nextUpRemoveLabel: (name: string) => `Remove ${name} from Next Up`,
+      nextUpRemoved: (name: string) => `${name} is off Next Up.`,
+      nextUpEmpty: 'Nothing up next',
+      nextUpEmptyHelp: 'The series you are watching show here with their next episode.',
+      nextUpRemovedList: 'Series taken off Next Up',
+      nextUpRemovedOn: 'Removed',
+      nextUpDroppedList: 'Dropped on a tracking service',
+      nextUpDroppedHelp:
+        'They come back to Next Up, Upcoming and Continue Watching once you take them off the service’s Dropped list, or play one of their episodes.',
+      nextUpDroppedOn: (service: string) => `Dropped on ${service}`,
+      nextUpShowLabel: (name: string) => `Show ${name} in Next Up again`,
+      nextUpShown: (name: string) => `${name} is back in Next Up.`,
+      withResume: 'Remove from Continue Watching also takes the series off Next Up',
+      withResumeHelp:
+        'Taking an episode off Continue Watching then takes its series off Next Up too, the same way, until you play one of its episodes or a new one comes out.',
+      withResumeOn: 'Remove from Continue Watching now takes the series off Next Up too.',
+      withResumeOff: 'Remove from Continue Watching no longer takes the series off Next Up.',
       kinds: {
         movie: 'Movie',
         series: 'Series',
@@ -96,11 +214,13 @@ const account = {
           : `every ${minutes / 60} hours`,
     serverImport: {
       description:
-        'Bring your played movies and episodes, resume points and favorites over from a Jellyfin or Emby server you used before, or your movies from your Letterboxd export. They go into your account only, and only add to what Polyfin already has. Nothing is written to the other server.',
+        'Bring your played movies and episodes, resume points and favorites over from a Jellyfin, Emby or Plex server you used before, or your movies from your Letterboxd export. They go into your account only, and only add to what Polyfin already has. Nothing is written to the other server.',
       serverKind: 'Server',
       address: 'Server address',
       addressHelp:
-        'The address the server opens at in a browser, such as http://192.168.1.10:8096.',
+        'The address the server opens at in a browser, such as https://jellyfin.example.com: a public address, or one on the local network when an administrator imports.',
+      privateNetwork:
+        'This server is on a local network address. Only administrators can import from such a server: ask one of them to run the import.',
       name: 'Your user name there',
       password: 'Your password there',
       passwordHelp:
@@ -110,6 +230,35 @@ const account = {
       started: 'The import has started. You can leave this page: it goes on.',
       lastTitle: 'Your last import',
       from: (server: string) => `From ${server}`,
+    },
+    /** My account › Import from another server, from Plex, signing in to Plex. */
+    plexImport: {
+      help: 'Sign in to Plex on Plex’s own page, then choose the server. Polyfin reads there, as you, the movies and episodes you played, marked as watched or synced, your resume points and your ratings, and your Plex Watchlist. Polyfin never sees your Plex password: what Plex gives it is used for this import only, then signed out.',
+      signIn: 'Sign in with Plex',
+      signingIn: 'Asking Plex…',
+      approve: 'Sign in to Plex on its page, which opens in a new tab, then come back here.',
+      open: 'Open Plex’s sign-in page',
+      waiting: 'Waiting for you to sign in to Plex…',
+      signedInAs: (name: string) => `Signed in to Plex as ${name}.`,
+      profile: 'Plex Home profile',
+      profileHelp:
+        'The profile whose watch data comes over. A managed profile has no sign-in of its own: choose it here.',
+      managed: (name: string) => `${name} (managed)`,
+      pin: 'Profile PIN',
+      pinHelp: 'The PIN this profile asks for on Plex.',
+      useProfile: 'Use this profile',
+      switching: 'Switching…',
+      server: 'Server',
+      serverHelp:
+        'The Plex servers this profile reaches. Polyfin reaches the one chosen at the addresses Plex gives for it: the public ones, and those on the local network when an administrator imports.',
+      privateNetwork:
+        'This server did not answer at a public address, and its other addresses are on a local network. Only administrators can import from such a server: ask one of them to run the import.',
+      owned: (name: string) => `${name} (yours)`,
+      noServers: 'This profile reaches no Plex server.',
+      watchlist: 'Watchlist to my Watchlist',
+      watchlistHelp:
+        'The movies and shows of your Plex Watchlist go to your Watchlist playlist in Polyfin, a series as its aired episodes. Only what you have not watched yet is added.',
+      cancel: 'Cancel',
     },
     /** My account › Import from another server, with Letterboxd's export file. */
     letterboxd: {
@@ -126,7 +275,7 @@ const account = {
       tooLarge: 'This file is larger than 20 MB: choose the ZIP file Letterboxd gives.',
       watchlist: 'Watchlist to my Watchlist',
       watchlistHelp:
-        'The movies of your Letterboxd watchlist go to your Watchlist in Jellyfin apps, until you start them.',
+        'The movies of your Letterboxd watchlist go to your Watchlist playlist in Jellyfin apps. Only those you have not started are added.',
       ratings: 'Ratings',
       ratingsHelp:
         'Your stars become your rating out of 10: 3.5 stars is 7. A rating you already have in Polyfin stays.',
@@ -138,7 +287,7 @@ const account = {
           'The movies they watched are marked played, on the latest date their diary gives, as many times as it logs them. Each movie is searched by its name and year in the server’s metadata addons, and kept when they know exactly one movie of that name and year.',
         watchlist: 'Watchlist to their Watchlist',
         watchlistHelp:
-          'The movies of their Letterboxd watchlist go to their Watchlist in Jellyfin apps, until they start them.',
+          'The movies of their Letterboxd watchlist go to their Watchlist playlist in Jellyfin apps. Only those they have not started are added.',
         ratingsHelp:
           'Their stars become their rating out of 10: 3.5 stars is 7. A rating they already have in Polyfin stays.',
         likesHelp: 'The movies they liked on Letterboxd become their favorites.',
@@ -156,25 +305,17 @@ const account = {
       states: { running: 'Running', done: 'Done', failed: 'Failed' },
       problem:
         'Polyfin ran into an error during the import: the server log tells more. What was imported is kept.',
-      runningHelp:
-        'You can leave this page: the import goes on. If Polyfin restarts meanwhile, the import stops: what it imported stays, and importing again adds nothing twice.',
       searching: (searched: number, movies: number) =>
         `Searching the movies: ${searched} of ${movies}.`,
       searchingLabel: 'Movies searched',
       summary: (movies: number, added: string) =>
         `${movies === 1 ? '1 movie' : `${movies} movies`}: ${added}.`,
       played: (count: number) => `${count} marked played`,
-      addedToWatchlist: (count: number) => `${count} added to the Watchlist`,
+      addedToWatchlist: (count: number) => `${count} added to the Watchlist playlist`,
       rated: (count: number) => `${count} rated`,
       favorites: (count: number) => `${count} made favorites`,
-      unmatched: (count: number) =>
-        count === 1 ? '1 movie not found' : `${count} movies not found`,
-      unmatchedTitle: 'Movies not found',
       unmatchedHelp:
-        'These movies were not imported. Each one is searched by its name and year, and kept only when the server’s metadata addons know exactly one movie of that name and year. Open it on Letterboxd to check them.',
-      movieColumn: 'Movie',
-      reasonColumn: 'Reason',
-      onLetterboxd: 'On Letterboxd',
+        'These movies were not imported. Each one is searched by its name and year, and kept only when the server’s metadata addons know exactly one movie of that name and year.',
       reasons: {
         not_found: 'Not found',
         ambiguous: 'Several movies of that name and year',
@@ -183,12 +324,14 @@ const account = {
     },
     appImport: {
       description:
-        'Bring over what you watched in an app built on addons: the movies and episodes you played with their dates, your resume points, and the app’s library, which goes to your Watchlist in Jellyfin apps, matched by IMDb, TMDB or Kitsu. They only add to what Polyfin already has, and nothing is written to the app.',
+        'Bring over what you watched in an app built on addons: the movies and episodes you played with their dates, your resume points, and the app’s library, which goes to your Watchlist playlist in Jellyfin apps, matched by IMDb, TMDB or Kitsu. They only add to what Polyfin already has, and nothing is written to the app.',
       app: 'App',
       apps: { nuvio: 'Nuvio', stremio: 'Stremio' },
       backend: 'Nuvio backend',
       backendHelp:
-        'Leave it empty for Nuvio’s own. A self-hosted backend works too, at its address, on the local network as well.',
+        'Leave it empty for Nuvio’s own. A self-hosted backend works too, at a public address, or on the local network when an administrator signs in.',
+      backendPrivateNetwork:
+        'This backend is on a local network address. Only administrators can sign in to such a backend.',
       email: 'Email',
       password: 'Password',
       passwordHelp:
@@ -200,15 +343,20 @@ const account = {
         nuvio:
           'Nuvio keeps a history for each profile: choose the one to import. Polyfin keeps what it read for a few minutes only.',
         stremio:
-          'Stremio keeps one history for the whole account. Polyfin keeps what it read for a few minutes only.',
+          'Stremio keeps a history for each profile, or one for the whole account without profiles: choose the one to import. Polyfin keeps what it read for a few minutes only.',
       },
       stayConnected: 'Stay connected',
       stayConnectedHelp: {
         nuvio: (every: string) =>
-          `Polyfin keeps the session, encrypted, never your password, and imports the profile you choose again ${every}. It only reads the account. You can disconnect at any time.`,
+          `Polyfin keeps the session, never your password, and imports the profile you choose again ${every}. The session is encrypted when the server has a POLYFIN_SECRET_KEY, and stored as is otherwise. It only reads the account. You can disconnect at any time.`,
         stremio: (every: string) =>
-          `Polyfin keeps the auth key, encrypted, and imports the account again ${every}. It only reads the account. You can disconnect at any time. Stremio’s terms forbid extracting its data by automated means: reading your account ${every} makes that grey area more pronounced than a one-off import.`,
+          `Polyfin keeps the auth key, and for a profile with a PIN that profile’s session, never the PIN, and imports the profile you choose again ${every}. They are encrypted when the server has a POLYFIN_SECRET_KEY, and stored as is otherwise. It only reads the account. You can disconnect at any time. Stremio’s terms forbid extracting its data by automated means: reading your account ${every} makes that grey area more pronounced than a one-off import.`,
       },
+      unencrypted:
+        'This server has no secret key: a sign-in kept to stay connected would be stored unencrypted.',
+      unencryptedAdministrator:
+        'This server has no POLYFIN_SECRET_KEY: a sign-in kept to stay connected would be stored unencrypted. Set the key, then restart Polyfin, to encrypt it.',
+      unencryptedDocs: 'Stored keys and tokens',
       staysConnected: (every: string) =>
         `You stay connected: this profile is imported again ${every}, the same way. Addons are installed now only.`,
       wholeAccount: 'The whole account',
@@ -216,10 +364,18 @@ const account = {
       profileNumber: (id: string) => `Profile ${id}`,
       profileCounts: (played: number, resumes: number, library: number) =>
         `${played} watched, ${resumes === 1 ? '1 resume point' : `${resumes} resume points`}, ${library} in the library.`,
+      lockedProfile: (name: string) => `${name} (PIN)`,
+      pin: 'PIN',
+      pinHelp:
+        'This profile asks for its PIN. Polyfin sends it to Stremio only, to open the profile, and never keeps it.',
+      unlock: 'Open this profile',
+      unlocking: 'Opening…',
       addons: 'Addons',
       addonsHelp:
         'Each addon ticked becomes one of the account’s own addons, under My sources. Its address may hold settings and keys: Polyfin never shows it whole.',
       addonsOff: 'Own addons are turned off for this account: the app’s addons are not offered.',
+      addonsParental:
+        'Parental control applies to this account: its own addons are kept but not used, so the app’s addons are not offered.',
       noAddons: 'This profile has no addon.',
       back: 'Sign in again',
       start: 'Import this profile',
@@ -236,21 +392,13 @@ const account = {
       states: { running: 'Running', done: 'Done', failed: 'Failed' },
       problem:
         'Polyfin ran into an error during the import: the server log tells more. What was imported is kept.',
-      runningHelp:
-        'You can leave this page: the import goes on. If Polyfin restarts meanwhile, the import stops: what it imported stays, and importing again adds nothing twice.',
       read: (count: number) => (count === 1 ? '1 title read.' : `${count} titles read.`),
       counts: (read: number, played: number, resumed: number, watchlist: number) =>
-        `${read === 1 ? '1 title read' : `${read} titles read`}: ${played} marked played, ${resumed === 1 ? '1 resume point' : `${resumed} resume points`}, ${watchlist} added to the Watchlist.`,
-      unmatched: (count: number) =>
-        count === 1 ? '1 title not found' : `${count} titles not found`,
-      unmatchedTitle: 'Titles not found',
+        `${read === 1 ? '1 title read' : `${read} titles read`}: ${played} marked played, ${resumed === 1 ? '1 resume point' : `${resumed} resume points`}, ${watchlist} added to the Watchlist playlist.`,
       unmatchedHelp:
         'These titles were not imported: the app names them by an identifier Polyfin does not match, or no Polyfin title has it. For a series, the app may also tell the episodes watched by their place in a list of episodes that Polyfin’s addons list otherwise.',
-      titleColumn: 'Title',
-      kindColumn: 'Kind',
-      reasonColumn: 'Reason',
       reasons: {
-        other_identifier: 'Not an IMDb, TMDB or Kitsu identifier',
+        other_identifier: 'Not an IMDb, TMDB, Kitsu or MyAnimeList identifier',
         not_found: 'Not in Polyfin',
         episode_list: 'Its episodes do not match Polyfin’s list: none was marked played',
       },
@@ -323,6 +471,8 @@ const account = {
             `${app} answered the last import in a way this version of Polyfin does not read. The next one tries again.`,
           profile_missing: (app: string) =>
             `The profile imported is no longer in the ${app} account. Sign in again to choose another.`,
+          profile_locked: (app: string) =>
+            `The profile imported now asks for a PIN, or another one, in ${app}. Sign in again to choose it with its PIN.`,
           sign_in_refused: (app: string) => `${app} refused the sign-in Polyfin kept.`,
           internal: () =>
             'Polyfin ran into an error during the last import: the server log tells more. The next one tries again.',
@@ -351,6 +501,17 @@ const account = {
     changePassword: 'Change password',
     changingPassword: 'Changing…',
     passwordChanged: 'Your password has been changed.',
+    /** My account › Identity provider: the account's link to its owner's account there. */
+    provider: {
+      help: (name: string) =>
+        `Once your account is linked to your account at ${name}, “Sign in with ${name}” opens it, in this admin app and in the web player.`,
+      linked: 'Linked',
+      notLinked: 'Not linked',
+      link: (name: string) => `Link with ${name}`,
+      otherAddress: 'A link starts at the server’s public address. Open this page there:',
+      taken:
+        'The link was not made: your account at the provider is linked to another account here, or this account is linked to someone else.',
+    },
     /** My account › Two-step sign-in, and its steps at sign-in. */
     twoStep: {
       help: 'After your password, this admin app asks for a code from an authenticator app on your phone. Jellyfin apps cannot ask for one: once it is on, they sign in with Quick Connect, which you approve here, and your password alone no longer signs in to them. The apps and browsers signed in already stay signed in.',
@@ -492,6 +653,10 @@ const account = {
         `${name} is not set up on this server: an administrator has to add the ${name} app first.`,
       appRefused: (name: string) =>
         `${name} refused this server’s app. An administrator has to check its credentials under Settings › Tracking.`,
+      traktCodeEnded:
+        'The code expired, or Trakt refused it. If Trakt refused your sign-in, check two things: an administrator has added your Trakt username to this server’s Trakt app, under Members; and, on a free Trakt account, no other app is connected, as Trakt allows only one (disconnect it on Trakt under Settings › Connected apps, or use Trakt VIP). Then get a new code.',
+      traktAppRefused:
+        'Trakt refused this sign-in. Check that an administrator added your Trakt username to this server’s Trakt app, under Members, and that your free Trakt account has no other app connected, as Trakt allows only one. If neither applies, an administrator has to check the app’s credentials under Settings › Tracking.',
       history: {
         toggle: (name: string) => `Import my ${name} history`,
         toggleHelp: (name: string, every: string) =>
@@ -521,16 +686,25 @@ const account = {
         watchlist: {
           lists: {
             trakt: 'watchlist',
+            mdblist: 'watchlist',
             simkl: 'Plan to Watch list',
             anilist: 'Plan to Watch list',
             myanimelist: 'Plan to Watch list',
+            publicmetadb: 'Watchlist',
           },
           toggle: (name: string, list: string) => `Import my ${name} ${list}`,
           toggleHelp: (name: string, list: string) =>
-            `Puts the movies and series of your ${name} ${list} in the Watchlist view of your Jellyfin apps, with each import. A title leaves it once you start it, or once ${name} no longer lists it. Nothing is sent back to ${name}.`,
+            `Puts the movies and series of your ${name} ${list} in your Watchlist playlist in Jellyfin apps, with each import, a series as its aired episodes. Only what you have not watched yet is added. What you started stays. A title ${name} no longer lists leaves it, unless you started it or added it yourself. Nothing is sent back to ${name}.`,
+          syncToggle: (name: string, list: string) => `Sync my ${name} ${list}`,
+          syncHelp: (name: string, list: string) =>
+            `Puts the movies and series of your ${name} ${list} in your Watchlist playlist in Jellyfin apps, with each import, a series as its aired episodes. From when you turn this on, the movies and series you add to or take off your Watchlist playlist yourself are sent to it. A series leaves it only once none of its episodes is left. Moving entries, watching a title or deleting the playlist changes nothing there.`,
+          simklNote:
+            'A title Simkl lists as watching, completed, on hold or dropped is left as it is.',
+          full: (name: string) =>
+            `${name} refused the last title sent: your ${name} watchlist is full. Make room there; this clears once a change goes through.`,
           counts: (added: number, unmapped: number) =>
-            `${added} added to the Watchlist, ${unmapped === 1 ? '1 title' : `${unmapped} titles`} not found in Polyfin.`,
-          added: (added: number) => `${added} added to the Watchlist.`,
+            `${added} added to the Watchlist playlist, ${unmapped === 1 ? '1 title' : `${unmapped} titles`} not found in Polyfin.`,
+          added: (added: number) => `${added} added to the Watchlist playlist.`,
         },
         ratings: {
           toggle: 'Sync my ratings',
@@ -591,6 +765,59 @@ const account = {
     copied: 'Link copied.',
     copyFailed: 'The link could not be copied. Select it and copy it by hand.',
     done: 'Done',
+  },
+  resetPreferences: {
+    button: 'Reset my preferences',
+    title: 'Reset your preferences?',
+    help: 'What you chose yourself goes back to the server’s defaults:',
+    metadataLanguage: 'Metadata language: The server’s',
+    webTheme: 'Web player theme: The server’s, unless your administrator chose yours',
+    audioRegion: 'Audio region: None',
+    homeRows: 'Home rows: every row is shown again',
+    nextUpWithResume: 'Remove from Continue Watching: leaves Next Up as it is',
+    trackChoices: 'Track choices: forgotten for every series and movie',
+    appPreferences:
+      'The preferences Jellyfin apps saved in your account: audio and subtitle languages and mode, home screen and display preferences',
+    kept: 'What you watched, your favorites, your resume points, your connections and imports stay.',
+    confirm: 'Reset',
+    resetting: 'Resetting…',
+    done: 'Your preferences have been reset.',
+  },
+  /** The titles an import did not find, kept for each source, and their links to IMDb or TMDB. */
+  importTitles: {
+    notFound: (count: number) => (count === 1 ? '1 title not found' : `${count} titles not found`),
+    linkedCount: (count: number) => (count === 1 ? '1 title linked' : `${count} titles linked`),
+    title: (source: string) => `Titles not found: ${source}`,
+    help: 'Link one to its title on IMDb or TMDB: what it would import is added at once, and again at each later import.',
+    none: 'No title is left in this list.',
+    /** Why a tracking service's title was not found. */
+    trackerReasons: {
+      not_found: 'Not in Polyfin',
+      not_mapped: 'Not identified by Polyfin',
+    },
+    morePlaces: (count: number) => `and ${count} more`,
+    fieldLabel: (title: string) => `Link ${title} to`,
+    fieldHint: 'An IMDb or TMDB id, or the title’s address on IMDb or TMDB',
+    placeholder: 'tt1234567, tmdb:123…',
+    link: 'Link',
+    linkedTo: (title: string, by: string | null) =>
+      by === null ? `Linked to ${title}.` : `Linked to ${title} by ${by}.`,
+    marksStay: 'Removing the link stops it at later imports. Marks already set stay.',
+    unlink: 'Remove the link',
+    linked: (title: string, target: string) => `${title} is linked to ${target}.`,
+    unlinked: (title: string) => `The link of ${title} is removed. Marks already set stay.`,
+    errors: {
+      invalid_target:
+        'Enter an IMDb id (tt…), a TMDB id, or the address of a title on IMDb or TMDB.',
+      kind_mismatch:
+        'This title is of another kind: link a movie to a movie, and a series or an episode to a series.',
+      target_not_found: 'No title has this TMDB id.',
+    },
+    /** The section of a user's page, for an administrator. */
+    sectionTitle: 'Titles not found',
+    sectionHelp:
+      'The titles this user’s imports did not find, by import. Link one to its title on IMDb or TMDB: it applies at once, and again at later imports.',
+    sectionNone: 'Their imports found every title.',
   },
 }
 

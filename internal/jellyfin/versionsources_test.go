@@ -115,7 +115,7 @@ func versionSourcesOn(t *testing.T) sourcesSetup {
 	token := s.signIn("member", "tv")
 	var views QueryResult
 	s.get(t, "/UserViews", token, &views)
-	for _, view := range views.Items {
+	for _, view := range libraryViews(views.Items) {
 		var page QueryResult
 		if s.get(t, "/Items?ParentId="+view.Id, token, &page); view.Name != "Shelf" && len(page.Items) == 1 {
 			p.rulesSetup = rulesSetup{playbackSetup: playbackSetup{testServer: s, token: token, user: user, movie: page.Items[0].Id}}
@@ -173,15 +173,19 @@ func TestVersionSourceOrder(t *testing.T) {
 	})
 	check("the criterion after the language", french, frenchToken, "TwoFrench", "OneFrench", "Shelf", "TwoEnglish", "OneEnglish")
 
-	// Descriptions aside, the subtitle providers keep the order of
+	// Descriptions aside, the addons' subtitles keep the order of
 	// Content › Sources.
 	movie, _ := accounts.ParseID(p.movie)
-	from, err := p.library.SubtitleAddons(t.Context(), french, movie)
+	subtitles, err := p.library.Subtitles(t.Context(), french, movie)
 	if err != nil {
 		t.Fatal(err)
 	}
+	var from []string
+	for _, subtitle := range subtitles {
+		from = append(from, subtitle.Addon)
+	}
 	if !slices.Equal(from, []string{"Relay One", "Relay Two"}) {
-		t.Errorf("subtitle providers: %v", from)
+		t.Errorf("subtitles: %v", from)
 	}
 }
 
@@ -223,7 +227,7 @@ func TestVersionSourceOrderLaterSources(t *testing.T) {
 		false); err != nil {
 		t.Fatal(err)
 	}
-	if err := p.addons.Remove(t.Context(), addons.Shared(), p.two.ID); err != nil {
+	if _, err := p.addons.Remove(t.Context(), addons.Shared(), p.two.ID); err != nil {
 		t.Fatal(err)
 	}
 	french, frenchToken := p.another(t, "french", "fre")

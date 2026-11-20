@@ -5,15 +5,46 @@
 // the menus for a seventh, gives members a link to the admin app for an
 // eighth, shows a title's three scores for a ninth, adds entries to the
 // item menus for a tenth, adds the server's home rows to the home page for
-// an eleventh, offers to share a movie or an episode for a twelfth, and adds
-// reminders to a programme's page for a thirteenth, makes the server's
-// logo, when it has one, the page's icon for a fourteenth, and adds a
-// subtitle panel to the video player for a fifteenth.
+// an eleventh, offers to share a movie or an episode for a twelfth, adds
+// reminders to a programme's page for a thirteenth, drops the answers
+// jellyfin-web keeps when another user signs in for a fourteenth, lists
+// the user's recent searches on the search page for a fifteenth,
+// shows titles' ratings on their posters for a sixteenth, writes how a
+// torrent starts under jellyfin-web's spinner for a seventeenth, offers
+// the identity provider's sign-in on the sign-in page for an eighteenth,
+// gives the page each user's web player theme for a nineteenth, boosts
+// the volume of videos for the users who ask for a twentieth, shows the
+// badges of the version picked or played for a twenty-first, brings
+// back the place of the home page and of search results on Back for a
+// twenty-second, and lets trailers play in YouTube's player for a
+// twenty-third.
+//
+// It is written in ES5 and runs before jellyfin-web's scripts and their
+// polyfills, so that it works on every browser jellyfin-web 12.4 is built
+// for, down to Chrome 27: it uses no syntax newer than ES5 (a test checks
+// it), writes addresses by hand rather than with URL or URLSearchParams,
+// and falls back where a later API (WeakMap, WeakSet, isConnected) is
+// missing.
+//
+// Six parts follow the whole page as jellyfin-web renders it, through one
+// observer of the body that serves them all, rather than one each: it
+// gathers the page's changes until the browser next draws the page, then
+// tells them once, as a "polyfinpagechange" event on the document.
+// jellyfin-web changes the page many times as it renders a route; each
+// part then looks at the page once a frame, before it is drawn, and only
+// while it listens: the menus' entry (the eighth) and the home page's rows
+// (the eleventh) always, the play buttons (the third) on a title's page
+// until the first answer, the reminders (the thirteenth) on a title's
+// page, which may be a programme's, the recent searches (the fifteenth)
+// on the search page, and the version badges (the twenty-first) on a
+// title's page once its badges came, and while a video plays. The other
+// parts that follow the page watch less of it: a title's page, a menu, or
+// the body's own children.
 //
 // First, it sends the pages of jellyfin-web that need a Jellyfin server's
 // administration, which Polyfin does not have, to Polyfin's admin app. It
 // watches the route only, never the page, so that a new jellyfin-web keeps
-// working with it. jellyfin-web 12.2 routes after the "#", matched without
+// working with it. jellyfin-web 12.4 routes after the "#", matched without
 // regard to case as its router does, "#!/" being an older form:
 //   #/dashboard and every #/dashboard/… page (users, libraries, playback,
 //     Live TV, devices, activity, logs, API keys, scheduled tasks, plugins…);
@@ -21,7 +52,11 @@
 //   #/configurationpage, plugin configuration pages;
 //   #/wizard/…, the startup wizard: Polyfin is set up in its admin app.
 // A dashboard page with a match in the admin app opens that page; any other
-// opens the admin app's home.
+// opens the admin app's home. Every link of the script to the admin app,
+// these included, carries ?from=web: the admin app, opened from the web
+// client signed in as another user than its own session's, signs that
+// session out and takes the web client's sign-in, so that a browser shows
+// one user, as Jellyfin's dashboard, part of jellyfin-web, does.
 //
 // Second, on a title's page (#/details?id=…), it adds the versions of the
 // addons that answer after the page opened. Item details list the versions
@@ -32,12 +67,14 @@
 // details list now (Count). Polyfin also pushes it, as it changes, on the
 // socket jellyfin-web keeps open, in a PolyfinVersions message whose Data
 // names the page's identifier (ItemId): the script hears it through
-// ApiClient's message event. It asks at once as the route changes, then
-// every second while addons are pending, every 10 seconds once a push came,
-// the socket then telling the changes,
-// for at most 90 seconds: a first answer, which takes at most 15 seconds,
+// ApiClient.subscribe, which gives the messages of jellyfin-web's socket
+// since 12.0 (ApiClient's message event before, without subscribe). It
+// asks at once as the route changes, then every second while addons are
+// pending, every 10 seconds once a push came, the socket then telling the
+// changes,
+// for at most 150 seconds: a first answer, which takes at most 30 seconds,
 // and both follow-ups, 10 and 30 seconds later and as long each, end within
-// 85. When the page lists fewer versions than Count, or a different number
+// 130. When the page lists fewer versions than Count, or a different number
 // once no addon is pending, it asks for the title's details and lists their
 // versions in the page's version menu, in place, keeping the version picked.
 // It reloads the page's details instead, as jellyfin-web does when the page
@@ -56,6 +93,27 @@
 // a menu that lists the placeholder to the versions: the others show when
 // the page opens again. Any error just stops it.
 //
+// The same page refreshes its track menus once a version is analyzed:
+// jellyfin-web fills them from the details it got when the page opened, or
+// from its own copy of them when the page is shown again after a video,
+// so a version analyzed since, as a play analyzes it, shows no track until
+// the browser tab reloads. Polyfin's push then says Tracks: a second
+// later, gathering the pushes of the versions analyzed together, the
+// script asks for the title's details, and when they list other tracks
+// for the version picked than its menus, reloads the page's details and,
+// once jellyfin-web has listed the versions anew, tells it the version was
+// picked, as picking it does: jellyfin-web fills the track menus from
+// those details, and from the version's own once it has them. The version
+// picked stays picked, and so do the audio and subtitle tracks the user
+// picked on the page, by name, where the menus still list them. A push
+// heard while a video plays is kept for the page shown again; the check
+// waits for the video to end, and for the page's menus to lose focus.
+// The page of the title the route left last is checked as it is shown
+// again, push or not, as after its video: when the tracks are the same but
+// the details name the versions otherwise, as once a first play made the
+// device's profile known and the names say how each version plays, the
+// version menu takes their names in place, the version picked staying.
+//
 // Third, on the same page, it holds the play buttons (.btnPlay, .btnResume,
 // .btnReplay) until a version is known, as /Polyfin/Items/{id}/Versions and
 // its push tell (Known, the placeholder left out). While none is known and
@@ -72,7 +130,8 @@
 // asked too soon, Polyfin answers 429 with Retry-After, and the button waits
 // that long. A MutationObserver on the page holds the buttons again when
 // jellyfin-web renders it anew. Its words follow jellyfin-web's language, the
-// document's lang (English and French, English otherwise). It never changes
+// document's lang (English, French, German, Spanish, Italian or Brazilian
+// Portuguese, which any Portuguese gets; English otherwise). It never changes
 // the page during a video, and gives everything back when the route leaves
 // the title.
 //
@@ -94,7 +153,7 @@
 // Sixth, it closes the generic error jellyfin-web shows on top of a refused
 // playback's own error. When a title's PlaybackInfo answers with an
 // ErrorCode, such as the RateLimitExceeded of a user playing on as many
-// devices as allowed, jellyfin-web 12.2 explains the code, then rejects the
+// devices as allowed, jellyfin-web 12.4 explains the code, then rejects the
 // playback without a reason, and its rejection handler shows "There was an
 // error processing the request" over it: the user meets the wrong error
 // first. Of two alerts with the same title shown within a second of each
@@ -108,7 +167,7 @@
 // is signed in, it asks /Polyfin/UserViews, which lists the user's views as
 // /UserViews does, in its order, each with HideInMenus, and keeps one style
 // that hides the links of each such library: the buttons of the top bar
-// (jellyfin-web 12.2's UserViewNav, MUI Buttons in the AppBar whose address
+// (jellyfin-web 12.4's UserViewNav, MUI Buttons in the AppBar whose address
 // holds the view's identifier), its More menu (#user-view-overflow-menu),
 // the side menu of that layout (an MUI Drawer, used below 900 pixels wide
 // instead of the buttons) and the legacy layout's side menu
@@ -134,7 +193,7 @@
 // counts as none. Any error just stops it.
 //
 // Eighth, it gives a user signed in who is not an administrator, a member,
-// a "Polyfin" entry where jellyfin-web 12.2 shows administrators Dashboard:
+// a "Polyfin" entry where jellyfin-web 12.4 shows administrators Dashboard:
 // it opens the admin app at /admin/ in the same tab, where the admin app
 // signs the member in with the web client's token, as it does an
 // administrator. It is named "Polyfin" in every language and drawn as
@@ -154,10 +213,10 @@
 // script asks jellyfin-web's client (ApiClient.getCurrentUser) whether the
 // user is an administrator whenever the user signed in changes, as for the
 // seventh, and keeps the last member in the browser's storage, so that the
-// entry shows as soon as jellyfin-web draws a menu. A MutationObserver on
-// the page puts it back as jellyfin-web draws its menus anew. It never shows
-// where Dashboard shows, nor before sign-in, and goes as soon as the user
-// signed in is another, signing out included. Any error just stops it.
+// entry shows as soon as jellyfin-web draws a menu. The page's changes put
+// it back as jellyfin-web draws its menus anew. It never shows where
+// Dashboard shows, nor before sign-in, and goes as soon as the user signed
+// in is another, signing out included. Any error just stops it.
 //
 // Ninth, on a title's page, it shows the title's three scores in the first
 // line of its details (.itemMiscInfo-primary): its IMDb rating, its
@@ -175,12 +234,22 @@
 // it.
 //
 // Tenth, it adds Polyfin's own entries to jellyfin-web's item menu, the
-// action sheet a card's ⋮ button or a right click on a card opens, and the
-// ⋮ button of a title's page (.btnMoreCommands):
+// action sheet a card's ⋮ button or a right click on a card opens, the ⋮
+// button of a title's page (.btnMoreCommands), and the ⋮ of a selection
+// (.btnSelectionPanelOptions) holding one card, which a long press makes
+// on a touch screen, where cards of the home's rows have no ⋮ and a long
+// press opens no menu; acting leaves the selection:
 //   "Remove from Continue Watching", for a card of a Continue Watching row:
 //     a row whose cards all have a resume point, as /UserItems/Resume
 //     lists them, the libraries' own rows included. It deletes
 //     /Polyfin/UserItems/{id}/Resume and takes the card off the row;
+//   "Remove from Next Up", for an episode's card in a Next Up list: the
+//     home's section whose title links to the Next Up page
+//     (#/list?type=nextup), that page, the Next Up of a TV library's
+//     tab (#nextUpItems), or the Next Up of a series' page
+//     (.nextUpSection). It deletes /Polyfin/UserItems/{id}/NextUp, takes
+//     the card off a list (a series' page keeps its next episode) and says
+//     until when in a toast;
 //   "Hide this title", for a movie, a home video or a series, or a season
 //     or an episode of one, that the user has not hidden, as
 //     /Polyfin/UserItems/Hidden lists them. It posts to
@@ -188,24 +257,129 @@
 //     page and says so in a toast, as jellyfin-web's own;
 //   "Show this title again", in its place for a title the user hid, its
 //     series hidden counting for a season or an episode, which deletes
-//     /Polyfin/UserItems/{id}/Hidden.
+//     /Polyfin/UserItems/{id}/Hidden;
+//   "Add to Watchlist", for a movie, an episode, a season or a series
+//     that is not on the user's watchlist playlist, as
+//     /Polyfin/UserItems/Watchlist lists its entries and the titles it
+//     holds pending (a series none of whose episodes aired): a title is
+//     on it when it is an entry or pending, a season or a series also
+//     when an entry is an episode of it (its SeasonId or SeriesId). It
+//     posts the title to /Polyfin/UserItems/{id}/Watchlist, which puts a
+//     movie or an episode at the top of the playlist, a season or a series
+//     its aired episodes, and makes the playlist again when the user
+//     deleted it; and says so in a toast;
+//   "Remove from Watchlist", in its place for a title on the watchlist,
+//     which deletes /Polyfin/UserItems/{id}/Watchlist: a movie or an
+//     episode goes off, a season or a series takes every entry of it off.
+//     It takes the cards of the title, and of its entries, off the rows of
+//     the watchlist and says so in a toast. A row of the watchlist is one
+//     of Polyfin's Now available and Still waiting home rows (see the
+//     eleventh), or the list of the user's watchlist playlist on its page
+//     (#/details?id= it, its Id the PlaylistId /Polyfin/UserItems/Watchlist
+//     gives, empty while the user has none); the title's cards elsewhere
+//     stay;
+//   "Watch together", on a movie's or an episode's page, for a user whose
+//     SyncPlay access is Create and join (Policy.SyncPlayAccess
+//     CreateAndJoinGroups, as ApiClient.getCurrentUser gives it), while
+//     jellyfin-web shows its SyncPlay button: the default layout's
+//     (aria-controls app-sync-play-menu) or the legacy layouts'
+//     (.headerSyncButton), which it shows only with its SyncPlay plugin
+//     and an access other than None. It starts the title in a SyncPlay
+//     group with Jellyfin's own routes: in the group the page's session
+//     is in, as the socket's SyncPlayGroupUpdate messages tell (GroupJoined,
+//     until GroupLeft, NotInGroup or GroupDoesNotExist) and
+//     GET /SyncPlay/{id} confirms, else in a new one (POST /SyncPlay/New,
+//     named as jellyfin-web names its own). A new group starts with a
+//     Stop, which jellyfin-web applies once its clock is set to the
+//     server's, about a second later, pinging the group then
+//     (ApiClient.sendSyncPlayPing): the script waits for that ping, 10
+//     seconds at most, so that the Stop finds nothing playing. It sets the
+//     title as the group's queue, from its start (POST
+//     /SyncPlay/SetNewQueue), then pauses the group (POST /SyncPlay/Pause)
+//     while it waits for its members to load the title: jellyfin-web
+//     pauses a title it starts for a group and tells it ready, and the
+//     group, paused meanwhile, stays paused once all are, until someone
+//     presses Play. Polyfin starts a queue only when every member may play
+//     it, the group then waiting (State Waiting), which GET /SyncPlay/{id}
+//     checks before the pause. It then opens the picker of the people to
+//     invite (below). A title without a known version, as
+//     /Polyfin/Items/{id}/Versions tells, a queue the group refused, and
+//     SyncPlay refused (403, the user's access asked again telling None
+//     or Join only) each get a toast instead. Used again in a group that
+//     plays the title, as the socket's PlayQueue updates tell, the entry
+//     only opens the picker again.
+//     The picker lists the people GET /Polyfin/SyncPlay/Invitees gives:
+//     those the session's group may invite now, who have a web player
+//     open and could join and play the title. It is a dialog over the
+//     dimmed page, with a box to tick for each, Invite and Skip; Escape
+//     or a click beside it skips, Tab and the arrows move between its
+//     controls, Enter also ticks a box. Invite posts each person picked
+//     to /Polyfin/SyncPlay/Invitations ({GroupId, UserId}) and says in a
+//     toast who was invited, who was invited less than a minute ago
+//     (429), and whether any failed. Skip, or nobody to invite, says in a
+//     toast how the others join from their own device; a picker opened
+//     again says nobody can be invited instead, and skips silently.
+//     An invitation reaches the invitee's web players as a
+//     PolyfinSyncPlayInvite message on the socket, State Invited, with
+//     its Id, GroupId, HostName, and the title's ItemName and SeriesName.
+//     It shows a prompt at the top right of the page, across the bottom
+//     on a narrow screen, which leaves the page usable: who invites, the
+//     title, Join, and Not now. The prompt takes the focus itself, not
+//     Join, so a key meant for the page joins nothing; while the user
+//     types in a field or a video plays, it leaves the focus where it is.
+//     Join joins the group with
+//     Jellyfin's POST /SyncPlay/Join, jellyfin-web then following the
+//     group as when its SyncPlay menu joins one; Not now, or Escape,
+//     posts /Polyfin/SyncPlay/Invitations/{Id}/Decline. Another
+//     invitation replaces the prompt; a message of the same Id telling it
+//     ended (Joined, Declined, Expired or Ended) closes it, as joining or
+//     declining on another of the user's devices does, and it goes by
+//     itself after the 5 minutes an invitation lasts.
 // As the button is pressed or the card right-clicked, before jellyfin-web
 // opens its menu, the script asks for the item (ApiClient.getItem), the
-// hidden titles and, for a card with a resume point, Continue Watching;
-// the first action sheet that opens within 10 seconds, no other click
-// coming between, gets the entries once the answers come. An entry closes
-// the menu as Back does, then acts. jellyfin-web 12.2 keeps the answers of
-// its rows for a minute, in memory and in the browser's IndexedDB, and
-// draws a row from such an answer, asking nothing, when the change's
-// UserDataChanged message refreshes it or when the page loads again within
-// that minute. The script keeps what its entries took off in the
-// browser's session storage, for the server and user, for 2 minutes, and
-// has every row's answers (their fetchData) leave out, meanwhile, the item
-// taken off Continue Watching from rows whose items all resume, unless
-// played since its last play then, and the titles hidden, with what is in
-// them, from every row. Nothing is kept longer: an older answer is asked
-// again, and Polyfin's leaves them out. Its words follow jellyfin-web's
+// hidden titles, the titles of the watchlist, for a card with a resume
+// point, Continue Watching, and on a title's page, the user; the first
+// action sheet that opens within 10 seconds, no other click coming
+// between, gets the entries once the answers come. An entry closes the
+// menu as Back does, then acts.
+// jellyfin-web 12.4 keeps the answers of its rows for a minute, in memory
+// and in the browser's IndexedDB, and draws a row from such an answer,
+// asking nothing, when the change's UserDataChanged message refreshes it
+// or when the page loads again within that minute. The script keeps what
+// its entries took off in the browser's session storage, for the server
+// and user, for 2 minutes, and has every row's answers (their fetchData)
+// leave out, meanwhile, the item taken off Continue Watching from rows
+// whose items all resume, unless played since its last play then, the
+// episodes of a series taken off Next Up from the Next Up lists, unless
+// played since, the titles hidden, with what is in them, from every row,
+// and the titles taken off the watchlist from the rows of the watchlist.
+// For as long, after a title is put on the watchlist or taken off, the
+// rows of the watchlist ask Polyfin each time they draw, as the home's
+// rows do after a played mark (see below), so that a title put on it
+// shows there. Nothing is kept longer: an older answer is asked again,
+// and Polyfin's leaves them out. Its words follow jellyfin-web's
 // language, as the third's. Any error just stops it.
+//
+// With the tenth, it also has the home page's Next Up, Continue Watching
+// and Continue Listening rows (the home's rows that jellyfin-web refreshes
+// on a played mark: data-monitor names markplayed) ask Polyfin again for a
+// minute after a change of what the user played. jellyfin-web refreshes
+// these rows on a UserDataChanged message, 10 seconds later, but draws
+// them from its answers of the last minute, asking nothing
+// (jellyfin/jellyfin-web#8543): a card marked played stayed as it was.
+// When a UserDataChanged message, or the answer of a played mark the page
+// sends (ApiClient.markPlayed and markUnplayed, as a card's ✓ does),
+// changes Played or the resume point of an item of these rows, as the
+// script last saw their answers, it refreshes the rows at once, and for a
+// minute every refresh of theirs asks Polyfin. The change is kept as the
+// item's state, so that the same change heard both ways refreshes them
+// once.
+// jellyfin-web's query client reuses an answer while Date.now() is less
+// than a minute after it came: during the row's own fetchData call only,
+// which asks the query client synchronously, Date.now() reads a minute
+// later, so the query client asks Polyfin with the row's own request and
+// keeps the new answer. Other rows, and anything else, are left as they
+// are. Any error just stops it.
 //
 // Eleventh, it adds to jellyfin-web's home page the rows the administrator
 // chose under Settings › Web player › Home rows, as
@@ -224,15 +398,20 @@
 // fills the sections .section0 to .section9 it made first, in place: the
 // rows go between them. A row is drawn as jellyfin-web draws a library's
 // row of latest items, with its classes, so that its styles, scroll
-// buttons and item actions apply: the row's name opens its list
-// (#/list?parentId= the row's Id), each card a poster with the title's
-// played mark, or count of unplayed episodes, and progress, opening the
-// title's page. When jellyfin-web draws the home page anew, which empties
-// it, a MutationObserver on the page puts the rows back from the last
-// answer. Every time it draws them, it leaves out the titles the item
-// menus hid meanwhile, as the tenth keeps them in the session storage for
-// the user signed in (a series taking its items with it), and a row left
-// without a title. Nothing else changes, nor anything while the answer is awaited.
+// buttons and item actions apply, and its Kind (data-polyfin-kind): the
+// row's name opens its list (#/list?parentId= the row's Id), or, for a row
+// of a playlist (its PlaylistId), the playlist's page; each card a poster
+// with the title's played mark, or count of unplayed episodes, and
+// progress, opening the title's page. An episode shows as jellyfin-web
+// shows one in a row: its series' poster, the series' name, then its
+// season and episode numbers before its name. When jellyfin-web draws the
+// home page anew, which empties it, the page's changes put the rows back
+// from the last answer. Every time it draws them, it leaves out the titles
+// the item menus hid meanwhile, and from the Now available, Still waiting
+// and Watchlist rows those they took off the watchlist, as the tenth keeps
+// them in the session storage for the user signed in (a series hidden
+// taking its items with it), and a row left without a title. Nothing else
+// changes, nor anything while the answer is awaited.
 // Any error just stops it.
 //
 // Twelfth, on a movie's or an episode's page, it adds a "Share" button to
@@ -265,33 +444,657 @@
 // apps do not show reminders, a line says so, with a link to My account ›
 // Notifications in the admin app. Jellyfin has no reminder: the script asks
 // Polyfin's /Polyfin/Reminders/Programs/{id}, which answers how the
-// programme stands, and nothing useful for an item that is not a programme
+// programme stands, and an empty 204 for an item that is not a programme
 // of the user's guide or for a user without Live TV, who get no button; it
 // posts to /Polyfin/Reminders to set one, with the page's language, which
 // the message is written in, and deletes /Polyfin/Reminders/{id} to remove
 // one. It asks once jellyfin-web has drawn the page's recording fields,
-// and a MutationObserver puts the buttons back as jellyfin-web renders the
+// and the page's changes put the buttons back as jellyfin-web renders the
 // page anew. Its words follow jellyfin-web's language, as the third's. It
 // never changes the page during a video, and takes the buttons off as the
 // route leaves the programme. Any error just stops it.
 //
-// Fifteenth, in the video player (#/video), it adds a button after the
-// subtitle button of the controls (.videoOsdBottom .btnSubtitles) that
-// opens a panel with three rows: the subtitles' size, from 50% to 300%;
-// how high they sit, raised by up to 30% of the screen's height; and their
-// timing, earlier or later by tenths and halves of a second. Size and
-// height are kept in the browser's local storage and apply to every video,
-// through a stylesheet: the subtitles jellyfin-web draws itself
-// (.videoSubtitlesInner) are scaled from their bottom and raised, those the
-// browser draws (::cue) take the size only. Timing is jellyfin-web's own
-// subtitle offset, which it resets for each video: the panel moves the
-// slider of jellyfin-web's subtitle sync (.subtitleSyncSlider, which
-// jellyfin-web makes once a video with subtitles plays) through its
-// updateOffset, as jellyfin-web's own G and H keys do; with no subtitle
-// shown, the row says to pick one. Keys pressed in the panel stay in it.
-// The panel closes on its button, on Escape, and as the route leaves the
-// player. Its words follow jellyfin-web's language, as the third's. Any
+// Fourteenth, it drops what jellyfin-web keeps of a user's answers once
+// another user signs in. jellyfin-web 12.4 keeps its answers in a React
+// Query cache for a minute before asking again, and for 24 hours in all,
+// in memory and in the browser's IndexedDB (database keyval-store, store
+// keyval, key jellyfin-query-cache), which a later load restores. Some of
+// them are keyed without the user: the search page's Suggestions
+// (SearchSuggestions) and results (Search), a library's Suggestions tab
+// (SuggestionSectionWithItems: its Continue Watching, Latest and Next Up),
+// MovieRecommendations, filters and studios. Its own Sign out clears the
+// cache; a session ended otherwise, such as one an administrator signs out
+// or a browser that lost its sign-in, does not, and the next user to sign
+// in would see the last one's answers, titles their parental control
+// forbids included, until jellyfin-web asks again. The script keeps in
+// the browser's storage the user, as server and user, the kept answers are
+// for. As it starts, before jellyfin-web, when the user its saved
+// credentials sign in (jellyfin_credentials, the server used last) is
+// another, it deletes the copy in IndexedDB, so that jellyfin-web restores
+// nothing. Whenever the route changes, as it does when a user signs in on
+// jellyfin-web's sign-in page, it looks at the user jellyfin-web's client
+// (ApiClient) signed in, and when that is another, it deletes that copy and
+// empties the cache in memory, through jellyfin-web's own LANGUAGE_CHANGE
+// listeners on the document (jellyfin-web clears the cache as the language
+// changes). Signing out changes nothing, nor does the same user signing in
+// again. When jellyfin-web lacks any of these, the rest still applies, and
+// nothing else changes. Any error just stops it.
+//
+// Fifteenth, on jellyfin-web's search page (#/search, its #searchPage), it
+// lists the user's recent searches while the field is empty: up to 10,
+// newest first, between the field (.searchFields) and the Suggestions
+// (.searchSuggestions), drawn as those are, under a "Recent searches"
+// heading. Each is a link that searches it again, with a button that
+// removes it, and "Clear all" removes them all. jellyfin-web 12.4 keeps the
+// field in the route (#/search?query=…, replaced as the user types, by
+// useSearchParam), and shows what the field's search found half a second
+// after the last key (useDebounceValue): its results (.searchResults), a
+// line that nothing was found (.noItemsMessage), or the Suggestions for an
+// empty field. As jellyfin-web draws results with a card, the script notes
+// the route's search as shown, for the user signed in; a line that nothing
+// was found drops it. It keeps the search shown as the user leaves it:
+// opening a result or any other page, clearing the field, typing a search
+// that neither starts with it nor is its start, or closing the tab. A
+// search typed on, or back, thus replaces the one before, and a search
+// that found nothing is never kept. A search kept again moves to the top,
+// the same words in other capitals counting as one. A link opens the
+// search page on its search, in the page's library if any (parentId,
+// collectionType), as jellyfin-web's own "Retry with a global search" link
+// opens #/search?query=…: jellyfin-web fills the field from the route and
+// searches. The searches stay in the browser, nothing goes to the server:
+// in its storage, under polyfinRecentSearches/ then the server and the
+// user (server/user, as the fourteenth names the user), so that another
+// user signing in never sees them. Signing out keeps them for the user's
+// next sign-in in this browser, as jellyfin-web keeps the settings it
+// stores in the browser for a user (appSettings, keyed by the user's ID)
+// through its own Sign out. Storage that fails, or holds anything else,
+// counts as none. Its words follow jellyfin-web's language, as the
+// third's. Any error just stops it.
+//
+// Sixteenth, while the administrator turned it on (Settings › Web player ›
+// Show ratings on posters), it shows a movie's or a series' ratings over
+// its poster, at the top on the start side, as the pointer comes to its
+// card or the focus does, the TV layout's included: its CommunityRating
+// with a star, then its critics' and audience scores, in percent, each
+// with an icon of its own, without words, those it lacks left out. Cards
+// are jellyfin-web 12.4's (.card[data-id] with data-type Movie or
+// Series, the poster in .cardScalable); others, and lists, get nothing.
+// The first card met that is not known asks /Polyfin/Items/Ratings once
+// for it and the other title cards of the page not known, those of its
+// row first, 100 at most, which answers Enabled and the ratings of those
+// with some; another card coming meanwhile waits for that answer. Every
+// card answered gets its ratings at once, hidden by the style until the
+// pointer or the focus comes, so that a row shows them without asking
+// again; a card jellyfin-web draws anew gets them back as the pointer or
+// the focus comes. Answers are kept for a minute, for the user signed in,
+// and forgotten when another signs in. Turned off, nothing shows, and the
+// server is asked again a minute later at the earliest, as is a server
+// that did not answer; a server turning it off takes the ratings shown
+// away. Nothing changes during a video. Any error just stops it.
+//
+// Seventeenth, while jellyfin-web's loading spinner shows (its .docspinner,
+// .mdlSpinnerActive while it turns), it writes under it how the torrent the
+// play waits for starts: "Finding peers: 12 found, 3 connected", then
+// "Receiving the start: 2.4 MB from 3 peers", or why it did not start. It
+// asks /Polyfin/Playback/Starting as the spinner shows, then every second
+// after each answer, and stops as the spinner hides, the line going with
+// it. Polyfin answers for the play of this browser's own session, the
+// torrents its PlaybackInfo tries, then the one it chose while the player
+// reads its first segments, and an empty Stage for anything else, which
+// shows no line: a play of a link, a page loading. jellyfin-web's spinner
+// takes no text (loading.ts), and the Jellyfin API tells a play nothing
+// before it starts. Its words follow jellyfin-web's language, as the
+// third's. Any error just stops it.
+//
+// Eighteenth, on jellyfin-web's sign-in page (#/login, its #loginPage), it
+// offers to sign in with the identity provider the administrator set up
+// (Settings › Security › Identity provider), as /admin/api/status names it:
+// a "Sign in with …" button first among the page's buttons
+// (.readOnlyContent), drawn as jellyfin-web's own, which opens the
+// provider's sign-in at the server's public address (the provider's start,
+// with ?app=web). The provider sends the browser back to /web/ with
+// ?polyfinProvider=signed-in, and a ticket in a cookie the script cannot
+// read. The script takes the parameter out of the address at once, waits
+// for jellyfin-web to draw its first page, by which time it has saved its
+// own connection to the server, then trades the ticket at
+// /admin/api/provider/web, as jellyfin-web's device (ApiClient's app,
+// device name, device ID and version, else those jellyfin-web keeps in
+// the browser), for a Jellyfin sign-in of that device. It keeps the
+// sign-in where jellyfin-web reads it (jellyfin_credentials), in this
+// server's entry, as the admin app's sign-in to the web client does, and
+// opens /web/ again, signed in. Any other value of the parameter, and a
+// trade refused, is what went wrong, said under the button. It looks for
+// the page as the route changes, for 5 seconds. Its words follow
+// jellyfin-web's language, as the third's. Without fetch or storage it
+// does nothing, and any error just stops it.
+//
+// Nineteenth, it gives the page the web player theme of the user, which
+// an administrator, or the user under My account, chooses in the admin
+// app: the server's, LumaaGlaass, jellyfin-web's own look (none) or the
+// Custom theme. The page describes the themes in its head, as JSON
+// (#polyfinWebThemes): the server's theme, the stylesheet and the script
+// of each theme that has some, and the cookie that tells the server the
+// theme shown. As it starts, before jellyfin-web, the script picks the
+// theme: the one it kept for the user jellyfin-web's saved credentials
+// sign in (as the fourteenth finds them), else, signed out, the one of the
+// user last signed in in this browser, else the server's. It keeps, in the
+// browser's storage (polyfinWebTheme), each user's own theme, empty for the
+// server's, up to 20 users, the last first. A browser that cannot run
+// LumaaGlaass, without CSS's :has() or the syntax of ES2021, which the
+// theme's stylesheet and script need, gets jellyfin-web's own look instead.
+// It writes the theme's stylesheet in the head while the page is parsed,
+// so that the page shows the theme from its first paint, unless the user
+// turned off the server's CSS in jellyfin-web's display settings
+// (disableCustomCss, kept in the browser for the user); and the theme's
+// script, deferred, which runs after jellyfin-web's own scripts, as the
+// server's custom script did. It names the theme in the cookie, so that
+// Jellyfin's branding, which jellyfin-web applies after its own CSS, gives
+// the same theme's CSS, imported from the same address; jellyfin-web's
+// SDK asks for it through fetch without the browser's cookies, so those
+// requests, to the branding alone, go with the cookies of the page's own
+// server. Once jellyfin-web shows that CSS, loaded, the script takes its
+// own stylesheet away, and jellyfin-web keeps the theme where it always
+// did, after its own CSS, and turns it off with the user's display
+// settings. When the stylesheet differs from the one shown at the last
+// load in this browser, it deletes the answers jellyfin-web kept in
+// IndexedDB, as the fourteenth does, which would show the CSS of the theme
+// before. Once jellyfin-web has a user signed in, as the route changes, or
+// as a load signed in starts, looked for every half second for half a
+// minute, it asks /Polyfin/WebTheme, once for each user signed in, and
+// keeps their own theme. When that theme is another than the page shows:
+// if the theme shown has a script, which cannot be taken back, it reloads
+// the page, once for that user and theme in the tab, and only if the
+// browser's storage kept the theme, which the load then shows; else it
+// changes the stylesheet at once, turns off jellyfin-web's copy of the one
+// before, and adds the new theme's script. Signing out keeps the theme.
+// Storage that fails counts as none, and any error just stops it.
+//
+// Twentieth, it makes videos louder in jellyfin-web's player for a user
+// with Boost the volume in the web player (My account › Sound, or their
+// user's or group's page), as /Polyfin/Sound answers it (BoostVolume): it
+// sends the sound of the <video> element through Web Audio, the element
+// into a gain of 2 then a compressor (threshold -6 dB, knee 6 dB, ratio
+// 12, attack 3 ms, release 250 ms) then the speakers, so that quiet
+// passages rise by about 8 dB and loud ones by about 5, their peaks held
+// near full scale. The element's own volume, jellyfin-web's slider,
+// applies before the gain. It asks the server once for each user signed
+// in, as the route changes, and again as each video starts, which also
+// tells the server that this device runs the script: the server then
+// relays the user's direct plays rather than sending the player to their
+// source, and marks their address (PolyfinRelay=1). For a user who
+// boosts, the page's one AudioContext is made and started at their first
+// click or tap, inside it: Safari starts a context only there, and the
+// video starts later, once jellyfin-web has asked the server how to play
+// it. The context is suspended again 3 s after a click, a pause or an end
+// while no video it boosts plays, so that it holds no audio session, and
+// resumed as one plays, which Safari allows once a tap started it. As a
+// video starts playing, the script builds the graph for its element,
+// once, on that context; an element whose sound Web Audio would play
+// silent is left alone: a stream from
+// another site fetched without CORS, as one jellyfin-web plays from its
+// source unless the address is marked or the element fetched it with CORS
+// (crossorigin, set for the server's own files); and HLS the browser plays
+// itself (an .m3u8 address, not hls.js's blob: one), as Safari and iOS
+// do, whose sound Web Audio may not get. A graph built stays, as Web Audio
+// cannot give an element back: turning the boost off sends the element
+// straight to the speakers, and a later video of an element whose sound
+// would be silent through Web Audio is not one the server sends a user who
+// boosts. Audio elements, which jellyfin-web's music player sends through
+// Web Audio itself, are never touched. During a video, the player's
+// settings menu (the action sheet .btnVideoOsdSettings opens, which lists
+// such entries as stats or playbackrate) gets "Boost the volume", On or
+// Off: it turns the boost on or off at once, for this page, and posts the
+// choice to /Polyfin/Sound, which a member following their group may not
+// change; a video that cannot be boosted now is from the next one, which a
+// toast says. Its words follow jellyfin-web's language, as the third's.
+// Without Web Audio it does nothing, and any error just stops it.
+//
+// Twenty-first, it shows badges for the version picked or played, while
+// the administrator leaves them on (Settings › Web player › Version
+// badges): a row of pills, each with a short text (4K, DV, HEVC, Atmos,
+// 7.1, IMAX, FR…), its words in full as its tooltip and its aria-label,
+// and a border, in the page's font, without icon or animation; the row
+// wraps where it does not fit, and the TV layout gets larger pills.
+// Polyfin writes the pills, in the document's language, from the
+// version's analysis once it has one, else from the addon's labels.
+// On a title's page, as the route opens it, it asks
+// /Polyfin/Items/{id}/Badges, every second until jellyfin-web made its
+// client, 10 times at most: Show, the setting, and the versions as item
+// details list them, each with its Id, its Name, the addon's own, and its
+// Badges. The row of the version picked in the version menu (the source
+// of its value, the first while the menu has none) goes right under the
+// menu: after its container (.selectSourceContainer, in .trackSelections)
+// where its label sits beside it, as in jellyfin-web's own look, in line
+// with the menu; last in that container where a theme lays the track
+// menus out itself, the label over the menu, as LumaaGlaass does in a
+// grid, where a row after the container would move. While the version
+// menu is hidden, as it is for one version, the row goes last in the
+// track menus' block (.trackSelections), across its grid if it has one.
+// The menu's tooltip names the version picked, as the addon names it,
+// even while the setting is off, which shows no pill. A
+// pick, as the menu closes, brings the row of the version picked; the
+// page's changes put it back as jellyfin-web renders the page anew. It
+// asks again, a second later, when a value of the menu is not in the
+// answer, once for each, or when a PolyfinVersions push for the title
+// tells another number of versions or new tracks. It changes nothing
+// while the version menu has focus, but at a pick, nor during a video,
+// and takes the row and the tooltip off as the route leaves the title.
+// During a video, as it starts playing (a new element or address), and
+// once jellyfin-web 12.4's controls show (.videoOsdBottom, without
+// videoOsdBottom-hidden), it asks /Polyfin/Playback/Badges, the version
+// this device plays, and again every 2 seconds, 5 times at most, while
+// the answer names no title: jellyfin-web tells the server of a play a
+// moment after the video starts. The row goes after the title's heading
+// of the controls (.osdTitle, in .osdMainTextContainer), its pills on a
+// dark ground, so that they read over a bright video, and shows and hides
+// with the controls; it goes as the video ends or loses its source. Any
 // error just stops it.
+//
+// Twenty-second, it brings back the place of jellyfin-web's home page
+// (#/home, its Home tab) and of search results (#/search?…) on Back, in
+// the modern and mobile layouts. There, jellyfin-web 12.4 builds the page
+// anew on Back and scrolls it to the top while it is still short, its
+// rows coming a moment later, so that the browser's own restore has
+// nothing to land on. The script keeps one place for each entry of the
+// history, by the key jellyfin-web's router gives it (history.state.key,
+// "first" for the first entry of a load, which has none), as the route
+// leaves the page: the scroll, the row at the top of the screen and how
+// far it is from the top, and how far each row is scrolled sideways, as
+// jellyfin-web's scroller tells it (getScrollPosition of .emby-scroller:
+// on a desktop, rows move by a transform rather than scrollLeft). A row
+// is known by its data-polyfin-row (the eleventh's rows), else its
+// .sectionN class, else its title. On a popstate (Back or Forward) to
+// such an entry, the page shows its top while it fills; then, looking
+// once a frame, as titles and pictures widen rows without changing the
+// page, and as soon as the page or a row scrolls, once the page is tall
+// enough, the script brings the row back to its height, or the scroll
+// itself while the row is not there, and scrolls each row sideways back
+// through the scroller (scrollToPosition), again whenever jellyfin-web's
+// scroller goes back to its start, as it does when a row's size changes.
+// It follows the row while the rows above it fill, going from the scroll
+// to the row at most once and never back, and stops a second after the
+// page first reached its place, 3 seconds after Back at most, or at once
+// at any wheel, touch, key or click, so that a user who scrolls is never
+// pulled back. The place of an entry left while it is still being
+// brought back stays as it was kept. Where jellyfin-web
+// shows the page it kept rather than a new one, as the legacy layouts do
+// with their home page, it does nothing: the place is marked on the
+// element it was kept from, and that element is shown again. The TV
+// layout (html.layout-tv) is left alone too. A push of the home page
+// while it shows (the side menu's Home, or the phone app's Home tab
+// through Emby.Page.goHome()), or the logo's (#/, which jellyfin-web
+// replaces with #/home), goes to the top at once, where jellyfin-web
+// would keep the place; the place of the entry left stays for Back. It
+// keeps the places of the last 50 entries, in memory only. Any error
+// just stops it.
+//
+// Twenty-third, it lets jellyfin-web's trailers play in YouTube's
+// player, which refuses to play (error 153) without a Referer. The page
+// sends none: Polyfin's Referrer-Policy header and jellyfin-web's own
+// <meta name="referrer"> both say no-referrer, and keep saying it for
+// every other request. YouTube's player script marks its frame with a
+// referrerpolicy attribute, but gives the frame its address once the
+// frame is in the page, and some browsers apply the attribute only as a
+// frame is inserted, so that the frame's load sends nothing. The script
+// watches the body's own children for jellyfin-web's trailer player
+// (.youtubePlayerContainer, which jellyfin-web 12.4 puts first in the
+// body), then that player's frames: a frame there whose address is a
+// YouTube embed (https://www.youtube.com/embed/…, or the same on
+// www.youtube-nocookie.com) gets referrerpolicy="strict-origin", so that
+// it sends the server's origin only, never a path, and is put back in
+// its place, which loads it again with it. A browser that applied the
+// attribute already loads it twice, the first load cut short. A new
+// address of the frame gets the same, once. Any other frame, and every
+// other request, is left as it was. Any error just stops it.
+
+// The page's changes, told to the parts that follow the whole page (see
+// the header's start).
+;(function () {
+  if (typeof MutationObserver !== 'function') return
+  // Whether the page changed since the parts were last told.
+  var due = false
+  function tell() {
+    due = false
+    document.dispatchEvent(new Event('polyfinpagechange'))
+  }
+  // A browser without requestAnimationFrame tells at once.
+  function changed() {
+    if (due) return
+    if (typeof requestAnimationFrame !== 'function') return tell()
+    due = true
+    requestAnimationFrame(tell)
+  }
+  // The script runs in the page's head, before the body exists.
+  function watch() {
+    new MutationObserver(changed).observe(document.body, { childList: true, subtree: true })
+  }
+  if (document.body) watch()
+  else addEventListener('DOMContentLoaded', watch)
+})()
+;(function () {
+  var themes = null
+  try {
+    var element = document.getElementById('polyfinWebThemes')
+    themes = element && JSON.parse(element.textContent)
+  } catch (error) {}
+  if (!themes || !themes.Themes || typeof themes.Cookie !== 'string') return
+  var storageKey = 'polyfinWebTheme'
+  var reloadKey = 'polyfinWebThemeReload'
+  var mostUsers = 20
+  var linkId = 'polyfinWebThemeCss'
+  function quietly(listener) {
+    return function (event) {
+      try {
+        listener(event)
+      } catch (error) {}
+    }
+  }
+  // jellyfin-web asks for the branding through fetch without the
+  // browser's cookies (its SDK's axios sends credentials: 'omit'), which
+  // would leave out the one naming the theme: those requests go with the
+  // cookies of the page's own server. Its XMLHttpRequests send them anyway.
+  var branding = /\/Branding\/(?:Configuration|Css(?:\.css)?)(?:[?#]|$)/i
+  if (typeof window.fetch === 'function') {
+    var originalFetch = window.fetch
+    window.fetch = function (input, init) {
+      var address = typeof input === 'string' ? input : input && input.url
+      if (typeof address === 'string' && branding.test(address)) {
+        var options = {}
+        for (var name in init || {}) options[name] = init[name]
+        options.credentials = 'same-origin'
+        init = options
+      }
+      return originalFetch.call(window, input, init)
+    }
+  }
+  // kept is what the browser keeps: Users, [server/user, theme] with the
+  // last first, the theme empty for the server's; Last, the user last
+  // signed in; Applied, the stylesheet the page showed, null when unknown.
+  function kept() {
+    try {
+      var value = JSON.parse(window.localStorage.getItem(storageKey))
+      if (value && Object.prototype.toString.call(value.Users) === '[object Array]') return value
+    } catch (error) {}
+    return { Users: [], Last: '', Applied: null }
+  }
+  // keep stores value, and tells whether the browser kept it.
+  function keep(value) {
+    try {
+      var text = JSON.stringify(value)
+      window.localStorage.setItem(storageKey, text)
+      return window.localStorage.getItem(storageKey) === text
+    } catch (error) {
+      return false
+    }
+  }
+  function ownTheme(value, user) {
+    for (var i = 0; i < value.Users.length; i++) {
+      if (value.Users[i] && value.Users[i][0] === user) return String(value.Users[i][1] || '')
+    }
+    return ''
+  }
+  function setOwnTheme(value, user, theme) {
+    var users = [[user, theme]]
+    for (var i = 0; i < value.Users.length && users.length < mostUsers; i++) {
+      if (value.Users[i] && value.Users[i][0] !== user) users.push(value.Users[i])
+    }
+    value.Users = users
+    value.Last = user
+  }
+  // savedUser is the user jellyfin-web's saved credentials sign in on the
+  // server it used last, as server/user; "" when none.
+  function savedUser() {
+    try {
+      var servers = JSON.parse(window.localStorage.getItem('jellyfin_credentials') || '{}').Servers || []
+      var last = null
+      for (var i = 0; i < servers.length; i++) {
+        var server = servers[i]
+        if (!server || !server.AccessToken || !server.UserId) continue
+        if (!last || (server.DateLastAccessed || 0) > (last.DateLastAccessed || 0)) last = server
+      }
+      return last ? last.Id + '/' + last.UserId : ''
+    } catch (error) {
+      return ''
+    }
+  }
+  var runsLumaaGlaass = null
+  // shown is the theme the page shows for theme: LumaaGlaass where the
+  // browser runs it, the Custom theme, else jellyfin-web's own look.
+  function shown(theme) {
+    if (theme === 'lumaaglaass' && runsLumaaGlaass === null) {
+      runsLumaaGlaass = false
+      try {
+        runsLumaaGlaass =
+          !!(window.CSS && CSS.supports && CSS.supports('selector(:has(a))')) &&
+          typeof new Function('a', 'b', 'a ||= b?.c ?? 1; return a') === 'function'
+      } catch (error) {}
+    }
+    if (theme === 'lumaaglaass' && runsLumaaGlaass) return theme
+    return theme === 'custom' ? theme : 'none'
+  }
+  function filesOf(theme) {
+    var files = themes.Themes[theme] || {}
+    return { css: typeof files.Css === 'string' ? files.Css : '', js: typeof files.Js === 'string' ? files.Js : '' }
+  }
+  // cssOff tells whether the user, by their ID, "" signed out, turned off
+  // the server's CSS in jellyfin-web's display settings, which jellyfin-web
+  // keeps in the browser for them (appSettings).
+  function cssOff(id) {
+    try {
+      return window.localStorage.getItem((id ? id + '-' : '') + 'disableCustomCss') === 'true'
+    } catch (error) {
+      return false
+    }
+  }
+  function name(theme) {
+    try {
+      document.cookie = themes.Cookie + '=' + theme + '; path=/; samesite=lax'
+    } catch (error) {}
+  }
+  // forgetKept deletes jellyfin-web's copy of its answers in IndexedDB, as
+  // the fourteenth does.
+  function forgetKept() {
+    try {
+      var request = indexedDB.open('keyval-store')
+      request.onupgradeneeded = function () {
+        request.transaction.abort()
+      }
+      request.onerror = function (event) {
+        event.preventDefault()
+      }
+      request.onsuccess = function () {
+        var database = request.result
+        try {
+          if (database.objectStoreNames.contains('keyval')) {
+            database.transaction('keyval', 'readwrite').objectStore('keyval').delete('jellyfin-query-cache')
+          }
+        } finally {
+          database.close()
+        }
+      }
+    } catch (error) {}
+  }
+  function escaped(text) {
+    return text.replace(/&/g, '&amp;').replace(/"/g, '&quot;').replace(/</g, '&lt;')
+  }
+  // copies are the style elements jellyfin-web shows the CSS at address in,
+  // as Jellyfin's branding imports it.
+  function copies(address) {
+    var found = []
+    var styles = document.getElementsByTagName('style')
+    for (var i = 0; i < styles.length; i++) {
+      if ((styles[i].textContent || '').indexOf("url('" + address + "')") >= 0) found.push(styles[i])
+    }
+    return found
+  }
+  // loaded tells whether the stylesheet a style element imports came.
+  function loaded(style) {
+    try {
+      var rule = style.sheet && style.sheet.cssRules[0]
+      return !!(rule && rule.styleSheet && rule.styleSheet.cssRules.length > 0)
+    } catch (error) {
+      return false
+    }
+  }
+  var link = null
+  var handing = null
+  // handOver takes the script's stylesheet away once jellyfin-web shows
+  // the same, loaded; it looks again every quarter of a second, for two
+  // minutes.
+  function handOver(tries) {
+    clearTimeout(handing)
+    if (!link) return
+    var found = copies(link.getAttribute('href'))
+    for (var i = 0; i < found.length; i++) {
+      if (loaded(found[i])) {
+        if (link.parentNode) link.parentNode.removeChild(link)
+        link = null
+        return
+      }
+    }
+    if (tries < 480) {
+      handing = setTimeout(
+        quietly(function () {
+          handOver(tries + 1)
+        }),
+        250
+      )
+    }
+  }
+  // setStylesheet shows the stylesheet at address, "" for none, in place
+  // of the script's own: at the end of the page, after jellyfin-web's own
+  // CSS, where jellyfin-web puts the branding's.
+  function setStylesheet(address) {
+    if (link && link.getAttribute('href') === address) return
+    if (link && link.parentNode) link.parentNode.removeChild(link)
+    link = null
+    if (!address) return
+    link = document.createElement('link')
+    link.rel = 'stylesheet'
+    link.id = linkId
+    link.setAttribute('href', address)
+    ;(document.body || document.head).appendChild(link)
+    handOver(0)
+  }
+
+  var value = kept()
+  var saved = savedUser()
+  var user = saved || String(value.Last || '')
+  var theme = shown((user && ownTheme(value, user)) || themes.Theme)
+  var files = filesOf(theme)
+  var off = cssOff(saved ? saved.slice(saved.indexOf('/') + 1) : '')
+  // What the page shows: its theme, stylesheet and script.
+  var applied = { theme: theme, css: files.css, js: files.js }
+  name(theme)
+  if (value.Applied !== files.css) forgetKept()
+  value.Applied = files.css
+  if (saved) value.Last = saved
+  keep(value)
+  // A load that shows the theme a reload was for ends that reload's mark.
+  try {
+    if (window.sessionStorage.getItem(reloadKey) === user + ' ' + theme) window.sessionStorage.removeItem(reloadKey)
+  } catch (error) {}
+  if (files.css && !off) {
+    if (document.readyState === 'loading') {
+      document.write('<link rel="stylesheet" id="' + linkId + '" href="' + escaped(files.css) + '">')
+      link = document.getElementById(linkId)
+      handOver(0)
+    } else {
+      setStylesheet(files.css)
+    }
+  }
+  if (files.js) {
+    if (document.readyState === 'loading') {
+      document.write('<script src="' + escaped(files.js) + '" defer></' + 'script>')
+    } else {
+      var script = document.createElement('script')
+      script.src = files.js
+      document.head.appendChild(script)
+    }
+  }
+
+  // The user whose theme was asked last, as server/user.
+  var asked = ''
+  // show shows theme, which the page did not show, for user, by their ID.
+  function show(user, id, theme, value) {
+    var files = filesOf(theme)
+    if (applied.js) {
+      // A theme's script cannot be taken back: the page loads again, and
+      // shows the theme from its start, once for this user and theme.
+      var reload = user + ' ' + theme
+      var reloaded = ''
+      try {
+        reloaded = window.sessionStorage.getItem(reloadKey)
+      } catch (error) {}
+      if (reloaded === reload || !keep(value)) return
+      try {
+        window.sessionStorage.setItem(reloadKey, reload)
+      } catch (error) {}
+      name(theme)
+      location.reload()
+      return
+    }
+    // jellyfin-web's copy of the CSS before is turned off until it asks
+    // again, and the next load forgets what it kept.
+    name(theme)
+    value.Applied = null
+    keep(value)
+    var before = copies(applied.css)
+    for (var i = 0; i < before.length; i++) {
+      if (before[i].sheet) before[i].sheet.disabled = true
+    }
+    setStylesheet(cssOff(id) ? '' : files.css)
+    if (files.js) {
+      var script = document.createElement('script')
+      script.src = files.js
+      document.head.appendChild(script)
+    }
+    applied = { theme: theme, css: files.css, js: files.js }
+  }
+  // follow asks the theme of the user jellyfin-web signed in, once for
+  // each, and shows it when the page shows another.
+  function follow() {
+    var api = window.ApiClient
+    var id = api && api.getCurrentUserId()
+    if (!id) return
+    var user = (typeof api.serverId === 'function' ? api.serverId() : '') + '/' + id
+    if (user === asked) return
+    asked = user
+    api.getJSON(api.getUrl('Polyfin/WebTheme')).then(
+      quietly(function (answer) {
+        if (asked !== user || !answer || typeof answer.Theme !== 'string') return
+        var value = kept()
+        setOwnTheme(value, user, typeof answer.UserTheme === 'string' ? answer.UserTheme : '')
+        var theme = shown(answer.Theme)
+        if (theme !== applied.theme) {
+          show(user, id, theme, value)
+          return
+        }
+        keep(value)
+        // The user who signed in may have turned off the server's CSS.
+        if (cssOff(id)) setStylesheet('')
+      }),
+      function () {}
+    )
+  }
+  ;['pushState', 'replaceState'].forEach(function (name) {
+    var original = history[name]
+    history[name] = function () {
+      var result = original.apply(this, arguments)
+      quietly(follow)()
+      return result
+    }
+  })
+  addEventListener('hashchange', quietly(follow))
+  addEventListener('popstate', quietly(follow))
+  // A load signed in may move no route: jellyfin-web's user is looked for
+  // every half second, for half a minute, until one is found.
+  var looks = 0
+  ;(function look() {
+    quietly(follow)()
+    if (!asked && looks++ < 60) setTimeout(look, 500)
+  })()
+})()
 ;(function () {
   var menus = document.createElement('style')
   menus.textContent =
@@ -321,7 +1124,8 @@
   // The admin page for a route: "" (home) unless it is a dashboard page with a match. A user's
   // dashboard pages name the user with ?userId=, which opens that user. A tuner's page names it
   // with ?id=, the identifier of its source among the server's, which opens that source; without
-  // one, the page adds a tuner, which opens Add a source on its HDHomeRun tuner tab.
+  // one, the page adds a tuner, which opens Add a source on its HDHomeRun tuner tab. A task's
+  // page, tasks/edit?id=, opens that task's triggers on the schedule.
   function target(hash) {
     if (!/^#!?\/dashboard(?:[/?#]|$)/i.test(hash)) return ''
     var path = hash.replace(/^#!?\/dashboard\/?/i, '').split(/[?#]/)[0].toLowerCase()
@@ -332,11 +1136,85 @@
       var tuner = /[?&]id=([0-9a-f]{32})(?:[&#]|$)/i.exec(hash)
       return tuner ? 'sources/shared/' + tuner[1].toLowerCase() : 'sources?add=hdhomerun'
     }
+    // A task's page names it with ?id=, which opens its triggers on the schedule.
+    if (/^tasks\/edit(\/|$)/.test(path)) {
+      var task = /[?&]id=([0-9a-f]{32})(?:[&#]|$)/i.exec(hash)
+      if (task) return 'system/schedule?task=' + task[1].toLowerCase()
+    }
     for (var i = 0; i < pages.length; i++) {
       var prefix = pages[i][0]
       if (path === prefix || path.indexOf(prefix + '/') === 0) return pages[i][1]
     }
     return ''
+  }
+  // Addresses are read and written by hand, never with URL: the script runs
+  // before jellyfin-web's polyfills, and browsers jellyfin-web is built for
+  // lack URL (before Chrome 32) or its searchParams (before Chrome 51).
+  //
+  // webFolder is the address of the web client's folder, /web/ or a folder
+  // under Polyfin's base path, with its last slash.
+  function webFolder() {
+    var page = location.href.split('#')[0].split('?')[0]
+    return page.slice(0, page.lastIndexOf('/') + 1)
+  }
+  // resolved is address as the page resolves it: one with a scheme as it
+  // is, one from the server's root, such as /admin/…, on the page's server,
+  // and any other in the web client's folder.
+  function resolved(address) {
+    if (/^[a-z][a-z0-9+.-]*:/i.test(address)) return address
+    var root = /^([a-z][a-z0-9+.-]*:)\/\/[^/?#]*/i.exec(location.href)
+    if (root && address.indexOf('//') === 0) return root[1] + address
+    if (root && address.charAt(0) === '/') return root[0] + address
+    return webFolder() + address
+  }
+  // adminAddress is the address of the admin app's page path ("" for its
+  // home), which '../admin/' leads to from the web client's folder, never
+  // above the server's root.
+  function adminAddress(path) {
+    var folder = webFolder()
+    var root = /^[a-z][a-z0-9+.-]*:\/\/[^/]*\//i.exec(folder)
+    var above = folder.replace(/[^/]+\/$/, '')
+    return (root && above.length < root[0].length ? root[0] : above) + 'admin/' + path
+  }
+  // An address of the admin app, marked as opened from the web client
+  // (?from=web): the admin app then shows the user signed in here, and
+  // signs out a session of another user it had in this browser.
+  function fromWebClient(address) {
+    var at = address.indexOf('#')
+    var rest = at < 0 ? address : address.slice(0, at)
+    var join = rest.indexOf('?') < 0 ? '?' : /[?&]$/.test(rest) ? '' : '&'
+    return rest + join + 'from=web' + (at < 0 ? '' : address.slice(at))
+  }
+  // marks is a WeakSet (kind "set") or a WeakMap ("map") of the page's
+  // elements, or, before Chrome 36, which has neither, the same kept on
+  // each element under a property named after name: either way, an element
+  // takes what was kept for it when it goes.
+  function marks(kind, name) {
+    if (kind === 'set' && typeof WeakSet === 'function') return new WeakSet()
+    if (kind === 'map' && typeof WeakMap === 'function') return new WeakMap()
+    var key = '__polyfin' + name
+    return {
+      has: function (element) {
+        return Object.prototype.hasOwnProperty.call(element, key)
+      },
+      get: function (element) {
+        return Object.prototype.hasOwnProperty.call(element, key) ? element[key] : undefined
+      },
+      set: function (element, value) {
+        element[key] = value
+        return this
+      },
+      add: function (element) {
+        element[key] = true
+        return this
+      },
+    }
+  }
+  // attached tells whether node is in the page, as isConnected does from
+  // Chrome 54 on.
+  function attached(node) {
+    if (typeof node.isConnected === 'boolean') return node.isConnected
+    return document.documentElement.contains(node)
   }
   // The title whose versions are followed, the next time they are asked,
   // and how many times the script began asking, the latest only going on.
@@ -360,14 +1238,28 @@
   // given, the sources the script was last given by identifier, tells them
   // again for an option jellyfin-web listed under a source's identifier and
   // name.
-  var added = new WeakSet()
-  var sizes = new WeakMap()
-  var tags = new WeakMap()
+  var added = marks('set', 'Added')
+  var sizes = marks('map', 'Size')
+  var tags = marks('map', 'Tag')
   var given = {}
   // The version picked among those added, until jellyfin-web lists it: the
   // observer that waits for jellyfin-web's options, and the identifier of
   // the version picked.
   var picking = null
+  // The title whose track menus Polyfin told may lack tracks, until they
+  // are checked; the title the route left last; the timer that gathers
+  // Polyfin's pushes before the check; the refill of the version menu a
+  // refresh waits for; the tracks the user picked on the page shown, and
+  // those a refresh keeps through jellyfin-web's renders; and whether the
+  // script is telling jellyfin-web of a pick.
+  var tracksDue = ''
+  var left = ''
+  var tracksTimer = null
+  var refreshing = null
+  var chosen = {}
+  var keeping = null
+  var dispatching = false
+  var trackMenus = ['.selectSource', '.selectVideo', '.selectAudio', '.selectSubtitles']
   // shownPage returns the title page shown, unless a video is.
   function shownPage() {
     if (document.querySelector('.videoPlayerContainer')) return null
@@ -377,6 +1269,7 @@
   // is shown again: it asks for them, lists their versions keeping the one
   // picked, and fills the track menus.
   function reload(page) {
+    stopKeeping()
     page.dispatchEvent(new CustomEvent('viewbeforehide', { detail: {} }))
     page.dispatchEvent(new CustomEvent('viewshow', { detail: { isRestored: false } }))
   }
@@ -501,7 +1394,7 @@
   function update(progress) {
     var id = title
     var page = shownPage()
-    if (!id || !page || asking || progress.Count < 1 || progress.Count === updatedFor) return
+    if (!id || !page || asking || refreshing || progress.Count < 1 || progress.Count === updatedFor) return
     var adding = progress.AddVersions !== false
     var menu = page.querySelector('.selectSource')
     if (!adding && (!menu || !placeholder(page))) return
@@ -533,22 +1426,93 @@
   // listen hears the messages of jellyfin-web's ApiClient, as its message
   // event gives them: jellyfin-web's events keep an object's listeners in
   // its _callbacks, by event, and call each with the event then the message.
+  // That event only fires for the socket of jellyfin-apiclient itself,
+  // which jellyfin-web opens no more since 12.0: its socket is its SDK's,
+  // whose messages ApiClient.subscribe gives by type, any type
+  // (ServerConnections.js). So UserDataChanged, PolyfinVersions,
+  // SyncPlayGroupUpdate and PolyfinSyncPlayInvite are heard there when
+  // jellyfin-web has it, through the message event otherwise.
+  // It also hears the answers of the played marks the page sends, as
+  // markPlayed and markUnplayed give them: what the user did with the item
+  // afterwards. They come at once, before the socket's message. And it
+  // hears jellyfin-web ping its SyncPlay group (sendSyncPlayPing), as it
+  // does once its clock is set to the server's (see the tenth).
   function listen() {
     var api = window.ApiClient
     if (!api || api === heard) return
     heard = api
-    var callbacks = (api._callbacks = api._callbacks || {})
-    ;(callbacks.message = callbacks.message || []).push(function (event, message) {
+    function heardData(message) {
+      try {
+        if (message) playedChanged(message.Data)
+      } catch (error) {}
+    }
+    function heardVersions(message) {
       try {
         hear(message)
       } catch (error) {}
+    }
+    function heardSyncPlay(message) {
+      try {
+        heardGroup(message)
+      } catch (error) {}
+    }
+    function heardInvite(message) {
+      try {
+        invited(message)
+      } catch (error) {}
+    }
+    if (typeof api.subscribe === 'function') {
+      api.subscribe(['UserDataChanged'], heardData)
+      api.subscribe(['PolyfinVersions'], heardVersions)
+      api.subscribe(['SyncPlayGroupUpdate'], heardSyncPlay)
+      api.subscribe(['PolyfinSyncPlayInvite'], heardInvite)
+    } else {
+      var callbacks = (api._callbacks = api._callbacks || {})
+      ;(callbacks.message = callbacks.message || []).push(function (event, message) {
+        if (message && message.MessageType === 'UserDataChanged') heardData(message)
+        else if (message && message.MessageType === 'SyncPlayGroupUpdate') heardSyncPlay(message)
+        else if (message && message.MessageType === 'PolyfinSyncPlayInvite') heardInvite(message)
+        else heardVersions(message)
+      })
+    }
+    ;['markPlayed', 'markUnplayed'].forEach(function (name) {
+      var mark = api[name]
+      if (typeof mark !== 'function') return
+      api[name] = function () {
+        var answer = mark.apply(this, arguments)
+        if (answer && typeof answer.then === 'function') {
+          answer.then(function (data) {
+            try {
+              if (data && data.ItemId) playedChanged({ UserDataList: [data] })
+            } catch (error) {}
+          }, function () {})
+        }
+        return answer
+      }
     })
+    var ping = api.sendSyncPlayPing
+    if (typeof ping === 'function') {
+      api.sendSyncPlayPing = function () {
+        try {
+          pinged()
+        } catch (error) {}
+        return ping.apply(this, arguments)
+      }
+    }
   }
-  // hear takes a pushed progress of the title followed as an answer.
+  // hear takes a pushed progress of the title followed as an answer. One
+  // that tells the tracks of its versions changed (Tracks) has the track
+  // menus checked, as soon as the page is shown for the title the route
+  // left, as for a video.
   function hear(message) {
     if (!message || message.MessageType !== 'PolyfinVersions' || !message.Data) return
     var progress = message.Data
-    if (!title || String(progress.ItemId).toLowerCase() !== title) return
+    var id = String(progress.ItemId).toLowerCase()
+    if (progress.Tracks && id && (id === title || id === left)) {
+      tracksDue = id
+      dueTracks()
+    }
+    if (!title || id !== title) return
     pushed = true
     unsure = false
     take(progress)
@@ -556,10 +1520,10 @@
   // take brings the page to an answer.
   function take(progress) {
     latest = progress
-    if (early) early.disconnect()
-    early = null
+    followEarly(false)
     hold()
     update(progress)
+    dueTracks()
   }
   // The words the script adds to a page, in jellyfin-web's language, which
   // it gives the document; English for any other.
@@ -569,20 +1533,227 @@
       none: 'No source is available for this title.',
       again: 'Try again',
       removeResume: 'Remove from Continue Watching',
+      removeNextUp: 'Remove from Next Up',
+      removedNextUp: 'This series is off Next Up until you play one of its episodes or a new one comes out.',
       hide: 'Hide this title',
       show: 'Show this title again',
       hidden: 'This title is hidden from your lists.',
       shown: 'This title is back in your lists.',
+      addWatchlist: 'Add to Watchlist',
+      removeWatchlist: 'Remove from Watchlist',
+      addedWatchlist: 'This title is on your Watchlist.',
+      removedWatchlist: 'This title is off your Watchlist.',
+      watchTogether: 'Watch together',
+      groupName: '{name}’s group',
+      togetherStarted: 'Your SyncPlay group is ready, paused. The others join it on their own device, from the SyncPlay button (the people icon at the top). Press Play once they are in.',
+      togetherOff: 'SyncPlay is off for your account.',
+      togetherJoinOnly: 'Your account can join SyncPlay groups, but not start one.',
+      togetherSearching: 'Sources for this title are still being looked for. Try again in a moment.',
+      togetherRefused: 'Not everyone in your SyncPlay group can play this title.',
+      togetherFailed: 'Watch together could not start. Try again.',
+      inviteIntro: 'Your SyncPlay group is ready, paused. Choose whom to invite: a prompt to join shows in their web player. Press Play once they are in.',
+      inviteMore: 'Choose whom to invite to your SyncPlay group: a prompt to join shows in their web player.',
+      inviteSend: 'Invite',
+      inviteSkip: 'Skip',
+      inviteNobody: 'Nobody else can be invited to this title right now.',
+      invitedSent: 'Invitation sent to {names}. Press Play once they are in.',
+      invitedMore: 'Invitation sent to {names}.',
+      invitedSoon: 'Invited less than a minute ago already: {names}.',
+      inviteFailed: 'The invitation could not be sent. Try again.',
+      invitePrompt: '{host} invites you to watch together.',
+      inviteJoin: 'Join',
+      inviteLater: 'Not now',
+      joinFailed: 'The group could not be joined. Try again from the SyncPlay button (the people icon at the top).',
     },
     fr: {
       searching: 'Recherche des sources…',
       none: 'Aucune source disponible pour ce titre.',
       again: 'Réessayer',
-      removeResume: 'Retirer de « Continuer de regarder »',
+      removeResume: 'Retirer de «\u202fContinuer de regarder\u202f»',
+      removeNextUp: 'Retirer de «\u202fÀ suivre\u202f»',
+      removedNextUp: 'Cette série n’est plus dans «\u202fÀ suivre\u202f» jusqu’à ce que vous en lisiez un épisode ou qu’un nouvel épisode sorte.',
       hide: 'Masquer ce titre',
       show: 'Afficher de nouveau ce titre',
       hidden: 'Ce titre est masqué de vos listes.',
       shown: 'Ce titre est de retour dans vos listes.',
+      addWatchlist: 'Ajouter à «\u202fÀ regarder\u202f»',
+      removeWatchlist: 'Retirer de «\u202fÀ regarder\u202f»',
+      addedWatchlist: 'Ce titre est dans «\u202fÀ regarder\u202f».',
+      removedWatchlist: 'Ce titre n’est plus dans «\u202fÀ regarder\u202f».',
+      watchTogether: 'Regarder ensemble',
+      groupName: 'Groupe de {name}',
+      togetherStarted: 'Votre groupe SyncPlay est prêt, en pause. Les autres le rejoignent sur leur propre appareil, depuis le bouton SyncPlay (l’icône de personnes en haut). Appuyez sur Lire une fois qu’ils sont là.',
+      togetherOff: 'SyncPlay est désactivé pour votre compte.',
+      togetherJoinOnly: 'Votre compte peut rejoindre des groupes SyncPlay, mais pas en créer.',
+      togetherSearching: 'Les sources de ce titre sont encore recherchées. Réessayez dans un instant.',
+      togetherRefused: 'Certains membres de votre groupe SyncPlay ne peuvent pas lire ce titre.',
+      togetherFailed: 'Impossible de lancer «\u202fRegarder ensemble\u202f». Réessayez.',
+      inviteIntro:
+        'Votre groupe SyncPlay est prêt, en pause. Choisissez qui inviter\u202f: une invitation à le rejoindre s’affiche dans leur lecteur web. Appuyez sur Lire une fois qu’ils sont là.',
+      inviteMore: 'Choisissez qui inviter dans votre groupe SyncPlay\u202f: une invitation à le rejoindre s’affiche dans leur lecteur web.',
+      inviteSend: 'Inviter',
+      inviteSkip: 'Passer',
+      inviteNobody: 'Personne d’autre ne peut être invité à ce titre pour le moment.',
+      invitedSent: 'Invitation envoyée à {names}. Appuyez sur Lire une fois qu’ils sont là.',
+      invitedMore: 'Invitation envoyée à {names}.',
+      invitedSoon: 'Déjà invités il y a moins d’une minute\u202f: {names}.',
+      inviteFailed: 'L’invitation n’a pas pu être envoyée. Réessayez.',
+      invitePrompt: '{host} vous invite à regarder ensemble.',
+      inviteJoin: 'Rejoindre',
+      inviteLater: 'Pas maintenant',
+      joinFailed: 'Impossible de rejoindre le groupe. Réessayez depuis le bouton SyncPlay (l’icône de personnes en haut).',
+    },
+    de: {
+      searching: 'Quellen werden gesucht…',
+      none: 'Für diesen Titel ist keine Quelle verfügbar.',
+      again: 'Erneut versuchen',
+      removeResume: 'Aus „Weiterschauen“ entfernen',
+      removeNextUp: 'Aus „Als Nächstes“ entfernen',
+      removedNextUp: 'Diese Serie ist nicht mehr in „Als Nächstes“, bis du eine ihrer Folgen abspielst oder eine neue erscheint.',
+      hide: 'Diesen Titel ausblenden',
+      show: 'Diesen Titel wieder einblenden',
+      hidden: 'Dieser Titel ist in deinen Listen ausgeblendet.',
+      shown: 'Dieser Titel ist wieder in deinen Listen.',
+      addWatchlist: 'Zur Merkliste hinzufügen',
+      removeWatchlist: 'Von der Merkliste entfernen',
+      addedWatchlist: 'Dieser Titel ist auf deiner Merkliste.',
+      removedWatchlist: 'Dieser Titel ist nicht mehr auf deiner Merkliste.',
+      watchTogether: 'Gemeinsam ansehen',
+      groupName: 'Gruppe von {name}',
+      togetherStarted: 'Deine SyncPlay-Gruppe ist bereit und pausiert. Die anderen treten ihr auf ihrem eigenen Gerät bei, über die Schaltfläche Synchronwiedergabe (das Personen-Symbol oben). Drücke auf Abspielen, sobald alle da sind.',
+      togetherOff: 'SyncPlay ist für dein Konto ausgeschaltet.',
+      togetherJoinOnly: 'Dein Konto kann SyncPlay-Gruppen beitreten, aber keine starten.',
+      togetherSearching: 'Für diesen Titel werden noch Quellen gesucht. Versuche es gleich noch einmal.',
+      togetherRefused: 'Nicht alle in deiner SyncPlay-Gruppe können diesen Titel abspielen.',
+      togetherFailed: '„Gemeinsam ansehen“ konnte nicht starten. Versuche es erneut.',
+      inviteIntro:
+        'Deine SyncPlay-Gruppe ist bereit und pausiert. Wähle aus, wen du einladen möchtest: Im Web-Player der Eingeladenen erscheint eine Einladung zum Beitreten. Drücke auf Abspielen, sobald alle da sind.',
+      inviteMore: 'Wähle aus, wen du in deine SyncPlay-Gruppe einladen möchtest: Im Web-Player der Eingeladenen erscheint eine Einladung zum Beitreten.',
+      inviteSend: 'Einladen',
+      inviteSkip: 'Überspringen',
+      inviteNobody: 'Gerade kann niemand sonst zu diesem Titel eingeladen werden.',
+      invitedSent: 'Einladung an {names} gesendet. Drücke auf Abspielen, sobald alle da sind.',
+      invitedMore: 'Einladung an {names} gesendet.',
+      invitedSoon: 'Schon vor weniger als einer Minute eingeladen: {names}.',
+      inviteFailed: 'Die Einladung konnte nicht gesendet werden. Versuche es erneut.',
+      invitePrompt: '{host} lädt dich zum gemeinsamen Ansehen ein.',
+      inviteJoin: 'Beitreten',
+      inviteLater: 'Nicht jetzt',
+      joinFailed: 'Der Gruppe konnte nicht beigetreten werden. Versuche es erneut über die Schaltfläche Synchronwiedergabe (das Personen-Symbol oben).',
+    },
+    es: {
+      searching: 'Buscando fuentes…',
+      none: 'No hay ninguna fuente disponible para este título.',
+      again: 'Reintentar',
+      removeResume: 'Quitar de «Seguir viendo»',
+      removeNextUp: 'Quitar de «A continuación»',
+      removedNextUp: 'Esta serie ya no está en «A continuación» hasta que reproduzca uno de sus episodios o salga uno nuevo.',
+      hide: 'Ocultar este título',
+      show: 'Volver a mostrar este título',
+      hidden: 'Este título está oculto en sus listas.',
+      shown: 'Este título vuelve a estar en sus listas.',
+      addWatchlist: 'Añadir a «Para ver»',
+      removeWatchlist: 'Quitar de «Para ver»',
+      addedWatchlist: 'Este título está en «Para ver».',
+      removedWatchlist: 'Este título ya no está en «Para ver».',
+      watchTogether: 'Ver juntos',
+      groupName: 'Grupo de {name}',
+      togetherStarted: 'Su grupo de SyncPlay está listo, en pausa. Los demás se unen desde su propio dispositivo, con el botón Reproducción sincronizada (el icono de personas de arriba). Pulse Reproducir cuando estén todos.',
+      togetherOff: 'SyncPlay está desactivado para su cuenta.',
+      togetherJoinOnly: 'Su cuenta puede unirse a grupos de SyncPlay, pero no crearlos.',
+      togetherSearching: 'Todavía se están buscando fuentes para este título. Vuelva a intentarlo en un momento.',
+      togetherRefused: 'No todos en su grupo de SyncPlay pueden reproducir este título.',
+      togetherFailed: '«Ver juntos» no pudo empezar. Vuelva a intentarlo.',
+      inviteIntro:
+        'Su grupo de SyncPlay está listo, en pausa. Elija a quién invitar: verán una invitación para unirse en su reproductor web. Pulse Reproducir cuando estén todos.',
+      inviteMore: 'Elija a quién invitar a su grupo de SyncPlay: verán una invitación para unirse en su reproductor web.',
+      inviteSend: 'Invitar',
+      inviteSkip: 'Omitir',
+      inviteNobody: 'Ahora mismo no se puede invitar a nadie más a este título.',
+      invitedSent: 'Invitación enviada a {names}. Pulse Reproducir cuando estén todos.',
+      invitedMore: 'Invitación enviada a {names}.',
+      invitedSoon: 'Ya invitados hace menos de un minuto: {names}.',
+      inviteFailed: 'No se pudo enviar la invitación. Vuelva a intentarlo.',
+      invitePrompt: '{host} le invita a ver juntos.',
+      inviteJoin: 'Unirse',
+      inviteLater: 'Ahora no',
+      joinFailed: 'No se pudo unir al grupo. Vuelva a intentarlo desde el botón Reproducción sincronizada (el icono de personas de arriba).',
+    },
+    it: {
+      searching: 'Ricerca delle origini…',
+      none: 'Nessuna origine disponibile per questo titolo.',
+      again: 'Riprova',
+      removeResume: 'Rimuovi da «Continua a guardare»',
+      removeNextUp: 'Rimuovi da «Prossimo»',
+      removedNextUp: 'Questa serie non è più in «Prossimo» finché non ne riproduci un episodio o ne esce uno nuovo.',
+      hide: 'Nascondi questo titolo',
+      show: 'Mostra di nuovo questo titolo',
+      hidden: 'Questo titolo è nascosto dai tuoi elenchi.',
+      shown: 'Questo titolo è di nuovo nei tuoi elenchi.',
+      addWatchlist: 'Aggiungi a «Da guardare»',
+      removeWatchlist: 'Rimuovi da «Da guardare»',
+      addedWatchlist: 'Questo titolo è in «Da guardare».',
+      removedWatchlist: 'Questo titolo non è più in «Da guardare».',
+      watchTogether: 'Guarda insieme',
+      groupName: 'Gruppo di {name}',
+      togetherStarted: 'Il tuo gruppo SyncPlay è pronto, in pausa. Gli altri si uniscono dal proprio dispositivo, con il pulsante Sincronizza Riproduzione (l’icona delle persone in alto). Premi Riproduci quando ci sono tutti.',
+      togetherOff: 'SyncPlay è disattivato per il tuo account.',
+      togetherJoinOnly: 'Il tuo account può unirsi ai gruppi SyncPlay, ma non crearne.',
+      togetherSearching: 'Le origini di questo titolo sono ancora in ricerca. Riprova tra un momento.',
+      togetherRefused: 'Non tutti nel tuo gruppo SyncPlay possono riprodurre questo titolo.',
+      togetherFailed: '«Guarda insieme» non è riuscito ad avviarsi. Riprova.',
+      inviteIntro:
+        'Il tuo gruppo SyncPlay è pronto, in pausa. Scegli chi invitare: nel loro lettore web compare un invito a unirsi. Premi Riproduci quando ci sono tutti.',
+      inviteMore: 'Scegli chi invitare nel tuo gruppo SyncPlay: nel loro lettore web compare un invito a unirsi.',
+      inviteSend: 'Invita',
+      inviteSkip: 'Salta',
+      inviteNobody: 'Al momento nessun altro può essere invitato a questo titolo.',
+      invitedSent: 'Invito inviato a {names}. Premi Riproduci quando ci sono tutti.',
+      invitedMore: 'Invito inviato a {names}.',
+      invitedSoon: 'Già invitati meno di un minuto fa: {names}.',
+      inviteFailed: 'Impossibile inviare l’invito. Riprova.',
+      invitePrompt: '{host} ti invita a guardare insieme.',
+      inviteJoin: 'Unisciti',
+      inviteLater: 'Non ora',
+      joinFailed: 'Impossibile unirsi al gruppo. Riprova dal pulsante Sincronizza Riproduzione (l’icona delle persone in alto).',
+    },
+    pt: {
+      searching: 'Procurando fontes…',
+      none: 'Nenhuma fonte disponível para este título.',
+      again: 'Tentar novamente',
+      removeResume: 'Remover de “Continuar assistindo”',
+      removeNextUp: 'Remover de “A seguir”',
+      removedNextUp: 'Esta série saiu de “A seguir” até você reproduzir um dos episódios dela ou sair um novo.',
+      hide: 'Ocultar este título',
+      show: 'Mostrar este título novamente',
+      hidden: 'Este título está oculto nas suas listas.',
+      shown: 'Este título voltou para as suas listas.',
+      addWatchlist: 'Adicionar a “Para assistir”',
+      removeWatchlist: 'Remover de “Para assistir”',
+      addedWatchlist: 'Este título está em “Para assistir”.',
+      removedWatchlist: 'Este título saiu de “Para assistir”.',
+      watchTogether: 'Assistir juntos',
+      groupName: 'Grupo de {name}',
+      togetherStarted: 'Seu grupo do SyncPlay está pronto, em pausa. Os outros entram pelo próprio dispositivo, no botão Reprodução sincronizada (o ícone de pessoas no topo). Toque em Reproduzir quando todos estiverem lá.',
+      togetherOff: 'O SyncPlay está desativado para a sua conta.',
+      togetherJoinOnly: 'Sua conta pode entrar em grupos do SyncPlay, mas não criá-los.',
+      togetherSearching: 'Ainda estamos procurando fontes para este título. Tente novamente em instantes.',
+      togetherRefused: 'Nem todos no seu grupo do SyncPlay podem reproduzir este título.',
+      togetherFailed: '“Assistir juntos” não conseguiu começar. Tente novamente.',
+      inviteIntro:
+        'Seu grupo do SyncPlay está pronto, em pausa. Escolha quem convidar: um convite para entrar aparece no player web dessas pessoas. Toque em Reproduzir quando todos estiverem lá.',
+      inviteMore: 'Escolha quem convidar para o seu grupo do SyncPlay: um convite para entrar aparece no player web dessas pessoas.',
+      inviteSend: 'Convidar',
+      inviteSkip: 'Pular',
+      inviteNobody: 'Ninguém mais pode ser convidado para este título agora.',
+      invitedSent: 'Convite enviado para {names}. Toque em Reproduzir quando todos estiverem lá.',
+      invitedMore: 'Convite enviado para {names}.',
+      invitedSoon: 'Já convidados há menos de um minuto: {names}.',
+      inviteFailed: 'Não foi possível enviar o convite. Tente novamente.',
+      invitePrompt: '{host} convida você para assistir juntos.',
+      inviteJoin: 'Entrar',
+      inviteLater: 'Agora não',
+      joinFailed: 'Não foi possível entrar no grupo. Tente novamente pelo botão Reprodução sincronizada (o ícone de pessoas no topo).',
     },
   }
   function say(key) {
@@ -591,15 +1762,16 @@
   }
   // The play buttons held, each with what the script changed as it was
   // before and the tooltip it gave; the line telling that no source is
-  // available; the page watched for jellyfin-web's renders, and the document
-  // until the first answer; whether the latest answer may have come before
-  // the title's details asked any addon; and when the title's addons may be
-  // asked again.
+  // available; the page watched for jellyfin-web's renders, and whether the
+  // page's changes are followed until the first answer (see the header's
+  // start); whether the latest answer may have come before the title's
+  // details asked any addon; and when the title's addons may be asked
+  // again.
   var held = []
   var note = null
   var watched = null
   var watcher = null
-  var early = null
+  var early = false
   var unsure = false
   var againAt = 0
   var againTimer = null
@@ -765,6 +1937,14 @@
     var changes = { childList: true, subtree: true, attributes: true, attributeFilter: ['title', 'disabled', 'class'] }
     watcher.observe(page, changes)
   }
+  // followEarly follows the page's changes, or stops, so that the page is
+  // found as jellyfin-web renders it until the first answer.
+  function followEarly(on) {
+    if (on === early) return
+    early = on
+    if (on) document.addEventListener('polyfinpagechange', hold)
+    else document.removeEventListener('polyfinpagechange', hold)
+  }
   // style adds the look of the buttons held and of the line, once.
   function style() {
     if (document.getElementById('polyfinStyle')) return
@@ -785,6 +1965,7 @@
     if (id === title) return
     clearTimeout(timer)
     timer = null
+    if (title) left = title
     title = id
     latest = null
     updatedFor = 0
@@ -796,29 +1977,37 @@
     if (watcher) watcher.disconnect()
     watcher = null
     watched = null
-    if (early) early.disconnect()
-    early = null
+    followEarly(false)
     unsure = true
     clearTimeout(againTimer)
     againTimer = null
     againAt = 0
+    // A check due waits through the routes that show no title, as a
+    // video's, for its page to be shown again. The title the route left
+    // last is checked as it comes back: jellyfin-web shows its own copy of
+    // the page, whose version names may have changed since, as a first
+    // play makes the device's profile known.
+    if (id && tracksDue !== id) tracksDue = id === left ? id : ''
+    clearTimeout(tracksTimer)
+    tracksTimer = null
+    if (refreshing) refreshing.observer.disconnect()
+    refreshing = null
+    chosen = {}
+    stopKeeping()
     if (!id) return
     // Until the first answer, the page is looked for as jellyfin-web renders
     // it, in case it lists only the placeholder.
-    if (document.body) {
-      early = new MutationObserver(hold)
-      early.observe(document.body, { childList: true, subtree: true })
-    }
+    followEarly(true)
     hold()
     poll(id, 0)
   }
-  // poll asks for the title's versions for 90 seconds, from scratch, first
+  // poll asks for the title's versions for 150 seconds, from scratch, first
   // after delay, then every second, or every 10 once a push came.
   function poll(id, delay) {
     clearTimeout(timer)
     timer = null
     var round = ++polls
-    var until = Date.now() + 90000
+    var until = Date.now() + 150000
     var answers = 0
     function ask() {
       timer = null
@@ -879,10 +2068,187 @@
     entry.observer.observe(menu, { childList: true })
     reload(page)
   }
-  // A version menu that had focus is updated as soon as it loses it.
+  // A version menu that had focus is updated as soon as it loses it, and
+  // track menus due a check are checked once none has focus.
   function leave(event) {
     var menu = event.target
     if (latest && menu && menu.matches && menu.matches('.selectSource')) update(latest)
+    dueTracks()
+  }
+  // dueTracks checks the track menus of the title page shown a second
+  // later, when Polyfin told the tracks of the title's versions changed:
+  // the pushes of versions analyzed together come within it, and
+  // jellyfin-web is done showing a page shown again.
+  function dueTracks() {
+    if (!title || tracksDue !== title || tracksTimer) return
+    tracksTimer = setTimeout(function () {
+      tracksTimer = null
+      try {
+        checkTracks()
+      } catch (error) {}
+    }, 1000)
+  }
+  // checkTracks asks for the title's details, and refreshes the track menus
+  // of its page when they list other tracks than the details list for the
+  // version picked. It waits while a video plays and while one of the
+  // menus has focus, where it could be open: the next answer or push, a
+  // show of the page or a loss of focus checks again. While the script
+  // asks for the details or reloads them already, it checks once done.
+  function checkTracks() {
+    var id = title
+    var page = shownPage()
+    if (!id || tracksDue !== id || !page || refreshing || trackFocus(page)) return
+    if (asking) return dueTracks()
+    var menu = page.querySelector('.selectSource')
+    var selections = page.querySelector('.trackSelections')
+    tracksDue = ''
+    if (!menu || !menu.value || !selections || selections.classList.contains('hide')) return
+    var api = window.ApiClient
+    asking = true
+    api.getItem(api.getCurrentUserId(), id).then(
+      function (item) {
+        asking = false
+        if (title !== id) return
+        if (shownPage() !== page || page.querySelector('.selectSource') !== menu || trackFocus(page)) {
+          tracksDue = id
+          return
+        }
+        var sources = item.MediaSources || []
+        for (var i = 0; i < sources.length; i++) {
+          if (sources[i].Id === menu.value) {
+            if (lacking(page, sources[i])) refresh(page, menu)
+            else place(menu, sources)
+            return
+          }
+        }
+      },
+      function () {
+        asking = false
+      }
+    )
+  }
+  // trackFocus tells whether one of the menus of page has focus.
+  function trackFocus(page) {
+    var focused = document.activeElement
+    return (
+      !!focused &&
+      trackMenus.some(function (selector) {
+        return page.querySelector(selector) === focused
+      })
+    )
+  }
+  // lacking tells whether the track menus of page list other tracks than
+  // source has, of each type: jellyfin-web lists them by their Index,
+  // after "Off" (-1) for subtitles.
+  function lacking(page, source) {
+    var menus = { Video: '.selectVideo', Audio: '.selectAudio', Subtitle: '.selectSubtitles' }
+    var streams = source.MediaStreams || []
+    for (var type in menus) {
+      var select = page.querySelector(menus[type])
+      if (!select) continue
+      var listed = []
+      for (var i = 0; i < select.options.length; i++) {
+        if (String(select.options[i].value) !== '-1') listed.push(String(select.options[i].value))
+      }
+      var known = []
+      for (var j = 0; j < streams.length; j++) {
+        if (streams[j].Type === type) known.push(String(streams[j].Index))
+      }
+      if (listed.sort().join() !== known.sort().join()) return true
+    }
+    return false
+  }
+  // refresh fills the track menus of page anew, as picking a version does:
+  // the page's details are reloaded, which keeps the version picked, and
+  // once jellyfin-web has listed the versions anew, the version menu tells
+  // it that version was picked, which fills the track menus from those
+  // details. The tracks the user picked are kept where the menus still
+  // list them (see keepPicks).
+  function refresh(page, menu) {
+    var picks = chosen
+    var entry = { observer: null }
+    entry.observer = new MutationObserver(function () {
+      entry.observer.disconnect()
+      if (refreshing !== entry) return
+      refreshing = null
+      if (shownPage() !== page) {
+        tracksDue = title
+        return
+      }
+      keepPicks(page, picks)
+      dispatching = true
+      try {
+        menu.dispatchEvent(new Event('change', { bubbles: true }))
+      } finally {
+        dispatching = false
+      }
+      restorePicks()
+      // Polyfin may have told of other tracks meanwhile.
+      dueTracks()
+    })
+    refreshing = entry
+    entry.observer.observe(menu, { childList: true })
+    reload(page)
+  }
+  // keepPicks has the audio and subtitle menus of page keep the tracks the
+  // user picked, picks, through jellyfin-web's renders of them, until the
+  // user picks again or the page hides: jellyfin-web renders them once the
+  // version is picked, then again once it has that version's own details.
+  function keepPicks(page, picks) {
+    stopKeeping()
+    var kept = []
+    for (var selector in picks) {
+      var select = page.querySelector(selector)
+      if (select) kept.push({ select: select, pick: picks[selector] })
+    }
+    if (!kept.length) return
+    keeping = { observer: new MutationObserver(restorePicks), kept: kept }
+    kept.forEach(function (entry) {
+      keeping.observer.observe(entry.select, { childList: true })
+    })
+  }
+  // restorePicks picks again in each menu kept the track the user picked:
+  // the one option with its name, or the one with its name and index.
+  function restorePicks() {
+    if (!keeping) return
+    keeping.kept.forEach(function (entry) {
+      var select = entry.select
+      var named = []
+      for (var i = 0; i < select.options.length; i++) {
+        if (select.options[i].textContent === entry.pick.text) named.push(select.options[i])
+      }
+      var found = named.length === 1 ? named[0] : null
+      for (var j = 0; j < named.length; j++) if (named[j].value === entry.pick.value) found = named[j]
+      if (found && select.value !== found.value) select.value = found.value
+    })
+  }
+  function stopKeeping() {
+    if (keeping) keeping.observer.disconnect()
+    keeping = null
+  }
+  // choose notes the tracks the user picks on the title page shown, and
+  // forgets them as they pick a version, for which jellyfin-web lists its
+  // default tracks. Either stops the picks a refresh keeps.
+  function choose(event) {
+    var select = event.target
+    if (dispatching || !select || !select.matches || !title || !select.closest || !select.closest('.itemDetailPage')) return
+    if (select.matches('.selectSource')) {
+      chosen = {}
+      stopKeeping()
+      return
+    }
+    ;['.selectAudio', '.selectSubtitles'].forEach(function (selector) {
+      if (!select.matches(selector)) return
+      var option = select.options[select.selectedIndex]
+      if (option) chosen[selector] = { value: option.value, text: option.textContent }
+      stopKeeping()
+    })
+  }
+  // hidden forgets the tracks the user picked as a page hides, as for a
+  // video: jellyfin-web shows the page again with its default tracks.
+  function hidden() {
+    chosen = {}
+    stopKeeping()
   }
   // quietly runs a listener, an error leaving the event to jellyfin-web.
   function quietly(listener) {
@@ -895,7 +2261,7 @@
   function follow() {
     if (adminRoute.test(location.hash)) {
       // Replaced, so that Back returns to the page before.
-      location.replace(new URL('../admin/' + target(location.hash), location.href).href)
+      location.replace(fromWebClient(adminAddress(target(location.hash))))
       return
     }
     try {
@@ -909,6 +2275,11 @@
     } catch (error) {}
     try {
       followShare()
+    } catch (error) {}
+    // The socket's SyncPlay messages tell the group the session is in from
+    // the first route on (see the tenth).
+    try {
+      listen()
     } catch (error) {}
   }
   // The user signed in whose views were asked for, the style hiding the
@@ -1108,7 +2479,7 @@
               var line = divider.cloneNode(true)
               line.classList.add(entryClass, 'polyfinMenuDivider')
               return line
-            }),
+            })
           )
         })
       }
@@ -1142,7 +2513,7 @@
   // jellyfin-web's emby-linkbutton would open it within jellyfin-web.
   function adminLink(className, content) {
     var link = element('a', className, content)
-    link.setAttribute('href', new URL('../admin/', location.href).href)
+    link.setAttribute('href', fromWebClient(adminAddress('')))
     return link
   }
   function materialIcon(className) {
@@ -1177,19 +2548,13 @@
     if (!text || !path) return null
     item.classList.add(entryClass, 'polyfinMenuEntry')
     item.classList.remove('Mui-focusVisible')
-    item.setAttribute('href', new URL('../admin/', location.href).href)
+    item.setAttribute('href', fromWebClient(adminAddress('')))
     text.textContent = 'Polyfin'
     path.setAttribute('d', dashboardIcon)
     path.parentNode.removeAttribute('data-testid')
     var ripple = item.querySelector('.MuiTouchRipple-root')
     if (ripple) ripple.textContent = ''
     return item
-  }
-  // jellyfin-web draws its menus anew, which the script, loaded in the
-  // head, follows once the body exists.
-  function watchMenus() {
-    if (typeof MutationObserver !== 'function' || !document.body) return
-    new MutationObserver(placeEntries).observe(document.body, { childList: true, subtree: true })
   }
   // The link pressed or clicked, if it opens a collection library on
   // Suggestions, without the tab: the library opens on its chosen screen.
@@ -1216,7 +2581,7 @@
     if (!title || buttons.length !== 1) return
     var shown = { container: container, title: title.textContent, at: Date.now() }
     var before = alerted
-    if (!before || !before.container.isConnected || shown.at - before.at > duplicateWithin || before.title !== shown.title) {
+    if (!before || !attached(before.container) || shown.at - before.at > duplicateWithin || before.title !== shown.title) {
       alerted = shown
       return
     }
@@ -1228,7 +2593,7 @@
     // seconds later all the same.
     var waited = 0
     ;(function close() {
-      if (!container.isConnected) return
+      if (!attached(container)) return
       if (dialog.classList.contains('opened') || waited >= 2000) {
         buttons[0].click()
         return
@@ -1253,7 +2618,7 @@
             }
           }
         }
-      }),
+      })
     ).observe(document.body, { childList: true })
   }
   // The title whose scores are asked for, its last answer holding one,
@@ -1267,6 +2632,10 @@
   var scoreWords = {
     en: { imdb: 'IMDb rating', critics: 'Critics', criticsTitle: 'Critics’ score', audience: 'Audience', audienceTitle: 'Audience score', percent: '%' },
     fr: { imdb: 'Note IMDb', critics: 'Critiques', criticsTitle: 'Score des critiques', audience: 'Public', audienceTitle: 'Score du public', percent: '\u00a0%' },
+    de: { imdb: 'IMDb-Bewertung', critics: 'Kritiker', criticsTitle: 'Kritikerwertung', audience: 'Publikum', audienceTitle: 'Publikumswertung', percent: '\u00a0%' },
+    es: { imdb: 'Valoración de IMDb', critics: 'Crítica', criticsTitle: 'Puntuación de la crítica', audience: 'Público', audienceTitle: 'Puntuación del público', percent: '\u00a0%' },
+    it: { imdb: 'Voto IMDb', critics: 'Critica', criticsTitle: 'Punteggio della critica', audience: 'Pubblico', audienceTitle: 'Punteggio del pubblico', percent: '%' },
+    pt: { imdb: 'Nota do IMDb', critics: 'Crítica', criticsTitle: 'Nota da crítica', audience: 'Público', audienceTitle: 'Nota do público', percent: '%' },
   }
   function sayScore(key) {
     var language = /^[a-z]*/.exec(String(document.documentElement.lang || '').toLowerCase())[0]
@@ -1403,6 +2772,11 @@
     } else if (target.closest('.btnMoreCommands')) {
       var route = titleRoute.exec(location.hash)
       id = route ? route[1] : ''
+    } else if (target.closest('.btnSelectionPanelOptions')) {
+      // On a touch screen, a long press selects a card instead of opening
+      // its menu: the selection's ⋮ stands for the card selected alone.
+      var selected = document.querySelectorAll('.chkItemSelect:checked')
+      card = selected.length === 1 ? selected[0].closest('.card[data-id]') : null
     } else {
       var button = target.closest('button[data-action="menu"]')
       card = button && button.closest('.card[data-id], .listItem[data-id]')
@@ -1415,40 +2789,105 @@
     return String(id).replace(/-/g, '').toLowerCase()
   }
   // askFacts asks for what the entries of the item's menu depend on: its
-  // type and series, whether the user hid it or its series, and whether
-  // its card stands in a Continue Watching row.
+  // type and series, whether the user hid it or its series, whether it is
+  // on the user's watchlist and which entries stand for it there, whether
+  // its card stands in a Continue Watching row, in which Next Up it does,
+  // and, on a title's page, whether the user may watch it together.
   function askFacts(api, id, card) {
     var user = api.getCurrentUserId()
     var row = card && card.getAttribute('data-positionticks') ? card.closest('.itemsContainer') : null
+    var nextUp = nextUpRow(card)
     var resume = row
       ? api.getJSON(api.getUrl('UserItems/Resume', { userId: user, Limit: 100, MediaTypes: 'Video', EnableImages: false }))
       : null
-    return Promise.all([api.getItem(user, id), api.getJSON(api.getUrl('Polyfin/UserItems/Hidden')), resume]).then(
-      function (answers) {
-        var item = answers[0] || {}
-        var series = item.SeriesId ? plainId(item.SeriesId) : ''
-        function listed(answer) {
-          var ids = {}
-          ;((answer && answer.Items) || []).forEach(function (listed) {
-            ids[plainId(listed.Id)] = true
+    // The user signed in, which jellyfin-web keeps, for their SyncPlay
+    // access; none leaves Watch together out.
+    var viewer =
+      !card && typeof api.getCurrentUser === 'function'
+        ? api.getCurrentUser().then(null, function () {
+            return null
           })
-          return ids
-        }
-        var hidden = listed(answers[1])
-        var resumable = listed(answers[2])
-        var cards = row ? row.querySelectorAll('.card[data-id]') : []
+        : null
+    var asked = [
+      api.getItem(user, id),
+      api.getJSON(api.getUrl('Polyfin/UserItems/Hidden')),
+      resume,
+      api.getJSON(api.getUrl('Polyfin/UserItems/Watchlist')),
+      viewer,
+    ]
+    return Promise.all(asked).then(function (answers) {
+      var item = answers[0] || {}
+      var series = item.SeriesId ? plainId(item.SeriesId) : ''
+      function listed(answer) {
+        var ids = {}
+        ;((answer && answer.Items) || []).forEach(function (listed) {
+          ids[plainId(listed.Id)] = true
+        })
+        return ids
+      }
+      var hidden = listed(answers[1])
+      var resumable = listed(answers[2])
+      var watchlist = answers[3] || {}
+      if (answers[3]) learnWatchlist(answers[3])
+      // A movie, an episode, a season or a series is acted on itself: a
+      // season or a series stands for its entries (whole). A title Polyfin
+      // holds pending, a series none of whose episodes aired, is listed by
+      // its own Id.
+      var whole = item.Type === 'Series' ? 'series' : item.Type === 'Season' ? 'season' : ''
+      var entries = (watchlist.Items || []).map(function (held) {
         return {
-          series: series,
-          hideable: /^(Movie|Video|Series)$/.test(item.Type) || (/^(Season|Episode)$/.test(item.Type) && !!series),
-          hidden: !!(hidden[id] || (series && hidden[series])),
-          resume:
-            cards.length > 0 &&
-            Array.prototype.every.call(cards, function (other) {
-              return resumable[plainId(other.getAttribute('data-id'))]
-            }),
+          id: plainId(held.Id),
+          series: held.SeriesId ? plainId(held.SeriesId) : '',
+          season: held.SeasonId ? plainId(held.SeasonId) : '',
         }
-      },
-    )
+      })
+      var held = entries.filter(function (held) {
+        return held.id === id || (!!whole && held[whole] === id)
+      })
+      var cards = row ? row.querySelectorAll('.card[data-id]') : []
+      return {
+        series: series,
+        hideable: /^(Movie|Video|Series)$/.test(item.Type) || (/^(Season|Episode)$/.test(item.Type) && !!series),
+        hidden: !!(hidden[id] || (series && hidden[series])),
+        // The watchlist's entries are movies and episodes: a movie or an
+        // episode is on it when it is an entry, a season or a series when
+        // an episode of it is.
+        watchable: /^(Movie|Series|Season|Episode)$/.test(item.Type),
+        watchlisted: held.length > 0,
+        watchlist: {
+          title: id,
+          whole: whole,
+          series: whole === 'series' ? id : series,
+          season: whole === 'season' ? id : item.SeasonId ? plainId(item.SeasonId) : '',
+          ids: [id].concat(
+            held.map(function (held) {
+              return held.id
+            })
+          ),
+        },
+        resume:
+          cards.length > 0 &&
+          Array.prototype.every.call(cards, function (other) {
+            return resumable[plainId(other.getAttribute('data-id'))]
+          }),
+        nextUp: item.Type === 'Episode' && series ? nextUp : '',
+        // A movie or an episode, for a user who may start a SyncPlay group
+        // where jellyfin-web offers SyncPlay (see the header).
+        together:
+          /^(Movie|Episode)$/.test(item.Type) && !!answers[4] && mayStartGroups(answers[4]) && syncPlayOffered()
+            ? answers[4]
+            : null,
+      }
+    })
+  }
+  function mayStartGroups(user) {
+    return !!user.Policy && user.Policy.SyncPlayAccess === 'CreateAndJoinGroups'
+  }
+  // syncPlayOffered tells whether jellyfin-web shows its SyncPlay button,
+  // from which the others join: in the default layout's top bar, or the
+  // legacy layouts' header.
+  function syncPlayOffered() {
+    return !!document.querySelector('button[aria-controls="app-sync-play-menu"], .headerSyncButton:not(.hide)')
   }
   // extendMenu adds the entries to the item menu a dialog container holds,
   // when it opens for the item aimed at, once Polyfin answered.
@@ -1461,7 +2900,7 @@
       .then(function (facts) {
         var scroller = sheet.querySelector('.actionSheetScroller')
         var model = scroller && scroller.querySelector('.actionSheetMenuItem')
-        if (!container.isConnected || !model) return
+        if (!attached(container) || !model) return
         if (facts.resume) {
           scroller.appendChild(
             menuItem(container, model, 'playlist_remove', say('removeResume'), function () {
@@ -1471,17 +2910,30 @@
                 keepDrop({ kind: 'resume', id: entry.id, last: Date.parse((data && data.LastPlayedDate) || '') || 0 })
                 dropCards(entry.card ? [entry.card] : [])
               })
-            }),
+            })
+          )
+        }
+        if (facts.nextUp) {
+          scroller.appendChild(
+            menuItem(container, model, 'remove_from_queue', say('removeNextUp'), function () {
+              act(entry.id, 'DELETE', 'NextUp', function () {
+                keepDrop({ kind: 'nextup', id: facts.series, at: Date.now() })
+                // A series' page keeps its next episode: only Next Up's
+                // lists leave the series out.
+                if (facts.nextUp === 'list' && entry.card) dropCards([entry.card])
+                toast(say('removedNextUp'))
+              })
+            })
           )
         }
         if (facts.hideable && facts.hidden) {
           scroller.appendChild(
             menuItem(container, model, 'visibility', say('show'), function () {
               act(entry.id, 'DELETE', 'Hidden', function () {
-                forgetHidden([entry.id, facts.series])
+                forgetDrops('hidden', [entry.id, facts.series])
                 toast(say('shown'))
               })
-            }),
+            })
           )
         } else if (facts.hideable) {
           scroller.appendChild(
@@ -1498,14 +2950,79 @@
                 dropCards(cards)
                 toast(say('hidden'))
               })
-            }),
+            })
           )
         }
-        // The menu was placed for its own entries: it moves up as far as
-        // the added ones need.
+        // A movie or an episode goes on the watchlist and off it itself; a
+        // season or a series puts its aired episodes on, and takes every
+        // entry of it off.
+        var listing = facts.watchlist
+        if (facts.watchable && facts.watchlisted) {
+          scroller.appendChild(
+            menuItem(container, model, 'bookmark_remove', say('removeWatchlist'), function () {
+              act(listing.title, 'DELETE', 'Watchlist', function () {
+                keepDrop({
+                  kind: 'watchlist',
+                  id: listing.title,
+                  series: listing.series,
+                  season: listing.season,
+                  whole: listing.whole,
+                  playlist: knownWatchlist(),
+                })
+                var cards = Array.prototype.filter.call(document.querySelectorAll('.card[data-id], .listItem[data-id]'), function (card) {
+                  return listing.ids.indexOf(plainId(card.getAttribute('data-id'))) >= 0 && watchlistRow(card)
+                })
+                if (entry.card && cards.indexOf(entry.card) < 0 && watchlistRow(entry.card)) cards.push(entry.card)
+                dropCards(cards)
+                toast(say('removedWatchlist'))
+              })
+            })
+          )
+        } else if (facts.watchable) {
+          scroller.appendChild(
+            menuItem(container, model, 'bookmark_add', say('addWatchlist'), function () {
+              act(listing.title, 'POST', 'Watchlist', function () {
+                forgetUnlisted(listing)
+                var drop = { kind: 'watchlisted', id: listing.title, playlist: knownWatchlist() }
+                keepDrop(drop)
+                toast(say('addedWatchlist'))
+                // A watchlist the user deleted is made again by the add:
+                // its page is known once Polyfin gives its Id.
+                if (drop.playlist) return
+                var api = window.ApiClient
+                api.getJSON(api.getUrl('Polyfin/UserItems/Watchlist')).then(
+                  quietly(function (answer) {
+                    learnWatchlist(answer)
+                    drop.playlist = knownWatchlist()
+                    saveDrops()
+                  }),
+                  function () {}
+                )
+              })
+            })
+          )
+        }
+        if (facts.together) {
+          scroller.appendChild(
+            menuItem(container, model, 'groups', say('watchTogether'), function () {
+              watchTogether(entry.id, facts.together)
+            })
+          )
+        }
+        // The menu was placed for its own entries: it moves up, and left, as
+        // far as the added ones need, measured without the transform of its
+        // opening animation, which scales it down at first.
         var box = sheet.getBoundingClientRect()
-        if (sheet.style.top && box.bottom > window.innerHeight) {
-          sheet.style.top = Math.max(0, window.innerHeight - box.height) + 'px'
+        var top = parseFloat(sheet.style.top)
+        var tall = sheet.offsetHeight || box.height
+        if (sheet.style.top && top + tall > window.innerHeight) {
+          sheet.style.top = Math.max(0, window.innerHeight - tall) + 'px'
+        }
+        var width = document.documentElement.clientWidth || window.innerWidth
+        var left = parseFloat(sheet.style.left)
+        var wide = sheet.offsetWidth || box.width
+        if (left > 0 && left + wide > width) {
+          sheet.style.left = Math.max(0, width - wide) + 'px'
         }
       })
       .catch(function () {})
@@ -1533,8 +3050,12 @@
         if (dialog && dialog.getAttribute('data-history') === 'true') history.back()
         else container.remove()
         run()
+        // A menu of the selection leaves the selection, as jellyfin-web's
+        // own commands do.
+        var unselect = document.querySelector('.selectionCommandsPanel .btnCloseSelectionPanel')
+        if (unselect) unselect.click()
       }),
-      true,
+      true
     )
     return item
   }
@@ -1546,11 +3067,457 @@
     if (path === 'Resume') request.dataType = 'json'
     api.ajax(request).then(quietly(done), function () {})
   }
+  // The SyncPlay group the page's session is in, as the socket's
+  // SyncPlayGroupUpdate messages tell it, with the user signed in then,
+  // and the title it plays, as its PlayQueue updates tell. Polyfin takes a
+  // session out of its group as its socket closes, as a page loaded again
+  // or another user signing in does.
+  var syncGroup = null
+  function heardGroup(message) {
+    var update = message && message.Data
+    if (!update) return
+    if (update.Type === 'GroupJoined' && update.GroupId) {
+      var api = window.ApiClient
+      syncGroup = { user: api ? api.getCurrentUserId() : '', id: String(update.GroupId), item: '' }
+    } else if (/^(GroupLeft|NotInGroup|GroupDoesNotExist)$/.test(update.Type)) {
+      syncGroup = null
+    } else if (update.Type === 'PlayQueue' && syncGroup && update.Data) {
+      var playing = (update.Data.Playlist || [])[update.Data.PlayingItemIndex]
+      syncGroup.item = playing && playing.ItemId ? plainId(playing.ItemId) : ''
+    }
+  }
+  // Those waiting for jellyfin-web's next ping of its SyncPlay group.
+  var pingWaiters = []
+  function pinged() {
+    var waiters = pingWaiters
+    pingWaiters = []
+    waiters.forEach(function (resolve) {
+      resolve()
+    })
+  }
+  // nextPing resolves at jellyfin-web's next ping, or within milliseconds
+  // at the latest.
+  function nextPing(within) {
+    return new Promise(function (resolve) {
+      pingWaiters.push(resolve)
+      setTimeout(resolve, within)
+    })
+  }
+  // watchTogether starts the title id in a SyncPlay group of host, the
+  // user signed in, paused at its start (see the header), and opens the
+  // picker of the people to invite, or says why it could not. In a group
+  // that plays the title already, it only opens the picker again.
+  function watchTogether(id, host) {
+    var api = window.ApiClient
+    var user = api.getCurrentUserId()
+    var group = syncGroup && syncGroup.user === user ? syncGroup.id : ''
+    if (group && syncGroup.item === id) {
+      pickInvitees(true)
+      return
+    }
+    function send(method, path, body) {
+      var request = { type: method, url: api.getUrl(path) }
+      if (body) {
+        request.data = JSON.stringify(body)
+        request.contentType = 'application/json'
+      }
+      if (method === 'GET' || path === 'SyncPlay/New') request.dataType = 'json'
+      return api.ajax(request)
+    }
+    function refusal(key) {
+      return { refused: key }
+    }
+    api
+      .getJSON(api.getUrl('Polyfin/Items/' + id + '/Versions'))
+      .then(function (progress) {
+        // A title without a known version would not play: jellyfin-web
+        // holds its play buttons meanwhile (see the third).
+        if (progress && progress.Count >= 1 && progress.Known === 0) {
+          throw refusal(progress.Pending > 0 ? 'togetherSearching' : 'none')
+        }
+        // The group the session is in, unless it ended meanwhile.
+        if (!group) return null
+        return send('GET', 'SyncPlay/' + group).then(null, function () {
+          return null
+        })
+      })
+      .then(function (current) {
+        if (current) return current
+        // A new group starts stopped: it tells jellyfin-web to stop, which
+        // jellyfin-web does once its clock is set to the server's, about
+        // a second later, and would stop the title started meanwhile. It
+        // pings the group then, the stop done.
+        var ready = nextPing(10000)
+        var groupName = say('groupName').replace('{name}', function () {
+          return host.Name || ''
+        })
+        return send('POST', 'SyncPlay/New', { GroupName: groupName }).then(function (joined) {
+          return ready.then(function () {
+            return joined
+          })
+        })
+      })
+      .then(function (joined) {
+        group = joined.GroupId
+        return send('POST', 'SyncPlay/SetNewQueue', { PlayingQueue: [id], PlayingItemPosition: 0, StartPositionTicks: 0 })
+      })
+      .then(function () {
+        return send('GET', 'SyncPlay/' + group)
+      })
+      .then(function (current) {
+        // A queue some member may not play leaves the group as it was.
+        if (!current || current.State !== 'Waiting') throw refusal('togetherRefused')
+        return send('POST', 'SyncPlay/Pause')
+      })
+      .then(function () {
+        return pickInvitees(false)
+      })
+      .catch(function (error) {
+        if (error && error.refused) return toast(say(error.refused))
+        if (!error || error.status !== 403 || typeof api.getUser !== 'function') return toast(say('togetherFailed'))
+        // SyncPlay refused: the user's access changed since jellyfin-web
+        // asked for it.
+        return api.getUser(user).then(
+          function (fresh) {
+            var access = fresh && fresh.Policy ? fresh.Policy.SyncPlayAccess : ''
+            toast(say(access === 'None' ? 'togetherOff' : access === 'JoinGroups' ? 'togetherJoinOnly' : 'togetherFailed'))
+          },
+          function () {
+            toast(say('togetherFailed'))
+          }
+        )
+      })
+      .catch(function () {})
+  }
+  // The invitations to watch together (see the header): the picker of the
+  // people the session's group may invite, and the prompt an invitation
+  // shows, each with the element it is and the one focused before.
+  var picker = null
+  var prompt = null
+  // inviteLasts is how long an invitation lasts, as Polyfin keeps it.
+  var inviteLasts = 300000
+  // pickInvitees asks whom the session's group may invite, and opens the
+  // picker with them; again when the entry opens it for a group under
+  // way. With nobody to invite, it says how the others join instead.
+  function pickInvitees(again) {
+    var api = window.ApiClient
+    return api.getJSON(api.getUrl('Polyfin/SyncPlay/Invitees')).then(
+      function (answer) {
+        var people = (answer && answer.Items) || []
+        if (people.length && answer.GroupId) openPicker(String(answer.GroupId), people, again)
+        else if (again) toast(say('inviteNobody'))
+        else toast(say('togetherStarted'), 10000)
+      },
+      function () {
+        if (again) toast(say('inviteFailed'))
+        else toast(say('togetherStarted'), 10000)
+      }
+    )
+  }
+  // closeInvite takes the picker or the prompt off the page, and gives the
+  // focus back when it held it.
+  function closeInvite(shown) {
+    if (!shown) return
+    clearTimeout(shown.timer)
+    var focused = document.activeElement
+    var held = !!focused && typeof shown.node.contains === 'function' && shown.node.contains(focused)
+    if (shown.node.parentNode) shown.node.parentNode.removeChild(shown.node)
+    if (held && shown.restore && typeof shown.restore.focus === 'function') shown.restore.focus()
+  }
+  function inviteButton(className, text) {
+    var made = element('button', 'emby-button raised ' + className, text)
+    made.setAttribute('type', 'button')
+    return made
+  }
+  // inviteKeys keeps the keyboard in a dialog: Tab and the arrows move
+  // between its controls, as a remote's arrows do, Enter ticks a box, and
+  // Escape runs leave. From the dialog itself, which the prompt focuses,
+  // every one of them goes to the first control, the one that declines:
+  // no single key leads from the page to Join. jellyfin-web hears none of
+  // these keys meanwhile.
+  function inviteKeys(dialog, leave) {
+    dialog.addEventListener(
+      'keydown',
+      quietly(function (event) {
+        var key = event.key
+        var focused = document.activeElement
+        if (key === 'Escape' || key === 'Esc') {
+          leave()
+        } else if (key === 'Enter' && focused && focused.type === 'checkbox') {
+          focused.click()
+        } else if (key === 'Tab' || /^(Arrow)?(Up|Down|Left|Right)$/.test(key)) {
+          var stops = Array.prototype.filter.call(dialog.querySelectorAll('input, button'), function (stop) {
+            return !stop.disabled
+          })
+          var at = stops.indexOf(focused)
+          var back = key === 'Tab' ? !!event.shiftKey : /Up|Left/.test(key)
+          var next = at < 0 ? stops[0] : stops[(at + (back ? stops.length - 1 : 1)) % stops.length]
+          if (next) next.focus()
+        } else {
+          return
+        }
+        event.preventDefault()
+        event.stopPropagation()
+      })
+    )
+  }
+  // openPicker lists people, whom the group may invite, each with a box to
+  // tick, Invite, and Skip, which says how the others join instead.
+  function openPicker(group, people, again) {
+    closeInvite(picker)
+    inviteStyle()
+    var send = inviteButton('button-submit polyfinInviteSend', say('inviteSend'))
+    var skip = inviteButton('button-cancel polyfinInviteSkip', say('inviteSkip'))
+    send.disabled = true
+    var boxes = people.map(function (person) {
+      var box = document.createElement('input')
+      box.setAttribute('type', 'checkbox')
+      box.type = 'checkbox'
+      box.addEventListener(
+        'change',
+        quietly(function () {
+          send.disabled = !boxes.some(function (other) {
+            return other.checked
+          })
+        })
+      )
+      return box
+    })
+    var list = element(
+      'div',
+      'polyfinInviteList',
+      people.map(function (person, i) {
+        return element('label', 'polyfinInvitee', [boxes[i], element('span', 'polyfinInviteName', String(person.Name || ''))])
+      })
+    )
+    var heading = element('h2', 'polyfinInviteTitle', say('watchTogether'))
+    heading.id = 'polyfinInviteTitle'
+    var text = element('p', 'polyfinInviteText', say(again ? 'inviteMore' : 'inviteIntro'))
+    text.id = 'polyfinInviteText'
+    var dialog = element('div', 'polyfinInvite', [heading, text, list, element('div', 'polyfinInviteButtons', [skip, send])])
+    dialog.setAttribute('role', 'dialog')
+    dialog.setAttribute('aria-modal', 'true')
+    dialog.setAttribute('aria-labelledby', 'polyfinInviteTitle')
+    dialog.setAttribute('aria-describedby', 'polyfinInviteText')
+    var backdrop = element('div', 'polyfinInviteBackdrop', [dialog])
+    var shown = (picker = { node: backdrop, restore: document.activeElement, timer: null })
+    function leave() {
+      if (picker !== shown) return
+      picker = null
+      closeInvite(shown)
+      if (!again) toast(say('togetherStarted'), 10000)
+    }
+    skip.addEventListener('click', quietly(leave))
+    backdrop.addEventListener(
+      'click',
+      quietly(function (event) {
+        if (event.target === backdrop) leave()
+      })
+    )
+    send.addEventListener(
+      'click',
+      quietly(function () {
+        var chosen = people.filter(function (person, i) {
+          return boxes[i].checked
+        })
+        if (picker !== shown || !chosen.length) return
+        picker = null
+        closeInvite(shown)
+        sendInvites(group, chosen, again)
+      })
+    )
+    inviteKeys(dialog, leave)
+    document.body.appendChild(backdrop)
+    boxes[0].focus()
+  }
+  // sendInvites invites people to the group, one by one, and says who was
+  // invited, who was invited less than a minute ago, and whether any
+  // invitation failed.
+  function sendInvites(group, people, again) {
+    var api = window.ApiClient
+    var outcomes = []
+    Promise.all(
+      people.map(function (person, i) {
+        var request = {
+          type: 'POST',
+          url: api.getUrl('Polyfin/SyncPlay/Invitations'),
+          data: JSON.stringify({ GroupId: group, UserId: person.Id }),
+          contentType: 'application/json',
+        }
+        return api.ajax(request).then(
+          function () {
+            outcomes[i] = 'sent'
+          },
+          function (error) {
+            outcomes[i] = error && error.status === 429 ? 'soon' : 'failed'
+          }
+        )
+      })
+    ).then(
+      quietly(function () {
+        function names(outcome) {
+          return people
+            .filter(function (person, i) {
+              return outcomes[i] === outcome
+            })
+            .map(function (person) {
+              return person.Name
+            })
+            .join(', ')
+        }
+        var sent = names('sent')
+        var soon = names('soon')
+        if (sent)
+          toast(
+            say(again ? 'invitedMore' : 'invitedSent').replace('{names}', function () {
+              return sent
+            }),
+            again ? 0 : 10000
+          )
+        if (soon)
+          toast(
+            say('invitedSoon').replace('{names}', function () {
+              return soon
+            })
+          )
+        if (outcomes.indexOf('failed') >= 0) toast(say('inviteFailed'))
+      })
+    )
+  }
+  // invited hears a PolyfinSyncPlayInvite: an invitation shows a prompt in
+  // place of any other; its end, joined, declined, expired or its group
+  // ended, closes its prompt.
+  function invited(message) {
+    var invite = message && message.Data
+    if (!invite || !invite.Id) return
+    if (invite.State === 'Invited') {
+      showPrompt(invite)
+    } else if (prompt && prompt.id === String(invite.Id)) {
+      closeInvite(prompt)
+      prompt = null
+    }
+  }
+  // showPrompt shows an invitation: who sent it, the title, Join, which
+  // joins its group as jellyfin-web's SyncPlay menu does, and Not now. It
+  // goes once the invitation lasted, should no end be heard.
+  function showPrompt(invite) {
+    closeInvite(prompt)
+    prompt = null
+    inviteStyle()
+    var id = String(invite.Id)
+    var join = inviteButton('button-submit polyfinInviteJoin', say('inviteJoin'))
+    var later = inviteButton('button-cancel polyfinInviteLater', say('inviteLater'))
+    var heading = element('h2', 'polyfinInviteTitle', say('watchTogether'))
+    heading.id = 'polyfinPromptTitle'
+    var host = say('invitePrompt').replace('{host}', function () {
+      return String(invite.HostName || '')
+    })
+    var text = element('p', 'polyfinInviteText', host)
+    text.id = 'polyfinPromptText'
+    var parts = [heading, text]
+    if (invite.ItemName) {
+      var name = String(invite.ItemName)
+      parts.push(
+        element(
+          'p',
+          'polyfinInviteItem',
+          invite.SeriesName ? [element('span', 'polyfinInviteSeries', String(invite.SeriesName)), element('span', '', name)] : name
+        )
+      )
+    }
+    parts.push(element('div', 'polyfinInviteButtons', [later, join]))
+    var card = element('div', 'polyfinInvite polyfinInvitePrompt', parts)
+    card.setAttribute('role', 'alertdialog')
+    card.setAttribute('aria-labelledby', 'polyfinPromptTitle')
+    card.setAttribute('aria-describedby', 'polyfinPromptText')
+    var shown = (prompt = { id: id, node: card, restore: document.activeElement, timer: null })
+    function done() {
+      if (prompt !== shown) return false
+      prompt = null
+      closeInvite(shown)
+      return true
+    }
+    shown.timer = setTimeout(quietly(done), inviteLasts)
+    function answer(path, body, failed) {
+      var api = window.ApiClient
+      var request = { type: 'POST', url: api.getUrl(path) }
+      if (body) {
+        request.data = JSON.stringify(body)
+        request.contentType = 'application/json'
+      }
+      api.ajax(request).then(null, quietly(failed))
+    }
+    join.addEventListener(
+      'click',
+      quietly(function () {
+        if (!done()) return
+        answer('SyncPlay/Join', { GroupId: invite.GroupId }, function () {
+          toast(say('joinFailed'))
+        })
+      })
+    )
+    function decline() {
+      if (done()) answer('Polyfin/SyncPlay/Invitations/' + id + '/Decline', null, function () {})
+    }
+    later.addEventListener('click', quietly(decline))
+    inviteKeys(card, decline)
+    document.body.appendChild(card)
+    // The card takes the focus, not Join: a key meant for the page then
+    // answers nothing until the user moves to a button. It leaves the
+    // focus alone in a field being typed in, or while a video plays.
+    card.tabIndex = -1
+    if (!busy()) card.focus()
+  }
+  // busy tells whether the user is typing in a field or watching a video,
+  // when a prompt nobody asked for leaves the focus where it is.
+  function busy() {
+    var focused = document.activeElement
+    if (focused && (focused.isContentEditable || /^(INPUT|TEXTAREA|SELECT)$/.test(focused.tagName || ''))) return true
+    var videos = document.querySelectorAll('video')
+    for (var i = 0; i < videos.length; i++) {
+      if (!videos[i].paused && !videos[i].ended) return true
+    }
+    return false
+  }
+  // inviteStyle adds the look of the picker and the prompt, once: a panel
+  // in the middle of a dimmed page for the picker; at the top right for
+  // the prompt, which leaves the page usable, across the bottom on a
+  // narrow screen. Their buttons are jellyfin-web's own.
+  function inviteStyle() {
+    if (document.getElementById('polyfinInviteStyle')) return
+    var sheet = document.createElement('style')
+    sheet.id = 'polyfinInviteStyle'
+    sheet.textContent =
+      '.polyfinInviteBackdrop{position:fixed;top:0;right:0;bottom:0;left:0;z-index:1100;display:flex;align-items:center;' +
+      'justify-content:center;padding:1em;box-sizing:border-box;background:rgba(0,0,0,.6)}' +
+      '.polyfinInvite{box-sizing:border-box;width:26em;max-width:100%;max-height:100%;overflow:auto;padding:1.5em;' +
+      'border-radius:.3em;background:#202020;color:#fff;box-shadow:0 .2em .8em rgba(0,0,0,.6);text-align:left}' +
+      '.polyfinInviteTitle{margin:0 0 .6em;font-size:1.3em;font-weight:500}' +
+      '.polyfinInviteText{margin:0 0 1em;line-height:1.4}' +
+      '.polyfinInviteList{margin:0 0 1.2em;max-height:40vh;overflow:auto}' +
+      '.polyfinInvitee{display:flex;align-items:center;padding:.5em .2em;cursor:pointer}' +
+      '.polyfinInvitee input{flex:none;width:1.3em;height:1.3em;margin:0 .8em 0 0;accent-color:#00a4dc;cursor:pointer}' +
+      '.polyfinInviteName{overflow-wrap:anywhere}' +
+      '.polyfinInviteItem{margin:0 0 1.2em;font-weight:600;overflow-wrap:anywhere}' +
+      '.polyfinInviteSeries{display:block;font-weight:400;opacity:.8}' +
+      '.polyfinInviteButtons{display:flex;flex-wrap:wrap;justify-content:flex-end;align-items:center;margin:-.25em}' +
+      '.polyfinInviteButtons .emby-button{flex:0 1 auto;width:auto;min-width:6em;margin:.25em!important}' +
+      '.polyfinInviteButtons .emby-button[disabled]{opacity:.45;cursor:default}' +
+      '.polyfinInvitePrompt{position:fixed;top:4.5em;right:1em;z-index:1100;width:24em;max-width:calc(100% - 2em)}' +
+      '@media (max-width:40em){.polyfinInvitePrompt{top:auto;right:.5em;bottom:.5em;left:.5em;width:auto;max-width:none}}'
+    document.head.appendChild(sheet)
+  }
   // What the entries took off (see the header), kept in the browser's
   // session storage under dropsKey for dropsKept: jellyfin-web keeps its
   // answers for a minute. Each names the server and user it is for, and
   // the item: taken off Continue Watching (resume), with its last play
-  // then, or hidden (hidden), a series standing for what is in it.
+  // then, hidden (hidden), a series standing for what is in it, a series
+  // taken off Next Up (nextup), with when, or a title taken off the
+  // watchlist (watchlist), with the Id of the watchlist playlist: a movie
+  // or an episode, with its series and season, or a season or a series
+  // with every entry of it (whole: season or series). A title put on the
+  // watchlist (watchlisted), with that Id too, takes nothing off: it has
+  // the watchlist's rows ask Polyfin.
   var dropsKey = 'polyfinDrops'
   var dropsKept = 120000
   var drops = []
@@ -1585,21 +3552,58 @@
     drops.push(drop)
     saveDrops()
   }
-  function forgetHidden(ids) {
+  // forgetDrops forgets the drops of a kind for the items ids.
+  function forgetDrops(kind, ids) {
     drops = drops.filter(function (drop) {
-      return !(drop && drop.kind === 'hidden' && ids.indexOf(drop.id) >= 0)
+      return !(drop && drop.kind === kind && ids.indexOf(drop.id) >= 0)
     })
     saveDrops()
   }
+  // forgetUnlisted forgets the drops of the watchlist that a title put
+  // back on it undoes: the title's own, those of the season or series it
+  // is in, and for a season or a series those of what is in it.
+  function forgetUnlisted(listing) {
+    drops = drops.filter(function (drop) {
+      if (!drop || drop.kind !== 'watchlist') return true
+      if (drop.id === listing.title) return false
+      if (drop.whole && (drop.id === listing.series || drop.id === listing.season)) return false
+      return !(listing.whole && (drop.series === listing.title || drop.season === listing.title))
+    })
+    saveDrops()
+  }
+  // unlists tells whether a drop of the watchlist takes an item off: the
+  // item itself, or what is in a season or a series taken off whole.
+  function unlists(drop, item) {
+    if (plainId(item.Id) === drop.id) return true
+    var whole = drop.whole === 'series' ? item.SeriesId : drop.whole === 'season' ? item.SeasonId : ''
+    return !!whole && plainId(whole) === drop.id
+  }
+  // watchlistChanged tells whether the user signed in put a title on the
+  // watchlist, or took one off, within dropsKept.
+  function watchlistChanged() {
+    var viewer = viewerKey()
+    return liveDrops().some(function (drop) {
+      return drop.viewer === viewer && (drop.kind === 'watchlist' || drop.kind === 'watchlisted')
+    })
+  }
   // screened is a row's answer without what the drops of the user signed
-  // in take off; the answer itself is left as it is.
-  function screened(answer) {
+  // in take off; the answer itself is left as it is. row is the element
+  // that asked, which tells a Next Up list and a row of the watchlist.
+  function screened(answer, row) {
     var viewer = viewerKey()
     var mine = liveDrops().filter(function (drop) {
       return drop.viewer === viewer
     })
     var items = Array.isArray(answer) ? answer : answer && Array.isArray(answer.Items) ? answer.Items : null
     if (!mine.length || !items) return answer
+    var nextUp =
+      mine.some(function (drop) {
+        return drop.kind === 'nextup'
+      }) && nextUpRow(row) === 'list'
+    var watchlist =
+      mine.some(function (drop) {
+        return drop.kind === 'watchlist'
+      }) && watchlistRow(row)
     var resumes =
       items.length > 0 &&
       items.every(function (item) {
@@ -1612,6 +3616,13 @@
           if (drop.kind === 'hidden') {
             return plainId(item.Id) === drop.id || (!!item.SeriesId && plainId(item.SeriesId) === drop.id)
           }
+          if (drop.kind === 'nextup') {
+            // Kept when one of its episodes was played since.
+            var since = Date.parse((item.UserData && item.UserData.LastPlayedDate) || '') || 0
+            return nextUp && !!item.SeriesId && plainId(item.SeriesId) === drop.id && since <= drop.at
+          }
+          if (drop.kind === 'watchlist') return watchlist && unlists(drop, item)
+          if (drop.kind !== 'resume') return false
           var played = Date.parse((item.UserData && item.UserData.LastPlayedDate) || '') || 0
           return resumes && plainId(item.Id) === drop.id && played <= drop.last
         })
@@ -1620,10 +3631,57 @@
     if (kept.length === items.length) return answer
     return Array.isArray(answer) ? kept : Object.assign({}, answer, { Items: kept })
   }
+  // nextUpRow tells where an element stands: in a list of Next Up (list),
+  // the home's section whose title links to the Next Up page, that page,
+  // or the Next Up of a TV library's tab; in the Next Up of a series' page
+  // (series); or elsewhere (empty).
+  function nextUpRow(element) {
+    if (!element || !element.closest) return ''
+    if (element.closest('.nextUpSection')) return 'series'
+    if (element.closest('#nextUpItems')) return 'list'
+    var section = element.closest('.verticalSection')
+    if (section && section.querySelector && section.querySelector('.sectionTitleContainer a[href*="type=nextup"]')) {
+      return 'list'
+    }
+    if (/[?&]type=nextup(?:&|$)/i.test(location.hash) && element.closest('.itemsContainer')) return 'list'
+    return ''
+  }
+  // The Id of the watchlist playlist of the user signed in, as
+  // /Polyfin/UserItems/Watchlist last gave it, empty while they have none;
+  // until it is asked, as the drops of the watchlist kept it, for a page
+  // loaded again.
+  var watchlistPlaylist = null
+  function learnWatchlist(answer) {
+    watchlistPlaylist = { viewer: viewerKey(), id: answer && answer.PlaylistId ? plainId(answer.PlaylistId) : '' }
+  }
+  function knownWatchlist() {
+    var viewer = viewerKey()
+    if (watchlistPlaylist && watchlistPlaylist.viewer === viewer) return watchlistPlaylist.id
+    var kept = liveDrops().filter(function (drop) {
+      return drop.viewer === viewer && drop.playlist
+    })
+    return kept.length > 0 ? kept[kept.length - 1].playlist : ''
+  }
+  // watchlistRow tells whether an element stands in a row of the user's
+  // watchlist: Polyfin's Now available, Still waiting and Watchlist home
+  // rows, or the list of the watchlist playlist's page shown.
+  function watchlistRow(element) {
+    if (!element || !element.closest) return false
+    var custom = element.closest('.polyfinHomeRow')
+    if (custom) return /^(NowAvailable|StillWaiting|Watchlist)$/.test(custom.getAttribute('data-polyfin-kind') || '')
+    return opensWatchlist(location.hash) && !!element.closest('.itemsContainer') && !element.closest('.page.hide')
+  }
+  // opensWatchlist tells whether an address opens the page of the user's
+  // watchlist playlist: #/details?id= it.
+  function opensWatchlist(address) {
+    var match = /^#!?\/details\?(?:[^#]*&)?id=([^&#]*)/i.exec(address || '')
+    var playlist = knownWatchlist()
+    return !!match && !!playlist && plainId(match[1]) === playlist
+  }
   // Every row's fetchData goes through screened, as jellyfin-web sets it on
   // the row: rows are divs, and the script runs before jellyfin-web.
-  if (typeof HTMLDivElement === 'function' && typeof WeakMap === 'function') {
-    var fetchers = new WeakMap()
+  if (typeof HTMLDivElement === 'function') {
+    var fetchers = marks('map', 'Fetcher')
     Object.defineProperty(HTMLDivElement.prototype, 'fetchData', {
       configurable: true,
       get: function () {
@@ -1632,11 +3690,16 @@
       set: function (fetch) {
         if (typeof fetch !== 'function') return fetchers.set(this, fetch)
         fetchers.set(this, function () {
-          var answer = fetch.apply(this, arguments)
+          var row = this
+          listen()
+          var refreshed =
+            row && ((playedRow(row) && Date.now() < freshUntil) || (watchlistRow(row) && watchlistChanged()))
+          var answer = refreshed ? unstale(fetch, row, arguments) : fetch.apply(row, arguments)
           if (!answer || typeof answer.then !== 'function') return answer
           return answer.then(function (got) {
             try {
-              return screened(got)
+              if (row && playedRow(row)) seen.set(row, playState(got))
+              return screened(got, row)
             } catch (error) {
               return got
             }
@@ -1645,23 +3708,93 @@
       },
     })
   }
+  // The home rows jellyfin-web refreshes on a played mark ask Polyfin until
+  // freshUntil (see the header). seen keeps, for each, what the user did
+  // with the items of its last answer: Played and the resume point.
+  var freshFor = 60000
+  var freshUntil = 0
+  var seen = marks('map', 'Seen')
+  // playedRow tells a home row that jellyfin-web refreshes on a played
+  // mark: Next Up's and Continue Watching's.
+  function playedRow(row) {
+    if (!row.closest || !row.closest('.homeSectionsContainer')) return false
+    return (row.getAttribute('data-monitor') || '').split(',').indexOf('markplayed') >= 0
+  }
+  function playState(answer) {
+    var items = Array.isArray(answer) ? answer : answer && Array.isArray(answer.Items) ? answer.Items : []
+    var state = {}
+    items.forEach(function (item) {
+      if (!item || !item.Id) return
+      var data = item.UserData || {}
+      state[plainId(item.Id)] = { played: !!data.Played, position: data.PlaybackPositionTicks || 0 }
+    })
+    return state
+  }
+  // playedChanged refreshes the home rows at once, and has them ask
+  // Polyfin for a minute, when a UserDataChanged message, or the answer of
+  // a played mark the page sent, changes Played or the resume point of one
+  // of their items. What it was told is kept as the item's state, so that
+  // the same change heard both ways, the answer then the message, or the
+  // other way round, refreshes the rows once.
+  function playedChanged(data) {
+    var changes = (data && data.UserDataList) || []
+    var rows = Array.prototype.filter.call(document.querySelectorAll('.homeSectionsContainer .itemsContainer'), playedRow)
+    var changed = false
+    rows.forEach(function (row) {
+      var state = seen.get(row)
+      if (!state) return
+      changes.forEach(function (change) {
+        var was = change && change.ItemId && state[plainId(change.ItemId)]
+        if (!was) return
+        var played = !!change.Played
+        var position = change.PlaybackPositionTicks || 0
+        if (was.played === played && was.position === position) return
+        was.played = played
+        was.position = position
+        changed = true
+      })
+    })
+    if (!changed) return
+    freshUntil = Date.now() + freshFor
+    rows.forEach(function (row) {
+      if (typeof row.notifyRefreshNeeded === 'function') row.notifyRefreshNeeded(true)
+    })
+  }
+  // unstale calls a row's fetchData as if its answers were older than a
+  // minute, jellyfin-web's query client then asking Polyfin (see the
+  // header).
+  function unstale(fetch, row, args) {
+    var now = Date.now
+    Date.now = function () {
+      return now() + freshFor + 1000
+    }
+    try {
+      return fetch.apply(row, args)
+    } finally {
+      Date.now = now
+    }
+  }
   // dropCards takes cards off the page, and hides a home row left empty.
   function dropCards(cards) {
     cards.forEach(function (card) {
       var row = card.closest('.itemsContainer')
       card.remove()
       var section = row && row.closest('.verticalSection')
-      if (section && !row.querySelector('.card')) section.classList.add('hide')
+      if (section && !row.querySelector('.card, .listItem')) section.classList.add('hide')
     })
   }
-  // toast says text as jellyfin-web's toasts do, for 3.3 seconds.
-  function toast(text) {
+  // toast says text as jellyfin-web's toasts do, for 3.3 seconds, or for
+  // lasts milliseconds when given, for a longer text. Clicks pass through
+  // it: a long one lies over the video's Play button, which the group's
+  // host is told to press.
+  function toast(text, lasts) {
     var holder = document.querySelector('.toastContainer')
     if (!holder) {
       holder = element('div', 'toastContainer', '')
       document.body.appendChild(holder)
     }
     var note = element('div', 'toast', text)
+    if (note.style) note.style.pointerEvents = 'none'
     holder.appendChild(note)
     setTimeout(function () {
       note.classList.add('toastVisible')
@@ -1671,7 +3804,7 @@
       setTimeout(function () {
         note.remove()
       }, 300)
-    }, 3300)
+    }, lasts || 3300)
   }
   // The title whose Share is asked about (see the header), the address its
   // button opens once Polyfin says it may be shared, the next ask while
@@ -1682,7 +3815,7 @@
   var shareTimer = null
   var shareWatcher = null
   var shareWatched = null
-  var shareWords = { en: 'Share', fr: 'Partager' }
+  var shareWords = { en: 'Share', fr: 'Partager', de: 'Teilen', es: 'Compartir', it: 'Condividi', pt: 'Compartilhar' }
   // followShare asks whether the title the route opens may be shared, and
   // takes the button off the page of the title it leaves.
   function followShare() {
@@ -1720,7 +3853,7 @@
       .getJSON(api.getUrl('Polyfin/Items/' + id + '/Share'))
       .then(function (answer) {
         if (shareTitle !== id || !answer || answer.Shareable !== true || typeof answer.Url !== 'string') return
-        shareAddress = new URL(answer.Url, location.href).href
+        shareAddress = fromWebClient(resolved(answer.Url))
         showShare()
       })
       .catch(function () {})
@@ -1775,22 +3908,24 @@
   })
   addEventListener('hashchange', follow)
   addEventListener('popstate', follow)
-  // Both run before jellyfin-web's own listeners on the version menu.
+  // These run before jellyfin-web's own listeners on the version menu.
+  addEventListener('change', quietly(choose), true)
   addEventListener('change', quietly(pick), true)
   addEventListener('blur', quietly(leave), true)
+  // jellyfin-web's views tell as they show and hide.
+  addEventListener('viewshow', quietly(dueTracks))
+  addEventListener('viewbeforehide', quietly(hidden))
   // Both run before jellyfin-web follows the link.
   addEventListener('mousedown', quietly(chosenScreen), true)
   addEventListener('click', quietly(chosenScreen), true)
   // Both run before jellyfin-web opens its item menu.
   addEventListener('click', quietly(aim), true)
   addEventListener('contextmenu', quietly(aim), true)
-  if (document.body) {
-    watchDialogs()
-    watchMenus()
-  } else {
-    addEventListener('DOMContentLoaded', watchDialogs)
-    addEventListener('DOMContentLoaded', watchMenus)
-  }
+  // jellyfin-web draws its menus anew, which the page's changes tell (see
+  // the header's start).
+  document.addEventListener('polyfinpagechange', placeEntries)
+  if (document.body) watchDialogs()
+  else addEventListener('DOMContentLoaded', watchDialogs)
   follow()
 })()
 ;(function () {
@@ -1886,20 +4021,27 @@
     return sections
   }
   // shownRows returns the rows of the answer without the titles the item
-  // menus hid meanwhile (see the tenth): those the tenth keeps in the
-  // session storage under polyfinDrops for the user signed in, until they
-  // expire, a hidden series taking its items with it. A row left without
-  // a title is left out. Storage that fails, or holds anything else, hides
-  // nothing.
+  // menus hid meanwhile (see the tenth), and without those they took off
+  // the watchlist in the rows of the watchlist (Now available and Still
+  // waiting): those the tenth keeps in the session storage under
+  // polyfinDrops for the user signed in, until they expire, a hidden series
+  // taking its items with it, as a season or a series taken off the
+  // watchlist takes its episodes. A row left without a title is left out.
+  // Storage that fails, or holds anything else, hides nothing.
   function shownRows() {
     var api = window.ApiClient
     var viewer = (typeof api.serverId === 'function' ? api.serverId() : '') + '/' + (api.getCurrentUserId() || '')
     var hidden = {}
+    var unlisted = {}
+    var unlistedWhole = { series: {}, season: {} }
     try {
       var drops = JSON.parse(window.sessionStorage.getItem('polyfinDrops'))
       if (Array.isArray(drops)) {
         drops.forEach(function (drop) {
-          if (drop && drop.kind === 'hidden' && drop.viewer === viewer && drop.until > Date.now()) hidden[drop.id] = true
+          if (!drop || drop.viewer !== viewer || !(drop.until > Date.now())) return
+          if (drop.kind === 'hidden') hidden[drop.id] = true
+          if (drop.kind === 'watchlist') unlisted[drop.id] = true
+          if (drop.kind === 'watchlist' && unlistedWhole[drop.whole]) unlistedWhole[drop.whole][drop.id] = true
         })
       }
     } catch (error) {}
@@ -1910,7 +4052,16 @@
     }
     return answer.rows
       .map(function (row) {
+        var watchlist = row.Kind === 'NowAvailable' || row.Kind === 'StillWaiting' || row.Kind === 'Watchlist'
         var items = (row.Items || []).filter(function (item) {
+          if (
+            watchlist &&
+            (unlisted[plain(item.Id)] ||
+              (item.SeriesId && unlistedWhole.series[plain(item.SeriesId)]) ||
+              (item.SeasonId && unlistedWhole.season[plain(item.SeasonId)]))
+          ) {
+            return false
+          }
           return !hidden[plain(item.Id)] && !(item.SeriesId && hidden[plain(item.SeriesId)])
         })
         return Object.assign({}, row, { Items: items })
@@ -1920,17 +4071,24 @@
       })
   }
   // drawn tells whether the container holds every row shown, each with all
-  // its titles.
+  // its titles. Rows are found by their identifiers: draw puts them in the
+  // order of their places, which may not be the order of the answer.
   function drawn(container) {
     var rows = shownRows()
-    var drawnRows = []
+    var drawnRows = {}
+    var count = 0
     for (var i = 0; i < container.children.length; i++) {
-      if (container.children[i].classList.contains('polyfinHomeRow')) drawnRows.push(container.children[i])
+      var child = container.children[i]
+      if (child.classList.contains('polyfinHomeRow')) {
+        drawnRows[child.getAttribute('data-polyfin-row')] = child
+        count++
+      }
     }
     return (
-      drawnRows.length === rows.length &&
-      drawnRows.every(function (element, i) {
-        return element.querySelectorAll('.card').length === rows[i].Items.length
+      count === rows.length &&
+      rows.every(function (row) {
+        var element = drawnRows[row.Id]
+        return !!element && element.querySelectorAll('.card').length === row.Items.length
       })
     )
   }
@@ -1974,17 +4132,20 @@
     return made('span', 'material-icons ' + (className ? className + ' ' : '') + name, { 'aria-hidden': 'true' })
   }
   // rowElement draws a row as jellyfin-web draws a library's row of
-  // latest items.
+  // latest items, with its Kind, which tells the tenth a row of the
+  // watchlist.
   function rowElement(row) {
     var api = window.ApiClient
     var server = typeof api.serverId === 'function' ? api.serverId() : ''
+    // A row of a playlist opens the playlist's page, as its card would.
+    var more = row.PlaylistId
+      ? '#/details?id=' + encodeURIComponent(row.PlaylistId) + '&serverId=' + encodeURIComponent(server)
+      : '#/list?parentId=' + encodeURIComponent(row.Id) + '&serverId=' + encodeURIComponent(server)
     var title = made('div', 'sectionTitleContainer sectionTitleContainer-cards padded-left', {}, [
-      made(
-        'a',
-        'more button-flat button-flat-mini sectionTitleTextButton emby-button',
-        { is: 'emby-linkbutton', href: '#/list?parentId=' + encodeURIComponent(row.Id) + '&serverId=' + encodeURIComponent(server) },
-        [made('h2', 'sectionTitle sectionTitle-cards', {}, [row.Name]), icon('chevron_right')],
-      ),
+      made('a', 'more button-flat button-flat-mini sectionTitleTextButton emby-button', { is: 'emby-linkbutton', href: more }, [
+        made('h2', 'sectionTitle sectionTitle-cards', {}, [row.Name]),
+        icon('chevron_right'),
+      ]),
     ])
     var cards = (row.Items || []).map(function (item, index) {
       return card(api, server, item, index)
@@ -1994,15 +4155,20 @@
       'div',
       'padded-top-focusscale padded-bottom-focusscale emby-scroller',
       { is: 'emby-scroller', 'data-centerfocus': 'true' },
-      [items],
+      [items]
     )
-    return made('div', 'verticalSection emby-scroller-container polyfinHomeRow', { 'data-polyfin-row': row.Id }, [title, scroller])
+    var attributes = { 'data-polyfin-row': row.Id, 'data-polyfin-kind': row.Kind || '' }
+    return made('div', 'verticalSection emby-scroller-container polyfinHomeRow', attributes, [title, scroller])
   }
-  // card draws a title as jellyfin-web's cards of a row of posters.
+  // card draws a title as jellyfin-web's cards of a row of posters. An
+  // episode shows its series' poster, the series' name, then its season
+  // and episode numbers before its own name, as jellyfin-web shows one.
   function card(api, server, item, index) {
     var link = '#/details?id=' + encodeURIComponent(item.Id) + '&serverId=' + encodeURIComponent(server)
     var data = item.UserData || {}
-    var tag = item.ImageTags && item.ImageTags.Primary
+    var episode = item.Type === 'Episode'
+    var poster = episode && item.SeriesId && item.SeriesPrimaryImageTag
+    var tag = poster ? item.SeriesPrimaryImageTag : item.ImageTags && item.ImageTags.Primary
     var image = made('a', 'cardImageContainer coveredImage cardContent itemAction', {
       href: link,
       'data-action': 'link',
@@ -2010,10 +4176,16 @@
       role: 'img',
     })
     if (tag) {
-      var url = api.getScaledImageUrl(item.Id, { type: 'Primary', fillHeight: 407, fillWidth: 272, quality: 96, tag: tag })
+      var url = api.getScaledImageUrl(poster ? item.SeriesId : item.Id, {
+        type: 'Primary',
+        fillHeight: 407,
+        fillWidth: 272,
+        quality: 96,
+        tag: tag,
+      })
       image.style.backgroundImage = 'url("' + url + '")'
     } else {
-      image.appendChild(icon(item.Type === 'Series' ? 'tv' : item.Type === 'BoxSet' ? 'folder' : 'movie', 'cardImageIcon'))
+      image.appendChild(icon(item.Type === 'Series' || episode ? 'tv' : item.Type === 'BoxSet' ? 'folder' : 'movie', 'cardImageIcon'))
     }
     if (data.UnplayedItemCount) {
       image.appendChild(
@@ -2021,7 +4193,7 @@
           made('div', 'countIndicator indicator', {}, [
             String(Math.min(data.UnplayedItemCount, 99)) + (data.UnplayedItemCount > 99 ? '+' : ''),
           ]),
-        ]),
+        ])
       )
     } else if (data.Played) {
       image.appendChild(made('div', 'cardIndicators', {}, [made('div', 'playedIndicator indicator', {}, [icon('check', 'indicatorIcon')])]))
@@ -2030,7 +4202,7 @@
       var bar = made('div', 'itemProgressBarForeground')
       bar.style.width = data.PlayedPercentage + '%'
       image.appendChild(
-        made('div', 'innerCardFooter fullInnerCardFooter innerCardFooterClear', {}, [made('div', 'itemProgressBar', {}, [bar])]),
+        made('div', 'innerCardFooter fullInnerCardFooter innerCardFooterClear', {}, [made('div', 'itemProgressBar', {}, [bar])])
       )
     }
     var overlay = made('div', 'cardOverlayContainer itemAction', { 'data-action': 'link' }, [
@@ -2042,7 +4214,7 @@
           type: 'button',
           'data-action': 'resume',
         },
-        [icon('play_arrow', 'cardOverlayButtonIcon cardOverlayButtonIcon-hover')],
+        [icon('play_arrow', 'cardOverlayButtonIcon cardOverlayButtonIcon-hover')]
       ),
       made('div', 'cardOverlayButton-br flex', {}, [
         made(
@@ -2053,16 +4225,20 @@
             type: 'button',
             'data-action': 'menu',
           },
-          [icon('more_vert', 'cardOverlayButtonIcon cardOverlayButtonIcon-hover')],
+          [icon('more_vert', 'cardOverlayButtonIcon cardOverlayButtonIcon-hover')]
         ),
       ]),
     ])
+    var numbered =
+      item.ParentIndexNumber != null && item.IndexNumber != null
+        ? 'S' + item.ParentIndexNumber + ':E' + item.IndexNumber + ' - ' + (item.Name || '')
+        : item.Name || ''
+    var first = episode && item.SeriesName ? item.SeriesName : item.Name || ''
+    var second = episode && item.SeriesName ? numbered : item.ProductionYear ? String(item.ProductionYear) : '\u00a0'
     var name = made('div', 'cardText cardTextCentered cardText-first', {}, [
-      made('bdi', '', {}, [made('a', 'itemAction textActionButton', { href: link, 'data-action': 'link' }, [item.Name || ''])]),
+      made('bdi', '', {}, [made('a', 'itemAction textActionButton', { href: link, 'data-action': 'link' }, [first])]),
     ])
-    var year = made('div', 'cardText cardTextCentered cardText-secondary', {}, [
-      made('bdi', '', {}, [item.ProductionYear ? String(item.ProductionYear) : '\u00a0']),
-    ])
+    var year = made('div', 'cardText cardTextCentered cardText-secondary', {}, [made('bdi', '', {}, [second])])
     return made(
       'div',
       'card overflowPortraitCard card-hoverable card-withuserdata',
@@ -2081,17 +4257,18 @@
           name,
           year,
         ]),
-      ],
+      ]
     )
   }
-  // watch checks the page as jellyfin-web changes it, the route included.
+  // watch checks the page as jellyfin-web changes it (see the header's
+  // start), the route included.
   function watch() {
     function checked() {
       try {
         check()
       } catch (error) {}
     }
-    new MutationObserver(checked).observe(document.body, { childList: true, subtree: true })
+    document.addEventListener('polyfinpagechange', checked)
     addEventListener('hashchange', checked)
     addEventListener('popstate', checked)
     checked()
@@ -2124,10 +4301,58 @@
       more: 'Autres rappels',
       remove: 'Supprimer le rappel',
       everyAiring: 'Vous rappelle chaque diffusion vers ',
-      noTarget: 'Aucune de vos cibles ne reçoit encore les rappels : choisissez « Début d’une émission » pour l’une d’elles dans ',
+      noTarget: 'Aucune de vos cibles ne reçoit encore les rappels\u202f: choisissez «\u202fDébut d’une émission\u202f» pour l’une d’elles dans ',
       notifications: 'Mon compte › Notifications',
-      added: 'Rappel prévu : vous serez prévenu avant le début.',
+      added: 'Rappel prévu\u202f: vous serez prévenu avant le début.',
       removed: 'Rappel supprimé.',
+    },
+    de: {
+      remind: 'Erinnern',
+      set: 'Erinnerung gesetzt',
+      every: 'An jede Ausstrahlung erinnern',
+      more: 'Weitere Erinnerungen',
+      remove: 'Erinnerung entfernen',
+      everyAiring: 'Erinnert dich an jede Ausstrahlung gegen ',
+      noTarget: 'Noch keines deiner Ziele erhält Erinnerungen: Wähle „Sendung beginnt“ für eines davon unter ',
+      notifications: 'Mein Konto › Benachrichtigungen',
+      added: 'Erinnerung gesetzt: Du wirst vor dem Beginn benachrichtigt.',
+      removed: 'Erinnerung entfernt.',
+    },
+    es: {
+      remind: 'Recordármelo',
+      set: 'Recordatorio programado',
+      every: 'Recordarme cada emisión',
+      more: 'Más recordatorios',
+      remove: 'Quitar el recordatorio',
+      everyAiring: 'Le recuerda cada emisión hacia las ',
+      noTarget: 'Ninguno de sus destinos recibe todavía recordatorios: elija «Programa a punto de empezar» para uno de ellos en ',
+      notifications: 'Mi cuenta › Notificaciones',
+      added: 'Recordatorio programado: se le avisará antes de que empiece.',
+      removed: 'Recordatorio quitado.',
+    },
+    it: {
+      remind: 'Ricordamelo',
+      set: 'Promemoria impostato',
+      every: 'Ricordami ogni messa in onda',
+      more: 'Altri promemoria',
+      remove: 'Rimuovi il promemoria',
+      everyAiring: 'Ti ricorda ogni messa in onda verso le ',
+      noTarget: 'Nessuna delle tue destinazioni riceve ancora i promemoria: scegli «Programma in partenza» per una di esse in ',
+      notifications: 'Il mio account › Notifiche',
+      added: 'Promemoria impostato: riceverai un avviso prima dell’inizio.',
+      removed: 'Promemoria rimosso.',
+    },
+    pt: {
+      remind: 'Lembrar-me',
+      set: 'Lembrete definido',
+      every: 'Lembrar-me de cada exibição',
+      more: 'Mais lembretes',
+      remove: 'Remover o lembrete',
+      everyAiring: 'Lembra você de cada exibição por volta das ',
+      noTarget: 'Nenhum dos seus destinos recebe lembretes ainda: escolha “Programa começando” para um deles em ',
+      notifications: 'Minha conta › Notificações',
+      added: 'Lembrete definido: você será avisado antes do início.',
+      removed: 'Lembrete removido.',
     },
   }
   function language() {
@@ -2138,15 +4363,16 @@
   }
   // The programme whose page is followed, how it stands as Polyfin last
   // answered, whether it was asked, whether a change is under way, the
-  // buttons drawn and the answer they were drawn for, and the observer of
-  // the document while the page is followed.
+  // buttons drawn and the answer they were drawn for, and whether the
+  // page's changes are followed, as they are while the page is (see the
+  // header's start).
   var program = ''
   var state = null
   var asked = false
   var busy = false
   var drawn = null
   var drawnFor = null
-  var watcher = null
+  var watching = false
   function quietly(listener) {
     return function () {
       try {
@@ -2171,16 +4397,27 @@
     busy = false
     undraw()
     if (!id) {
-      if (watcher) watcher.disconnect()
-      watcher = null
+      if (watching) document.removeEventListener('polyfinpagechange', placed)
+      watching = false
       return
     }
-    if (!watcher && document.body) {
-      watcher = new MutationObserver(quietly(place))
-      watcher.observe(document.body, { childList: true, subtree: true })
+    // The script runs in the page's head: a page opened on a programme's
+    // address has no body yet, which watch waits for.
+    if (document.body) watch()
+    else addEventListener('DOMContentLoaded', quietly(watch))
+  }
+  // watch follows the page's changes while a programme's page is followed,
+  // and looks at the page.
+  function watch() {
+    if (!program || !document.body) return
+    if (!watching) {
+      watching = true
+      document.addEventListener('polyfinpagechange', placed)
     }
     place()
   }
+  // place as it listens to the page's changes.
+  var placed = quietly(place)
   // undraw takes the buttons off.
   function undraw() {
     if (drawn && drawn.parentNode) drawn.parentNode.removeChild(drawn)
@@ -2205,8 +4442,8 @@
     fields.parentNode.insertBefore(drawn, fields.nextSibling)
   }
   // ask asks Polyfin how the programme id stands: an item that is not a
-  // programme of the user's guide, or a user without Live TV, gets no
-  // answer, and no button.
+  // programme of the user's guide, or a user without Live TV, gets an
+  // empty answer, which getJSON fails to read, and no button.
   function ask(id) {
     var api = window.ApiClient
     if (!api) return
@@ -2217,7 +4454,7 @@
         state = answer
         place()
       }),
-      function () {},
+      function () {}
     )
   }
   // button makes a button styled as jellyfin-web's record buttons.
@@ -2276,7 +4513,7 @@
           menu.classList.toggle('hide', !open)
           more.setAttribute('aria-expanded', open ? 'true' : 'false')
           if (open) every.focus()
-        }),
+        })
       )
       row.appendChild(more)
       row.appendChild(menu)
@@ -2292,7 +4529,23 @@
       var hint = note(say('noTarget'))
       var link = document.createElement('a')
       link.className = 'polyfinReminderLink'
-      link.href = new URL('..' + (state.NotificationsUrl || '/admin/me/account#notifications'), location.href).href
+      // Marked as opened from the web client, as the script's other links
+      // to the admin app are (see fromWebClient). The server names the page
+      // from its root, /admin/…: the web client's folder is one below it,
+      // or below Polyfin's base path. Written by hand, as the script writes
+      // its addresses (see adminAddress).
+      var page = location.href.split('#')[0].split('?')[0]
+      var path = (state.NotificationsUrl || '/admin/me/account#notifications').replace(/^\/+/, '')
+      var at = path.indexOf('#')
+      var rest = at < 0 ? path : path.slice(0, at)
+      var root = /^[a-z][a-z0-9+.-]*:\/\/[^/]*\//i.exec(page)
+      var above = page.slice(0, page.lastIndexOf('/') + 1).replace(/[^/]+\/$/, '')
+      link.href =
+        (root && above.length < root[0].length ? root[0] : above) +
+        rest +
+        (rest.indexOf('?') < 0 ? '?' : '&') +
+        'from=web' +
+        (at < 0 ? '' : path.slice(at))
       link.textContent = say('notifications')
       hint.appendChild(link)
       hint.appendChild(document.createTextNode('.'))
@@ -2345,7 +4598,7 @@
         busy = false
         drawnFor = null
         place()
-      }),
+      })
     )
   }
   // toast says text as jellyfin-web's toasts do, for 3.3 seconds.
@@ -2415,10 +4668,2271 @@
       if (target && target.closest && target.closest('.polyfinReminderRow')) return
       menu.classList.add('hide')
     }),
-    true,
+    true
   )
   quietly(follow)()
+})()
 
+// Dropping jellyfin-web's kept answers when another user signs in (see the
+// header's fourteenth), on its own: it follows the routes itself.
+;(function () {
+  var keptForKey = 'polyfinKeptFor'
+  // The user, as server/user, the answers jellyfin-web keeps are for.
+  var keptFor = null
+  try {
+    keptFor = window.localStorage.getItem(keptForKey)
+  } catch (error) {}
+  function quietly(listener) {
+    return function (event) {
+      try {
+        listener(event)
+      } catch (error) {}
+    }
+  }
+  // forgetKept deletes jellyfin-web's copy of its cache in IndexedDB, then
+  // empties the cache in memory as a language change does. A browser
+  // without the database has nothing kept: the upgrade that would make it
+  // is aborted, leaving it to jellyfin-web.
+  function forgetKept() {
+    try {
+      var request = indexedDB.open('keyval-store')
+      request.onupgradeneeded = function () {
+        request.transaction.abort()
+      }
+      request.onerror = function (event) {
+        event.preventDefault()
+      }
+      request.onsuccess = function () {
+        var database = request.result
+        try {
+          if (database.objectStoreNames.contains('keyval')) {
+            database.transaction('keyval', 'readwrite').objectStore('keyval').delete('jellyfin-query-cache')
+          }
+        } finally {
+          database.close()
+        }
+      }
+    } catch (error) {}
+    var listeners = ((document._callbacks || {}).LANGUAGE_CHANGE || []).slice()
+    for (var i = 0; i < listeners.length; i++) {
+      try {
+        listeners[i].apply(document, [{ type: 'LANGUAGE_CHANGE' }, document.documentElement.lang])
+      } catch (error) {}
+    }
+  }
+  // signedIn forgets the kept answers when user, signed in, is not the one
+  // they were kept for.
+  function signedIn(user) {
+    if (!user || user === keptFor) return
+    keptFor = user
+    try {
+      window.localStorage.setItem(keptForKey, user)
+    } catch (error) {}
+    forgetKept()
+  }
+  // savedUser is the user jellyfin-web's saved credentials sign in on the
+  // server it used last, as server/user; "" when none.
+  function savedUser() {
+    var servers = JSON.parse(window.localStorage.getItem('jellyfin_credentials') || '{}').Servers || []
+    var last = null
+    for (var i = 0; i < servers.length; i++) {
+      var server = servers[i]
+      if (!server || !server.AccessToken || !server.UserId) continue
+      if (!last || (server.DateLastAccessed || 0) > (last.DateLastAccessed || 0)) last = server
+    }
+    return last ? last.Id + '/' + last.UserId : ''
+  }
+  try {
+    signedIn(savedUser())
+  } catch (error) {}
+  // A user signing in in the page goes with a route change: jellyfin-web
+  // then leaves its sign-in page.
+  function follow() {
+    var api = window.ApiClient
+    var user = api && api.getCurrentUserId()
+    if (user) signedIn((typeof api.serverId === 'function' ? api.serverId() : '') + '/' + user)
+  }
+  ;['pushState', 'replaceState'].forEach(function (name) {
+    var original = history[name]
+    history[name] = function () {
+      var result = original.apply(this, arguments)
+      quietly(follow)()
+      return result
+    }
+  })
+  addEventListener('hashchange', quietly(follow))
+  addEventListener('popstate', quietly(follow))
+  quietly(follow)()
+})()
+
+// The user's recent searches on jellyfin-web's search page (see the
+// header's fifteenth), on their own: they follow the routes themselves.
+;(function () {
+  var route = /^#!?\/search(?:[?#]|$)/i
+  var recentKey = 'polyfinRecentSearches/'
+  var most = 10
+  // removeOne names the button that removes the search in {0}.
+  var searchWords = {
+    en: { title: 'Recent searches', remove: 'Remove', removeOne: 'Remove “{0}”', clear: 'Clear all' },
+    fr: { title: 'Recherches récentes', remove: 'Supprimer', removeOne: 'Supprimer «\u202f{0}\u202f»', clear: 'Tout effacer' },
+    de: { title: 'Letzte Suchen', remove: 'Entfernen', removeOne: '„{0}“ entfernen', clear: 'Alle löschen' },
+    es: { title: 'Búsquedas recientes', remove: 'Eliminar', removeOne: 'Eliminar «{0}»', clear: 'Borrar todo' },
+    it: { title: 'Ricerche recenti', remove: 'Rimuovi', removeOne: 'Rimuovi «{0}»', clear: 'Cancella tutto' },
+    pt: { title: 'Buscas recentes', remove: 'Remover', removeOne: 'Remover “{0}”', clear: 'Limpar tudo' },
+  }
+  function language() {
+    return /^[a-z]*/.exec(String(document.documentElement.lang || '').toLowerCase())[0]
+  }
+  function say(key) {
+    return (searchWords[language()] || searchWords.en)[key]
+  }
+  function quietly(listener) {
+    return function () {
+      try {
+        listener.apply(this, arguments)
+      } catch (error) {}
+    }
+  }
+  // The route's search, trimmed, when last followed, null off the search
+  // page; the search shown with results, with the user it is for, as
+  // { user, query }; the first card of the results and the line that
+  // nothing was found when last looked at; the list drawn and what it was
+  // drawn for; and whether the page's changes are followed, as they are
+  // while the page is (see the header's start).
+  var typed = null
+  var shown = null
+  var shownCard = null
+  var shownNothing = null
+  var drawn = null
+  var drawnFor = ''
+  var watching = false
+  // user is the user signed in, as server/user; "" when none.
+  function user() {
+    var api = window.ApiClient
+    var id = api && api.getCurrentUserId()
+    return id ? (typeof api.serverId === 'function' ? api.serverId() : '') + '/' + id : ''
+  }
+  // params are the parameters of a search route, null for another route.
+  function params(hash) {
+    if (!route.test(hash)) return null
+    var at = hash.indexOf('?')
+    return new RouteParams(at < 0 ? '' : hash.slice(at + 1).split('#')[0])
+  }
+  // RouteParams are a route's parameters, read and written as
+  // URLSearchParams does, which browsers before Chrome 49 lack: the script
+  // runs before jellyfin-web's polyfills. get gives a parameter's first
+  // value, set replaces its first and drops the others, and toString
+  // writes them back.
+  function RouteParams(text) {
+    this.pairs = []
+    var parts = text.split('&')
+    for (var i = 0; i < parts.length; i++) {
+      if (!parts[i]) continue
+      var at = parts[i].indexOf('=')
+      this.pairs.push([decoded(at < 0 ? parts[i] : parts[i].slice(0, at)), at < 0 ? '' : decoded(parts[i].slice(at + 1))])
+    }
+  }
+  RouteParams.prototype.get = function (name) {
+    for (var i = 0; i < this.pairs.length; i++) if (this.pairs[i][0] === name) return this.pairs[i][1]
+    return null
+  }
+  RouteParams.prototype.set = function (name, value) {
+    var kept = []
+    var placed = false
+    for (var i = 0; i < this.pairs.length; i++) {
+      if (this.pairs[i][0] !== name) {
+        kept.push(this.pairs[i])
+      } else if (!placed) {
+        kept.push([name, String(value)])
+        placed = true
+      }
+    }
+    if (!placed) kept.push([name, String(value)])
+    this.pairs = kept
+  }
+  RouteParams.prototype.toString = function () {
+    return this.pairs
+      .map(function (pair) {
+        return encoded(pair[0]) + '=' + encoded(pair[1])
+      })
+      .join('&')
+  }
+  // decoded reads a parameter's name or value, + standing for a space; a
+  // malformed escape leaves it as it is.
+  function decoded(text) {
+    var plain = text.replace(/\+/g, ' ')
+    try {
+      return decodeURIComponent(plain)
+    } catch (error) {
+      return plain
+    }
+  }
+  // encoded writes a parameter's name or value as URLSearchParams does
+  // (application/x-www-form-urlencoded): a space as +, and every character
+  // but letters, digits and *-._ escaped.
+  function encoded(text) {
+    return encodeURIComponent(text)
+      .replace(/[!'()~]/g, function (character) {
+        return '%' + character.charCodeAt(0).toString(16).toUpperCase()
+      })
+      .replace(/%20/g, '+')
+  }
+  // recent are the searches kept for who, newest first.
+  function recent(who) {
+    try {
+      var list = JSON.parse(window.localStorage.getItem(recentKey + who))
+      if (!Array.isArray(list)) return []
+      return list
+        .filter(function (query) {
+          return typeof query === 'string' && query.trim() !== ''
+        })
+        .slice(0, most)
+    } catch (error) {
+      return []
+    }
+  }
+  function save(who, list) {
+    try {
+      if (list.length) window.localStorage.setItem(recentKey + who, JSON.stringify(list))
+      else window.localStorage.removeItem(recentKey + who)
+    } catch (error) {}
+  }
+  // same tells whether two searches are the same words, in any capitals.
+  function same(a, b) {
+    return a.toLowerCase() === b.toLowerCase()
+  }
+  // without is the list without query.
+  function without(list, query) {
+    return list.filter(function (kept) {
+      return !same(kept, query)
+    })
+  }
+  // leave keeps the search shown, at the top, as the user leaves it.
+  function leave() {
+    var search = shown
+    shown = null
+    if (!search) return
+    var list = without(recent(search.user), search.query)
+    list.unshift(search.query)
+    save(search.user, list.slice(0, most))
+  }
+  // follow follows the search page's field, as the route holds it: it
+  // keeps the search shown when the route leaves the page, clears the
+  // field, or holds a search that neither starts with it nor is its start.
+  function follow() {
+    var found = params(location.hash)
+    var query = found ? (found.get('query') || '').trim() : null
+    if (shown) {
+      var a = shown.query.toLowerCase()
+      var b = (query || '').toLowerCase()
+      if (!b || (a.indexOf(b) !== 0 && b.indexOf(a) !== 0)) leave()
+    }
+    typed = query
+    if (query === null) {
+      if (watching) document.removeEventListener('polyfinpagechange', looked)
+      watching = false
+      shownCard = null
+      shownNothing = null
+      undraw()
+      return
+    }
+    // The script runs in the page's head: a page opened on the search
+    // page's address has no body yet, which watch waits for.
+    if (document.body) watch()
+    else addEventListener('DOMContentLoaded', quietly(watch))
+  }
+  // watch follows the page's changes while the search page is followed,
+  // and looks at the page.
+  function watch() {
+    if (typed === null || !document.body) return
+    if (!watching) {
+      watching = true
+      document.addEventListener('polyfinpagechange', looked)
+    }
+    look()
+  }
+  // look as it listens to the page's changes.
+  var looked = quietly(look)
+  function searchPage() {
+    var page = document.getElementById('searchPage')
+    return page && !page.classList.contains('hide') ? page : null
+  }
+  // look notes the field's search as shown when jellyfin-web draws its
+  // results with a card, or drops it when jellyfin-web says that nothing
+  // was found, then lists the recent searches while the field is empty
+  // and jellyfin-web shows no result.
+  function look() {
+    if (typed === null) return
+    var page = searchPage()
+    if (!page) return undraw()
+    var results = page.querySelector('.searchResults')
+    var card = results && results.querySelector('.card')
+    if (card !== shownCard) {
+      shownCard = card
+      var who = user()
+      if (card && typed && who) shown = { user: who, query: typed }
+    }
+    var nothing = page.querySelector('.noItemsMessage')
+    if (nothing !== shownNothing) {
+      shownNothing = nothing
+      if (nothing) shown = null
+    }
+    place(page, !typed && !results && !nothing)
+  }
+  // undraw takes the list off.
+  function undraw() {
+    if (drawn && drawn.parentNode) drawn.parentNode.removeChild(drawn)
+    drawn = null
+    drawnFor = ''
+  }
+  // place puts the list after the field when it is to show, again when
+  // it changes or jellyfin-web draws the page anew.
+  function place(page, empty) {
+    var who = user()
+    var list = empty && who ? recent(who) : []
+    var fields = page.querySelector('.searchFields')
+    if (!list.length || !fields) return undraw()
+    var key = [who, language(), location.hash].concat(list).join('\n')
+    if (drawn && drawnFor === key && drawn.parentNode === fields.parentNode && drawn.previousSibling === fields) return
+    undraw()
+    style()
+    drawn = draw(who, list)
+    drawnFor = key
+    fields.parentNode.insertBefore(drawn, fields.nextSibling)
+  }
+  function made(tag, className, children) {
+    var element = document.createElement(tag)
+    element.className = className
+    ;(children || []).forEach(function (child) {
+      if (typeof child === 'string') element.textContent = child
+      else element.appendChild(child)
+    })
+    return element
+  }
+  // address is the route that searches query again on the search page,
+  // in the page's library, if any.
+  function address(query) {
+    var found = params(location.hash) || new RouteParams('')
+    found.set('query', query)
+    return '#/search?' + found.toString()
+  }
+  // draw makes the list, drawn as jellyfin-web draws the Suggestions:
+  // centred, a heading, then a link for each search, with its button that
+  // removes it, then the button that removes them all. The TV layout
+  // scales the button with the focus, as jellyfin-web's own. A link
+  // chosen gives the focus to the field, as the list leaves with it.
+  function draw(who, list) {
+    var root = document.documentElement
+    var focus = root.classList && root.classList.contains('layout-tv') ? ' show-focus' : ''
+    var entries = made('div', 'polyfinRecentSearchesList padded-left padded-right')
+    list.forEach(function (query) {
+      var link = made('a', 'button-link emby-button polyfinRecentSearchLink' + focus, [query])
+      link.setAttribute('href', address(query))
+      link.addEventListener('click', quietly(focusField))
+      var remove = made('button', 'paper-icon-button-light polyfinRecentSearchRemove' + focus, [
+        made('span', 'material-icons close'),
+      ])
+      remove.firstChild.setAttribute('aria-hidden', 'true')
+      remove.setAttribute('type', 'button')
+      remove.setAttribute(
+        'aria-label',
+        say('removeOne').replace('{0}', function () {
+          return query
+        })
+      )
+      remove.title = say('remove')
+      remove.addEventListener(
+        'click',
+        quietly(function () {
+          forget(who, query)
+        })
+      )
+      entries.appendChild(made('div', 'polyfinRecentSearch', [made('span', 'polyfinRecentSearchItem', [link, remove])]))
+    })
+    var clear = made('button', 'button-link emby-button polyfinRecentSearchesClear' + focus, [say('clear')])
+    clear.setAttribute('type', 'button')
+    clear.addEventListener(
+      'click',
+      quietly(function () {
+        forget(who, null)
+      })
+    )
+    var heading = made('h2', 'sectionTitle padded-left padded-right', [say('title')])
+    return made('div', 'verticalSection polyfinRecentSearches', [made('div', '', [heading]), entries, made('div', '', [clear])])
+  }
+  // forget removes query from who's searches, or all of them for null,
+  // then gives the focus to the next button that removes one, the last
+  // one, or the field when none is left.
+  function forget(who, query) {
+    var list = recent(who)
+    var at = query === null ? 0 : list.indexOf(query)
+    save(who, query === null ? [] : without(list, query))
+    look()
+    var removes = drawn ? drawn.querySelectorAll('.polyfinRecentSearchRemove') : []
+    if (removes.length) removes[Math.min(Math.max(at, 0), removes.length - 1)].focus()
+    else focusField()
+  }
+  function focusField() {
+    var field = document.getElementById('searchTextInput')
+    if (field) field.focus()
+  }
+  // style adds the look of the list, once: the searches centred as the
+  // Suggestions, each button that removes one after its search.
+  function style() {
+    if (document.getElementById('polyfinRecentSearchesStyle')) return
+    var sheet = document.createElement('style')
+    sheet.id = 'polyfinRecentSearchesStyle'
+    sheet.textContent =
+      '.polyfinRecentSearches{text-align:center}' +
+      '.polyfinRecentSearchItem{position:relative;display:inline-block}' +
+      '.polyfinRecentSearchLink,.polyfinRecentSearchesClear{display:inline-block;padding:.5em 1em}' +
+      '.polyfinRecentSearchRemove{position:absolute;top:0;bottom:0;left:100%;margin:0;padding:0 .2em;opacity:.6}' +
+      '.polyfinRecentSearchRemove>.material-icons{font-size:1.2em}' +
+      '.polyfinRecentSearchRemove:hover,.polyfinRecentSearchRemove:focus{opacity:1}' +
+      '.polyfinRecentSearchesClear{margin-top:.3em;opacity:.7}' +
+      '.polyfinRecentSearchesClear:hover,.polyfinRecentSearchesClear:focus{opacity:1}'
+    document.head.appendChild(sheet)
+  }
+  // The router moves through history.pushState and replaceState, which
+  // fire no event; links and typed addresses fire hashchange.
+  ;['pushState', 'replaceState'].forEach(function (name) {
+    var original = history[name]
+    history[name] = function () {
+      var result = original.apply(this, arguments)
+      quietly(follow)()
+      return result
+    }
+  })
+  addEventListener('hashchange', quietly(follow))
+  addEventListener('popstate', quietly(follow))
+  // Closing the tab, or loading another page in it, leaves the search too.
+  addEventListener('pagehide', quietly(leave))
+  quietly(follow)()
+})()
+
+// Titles' ratings on their posters (see the header's sixteenth), on their
+// own: they follow the pointer and the focus.
+;(function () {
+  var titleCard = '.card[data-id]'
+  var titleTypes = { Movie: true, Series: true }
+  // How long an answer is kept, so that turning the ratings on posters on
+  // or off applies within a minute, how long a server that shows none, or
+  // did not answer, is left unasked, and how many titles one request names.
+  var keptFor = 60 * 1000
+  var offFor = 60 * 1000
+  var most = 100
+  // The ratings answered, by identifier, as { at, rating }, rating null for
+  // a title without any, for keptUser; until when not to ask; whether a
+  // request is under way, and the card last met meanwhile.
+  var kept = {}
+  var keptUser = ''
+  var offUntil = 0
+  var asking = false
+  var waiting = null
+  // The icons, MUI's Material Icons (Apache License 2.0) as jellyfin-web
+  // draws its own: a star, a review and a group of people.
+  var icons = {
+    community: 'M12 17.27 18.18 21l-1.64-7.03L22 9.24l-7.19-.61L12 2 9.19 8.63 2 9.24l5.46 4.73L5.82 21z',
+    critics:
+      'M20 2H4c-1.1 0-1.99.9-1.99 2L2 22l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zM6 14v-2.47l6.88-6.88c.2-.2.51-.2.71 0l1.77 1.77c.2.2.2.51 0 .71L8.47 14H6zm12 0h-7.5l2-2H18v2z',
+    audience:
+      'M16 11c1.66 0 2.99-1.34 2.99-3S17.66 5 16 5c-1.66 0-3 1.34-3 3s1.34 3 3 3zm-8 0c1.66 0 2.99-1.34 2.99-3S9.66 5 8 5C6.34 5 5 6.34 5 8s1.34 3 3 3zm0 2c-2.33 0-7 1.17-7 3.5V19h14v-2.5c0-2.33-4.67-3.5-7-3.5zm8 0c-.29 0-.62.02-.97.05 1.16.84 1.97 1.97 1.97 3.45V19h6v-2.5c0-2.33-4.67-3.5-7-3.5z',
+  }
+  // The percent sign as each of jellyfin-web's languages writes it after a
+  // number, "%" for the others.
+  var percents = { fr: '\u00a0%', de: '\u00a0%', es: '\u00a0%' }
+  function percent() {
+    var language = /^[a-z]*/.exec(String(document.documentElement.lang || '').toLowerCase())[0]
+    return percents[language] || '%'
+  }
+  function quietly(listener) {
+    return function () {
+      try {
+        listener.apply(this, arguments)
+      } catch (error) {}
+    }
+  }
+  function plainId(id) {
+    return String(id).replace(/-/g, '').toLowerCase()
+  }
+  // titleOf returns the title card an element is in, null outside one.
+  function titleOf(element) {
+    var card = element && element.closest ? element.closest(titleCard) : null
+    return card && titleTypes[card.getAttribute('data-type')] ? card : null
+  }
+  function known(id, now) {
+    var entry = kept[id]
+    return entry && now - entry.at < keptFor ? entry : null
+  }
+  // arrive follows the pointer and the focus to a title card: it shows the
+  // card's ratings when known, and asks for them otherwise.
+  function arrive(event) {
+    var card = titleOf(event.target)
+    var api = window.ApiClient
+    if (!card || !api || /^#!?\/video(?:[/?#]|$)/i.test(location.hash)) return
+    var user = api.getCurrentUserId() || ''
+    if (!user) return
+    if (user !== keptUser) {
+      kept = {}
+      keptUser = user
+      offUntil = 0
+    }
+    var now = Date.now()
+    var entry = known(plainId(card.getAttribute('data-id')), now)
+    if (entry) return show(card, entry.rating)
+    if (now < offUntil) return
+    if (asking) {
+      waiting = card
+      return
+    }
+    ask(api, user, card, now)
+  }
+  // ask asks for the ratings of card and of the other title cards of the
+  // page not known, those of its row first, 100 at most, then shows them.
+  function ask(api, user, card, now) {
+    var ids = []
+    var row = card.closest('.itemsContainer')
+    var cards = [card]
+      .concat(row ? Array.prototype.slice.call(row.querySelectorAll(titleCard)) : [])
+      .concat(Array.prototype.slice.call(document.querySelectorAll(titleCard)))
+    for (var i = 0; i < cards.length && ids.length < most; i++) {
+      if (!titleTypes[cards[i].getAttribute('data-type')]) continue
+      var id = plainId(cards[i].getAttribute('data-id'))
+      if (ids.indexOf(id) < 0 && !known(id, now)) ids.push(id)
+    }
+    asking = true
+    var done = function () {
+      asking = false
+      var next = waiting
+      waiting = null
+      if (next) quietly(arrive)({ target: next })
+    }
+    api
+      .getJSON(api.getUrl('Polyfin/Items/Ratings', { Ids: ids.join(',') }))
+      .then(
+        quietly(function (answer) {
+          if (keptUser !== user) return
+          var at = Date.now()
+          if (!answer || !answer.Enabled) {
+            offUntil = at + offFor
+            strip()
+            return
+          }
+          ids.forEach(function (id) {
+            kept[id] = { at: at, rating: null }
+          })
+          ;(answer.Items || []).forEach(function (item) {
+            if (item && item.Id) kept[plainId(item.Id)] = { at: at, rating: item }
+          })
+          decorate(at)
+        }),
+        function () {
+          offUntil = Date.now() + offFor
+        }
+      )
+      .then(done, done)
+  }
+  // decorate gives every title card of the page whose ratings are known
+  // its ratings.
+  function decorate(now) {
+    var cards = document.querySelectorAll(titleCard)
+    for (var i = 0; i < cards.length; i++) {
+      if (!titleTypes[cards[i].getAttribute('data-type')]) continue
+      var entry = known(plainId(cards[i].getAttribute('data-id')), now)
+      if (entry) show(cards[i], entry.rating)
+    }
+  }
+  // strip takes every card's ratings away.
+  function strip() {
+    var shown = document.querySelectorAll('.polyfinPosterRatings')
+    for (var i = 0; i < shown.length; i++) if (shown[i].parentNode) shown[i].parentNode.removeChild(shown[i])
+  }
+  // show puts a title's ratings over its card's poster, once.
+  function show(card, rating) {
+    var poster = card.querySelector('.cardScalable')
+    if (!rating || !poster || poster.querySelector('.polyfinPosterRatings')) return
+    var entries = []
+    if (rating.CommunityRating != null) entries.push(['community', Number(rating.CommunityRating).toFixed(1)])
+    if (rating.CriticsScore != null) entries.push(['critics', Math.round(rating.CriticsScore) + percent()])
+    if (rating.AudienceScore != null) entries.push(['audience', Math.round(rating.AudienceScore) + percent()])
+    if (!entries.length) return
+    style()
+    var badge = document.createElement('div')
+    badge.className = 'polyfinPosterRatings'
+    // What the pointer or the focus already reaches: the card names the
+    // title, and its page tells the ratings in words.
+    badge.setAttribute('aria-hidden', 'true')
+    entries.forEach(function (entry) {
+      var score = document.createElement('span')
+      score.className = 'polyfinPosterRating polyfinPosterRating-' + entry[0]
+      var icon = document.createElement('span')
+      icon.className = 'polyfinPosterRatingIcon'
+      icon.innerHTML = '<svg viewBox="0 0 24 24" focusable="false"><path d="' + icons[entry[0]] + '"></path></svg>'
+      score.appendChild(icon)
+      score.appendChild(document.createTextNode(entry[1]))
+      badge.appendChild(score)
+    })
+    poster.appendChild(badge)
+  }
+  // style adds the look of the ratings, once: hidden until the pointer or
+  // the focus comes to the card, above jellyfin-web's hover menu, under a
+  // version count, never in the pointer's way.
+  function style() {
+    if (document.getElementById('polyfinPosterRatingsStyle')) return
+    var sheet = document.createElement('style')
+    sheet.id = 'polyfinPosterRatingsStyle'
+    sheet.textContent =
+      '.polyfinPosterRatings{position:absolute;top:.45em;inset-inline-start:.45em;z-index:3;display:flex;flex-direction:column;' +
+      'align-items:flex-start;gap:.3em;pointer-events:none;opacity:0;transition:opacity .15s ease}' +
+      '.cardScalable:has(.mediaSourceIndicator) .polyfinPosterRatings{top:2.4em}' +
+      '.card:hover .polyfinPosterRatings,.card:focus .polyfinPosterRatings,.card:focus-within .polyfinPosterRatings{opacity:1}' +
+      '.polyfinPosterRating{display:inline-flex;align-items:center;gap:.3em;padding:.2em .5em;border-radius:1em;' +
+      'background:rgba(0,0,0,.68);color:#fff;font-size:.8rem;font-weight:600;line-height:1.25;white-space:nowrap;' +
+      'font-variant-numeric:tabular-nums;-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px)}' +
+      '.polyfinPosterRatingIcon{display:inline-flex}' +
+      '.polyfinPosterRatingIcon svg{width:1.1em;height:1.1em;fill:currentColor}' +
+      '.polyfinPosterRating-community .polyfinPosterRatingIcon{color:#ffc83d}' +
+      '@media (prefers-reduced-motion:reduce){.polyfinPosterRatings{transition:none}}'
+    document.head.appendChild(sheet)
+  }
+  addEventListener('mouseover', quietly(arrive), true)
+  addEventListener('focusin', quietly(arrive), true)
+})()
+
+// Polyfin's line under jellyfin-web's spinner while a torrent starts (see
+// the header's seventeenth), on its own.
+;(function () {
+  var startWords = {
+    en: {
+      looking: 'Finding peers…',
+      finding: 'Finding peers: {found} found, {connected} connected',
+      receiving: 'Receiving the start: {mb} MB from {peers} peers',
+      receivingOne: 'Receiving the start: {mb} MB from 1 peer',
+      failed: 'The torrent did not start: {why}',
+      silent: 'its peers sent nothing',
+      noUdp: 'no peer found, and the route carries no UDP',
+      refused: 'its trackers did not answer',
+      noTrackers: 'the addon named no tracker, and none was found otherwise',
+      noPeers: 'no peer found',
+      route: 'the route for torrents is down',
+      atCap: 'as many torrents play as allowed',
+      infoRefused: 'its list of files is refused',
+    },
+    fr: {
+      looking: 'Recherche de pairs…',
+      finding: 'Recherche de pairs\u202f: {found} trouvés, {connected} connectés',
+      receiving: 'Réception du début\u202f: {mb} Mo depuis {peers} pairs',
+      receivingOne: 'Réception du début\u202f: {mb} Mo depuis 1 pair',
+      failed: 'Le torrent n’a pas démarré\u202f: {why}',
+      silent: 'ses pairs n’ont rien envoyé',
+      noUdp: 'aucun pair trouvé, et la route ne transporte pas l’UDP',
+      refused: 'ses trackers n’ont pas répondu',
+      noTrackers: 'l’addon n’a indiqué aucun tracker, et aucun pair n’a été trouvé autrement',
+      noPeers: 'aucun pair trouvé',
+      route: 'la route des torrents est coupée',
+      atCap: 'autant de torrents sont lus que permis',
+      infoRefused: 'sa liste de fichiers est refusée',
+    },
+    de: {
+      looking: 'Suche nach Peers…',
+      finding: 'Suche nach Peers: {found} gefunden, {connected} verbunden',
+      receiving: 'Empfange den Anfang: {mb} MB von {peers} Peers',
+      receivingOne: 'Empfange den Anfang: {mb} MB von 1 Peer',
+      failed: 'Der Torrent ist nicht gestartet: {why}',
+      silent: 'seine Peers haben nichts gesendet',
+      noUdp: 'kein Peer gefunden, und die Route überträgt kein UDP',
+      refused: 'seine Tracker haben nicht geantwortet',
+      noTrackers: 'das Add-on hat keinen Tracker genannt, und anders wurde kein Peer gefunden',
+      noPeers: 'kein Peer gefunden',
+      route: 'die Route für Torrents ist unterbrochen',
+      atCap: 'es laufen so viele Torrents wie erlaubt',
+      infoRefused: 'seine Dateiliste wird abgelehnt',
+    },
+    es: {
+      looking: 'Buscando pares…',
+      finding: 'Buscando pares: {found} encontrados, {connected} conectados',
+      receiving: 'Recibiendo el inicio: {mb} MB de {peers} pares',
+      receivingOne: 'Recibiendo el inicio: {mb} MB de 1 par',
+      failed: 'El torrent no se inició: {why}',
+      silent: 'sus pares no enviaron nada',
+      noUdp: 'no se encontró ningún par, y la ruta no transporta UDP',
+      refused: 'sus trackers no respondieron',
+      noTrackers: 'la extensión no indicó ningún tracker, y no se encontró ningún par de otro modo',
+      noPeers: 'no se encontró ningún par',
+      route: 'la ruta de los torrents está caída',
+      atCap: 'se reproducen tantos torrents como se permite',
+      infoRefused: 'su lista de archivos es rechazada',
+    },
+    it: {
+      looking: 'Ricerca dei peer…',
+      finding: 'Ricerca dei peer: {found} trovati, {connected} connessi',
+      receiving: 'Ricezione dell’inizio: {mb} MB da {peers} peer',
+      receivingOne: 'Ricezione dell’inizio: {mb} MB da 1 peer',
+      failed: 'Il torrent non è partito: {why}',
+      silent: 'i suoi peer non hanno inviato nulla',
+      noUdp: 'nessun peer trovato, e il percorso non trasporta UDP',
+      refused: 'i suoi tracker non hanno risposto',
+      noTrackers: 'l’add-on non ha indicato nessun tracker, e non è stato trovato nessun peer in altro modo',
+      noPeers: 'nessun peer trovato',
+      route: 'il percorso dei torrent è interrotto',
+      atCap: 'sono in riproduzione tanti torrent quanti consentiti',
+      infoRefused: 'il suo elenco di file è rifiutato',
+    },
+    pt: {
+      looking: 'Procurando peers…',
+      finding: 'Procurando peers: {found} encontrados, {connected} conectados',
+      receiving: 'Recebendo o início: {mb} MB de {peers} peers',
+      receivingOne: 'Recebendo o início: {mb} MB de 1 peer',
+      failed: 'O torrent não começou: {why}',
+      silent: 'seus peers não enviaram nada',
+      noUdp: 'nenhum peer encontrado, e a rota não transporta UDP',
+      refused: 'seus trackers não responderam',
+      noTrackers: 'o complemento não indicou nenhum tracker, e nenhum peer foi encontrado de outro modo',
+      noPeers: 'nenhum peer encontrado',
+      route: 'a rota dos torrents está fora do ar',
+      atCap: 'há tantos torrents em reprodução quanto o permitido',
+      infoRefused: 'sua lista de arquivos é recusada',
+    },
+  }
+  // The words of each failure Polyfin tells.
+  var failures = { silent: 'silent', no_udp: 'noUdp', refused: 'refused', no_trackers: 'noTrackers', no_peers: 'noPeers', route: 'route', at_cap: 'atCap', info_refused: 'infoRefused' }
+  function language() {
+    return /^[a-z]*/.exec(String(document.documentElement.lang || '').toLowerCase())[0]
+  }
+  function say(key) {
+    return (startWords[language()] || startWords.en)[key]
+  }
+  function quietly(listener) {
+    return function () {
+      try {
+        listener.apply(this, arguments)
+      } catch (error) {}
+    }
+  }
+  // The spinner watched, the round of asks while it shows (0 while it does
+  // not), the ask to come, and the line drawn.
+  var watched = null
+  var rounds = 0
+  var polling = 0
+  var timer = null
+  var line = null
+  function spinning() {
+    return !!document.querySelector('.docspinner.mdlSpinnerActive')
+  }
+  // watch follows jellyfin-web's spinner, which it makes at its first
+  // show, then turns on and off by its class.
+  function watch() {
+    var loader = document.querySelector('.docspinner')
+    if (loader && loader !== watched) {
+      watched = loader
+      new MutationObserver(quietly(check)).observe(loader, { attributes: true, attributeFilter: ['class'] })
+    }
+    check()
+  }
+  function check() {
+    if (spinning()) {
+      if (!polling) {
+        polling = ++rounds
+        ask(polling)
+      }
+      return
+    }
+    if (!polling) return
+    polling = 0
+    clearTimeout(timer)
+    timer = null
+    undraw()
+  }
+  function ask(round) {
+    timer = null
+    if (round !== polling) return
+    var api = window.ApiClient
+    if (!api || !api.getCurrentUserId()) return again(round)
+    api
+      .getJSON(api.getUrl('Polyfin/Playback/Starting'))
+      .then(
+        quietly(function (progress) {
+          if (round !== polling) return
+          draw(describe(progress))
+          again(round)
+        }),
+        quietly(function () {
+          if (round === polling) again(round)
+        })
+      )
+      .catch(function () {})
+  }
+  function again(round) {
+    timer = setTimeout(
+      quietly(function () {
+        ask(round)
+      }),
+      1000
+    )
+  }
+  // describe words how the start goes, empty when nothing starts.
+  function describe(progress) {
+    if (!progress || !progress.Stage) return ''
+    if (progress.Stage === 'failed') return say('failed').replace('{why}', say(failures[progress.Failure] || 'noPeers'))
+    if (progress.Stage === 'pieces') {
+      return say(progress.PeersConnected === 1 ? 'receivingOne' : 'receiving')
+        .replace('{mb}', megabytes(progress.Received))
+        .replace('{peers}', String(progress.PeersConnected))
+    }
+    if (!progress.PeersFound) return say('looking')
+    return say('finding').replace('{found}', String(progress.PeersFound)).replace('{connected}', String(progress.PeersConnected))
+  }
+  // megabytes writes bytes in megabytes, with one decimal, as the
+  // language writes numbers.
+  function megabytes(bytes) {
+    var lang = String(document.documentElement.lang || 'en')
+    try {
+      return (bytes / 1e6).toLocaleString(lang, { minimumFractionDigits: 1, maximumFractionDigits: 1 })
+    } catch (error) {
+      return (bytes / 1e6).toFixed(1)
+    }
+  }
+  function draw(text) {
+    if (!text) return undraw()
+    style()
+    if (!line) {
+      line = document.createElement('div')
+      line.className = 'polyfinTorrentStart'
+      line.setAttribute('role', 'status')
+      line.setAttribute('aria-live', 'polite')
+    }
+    if (line.textContent !== text) line.textContent = text
+    if (!line.parentNode) document.body.appendChild(line)
+    place()
+  }
+  // place puts the line under the spinner where it shows: jellyfin-web
+  // centres it in the window, a web theme may move it, as the default
+  // theme does under its header.
+  function place() {
+    var loader = document.querySelector('.docspinner.mdlSpinnerActive')
+    var box = loader && loader.getBoundingClientRect && loader.getBoundingClientRect()
+    if (!box || !box.height || !line.style) return
+    line.style.top = Math.round(box.bottom + 12) + 'px'
+    line.style.left = Math.round(box.left + box.width / 2) + 'px'
+  }
+  function undraw() {
+    if (line && line.parentNode) line.parentNode.removeChild(line)
+  }
+  // style places the line under the spinner as jellyfin-web places it,
+  // centred in the window, 10vh wide and tall, above everything, until
+  // place finds where it shows.
+  function style() {
+    if (document.getElementById('polyfinTorrentStartStyle')) return
+    var sheet = document.createElement('style')
+    sheet.id = 'polyfinTorrentStartStyle'
+    sheet.textContent =
+      '.polyfinTorrentStart{position:fixed;left:50%;top:calc(50% + 7vh);transform:translateX(-50%);z-index:9999999;' +
+      'padding:.35em .9em;border-radius:1em;background:rgba(0,0,0,.65);color:#fff;font-size:1em;line-height:1.4;' +
+      'text-align:center;white-space:nowrap;pointer-events:none}'
+    document.head.appendChild(sheet)
+  }
+  // The script runs from the page's head: the body, where jellyfin-web
+  // puts its spinner, comes later.
+  function start() {
+    new MutationObserver(quietly(watch)).observe(document.body, { childList: true })
+    watch()
+  }
+  if (document.body) quietly(start)()
+  else addEventListener('DOMContentLoaded', quietly(start))
+})()
+
+;(function () {
+  var providerWords = {
+    en: {
+      signIn: 'Sign in with {0}',
+      signingIn: 'Signing in…',
+      refused: 'The sign-in was cancelled.',
+      noAccount: 'No account on this server is linked to your account at the identity provider. If you have an account here, sign in with its password and link it under My account, in the admin app. Otherwise, ask an administrator.',
+      disabled: 'This account is disabled.',
+      hours: 'This account may not sign in at this time.',
+      remote: 'This account may only sign in from the local network.',
+      tooMany: 'Too many attempts. Try again later.',
+      failed: 'The sign-in with the identity provider failed. Try again.',
+    },
+    fr: {
+      signIn: 'Se connecter avec {0}',
+      signingIn: 'Connexion…',
+      refused: 'La connexion a été annulée.',
+      noAccount: 'Aucun compte de ce serveur n’est lié à votre compte chez le fournisseur d’identité. Si vous avez un compte ici, connectez-vous avec son mot de passe et liez-le dans Mon compte, dans l’appli d’administration. Sinon, demandez à un administrateur.',
+      disabled: 'Ce compte est désactivé.',
+      hours: 'Ce compte ne peut pas se connecter à cette heure.',
+      remote: 'Ce compte ne peut se connecter que depuis le réseau local.',
+      tooMany: 'Trop de tentatives. Réessayez plus tard.',
+      failed: 'La connexion avec le fournisseur d’identité a échoué. Réessayez.',
+    },
+    de: {
+      signIn: 'Mit {0} anmelden',
+      signingIn: 'Anmeldung…',
+      refused: 'Die Anmeldung wurde abgebrochen.',
+      noAccount: 'Kein Konto dieses Servers ist mit deinem Konto beim Identitätsanbieter verknüpft. Wenn du hier ein Konto hast, melde dich mit dessen Passwort an und verknüpfe es unter Mein Konto in der Admin-App. Wende dich sonst an einen Administrator.',
+      disabled: 'Dieses Konto ist deaktiviert.',
+      hours: 'Dieses Konto darf sich zu dieser Zeit nicht anmelden.',
+      remote: 'Dieses Konto darf sich nur im lokalen Netzwerk anmelden.',
+      tooMany: 'Zu viele Versuche. Versuche es später erneut.',
+      failed: 'Die Anmeldung beim Identitätsanbieter ist fehlgeschlagen. Versuche es erneut.',
+    },
+    es: {
+      signIn: 'Iniciar sesión con {0}',
+      signingIn: 'Iniciando sesión…',
+      refused: 'Se canceló el inicio de sesión.',
+      noAccount: 'Ninguna cuenta de este servidor está vinculada a su cuenta del proveedor de identidad. Si tiene una cuenta aquí, inicie sesión con su contraseña y vincúlela en Mi cuenta, en la aplicación de administración. Si no, pídaselo a un administrador.',
+      disabled: 'Esta cuenta está desactivada.',
+      hours: 'Esta cuenta no puede iniciar sesión a esta hora.',
+      remote: 'Esta cuenta solo puede iniciar sesión desde la red local.',
+      tooMany: 'Demasiados intentos. Vuelva a intentarlo más tarde.',
+      failed: 'El inicio de sesión con el proveedor de identidad falló. Vuelva a intentarlo.',
+    },
+    it: {
+      signIn: 'Accedi con {0}',
+      signingIn: 'Accesso in corso…',
+      refused: 'L’accesso è stato annullato.',
+      noAccount: 'Nessun account di questo server è collegato al tuo account presso il provider di identità. Se hai un account qui, accedi con la sua password e collegalo in Il mio account, nell’applicazione di amministrazione. Altrimenti, chiedi a un amministratore.',
+      disabled: 'Questo account è disattivato.',
+      hours: 'Questo account non può accedere a quest’ora.',
+      remote: 'Questo account può accedere solo dalla rete locale.',
+      tooMany: 'Troppi tentativi. Riprova più tardi.',
+      failed: 'L’accesso con il provider di identità non è riuscito. Riprova.',
+    },
+    pt: {
+      signIn: 'Entrar com {0}',
+      signingIn: 'Entrando…',
+      refused: 'O login foi cancelado.',
+      noAccount: 'Nenhuma conta deste servidor está vinculada à sua conta no provedor de identidade. Se você tem uma conta aqui, entre com a senha dela e vincule-a em Minha conta, no aplicativo de administração. Caso contrário, peça a um administrador.',
+      disabled: 'Esta conta está desativada.',
+      hours: 'Esta conta não pode entrar neste horário.',
+      remote: 'Esta conta só pode entrar pela rede local.',
+      tooMany: 'Tentativas demais. Tente novamente mais tarde.',
+      failed: 'O login com o provedor de identidade falhou. Tente novamente.',
+    },
+  }
+  // The words for what the server says went wrong; any other, failed.
+  var providerOutcomes = {
+    provider_refused: 'refused',
+    provider_no_account: 'noAccount',
+    account_disabled: 'disabled',
+    outside_allowed_hours: 'hours',
+    outside_local_network: 'remote',
+    too_many_attempts: 'tooMany',
+    signing_in: 'signingIn',
+  }
+  function sayProvider(key) {
+    var language = /^[a-z]*/.exec(String(document.documentElement.lang || '').toLowerCase())[0]
+    return (providerWords[language] || providerWords.en)[key]
+  }
+  if (typeof fetch !== 'function' || typeof localStorage === 'undefined' || !document.querySelectorAll) return
+  var credentialsKey = 'jellyfin_credentials'
+  // provider is the provider /admin/api/status names, null for none;
+  // message what went wrong, or signing_in, "" for nothing.
+  var provider = null
+  var message = ''
+  var outcome = ''
+  try {
+    var address = new URL(location.href)
+    outcome = address.searchParams.get('polyfinProvider') || ''
+    if (outcome) {
+      address.searchParams.delete('polyfinProvider')
+      history.replaceState(history.state, '', address.pathname + address.search + address.hash)
+    }
+  } catch (error) {
+    return
+  }
+  message = outcome === 'signed-in' ? 'signing_in' : outcome
+  function quietly(run) {
+    return function () {
+      try {
+        return run.apply(this, arguments)
+      } catch (error) {
+        return undefined
+      }
+    }
+  }
+  fetch('/admin/api/status', { credentials: 'same-origin' })
+    .then(function (response) {
+      return response.ok ? response.json() : null
+    })
+    .then(
+      quietly(function (status) {
+        var named = status && status.provider
+        provider = named && typeof named.start === 'string' && typeof named.name === 'string' ? named : null
+        follow()
+      })
+    )
+    .catch(function () {})
+  if (outcome === 'signed-in') settle(0)
+  // settle trades the ticket once jellyfin-web drew its first page, or
+  // after 20 seconds.
+  function settle(waited) {
+    if ((/^#!?\//.test(location.hash) && document.querySelector('.page')) || waited >= 20000) return trade()
+    setTimeout(
+      quietly(function () {
+        settle(waited + 250)
+      }),
+      250
+    )
+  }
+  // device is how jellyfin-web names itself: its client's, else what it
+  // keeps in the browser and the browser it runs in.
+  function device() {
+    var api = typeof window !== 'undefined' && window.ApiClient
+    var ask = function (name) {
+      try {
+        return api && typeof api[name] === 'function' ? String(api[name]() || '') : ''
+      } catch (error) {
+        return ''
+      }
+    }
+    var agent = typeof navigator !== 'undefined' ? String(navigator.userAgent || '') : ''
+    var id = ask('deviceId') || localStorage.getItem('_deviceId2')
+    if (!id) {
+      id = btoa(agent + '|' + Date.now()).replace(/=/g, '1')
+      localStorage.setItem('_deviceId2', id)
+    }
+    var browser = /Firefox\//.test(agent)
+      ? 'Firefox'
+      : /Edg\//.test(agent)
+        ? 'Edge Chromium'
+        : /OPR\//.test(agent)
+          ? 'Opera'
+          : /Chrome\//.test(agent)
+            ? 'Chrome'
+            : /Safari\//.test(agent)
+              ? 'Safari'
+              : 'Web Browser'
+    return {
+      client: ask('appName') || 'Jellyfin Web',
+      name: ask('deviceName') || browser,
+      id: id,
+      version: ask('appVersion') || '12.4.0',
+    }
+  }
+  // encode escapes a value of the header once, as jellyfin-web sends it:
+  // its client gives some values escaped already, such as its app's name
+  // (Jellyfin%20Web), which the server takes back once.
+  function encode(value) {
+    try {
+      return encodeURIComponent(decodeURIComponent(value))
+    } catch (error) {
+      return encodeURIComponent(value)
+    }
+  }
+  function trade() {
+    var named = device()
+    var header =
+      'MediaBrowser Client="' +
+      encode(named.client) +
+      '", Device="' +
+      encode(named.name) +
+      '", DeviceId="' +
+      encode(named.id) +
+      '", Version="' +
+      encode(named.version) +
+      '"'
+    fetch('/admin/api/provider/web', { method: 'POST', credentials: 'same-origin', headers: { Authorization: header } })
+      .then(function (response) {
+        return response.json().then(function (body) {
+          return { ok: response.ok, body: body }
+        })
+      })
+      .then(
+        quietly(function (answer) {
+          if (!answer.ok || !answer.body || typeof answer.body.accessToken !== 'string') {
+            message = (answer.body && answer.body.error) || 'failed'
+            return follow()
+          }
+          keep(answer.body)
+          location.replace(location.pathname)
+        })
+      )
+      .catch(function () {
+        message = 'failed'
+        follow()
+      })
+  }
+  // keep puts the sign-in in this server's entry of jellyfin-web's
+  // credentials, first, keeping what jellyfin-web saved there.
+  function keep(signedIn) {
+    var stored
+    try {
+      stored = JSON.parse(localStorage.getItem(credentialsKey) || '{}')
+    } catch (error) {
+      stored = {}
+    }
+    if (!stored || typeof stored !== 'object' || Array.isArray(stored)) stored = {}
+    var servers = Array.isArray(stored.Servers) ? stored.Servers : []
+    var entry = { ManualAddress: location.origin, LastConnectionMode: 2 }
+    var others = []
+    servers.forEach(function (server) {
+      if (server && typeof server === 'object' && server.Id === signedIn.serverId) entry = server
+      else others.push(server)
+    })
+    entry.Id = signedIn.serverId
+    entry.Name = entry.Name || signedIn.serverName
+    entry.UserId = signedIn.userId
+    entry.AccessToken = signedIn.accessToken
+    entry.DateLastAccessed = Date.now()
+    stored.Servers = [entry].concat(others)
+    localStorage.setItem(credentialsKey, JSON.stringify(stored))
+  }
+  // place draws the button, and the line under it, on the sign-in pages
+  // shown, and reports whether there was one.
+  function place() {
+    var found = false
+    var pages = document.querySelectorAll('#loginPage .readOnlyContent')
+    for (var i = 0; i < pages.length; i++) {
+      var container = pages[i]
+      found = true
+      var button = container.querySelector('.polyfinProviderButton')
+      var line = container.querySelector('.polyfinProviderMessage')
+      if (!provider) {
+        if (button) button.remove()
+        if (line) line.remove()
+        continue
+      }
+      if (!button) {
+        button = document.createElement('button')
+        button.setAttribute('type', 'button')
+        button.className = 'raised block emby-button polyfinProviderButton'
+        button.appendChild(document.createElement('span'))
+        button.addEventListener(
+          'click',
+          quietly(function () {
+            location.href = provider.start + '?app=web'
+          })
+        )
+        container.insertBefore(button, container.firstChild)
+      }
+      button.firstChild.textContent = sayProvider('signIn').replace('{0}', function () {
+        return provider.name
+      })
+      if (!message) {
+        if (line) line.remove()
+        continue
+      }
+      if (!line) {
+        line = document.createElement('p')
+        line.className = 'fieldDescription polyfinProviderMessage'
+        line.setAttribute('role', 'status')
+        container.insertBefore(line, button.nextSibling)
+      }
+      line.textContent = sayProvider(providerOutcomes[message] || 'failed')
+    }
+    return found
+  }
+  // follow looks for the sign-in page as the route changes, every 200
+  // milliseconds for 5 seconds, until it finds it.
+  var looking = null
+  function follow() {
+    clearTimeout(looking)
+    var tries = 0
+    var look = quietly(function () {
+      looking = null
+      if (place() || ++tries >= 25) return
+      looking = setTimeout(look, 200)
+    })
+    look()
+  }
+  ;['pushState', 'replaceState'].forEach(function (name) {
+    var original = history[name]
+    history[name] = function () {
+      var result = original.apply(this, arguments)
+      quietly(follow)()
+      return result
+    }
+  })
+  addEventListener('hashchange', quietly(follow))
+  addEventListener('popstate', quietly(follow))
+})()
+;(function () {
+  var Context = typeof window === 'object' && window && (window.AudioContext || window.webkitAudioContext)
+  if (typeof Context !== 'function') return
+  var boostWords = {
+    en: { boost: 'Boost the volume', on: 'On', off: 'Off', next: 'The volume is boosted from the next video.' },
+    fr: { boost: 'Augmenter le volume', on: 'Activé', off: 'Désactivé', next: 'Le volume est augmenté à partir de la prochaine vidéo.' },
+    de: { boost: 'Lautstärke anheben', on: 'Ein', off: 'Aus', next: 'Die Lautstärke wird ab dem nächsten Video angehoben.' },
+    es: { boost: 'Subir el volumen', on: 'Activado', off: 'Desactivado', next: 'El volumen se sube a partir del próximo vídeo.' },
+    it: { boost: 'Aumenta il volume', on: 'Attivo', off: 'Disattivo', next: 'Il volume viene aumentato dal prossimo video.' },
+    pt: { boost: 'Aumentar o volume', on: 'Ativado', off: 'Desativado', next: 'O volume é aumentado a partir do próximo vídeo.' },
+  }
+  function say(key) {
+    var language = /^[a-z]*/.exec(String(document.documentElement.lang || '').toLowerCase())[0]
+    return (boostWords[language] || boostWords.en)[key]
+  }
+  function quietly(listener) {
+    return function (event) {
+      try {
+        listener(event)
+      } catch (error) {}
+    }
+  }
+  // The player's own settings entries, which tell its menu from others.
+  var playerEntries = ['aspectratio', 'playbackrate', 'quality', 'repeatmode', 'suboffset', 'stats']
+  var menuWithin = 10000
+  // chosen is the user's choice as the server last answered it, for the
+  // user signed in (server/user); own, once the player's menu changed it,
+  // the page's, until it loads again.
+  var chosen = { user: '', boost: false }
+  var own = null
+  var asked = ''
+  var context = null
+  // The graphs built: each element, its source, gain and compressor, and
+  // whether it goes through the gain.
+  var graphs = []
+  var menuAt = 0
+  function viewer() {
+    var api = window.ApiClient
+    var id = api && api.getCurrentUserId && api.getCurrentUserId()
+    return id ? (typeof api.serverId === 'function' ? api.serverId() : '') + '/' + id : ''
+  }
+  function wanted() {
+    if (own !== null && own.user === viewer()) return own.boost
+    return chosen.user === viewer() && chosen.boost
+  }
+  // ask asks the user's choice, then applies it to the videos playing.
+  function ask() {
+    var api = window.ApiClient
+    var user = viewer()
+    if (!user) return
+    asked = user
+    api.getJSON(api.getUrl('Polyfin/Sound')).then(
+      quietly(function (answer) {
+        if (!answer || viewer() !== user) return
+        chosen = { user: user, boost: answer.BoostVolume === true }
+        applyAll()
+      }),
+      function () {}
+    )
+  }
+  // follow asks once for each user signed in, as the route changes.
+  function follow() {
+    var user = viewer()
+    if (user && user !== asked) ask()
+  }
+  function sameSite(address) {
+    var here = location.protocol + '//' + location.host + '/'
+    return address.slice(0, here.length).toLowerCase() === here.toLowerCase()
+  }
+  // safe tells whether Web Audio gets the sound of the video an element
+  // plays (see the header).
+  function safe(video) {
+    var address = String(video.currentSrc || video.src || '')
+    if (!address) return false
+    if (/^blob:/i.test(address)) return true
+    if (/\.m3u8(?:[?#]|$)/i.test(address)) return false
+    if (video.getAttribute('crossorigin') !== null) return true
+    return sameSite(address) && /[?&]PolyfinRelay=1(?:[&#]|$)/.test(address)
+  }
+  function attached(node) {
+    return document.documentElement.contains ? document.documentElement.contains(node) : true
+  }
+  function graphOf(video) {
+    for (var i = 0; i < graphs.length; i++) {
+      if (graphs[i].video === video) return graphs[i]
+    }
+    return null
+  }
+  function route(graph, on) {
+    if (graph.boosted === on) return
+    graph.source.disconnect()
+    graph.source.connect(on ? graph.gain : context.destination)
+    graph.boosted = on
+  }
+  // build sends the element through Web Audio, once the context runs: in
+  // a suspended context the element would play silent.
+  function build(video, done) {
+    if (!context) context = new Context()
+    var make = quietly(function () {
+      if (context.state !== 'running' || graphOf(video)) return
+      // The graphs of elements gone are let go.
+      graphs = graphs.filter(function (graph) {
+        if (attached(graph.video)) return true
+        graph.source.disconnect()
+        graph.compressor.disconnect()
+        return false
+      })
+      var gain = context.createGain()
+      gain.gain.value = 2
+      var compressor = context.createDynamicsCompressor()
+      compressor.threshold.value = -6
+      compressor.knee.value = 6
+      compressor.ratio.value = 12
+      compressor.attack.value = 0.003
+      compressor.release.value = 0.25
+      gain.connect(compressor)
+      compressor.connect(context.destination)
+      var graph = { video: video, source: context.createMediaElementSource(video), gain: gain, compressor: compressor, boosted: null }
+      graphs.push(graph)
+      done(graph)
+    })
+    if (context.state === 'running') make()
+    else if (typeof context.resume === 'function') context.resume().then(make, function () {})
+  }
+  // apply boosts a video as the choice says: a graph built is routed, one
+  // not built is built for a safe element only.
+  function apply(video) {
+    var on = wanted()
+    var graph = graphOf(video)
+    if (graph) {
+      if (context.state !== 'running' && typeof context.resume === 'function') context.resume().then(null, function () {})
+      route(graph, on)
+      return
+    }
+    if (!on || !safe(video)) return
+    build(video, function (built) {
+      route(built, wanted())
+    })
+  }
+  function videos() {
+    return Array.prototype.slice.call(document.getElementsByTagName('video'))
+  }
+  function applyAll() {
+    videos().forEach(quietly(apply))
+  }
+  function played(event) {
+    var video = event.target
+    if (!video || String(video.tagName).toUpperCase() !== 'VIDEO') return
+    apply(video)
+    ask()
+  }
+  // idle suspends the context while no video it boosts plays, so that an
+  // idle context holds no audio session, as on an iPhone, where it could
+  // stop another app's music. A tap having started it once, Safari lets
+  // the page resume it later without one, as build and apply do.
+  var resting = 0
+  function idle() {
+    if (!context || context.state !== 'running' || typeof context.suspend !== 'function') return
+    for (var i = 0; i < graphs.length; i++) {
+      if (attached(graphs[i].video) && !graphs[i].video.paused) return
+    }
+    context.suspend().then(null, function () {})
+  }
+  function rest() {
+    clearTimeout(resting)
+    resting = setTimeout(quietly(idle), 3000)
+  }
+  function stopped(event) {
+    if (graphOf(event.target)) rest()
+  }
+  function close(container) {
+    var dialog = container.querySelector('.dialog')
+    if (dialog && dialog.getAttribute('data-history') === 'true') history.back()
+    else container.remove()
+  }
+  function toast(text) {
+    var holder = document.querySelector('.toastContainer')
+    if (!holder) {
+      holder = document.createElement('div')
+      holder.className = 'toastContainer'
+      document.body.appendChild(holder)
+    }
+    var shown = document.createElement('div')
+    shown.className = 'toast'
+    shown.textContent = text
+    holder.appendChild(shown)
+    setTimeout(function () {
+      shown.classList.add('toastVisible')
+    }, 50)
+    setTimeout(function () {
+      shown.classList.add('toastHide')
+      setTimeout(function () {
+        shown.remove()
+      }, 300)
+    }, 3300)
+  }
+  // toggle turns the boost on or off for the page, applies it, and saves
+  // the choice.
+  function toggle() {
+    var on = !wanted()
+    own = { user: viewer(), boost: on }
+    var later = false
+    videos().forEach(function (video) {
+      if (on && !graphOf(video) && !safe(video)) later = true
+      quietly(apply)(video)
+    })
+    if (later) toast(say('next'))
+    var api = window.ApiClient
+    api.ajax({
+      type: 'POST',
+      url: api.getUrl('Polyfin/Sound'),
+      data: JSON.stringify({ BoostVolume: on }),
+      contentType: 'application/json',
+      dataType: 'json',
+    }).then(
+      quietly(function (answer) {
+        if (answer && own && own.user === viewer()) chosen = { user: own.user, boost: answer.BoostVolume === true }
+      }),
+      function () {}
+    )
+  }
+  // extend adds the entry to the player's settings menu a dialog
+  // container holds, opened from its button lately, during a video.
+  function extend(container) {
+    if (Date.now() - menuAt > menuWithin || !videos().length) return
+    var scroller = container.querySelector && container.querySelector('.actionSheetScroller')
+    if (!scroller || scroller.querySelector('.polyfinBoost')) return
+    var items = scroller.querySelectorAll('.actionSheetMenuItem')
+    var model = null
+    for (var i = 0; i < items.length; i++) {
+      if (playerEntries.indexOf(items[i].getAttribute('data-id')) >= 0) model = items[i]
+    }
+    if (!model) return
+    menuAt = 0
+    var item = model.cloneNode(true)
+    item.setAttribute('data-id', 'polyfinBoost')
+    item.classList.add('polyfinBoost')
+    var words = item.querySelector('.actionSheetItemText')
+    if (words) words.textContent = say('boost')
+    var aside = item.querySelector('.actionSheetItemAsideText')
+    if (!aside) {
+      aside = document.createElement('div')
+      aside.className = 'listItemAside actionSheetItemAsideText'
+      item.appendChild(aside)
+    }
+    aside.textContent = say(wanted() ? 'on' : 'off')
+    item.addEventListener(
+      'click',
+      quietly(function (event) {
+        // Before the menu hears the click, which would ask jellyfin-web to
+        // run a setting it does not know.
+        event.stopPropagation()
+        event.preventDefault()
+        close(container)
+        toggle()
+      }),
+      true
+    )
+    scroller.appendChild(item)
+  }
+  // aim notes a click on the player's settings button, and starts the
+  // page's context inside the click for a user who boosts: Safari and iOS
+  // start an AudioContext only there, not when the video starts playing,
+  // after jellyfin-web's PlaybackInfo, so the first video would stay
+  // unboosted. build reuses the context; idle suspends it again 3 s later
+  // when no video it boosts plays.
+  function aim(event) {
+    var target = event.target
+    menuAt = target && target.closest && target.closest('.btnVideoOsdSettings') ? Date.now() : 0
+    if (!wanted()) return
+    if (!context) context = new Context()
+    if (context.state !== 'running' && typeof context.resume === 'function') context.resume().then(null, function () {})
+    rest()
+  }
+  function watch() {
+    if (typeof MutationObserver !== 'function' || !document.body) return
+    new MutationObserver(
+      quietly(function (records) {
+        for (var i = 0; i < records.length; i++) {
+          var added = records[i].addedNodes || []
+          for (var j = 0; j < added.length; j++) {
+            if (added[j].classList && added[j].classList.contains('dialogContainer')) quietly(extend)(added[j])
+          }
+        }
+      })
+    ).observe(document.body, { childList: true })
+  }
+  addEventListener('play', quietly(played), true)
+  addEventListener('pause', quietly(stopped), true)
+  addEventListener('ended', quietly(stopped), true)
+  addEventListener('click', quietly(aim), true)
+  ;['pushState', 'replaceState'].forEach(function (name) {
+    var original = history[name]
+    history[name] = function () {
+      var result = original.apply(this, arguments)
+      quietly(follow)()
+      return result
+    }
+  })
+  addEventListener('hashchange', quietly(follow))
+  addEventListener('popstate', quietly(follow))
+  if (document.body) watch()
+  else addEventListener('DOMContentLoaded', watch)
+  quietly(follow)()
+})()
+
+// The badges of the version picked on a title's page and of the version
+// a video plays (see the header's twenty-first), on their own.
+;(function () {
+  var titleRoute = /^#!?\/details\?(?:[^#]*&)?id=([0-9a-f]{32})(?:[&#]|$)/i
+  function quietly(listener) {
+    return function () {
+      try {
+        listener.apply(this, arguments)
+      } catch (error) {}
+    }
+  }
+  // marks is a WeakSet of the page's elements, or, before Chrome 36, a
+  // property kept on each element, as the other parts keep theirs.
+  function marks(name) {
+    if (typeof WeakSet === 'function') return new WeakSet()
+    var key = '__polyfin' + name
+    return {
+      has: function (element) {
+        return Object.prototype.hasOwnProperty.call(element, key)
+      },
+      add: function (element) {
+        element[key] = true
+        return this
+      },
+    }
+  }
+  // attached tells whether node is in the page, as isConnected does from
+  // Chrome 54 on.
+  function attached(node) {
+    if (typeof node.isConnected === 'boolean') return node.isConnected
+    return document.documentElement.contains(node)
+  }
+  // address is the address of a path of Polyfin's, asked in jellyfin-web's
+  // language, which it gives the document.
+  function address(api, path) {
+    var language = String(document.documentElement.lang || '')
+    return api.getUrl(path, language ? { language: language } : undefined)
+  }
+  // The title whose badges are followed, its last answer and the title it
+  // is for, the title being asked and whether to ask again once it
+  // answers, the ask to come, and the option value the script asked again
+  // for.
+  var title = ''
+  var answer = null
+  var answered = ''
+  var asking = ''
+  var again = false
+  var timer = null
+  var unknown = null
+  // The rows drawn on the title's page and in the video's controls, each
+  // with the badges it shows; the menu whose tooltip the script wrote; the
+  // menus whose picks and focus it follows; the ApiClient whose messages it
+  // hears; and whether it follows the page's changes.
+  var pageRow = null
+  var pageKey = ''
+  var osdRow = null
+  var osdKey = ''
+  var titled = null
+  var menus = marks('BadgeMenu')
+  var heard = null
+  var watching = false
+  // The video played, as { video, src, asked, answer, timer }, and the
+  // controls whose showing the script watches.
+  var play = null
+  var osdWatched = null
+  var osdWatcher = null
+  // follow follows the title the route opens: it asks for its badges, and
+  // draws at once those it has for a title the route comes back to, as
+  // after a video. It takes the row and the tooltip off the page the route
+  // leaves, but for a video: the page shows them as it is shown again.
+  function follow() {
+    listen()
+    var match = titleRoute.exec(location.hash)
+    var id = match ? match[1].toLowerCase() : ''
+    if (id === title) return
+    title = id
+    again = false
+    unknown = null
+    clearTimeout(timer)
+    timer = null
+    if (answered !== id) {
+      answer = null
+      answered = ''
+    }
+    if (!document.querySelector('.videoPlayerContainer')) {
+      undraw()
+      if (titled) titled.removeAttribute('title')
+      titled = null
+    }
+    watch()
+    if (!id) return
+    place(false)
+    ask(id, 0)
+  }
+  // ask asks for the badges of the title's versions, every second until
+  // jellyfin-web made its client, 10 times at most; an ask while one is
+  // awaited comes after it.
+  function ask(id, tries) {
+    timer = null
+    if (title !== id) return
+    var api = window.ApiClient
+    if (!api || !api.getCurrentUserId()) {
+      if (tries < 10) {
+        timer = setTimeout(
+          quietly(function () {
+            ask(id, tries + 1)
+          }),
+          1000
+        )
+      }
+      return
+    }
+    listen()
+    if (asking === id) {
+      again = true
+      return
+    }
+    asking = id
+    api.getJSON(address(api, 'Polyfin/Items/' + id + '/Badges')).then(
+      quietly(function (got) {
+        if (asking === id) asking = ''
+        if (title !== id) return
+        if (again) {
+          again = false
+          ask(id, 10)
+        }
+        if (!got || !Array.isArray(got.Versions)) return
+        answer = got
+        answered = id
+        watch()
+        place(false)
+      }),
+      function () {
+        if (asking === id) asking = ''
+      }
+    )
+  }
+  // later asks again a second later, gathering the reasons that come
+  // meanwhile.
+  function later() {
+    var id = title
+    if (!id || timer) return
+    timer = setTimeout(
+      quietly(function () {
+        ask(id, 10)
+      }),
+      1000
+    )
+  }
+  // listen hears Polyfin's pushes of the title's versions on jellyfin-web's
+  // socket, as the second part does.
+  function listen() {
+    var api = window.ApiClient
+    if (!api || api === heard) return
+    heard = api
+    var heardVersions = quietly(hear)
+    if (typeof api.subscribe === 'function') {
+      api.subscribe(['PolyfinVersions'], heardVersions)
+    } else {
+      var callbacks = (api._callbacks = api._callbacks || {})
+      ;(callbacks.message = callbacks.message || []).push(function (event, message) {
+        heardVersions(message)
+      })
+    }
+  }
+  // hear asks again when a push tells the title's page lists another
+  // number of versions than the answer, or a version's tracks changed.
+  function hear(message) {
+    if (!message || message.MessageType !== 'PolyfinVersions' || !message.Data || !answer) return
+    var progress = message.Data
+    if (String(progress.ItemId).toLowerCase() !== title) return
+    if (progress.Tracks || progress.Count !== answer.Versions.length) later()
+  }
+  // watch follows the page's changes while there is a row to place: a
+  // title's badges came, or a video plays.
+  function watch() {
+    var on = !!(title && answer) || !!play
+    if (on === watching) return
+    watching = on
+    if (on) document.addEventListener('polyfinpagechange', looked)
+    else document.removeEventListener('polyfinpagechange', looked)
+  }
+  var looked = quietly(function () {
+    place(false)
+    lookOsd()
+  })
+  // shownPage returns the title page shown, unless a video is.
+  function shownPage() {
+    if (document.querySelector('.videoPlayerContainer')) return null
+    return document.querySelector('.page.itemDetailPage:not(.hide)')
+  }
+  // picked is the version picked in the menu: the source of its value,
+  // the first without a menu or a value. A value the answer does not know
+  // asks again, once for each.
+  function picked(menu) {
+    var versions = answer.Versions
+    if (!menu || !menu.value) return versions[0] || null
+    for (var i = 0; i < versions.length; i++) {
+      if (versions[i] && versions[i].Id === menu.value) return versions[i]
+    }
+    if (unknown !== menu.value) {
+      unknown = menu.value
+      later()
+    }
+    return null
+  }
+  // place writes the tooltip of the version menu and puts the row of the
+  // version picked under it (see where), or in the track menus' block when
+  // it is hidden. It changes nothing while the menu has focus, where it
+  // could be open, but at a pick, which closed it: the menu losing focus
+  // places them.
+  function place(picking) {
+    if (!title || !answer) return
+    var page = shownPage()
+    if (!page) return
+    var menu = page.querySelector('.selectSource')
+    if (menu && !menus.has(menu)) {
+      menus.add(menu)
+      menu.addEventListener(
+        'change',
+        quietly(function () {
+          place(true)
+        })
+      )
+      menu.addEventListener(
+        'blur',
+        quietly(function () {
+          place(false)
+        })
+      )
+    }
+    if (menu && !picking && document.activeElement === menu) return
+    var version = picked(menu)
+    if (menu) {
+      var option = menu.options && menu.options[menu.selectedIndex]
+      var name = (version && version.Name) || (option ? option.textContent : '')
+      if (name && menu.getAttribute('title') !== name) menu.setAttribute('title', name)
+      titled = menu
+    }
+    var form = page.querySelector('.trackSelections')
+    var badges = answer.Show && version ? shown(version.Badges) : []
+    if (!badges.length || !form || form.classList.contains('hide')) return undraw()
+    var container = menu && menu.closest('.selectSourceContainer')
+    var mode = container && !container.classList.contains('hide') ? where(container) : 'tracks'
+    var parent = mode === 'beside' ? container.parentNode : mode === 'inside' ? container : form
+    var placed = pageRow && pageRow.parentNode === parent
+    if (placed) placed = mode === 'beside' ? container.nextSibling === pageRow : !pageRow.nextSibling
+    var key = mode + ' ' + JSON.stringify(badges)
+    if (placed && pageKey === key) return
+    undraw()
+    var classes = { beside: 'polyfinVersionBadgesMenu', inside: 'polyfinVersionBadgesIn', tracks: 'polyfinVersionBadgesTracks' }
+    pageRow = row(badges, classes[mode])
+    pageKey = key
+    parent.insertBefore(pageRow, mode === 'beside' ? container.nextSibling : null)
+  }
+  // where tells where the row goes under the version menu, as the page
+  // lays its container out: "beside" when the menu's label sits beside it,
+  // as jellyfin-web's own look does (a flex row), the row then going after
+  // the container, in line with the menu; "inside" otherwise, as a theme
+  // that puts the label over the menu and lays the track menus out
+  // itself, such as LumaaGlaass (a column, in a grid), the row then going
+  // last in the container, under the menu, where the theme's layout keeps
+  // it.
+  function where(container) {
+    var style = typeof getComputedStyle === 'function' ? getComputedStyle(container) : null
+    if (!style) return 'beside'
+    return /flex/.test(style.display) && !/column/.test(style.flexDirection) ? 'beside' : 'inside'
+  }
+  function undraw() {
+    if (pageRow && pageRow.parentNode) pageRow.parentNode.removeChild(pageRow)
+    pageRow = null
+    pageKey = ''
+  }
+  // shown are the badges that show: those with a text.
+  function shown(badges) {
+    if (!Array.isArray(badges)) return []
+    return badges.filter(function (badge) {
+      return badge && typeof badge.Text === 'string' && badge.Text !== ''
+    })
+  }
+  // row makes a list of badges: each a pill with its text, its label in
+  // full words for screen readers and as its tooltip, and its kind.
+  function row(badges, className) {
+    style()
+    var list = document.createElement('ul')
+    list.className = 'polyfinVersionBadges ' + className
+    list.setAttribute('role', 'list')
+    badges.forEach(function (badge) {
+      var label = typeof badge.Label === 'string' && badge.Label ? badge.Label : badge.Text
+      var pill = document.createElement('span')
+      pill.className = 'polyfinVersionBadge'
+      pill.setAttribute('data-kind', String(badge.Kind || ''))
+      pill.setAttribute('aria-label', label)
+      pill.setAttribute('title', label)
+      pill.textContent = badge.Text
+      var item = document.createElement('li')
+      item.appendChild(pill)
+      list.appendChild(item)
+    })
+    return list
+  }
+  // played follows the videos that start: a new element, or a new address
+  // for the same, is a new play, whose badges are asked once the video's
+  // controls show.
+  function played(event) {
+    var video = event.target
+    if (!video || video.tagName !== 'VIDEO') return
+    var src = String(video.currentSrc || video.src || '')
+    if (play && play.video === video && play.src === src) return
+    stop()
+    play = { video: video, src: src, asked: 0, answer: null, timer: null }
+    watch()
+    lookOsd()
+  }
+  // ended takes the row of a video off as it ends or loses its source.
+  function ended(event) {
+    if (!play || event.target !== play.video) return
+    stop()
+    watch()
+  }
+  function stop() {
+    if (play) clearTimeout(play.timer)
+    play = null
+    if (osdRow && osdRow.parentNode) osdRow.parentNode.removeChild(osdRow)
+    osdRow = null
+    osdKey = ''
+    if (osdWatcher) osdWatcher.disconnect()
+    osdWatcher = null
+    osdWatched = null
+  }
+  // hidden tells whether node or an element it is in is hidden.
+  function hidden(node) {
+    for (var at = node; at && at.classList; at = at.parentNode) {
+      if (at.classList.contains('hide')) return true
+    }
+    return false
+  }
+  // shownOsd returns the video's controls (jellyfin-web 12.4's
+  // .videoOsdBottom), in the video's page that is not hidden.
+  function shownOsd() {
+    var found = document.querySelectorAll('.videoOsdBottom')
+    for (var i = 0; i < found.length; i++) {
+      if (!hidden(found[i].parentNode)) return found[i]
+    }
+    return null
+  }
+  // lookOsd asks for the badges of the play once its controls show, and
+  // puts the row after the title's heading (.osdTitle) in the controls,
+  // where it shows and hides with them. Their showing is watched: the
+  // page's changes do not tell their class.
+  function lookOsd() {
+    if (!play) return
+    if (!attached(play.video)) {
+      stop()
+      watch()
+      return
+    }
+    var osd = shownOsd()
+    if (!osd) return
+    if (osd !== osdWatched && typeof MutationObserver === 'function') {
+      if (osdWatcher) osdWatcher.disconnect()
+      osdWatched = osd
+      osdWatcher = new MutationObserver(quietly(lookOsd))
+      osdWatcher.observe(osd, { attributes: true, attributeFilter: ['class'] })
+    }
+    var showing = !osd.classList.contains('hide') && !osd.classList.contains('videoOsdBottom-hidden')
+    if (!play.asked && showing) askPlaying(play)
+    var heading = osd.querySelector('.osdTitle')
+    var badges = play.answer && play.answer.Show ? shown(play.answer.Badges) : []
+    if (!badges.length || !heading) {
+      if (osdRow && osdRow.parentNode) osdRow.parentNode.removeChild(osdRow)
+      osdRow = null
+      osdKey = ''
+      return
+    }
+    var key = JSON.stringify(badges)
+    if (osdRow && osdKey === key && heading.nextSibling === osdRow) return
+    if (osdRow && osdRow.parentNode) osdRow.parentNode.removeChild(osdRow)
+    osdRow = row(badges, 'polyfinVersionBadgesOsd')
+    osdKey = key
+    heading.parentNode.insertBefore(osdRow, heading.nextSibling)
+  }
+  // askPlaying asks for the badges of the version this device plays, and
+  // again every 2 seconds, 5 times at most, while the answer names no
+  // title: jellyfin-web tells the server of a play a moment after the
+  // video starts.
+  function askPlaying(current) {
+    current.timer = null
+    if (play !== current) return
+    var api = window.ApiClient
+    if (!api || !api.getCurrentUserId()) return
+    current.asked++
+    api.getJSON(address(api, 'Polyfin/Playback/Badges')).then(
+      quietly(function (got) {
+        if (play !== current || !got) return
+        if (!got.ItemId) {
+          if (current.asked <= 5) {
+            current.timer = setTimeout(
+              quietly(function () {
+                askPlaying(current)
+              }),
+              2000
+            )
+          }
+          return
+        }
+        current.answer = got
+        lookOsd()
+      }),
+      function () {}
+    )
+  }
+  // style adds the look of the rows, once: pills with a border and their
+  // text, in the page's font, wrapping where the row does not fit; beside
+  // a label, in line with the menu; across the track menus' grid when it
+  // stands for the hidden version menu; on a dark ground over a video;
+  // larger in the TV layout.
+  function style() {
+    if (document.getElementById('polyfinVersionBadgesStyle')) return
+    var sheet = document.createElement('style')
+    sheet.id = 'polyfinVersionBadgesStyle'
+    sheet.textContent =
+      '.polyfinVersionBadges{display:flex;flex-wrap:wrap;align-items:center;margin:0;padding:0;list-style:none;' +
+      'max-width:100%;white-space:normal}' +
+      '.polyfinVersionBadges>li{display:block;margin:0 .35em .3em 0;padding:0}' +
+      '[dir=rtl] .polyfinVersionBadges>li{margin:0 0 .3em .35em}' +
+      '.polyfinVersionBadge{display:inline-block;box-sizing:border-box;padding:.05em .45em;border:1px solid currentColor;' +
+      'border-radius:.3em;font:inherit;font-size:.8em;line-height:1.5;white-space:nowrap;cursor:default}' +
+      '.polyfinVersionBadgesMenu{margin:0 0 .5em;padding-inline-start:6.45em}' +
+      '.layout-mobile .polyfinVersionBadgesMenu{padding-inline-start:4.7em}' +
+      '.polyfinVersionBadgesIn{flex:0 0 auto;width:100%;box-sizing:border-box}' +
+      '.polyfinVersionBadgesTracks{grid-column:1/-1;margin:0 0 .7em}' +
+      '.polyfinVersionBadgesOsd{flex:0 1 auto;min-width:0}' +
+      '.polyfinVersionBadgesOsd .polyfinVersionBadge{background:rgba(0,0,0,.55);color:#fff}' +
+      '.layout-tv .polyfinVersionBadge{font-size:1em;padding:.15em .6em}' +
+      '.layout-tv .polyfinVersionBadges>li{margin-bottom:.4em}'
+    document.head.appendChild(sheet)
+  }
+  ;['pushState', 'replaceState'].forEach(function (name) {
+    var original = history[name]
+    history[name] = function () {
+      var result = original.apply(this, arguments)
+      quietly(follow)()
+      return result
+    }
+  })
+  addEventListener('hashchange', quietly(follow))
+  addEventListener('popstate', quietly(follow))
+  addEventListener('playing', quietly(played), true)
+  addEventListener('ended', quietly(ended), true)
+  addEventListener('emptied', quietly(ended), true)
+  quietly(follow)()
+})()
+
+// The place of the home page and of search results, brought back on Back
+// (see the header's twenty-second), on its own.
+;(function () {
+  var homeRoute = /^#!?\/home(?:\.html)?(?:[?#]|$)/i
+  var tabParameter = /[?&]tab=([^&#]*)/
+  var searchRoute = /^#!?\/search(?:\.html)?\?/i
+  // The logo opens #/, which jellyfin-web replaces with #/home.
+  var rootRoute = /^(?:#!?\/?)?$/
+  var rowClass = /(?:^|\s)section(\d+)(?:\s|$)/
+  function quietly(listener) {
+    return function () {
+      try {
+        listener.apply(this, arguments)
+      } catch (error) {}
+    }
+  }
+  // The places kept, by the key of their history entry, and those keys,
+  // the oldest first; the number the last place was marked with.
+  var places = {}
+  var kept = []
+  var marks = 0
+  // The entry shown, as { key, route, kind }, its kind being 'home',
+  // 'search' or ''.
+  var current = null
+  // The place being brought back, as { place, row, ready, until, settle }:
+  // row once the place's row was found, ready once the page reached its
+  // place, until and settle the timers that stop it.
+  var restoring = null
+  function keyOf() {
+    var state = history.state
+    return state && typeof state.key === 'string' && state.key ? state.key : 'first'
+  }
+  // kindOf tells whether a route is the home page's Home tab, search
+  // results, or neither.
+  function kindOf(route) {
+    if (homeRoute.test(route)) {
+      var tab = tabParameter.exec(route)
+      return !tab || tab[1] === '' || tab[1] === '0' ? 'home' : ''
+    }
+    return searchRoute.test(route) ? 'search' : ''
+  }
+  function tv() {
+    var root = document.documentElement
+    return !!(root && root.classList && root.classList.contains('layout-tv'))
+  }
+  // shown returns the element that holds the rows of the home page or of
+  // the search page shown, or null.
+  function shown(kind) {
+    if (kind === 'search') {
+      var page = document.getElementById('searchPage')
+      return page && !page.classList.contains('hide') ? page : null
+    }
+    var containers = document.querySelectorAll('.homeSectionsContainer')
+    for (var i = 0; i < containers.length; i++) {
+      var holder = containers[i].closest('.page')
+      if (!holder || !holder.classList.contains('hide')) return containers[i]
+    }
+    return null
+  }
+  // rowId names a row: by its data-polyfin-row, else its .sectionN class,
+  // else its title; '' when it has none.
+  function rowId(row) {
+    var id = row.getAttribute('data-polyfin-row')
+    if (id) return 'row ' + id
+    var section = rowClass.exec(String(row.className))
+    if (section) return 'section ' + section[1]
+    var title = row.querySelector('.sectionTitle')
+    var text = title ? String(title.textContent).replace(/\s+/g, ' ').trim() : ''
+    return text ? 'title ' + text : ''
+  }
+  // topRow returns the named row at the top of the screen: the innermost
+  // across its top edge, else the first below it.
+  function topRow(container) {
+    var rows = container.querySelectorAll('.verticalSection')
+    var found = null
+    for (var i = 0; i < rows.length; i++) {
+      var box = rows[i].getBoundingClientRect()
+      if (box.height <= 0 || box.bottom <= 0 || !rowId(rows[i])) continue
+      if (box.top > 0) {
+        if (!found) found = rows[i]
+        break
+      }
+      found = rows[i]
+    }
+    return found
+  }
+  // findRow returns the row of the container named id, or null.
+  function findRow(container, id) {
+    var rows = container.querySelectorAll('.verticalSection')
+    for (var i = 0; i < rows.length; i++) if (rowId(rows[i]) === id) return rows[i]
+    return null
+  }
+  // sideways returns how far a row's scroller is scrolled, as
+  // jellyfin-web's scroller tells it, its scrollLeft for a scroller
+  // jellyfin-web has not made one; null while it cannot tell.
+  function sideways(scroller) {
+    var at = typeof scroller.getScrollPosition === 'function' ? scroller.getScrollPosition() : scroller.scrollLeft
+    return typeof at === 'number' && isFinite(at) ? at : null
+  }
+  // slide scrolls a row's scroller sideways back to at. A row whose titles
+  // have not come yet stays at its start, and jellyfin-web's scroller
+  // goes back to its start, with an animation, as the row's size changes
+  // or the row is drawn anew: each look slides it again.
+  function slide(scroller, at) {
+    var now = sideways(scroller)
+    if (now === null || Math.abs(now - at) <= 1) return
+    if (typeof scroller.scrollToPosition === 'function') scroller.scrollToPosition(at, true)
+    else scroller.scrollLeft = at
+  }
+  // keep keeps the place of the entry the route leaves, when the page
+  // shown is its own, and marks the page's element with it. A place still
+  // being brought back stays as it was kept.
+  function keep(entry) {
+    if (!entry.kind || tv() || (restoring && !restoring.ready)) return
+    var container = shown(entry.kind)
+    if (!container) return
+    var place = { y: pageYOffset, row: '', offset: 0, sideways: {}, mark: ++marks }
+    container.__polyfinPlace = place.mark
+    var row = topRow(container)
+    if (row) {
+      place.row = rowId(row)
+      place.offset = row.getBoundingClientRect().top
+    }
+    var scrollers = container.querySelectorAll('.emby-scroller')
+    for (var i = 0; i < scrollers.length; i++) {
+      var holder = scrollers[i].closest('.verticalSection')
+      var id = holder && rowId(holder)
+      var at = sideways(scrollers[i])
+      if (id && at) place.sideways[id] = at
+    }
+    if (!Object.prototype.hasOwnProperty.call(places, entry.key)) kept.push(entry.key)
+    places[entry.key] = place
+    while (kept.length > 50) delete places[kept.shift()]
+  }
+  // look brings the place back as far as the page allows.
+  var look = quietly(function () {
+    var at = restoring
+    if (!at) return
+    var place = at.place
+    var container = shown(current.kind)
+    if (!container) return
+    if (container.__polyfinPlace === place.mark) return stop()
+    var row = place.row ? findRow(container, place.row) : null
+    var box = row && row.getBoundingClientRect()
+    var target = null
+    if (box && box.height > 0) {
+      at.row = true
+      target = pageYOffset + box.top - place.offset
+    } else if (!at.row) {
+      target = place.y
+    }
+    var root = document.scrollingElement || document.documentElement
+    if (target !== null) {
+      target = Math.max(0, Math.round(target))
+      if (root.scrollHeight - innerHeight >= target - 1) {
+        if (Math.abs(pageYOffset - target) > 1) scrollTo(0, target)
+        if (!at.ready) {
+          at.ready = true
+          at.settle = setTimeout(quietly(stop), 1000)
+        }
+      }
+    }
+    var scrollers = container.querySelectorAll('.emby-scroller')
+    for (var i = 0; i < scrollers.length; i++) {
+      var holder = scrollers[i].closest('.verticalSection')
+      var id = holder && rowId(holder)
+      if (id && Object.prototype.hasOwnProperty.call(place.sideways, id)) slide(scrollers[i], place.sideways[id])
+    }
+  })
+  // start brings a place back: it looks once a frame, as the rows' titles
+  // and pictures widen them without changing the page, and as soon as a
+  // row scrolls, which does not bubble, heard as it goes down.
+  function start(place) {
+    var mine = { place: place, row: false, ready: false, until: setTimeout(quietly(stop), 3000), settle: null }
+    restoring = mine
+    function frame() {
+      if (restoring !== mine) return
+      look()
+      if (restoring !== mine) return
+      if (typeof requestAnimationFrame === 'function') requestAnimationFrame(frame)
+      else setTimeout(frame, 16)
+    }
+    addEventListener('scroll', look, true)
+    frame()
+  }
+  function stop() {
+    if (!restoring) return
+    clearTimeout(restoring.until)
+    clearTimeout(restoring.settle)
+    restoring = null
+    removeEventListener('scroll', look, true)
+  }
+  // follow keeps the place of the entry the route leaves, brings back the
+  // place of the entry a popstate shows, and sends a push of the home page
+  // while it shows to the top.
+  function follow(how) {
+    var key = keyOf()
+    var route = location.hash
+    if (current && current.key === key && current.route === route) return
+    var left = current
+    var moved = !left || left.key !== key
+    if (left && moved) keep(left)
+    stop()
+    current = { key: key, route: route, kind: kindOf(route) }
+    if (!current.kind || tv()) return
+    if (how === 'pop') {
+      var place = Object.prototype.hasOwnProperty.call(places, key) ? places[key] : null
+      if (place && (place.y > 0 || Object.keys(place.sideways).length)) start(place)
+    } else if ((how === 'push' || how === 'replace') && moved && current.kind === 'home' && left) {
+      if (left.kind === 'home' || rootRoute.test(left.route)) scrollTo(0, 0)
+    }
+  }
+  // The router moves through history.pushState and replaceState, which
+  // fire no event; Back and Forward fire popstate, typed addresses
+  // hashchange.
+  ;['pushState', 'replaceState'].forEach(function (name) {
+    var original = history[name]
+    history[name] = function () {
+      var result = original.apply(this, arguments)
+      quietly(follow)(name === 'pushState' ? 'push' : 'replace')
+      return result
+    }
+  })
+  addEventListener(
+    'hashchange',
+    quietly(function () {
+      follow('hash')
+    })
+  )
+  addEventListener(
+    'popstate',
+    quietly(function () {
+      follow('pop')
+    })
+  )
+  // The user's own scrolling stops a place being brought back; these run
+  // before the page's own listeners.
+  ;['wheel', 'touchstart', 'keydown', 'mousedown', 'click'].forEach(function (type) {
+    addEventListener(type, quietly(stop), true)
+  })
+  quietly(follow)('')
+})()
+;(function () {
+  if (typeof MutationObserver !== 'function') return
+  var embed = /^https:\/\/www\.youtube(?:-nocookie)?\.com\/embed\//
+  // The server's origin only, never a path, and nothing to an address
+  // over http.
+  var policy = 'strict-origin'
+  function quietly(listener) {
+    return function () {
+      try {
+        listener.apply(this, arguments)
+      } catch (error) {}
+    }
+  }
+  // mend gives the policy to the YouTube frames of the trailer's player,
+  // and loads again each one at an address it was not loaded again for.
+  function mend(player) {
+    var live = player.getElementsByTagName('iframe')
+    // Putting a frame back changes the live list.
+    var frames = []
+    for (var i = 0; i < live.length; i++) frames.push(live[i])
+    frames.forEach(function (frame) {
+      var address = frame.getAttribute('src') || ''
+      if (!embed.test(address) || frame.polyfinReferrerFor === address) return
+      frame.polyfinReferrerFor = address
+      frame.setAttribute('referrerpolicy', policy)
+      if (frame.parentNode) frame.parentNode.insertBefore(frame, frame.nextSibling)
+    })
+  }
+  function follow(player) {
+    player.polyfinTrailerFollowed = true
+    new MutationObserver(
+      quietly(function () {
+        mend(player)
+      })
+    ).observe(player, { childList: true, subtree: true, attributes: true, attributeFilter: ['src'] })
+    mend(player)
+  }
+  function watch() {
+    var children = document.body.children
+    for (var i = 0; i < children.length; i++) {
+      var child = children[i]
+      if (!child.polyfinTrailerFollowed && child.classList && child.classList.contains('youtubePlayerContainer')) follow(child)
+    }
+  }
+  // The script runs from the page's head: the body comes later.
+  function start() {
+    new MutationObserver(quietly(watch)).observe(document.body, { childList: true })
+    watch()
+  }
+  if (document.body) quietly(start)()
+  else addEventListener('DOMContentLoaded', quietly(start))
+})()
+
+// This fork's additions (kohnorw/polyfin), apart from upstream's parts.
+//
+// First, it makes the server's logo, when it has one (Settings › Web
+// player › Logo), the page's icon: the stylesheet shows it everywhere else
+// (see jellyfin.logoCSS), but the tab's icon is a link.
+//
+// Second, in the video player (#/video), it adds a button after the
+// subtitle button of the controls (.videoOsdBottom .btnSubtitles) that
+// opens a panel with three rows: the subtitles' size, from 50% to 300%;
+// how high they sit, raised by up to 30% of the screen's height; and their
+// timing, earlier or later by tenths and halves of a second. Size and
+// height are kept in the browser's local storage and apply to every video,
+// through a stylesheet: the subtitles jellyfin-web draws itself
+// (.videoSubtitlesInner) are scaled from their bottom and raised, those the
+// browser draws (::cue) take the size only. Timing is jellyfin-web's own
+// subtitle offset, which it resets for each video: the panel moves the
+// slider of jellyfin-web's subtitle sync (.subtitleSyncSlider, which
+// jellyfin-web makes once a video with subtitles plays) through its
+// updateOffset, as jellyfin-web's own G and H keys do; with no subtitle
+// shown, the row says to pick one. Keys pressed in the panel stay in it.
+// The panel closes on its button, on Escape, and as the route leaves the
+// player. Its words follow jellyfin-web's language, as the third's. Any
+// error just stops it.
+;(function () {
+  function quietly(listener) {
+    return function (event) {
+      try {
+        listener(event)
+      } catch (error) {}
+    }
+  }
   // The server's logo (Settings › Web player › Logo) as the page's icon:
   // the stylesheet shows it everywhere else, but the tab's icon is a link.
   quietly(function () {
@@ -2465,6 +6979,42 @@
       reset: 'Réinitialiser',
       pick: 'Choisissez un sous-titre pour le décaler',
       close: 'Fermer',
+    },
+    de: {
+      button: 'Größe und Timing der Untertitel',
+      size: 'Größe',
+      height: 'Höhe',
+      timing: 'Timing',
+      reset: 'Zurücksetzen',
+      pick: 'Wähle einen Untertitel, um sein Timing zu ändern',
+      close: 'Schließen',
+    },
+    es: {
+      button: 'Tamaño y sincronía de los subtítulos',
+      size: 'Tamaño',
+      height: 'Altura',
+      timing: 'Sincronía',
+      reset: 'Restablecer',
+      pick: 'Elija un subtítulo para cambiar su sincronía',
+      close: 'Cerrar',
+    },
+    it: {
+      button: 'Dimensione e sincronia dei sottotitoli',
+      size: 'Dimensione',
+      height: 'Altezza',
+      timing: 'Sincronia',
+      reset: 'Reimposta',
+      pick: 'Scegli un sottotitolo per cambiarne la sincronia',
+      close: 'Chiudi',
+    },
+    pt: {
+      button: 'Tamanho e sincronia das legendas',
+      size: 'Tamanho',
+      height: 'Altura',
+      timing: 'Sincronia',
+      reset: 'Redefinir',
+      pick: 'Escolha uma legenda para mudar sua sincronia',
+      close: 'Fechar',
     },
   }
   function say(key) {
@@ -2580,7 +7130,7 @@
         button('+', function () {
           setScale(scale + 0.1)
         }),
-      ]),
+      ])
     )
     panel.appendChild(
       row(say('height'), raise + '%', [
@@ -2590,7 +7140,7 @@
         button('+', function () {
           setRaise(raise + 2)
         }),
-      ]),
+      ])
     )
     var now = offset()
     if (now === null) {
@@ -2620,7 +7170,7 @@
           button('+0.5', function () {
             shift(0.5)
           }),
-        ]),
+        ])
       )
     }
     var footer = document.createElement('div')
@@ -2633,7 +7183,7 @@
         save('polyfinSubtitleRaise', raise)
         if (offset() !== null) shift(null)
         apply()
-      }),
+      })
     )
     panel.appendChild(footer)
   }

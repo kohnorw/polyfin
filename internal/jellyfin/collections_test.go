@@ -65,7 +65,7 @@ func groupedAddon(t *testing.T) string {
 			_ = json.NewEncoder(w).Encode(map[string]any{"meta": meta(parts[2])})
 		case len(parts) == 2 && parts[0] == "poster":
 			w.Header().Set("Content-Type", "image/jpeg")
-			_, _ = w.Write([]byte("poster of " + strings.TrimSuffix(parts[1], ".jpg")))
+			_, _ = w.Write([]byte(jpegStart + "poster of " + strings.TrimSuffix(parts[1], ".jpg")))
 		default:
 			http.NotFound(w, r)
 		}
@@ -324,6 +324,24 @@ func TestCollectionsAreMadeChangedAndDeletedAsInJellyfin(t *testing.T) {
 	}
 }
 
+// The Collections view is named in the server's language, as the
+// libraries Polyfin names are.
+func TestCollectionsViewIsNamedInTheServerLanguage(t *testing.T) {
+	t.Parallel()
+	s, admin, titles := grouping(t)
+	s.setting(t, func(settings *accounts.Settings) { settings.Language = "de" })
+	s.createCollection(t, admin, "name=Picks&ids="+titles.kids)
+	views := s.viewIDs(t, admin)
+	view, ok := views["Sammlungen"]
+	if !ok {
+		t.Fatalf("views: %v", views)
+	}
+	var folder BaseItemDto
+	if s.get(t, "/Items/"+view, admin, &folder); folder.Name != "Sammlungen" {
+		t.Errorf("the view's own page names it %q", folder.Name)
+	}
+}
+
 func TestCollectionsNeedThePermissionToManageThem(t *testing.T) {
 	t.Parallel()
 	s, admin, titles := grouping(t)
@@ -387,7 +405,7 @@ func TestCollectionsShowEachUserTheTitlesTheyMaySee(t *testing.T) {
 
 	poster := func(tag string) string {
 		t.Helper()
-		response, err := http.Get(s.url + "/Items/" + id + "/Images/Primary?tag=" + tag)
+		response, err := testClient.Get(s.url + "/Items/" + id + "/Images/Primary?tag=" + tag)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -396,7 +414,7 @@ func TestCollectionsShowEachUserTheTitlesTheyMaySee(t *testing.T) {
 		if response.StatusCode != http.StatusOK {
 			t.Fatalf("poster: %d %s", response.StatusCode, body)
 		}
-		return string(body)
+		return strings.TrimPrefix(string(body), jpegStart)
 	}
 	for _, tc := range []struct {
 		user, device string

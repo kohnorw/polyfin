@@ -26,9 +26,12 @@
 // the server's disk or on a share (see sharedisc.go). An
 // administrator links the files left unmatched to an IMDb identifier by
 // hand. The subtitle files beside a video are offered with its stream (see
-// sidecars). A music folder answers as an Eclipse addon instead (see
-// music.go), and a home videos folder lists its videos as titles of their
-// own, which no metadata addon is asked about (see homevideos.go).
+// sidecars), and a video new or changed is probed with ffprobe for how
+// long it plays, which the library tells of titles neither their
+// descriptions nor TMDB give a length of (see durations.go). A music
+// folder answers as an Eclipse addon instead (see music.go), and a home
+// videos folder lists its videos as titles of their own, which no metadata
+// addon is asked about (see homevideos.go).
 //
 // A share's files are read from the share at each request, with byte
 // ranges; its connections are kept between requests. Those of S3 buckets,
@@ -62,6 +65,7 @@ import (
 	"github.com/moodiness/polyfin/internal/media"
 	"github.com/moodiness/polyfin/internal/secrets"
 	"github.com/moodiness/polyfin/internal/stremio"
+	"github.com/moodiness/polyfin/internal/tmdb"
 )
 
 // Kinds of folders: a folder holds movies, shows with their episodes,
@@ -84,12 +88,24 @@ var (
 	// ErrSearchFailed wraps the error of a search of the metadata addons
 	// (see Service.Search).
 	ErrSearchFailed = errors.New("the metadata addons could not be searched")
+	// ErrOfferedKeyChanged is Update's answer to the acceptance of a host
+	// key that is not the one the folder's SFTP server offers now.
+	ErrOfferedKeyChanged = errors.New("the server does not offer the host key accepted")
 )
 
 // Titles finds titles in the server's metadata addons: library.Service.
 type Titles interface {
 	RemoteSearch(ctx context.Context, kind library.Kind, name string, limit int) ([]library.RemoteResult, error)
 	TitleMeta(ctx context.Context, metaType, id string) (stremio.Meta, bool)
+	RemoteSearches(ctx context.Context, kind library.Kind) (bool, error)
+	// EpisodeGroupsOf lists a series' TMDB episode groups, and FileOrder
+	// maps one's episodes to the catalog's (see numbering.go).
+	EpisodeGroupsOf(ctx context.Context, meta stremio.Meta) ([]tmdb.GroupSummary, error)
+	FileOrder(ctx context.Context, meta stremio.Meta, group string) (map[[2]int]library.OrderPlace, error)
+	// ProviderIDs returns the provider identifiers of the movie or series
+	// of kind that meta describes, with what administrators set of them
+	// (see library.Service.ProviderIDs).
+	ProviderIDs(kind library.Kind, meta stremio.Meta) map[string]string
 }
 
 // Service stores the local folders, scans them and answers for them as
@@ -117,6 +133,18 @@ type Service struct {
 	// retry is told of a folder whose address, credentials or host key
 	// changed (see UseRetry), nil until set.
 	retry func(folder accounts.ID)
+	// unlisted keeps, by series, a hash of the episodes last recorded as
+	// not listed by its description and of those it lists (see
+	// NoteUnlisted), so that describing it again writes nothing unless
+	// they changed; unlistedMu guards it. frames
+	// bounds the episodes' frames made at once, and failedFrames keeps the
+	// files whose frame could not be made, which framesMu guards (see
+	// episodeFrame).
+	unlistedMu   sync.Mutex
+	unlisted     map[string]uint64
+	frames       chan struct{}
+	framesMu     sync.Mutex
+	failedFrames map[accounts.ID]failedFrame
 	// ffprobe and ffmpeg read a music folder's tracks, their tags and
 	// their embedded covers, and a home videos folder's videos, their
 	// dates and frames; toneMapping tells whether ffmpeg brings HDR to SDR
@@ -125,6 +153,12 @@ type Service struct {
 	toneMapping     bool
 	// workers bounds the units matched at once in a scan.
 	workers int
+	// shareScanTime bounds one scan of a share (see scan); tests lower
+	// it.
+	shareScanTime time.Duration
+	// serverWait waits d before a search an addon failed is tried again,
+	// or until ctx ends (see serverWaits); tests replace it.
+	serverWait func(ctx context.Context, d time.Duration) error
 	// meter measures the loudness of music folders' tracks without a
 	// gain, nil until UseMeter: none is measured.
 	meter *loudness.Meter
@@ -166,6 +200,10 @@ type Service struct {
 	artwork        atomic.Pointer[artworkSet]
 	artworkChanges atomic.Uint64
 	artworkMu      sync.Mutex
+
+	// tmdb searches TMDB for a title when every metadata addon's search
+	// failed, nil until set (see tmdbmatch.go).
+	tmdb *tmdb.Client
 }
 
 // scanning is a scan under way: done is closed when it ends, and stop
@@ -186,9 +224,11 @@ func New(db *pgxpool.Pool, store *addons.Store, titles Titles, logger *slog.Logg
 	box *secrets.Box) *Service {
 	ctx, cancel := context.WithCancel(context.Background())
 	return &Service{db: db, addons: store, titles: titles, logger: logger, settings: settings, box: box, now: time.Now,
-		ffprobe: "ffprobe", ffmpeg: "ffmpeg", workers: matchWorkers, ctx: ctx, cancel: cancel, running: map[accounts.ID]scanning{},
+		ffprobe: "ffprobe", ffmpeg: "ffmpeg", workers: matchWorkers, shareScanTime: shareScanTime, serverWait: waitFor, ctx: ctx, cancel: cancel,
+		running: map[accounts.ID]scanning{},
 		scanned: map[accounts.ID]bool{}, prints: map[accounts.ID]map[string]uint64{}, kept: map[accounts.ID]int{},
-		shares: map[accounts.ID]*pooledRemote{}, measuring: map[accounts.ID]bool{}}
+		shares: map[accounts.ID]*pooledRemote{}, measuring: map[accounts.ID]bool{}, unlisted: map[string]uint64{},
+		frames: make(chan struct{}, episodeFrames), failedFrames: map[accounts.ID]failedFrame{}}
 }
 
 // UseFiles sets the address the folders' files are served at, a file's
@@ -197,9 +237,10 @@ func New(db *pgxpool.Pool, store *addons.Store, titles Titles, logger *slog.Logg
 // playback.Service.LocalInputs); it is called before the service is used.
 func (s *Service) UseFiles(files, inputs string) { s.files, s.inputs = files, inputs }
 
-// UseTools sets the ffprobe and FFmpeg executables music folders' tracks
-// and home videos are read with, ffprobe and ffmpeg from PATH until then;
-// it is called before the service is used.
+// UseTools sets the ffprobe and FFmpeg executables music folders' tracks,
+// home videos and the lengths of movies and shows folders' videos are read
+// with, ffprobe and ffmpeg from PATH until then; it is called before the
+// service is used.
 func (s *Service) UseTools(ffprobe, ffmpeg string) { s.ffprobe, s.ffmpeg = ffprobe, ffmpeg }
 
 // UseToneMapping tells that FFmpeg has the filters bringing HDR to SDR,
@@ -303,7 +344,8 @@ func (s *Service) Close() {
 // key and secret key; an SFTP folder a private key, with its passphrase
 // when it has one; an rclone remote the remote's name. PollMinutes is how
 // often such a folder is listed again for changes, 0 only at its scans,
-// nil for its kind's default (see defaultPollMinutes).
+// nil for its kind's default (see defaultPollMinutes). UsedBy is who uses
+// it (see addons.UsedBy).
 type NewFolder struct {
 	Name        string
 	Path        string
@@ -318,6 +360,7 @@ type NewFolder struct {
 	PrivateKey  string
 	Passphrase  string
 	PollMinutes *int
+	UsedBy      addons.UsedBy
 }
 
 // Folder describes a local folder: its addon, what it holds, the kind of
@@ -326,8 +369,11 @@ type NewFolder struct {
 // is stored, how its last scan went
 // (CheckedAt is the last attempt, ScannedAt the last scan that could read
 // the folder, Error the code of the last failure: "missing",
-// "unreadable", "not_folder", or for a share "unreachable", "refused" or
-// "host_key_changed"),
+// "unreadable", "not_folder", or for a share "unreachable", "refused",
+// "host_key_changed", the bound a share that holds more than one scan
+// reads met, "too_deep", "too_many_folders", "too_many_files" or
+// "listing_too_large", or "too_slow" when its scan lasted longer than
+// one scan may),
 // whether a scan is under way, its files, those matched to a title, how,
 // and the others, the links made by hand, and the episodes given by hand
 // to the titles of shows' discs. Unwatched tells why a
@@ -388,20 +434,49 @@ type Folder struct {
 	// has a private key and a passphrase stored, never them; HostKey is
 	// the fingerprint of the host key saved at its first connection, and
 	// OfferedHostKey that of another one its server offered since, which
-	// refuses it until an administrator accepts it. PollMinutes is how
-	// often the folder is listed again for changes, 0 only at its scans,
-	// nil for a folder whose kind has no such setting.
+	// refuses it until an administrator accepts it. HostKeyForgotten tells
+	// a folder moved to another server since: the key it offers is shown
+	// as OfferedHostKey, not saved. PollMinutes is how often the folder is
+	// listed again for changes, 0 only at its scans, nil for a folder
+	// whose kind has no such setting.
 	Endpoint, Region, Remote     string
 	PrivateKeySet, PassphraseSet bool
 	HostKey, OfferedHostKey      string
+	HostKeyForgotten             bool
 	PollMinutes                  *int
+	// SearchFailed counts the files left unmatched as their titles'
+	// searches failed, SearchAddon and SearchFailure telling the addon
+	// that failed most of them and why (see library.SearchFailure).
+	// SearchRetryAt is when the folder is scanned again to search them
+	// again, after SearchRetries failures in a row (see searchRetry).
+	SearchFailed               int
+	SearchAddon, SearchFailure string
+	SearchRetryAt              *time.Time
+	SearchRetries              int
+	// NoSearch counts the files left unmatched as no addon of the server
+	// describes and searches titles of the folder's kind.
+	NoSearch int
+	// Unlisted counts the episodes its files hold that their series'
+	// metadata addon does not list, as the series were last described:
+	// they are listed all the same, named after their files (see
+	// NoteUnlisted), and Unlisted lists them by show and season.
+	Unlisted int
+	// Absolute counts its files named by an absolute number that are the
+	// catalog's episodes of their places (see absolute.go).
+	Absolute int
+	// Unmapped counts its shows' files their numbering could not place,
+	// each an episode of its own (see numbering.go), which Shows lists.
+	Unmapped int
 }
 
 // Matches counts a folder's matched files by how they were matched: by an
-// identifier in their name, by their NFO file, by a search, or by a link
-// made by hand.
+// identifier in their name, by their NFO file, by a search, by a search
+// that kept a title of the year before or after (Year), named alike once
+// numerals are read (Numerals), or both (YearNumerals), by a link made by
+// hand (see chooseItem), or by TMDB's search when the metadata addons'
+// failed (see tmdbmatch.go).
 type Matches struct {
-	Name, NFO, Search, Link int
+	Name, NFO, Search, Year, Numerals, YearNumerals, Link, TMDB int
 }
 
 // Dates counts home videos by where their dates come from: their NFO
@@ -416,6 +491,10 @@ type Dates struct {
 type Link struct {
 	Unit string
 	IMDb string
+	// Described tells whether a metadata addon of the server described
+	// the title, as the folder's kind, when the unit's files were last
+	// matched to it (see noteLink).
+	Described bool
 }
 
 // Add adds a folder to the server's addons, its catalog enabled as a
@@ -449,6 +528,7 @@ func (s *Service) Add(ctx context.Context, folder NewFolder) (addons.Addon, erro
 	if err != nil {
 		return addons.Addon{}, err
 	}
+	usedBy := addons.UsedBy{Groups: []accounts.ID{}, Users: []accounts.ID{}}
 	addon, err := s.addons.Create(ctx, addons.Shared(), addons.KindLocal, location,
 		func(id accounts.ID) stremio.Manifest { return manifest(id, name, folder.Kind, share) },
 		func(tx pgx.Tx, addon addons.Addon) error {
@@ -464,11 +544,16 @@ func (s *Service) Add(ctx context.Context, folder NewFolder) (addons.Addon, erro
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`, addon.ID, folder.Kind, checked, failure, user,
 				s.box.Seal(password), useArtwork, readExtras, extra.endpoint, extra.region, extra.remote, s.box.Seal(extra.privateKey),
 				s.box.Seal(extra.passphrase), extra.pollMinutes)
+			if err != nil || !folder.UsedBy.Listed {
+				return err
+			}
+			usedBy, err = addons.WriteUsedBy(ctx, tx, addon.ID, folder.UsedBy)
 			return err
 		})
 	if err != nil {
 		return addons.Addon{}, err
 	}
+	addon.UsedBy = usedBy
 	s.StartScan(addon.ID)
 	s.watch.kick()
 	return addon, nil
@@ -481,8 +566,9 @@ func (s *Service) Add(ctx context.Context, folder NewFolder) (addons.Addon, erro
 //
 // An S3 bucket's endpoint and region, an rclone remote's name, an SFTP
 // folder's private key and passphrase, removed when empty, and how often
-// the folder is listed again for changes change too; AcceptHostKey
-// accepts the host key an SFTP server offered in place of the one saved.
+// the folder is listed again for changes change too; AcceptHostKey is the
+// fingerprint, as Folder gives it, of the host key an SFTP server offered
+// in place of the one saved, which it accepts.
 type Changes struct {
 	Name          *string
 	Path          *string
@@ -497,7 +583,7 @@ type Changes struct {
 	PrivateKey    *string
 	Passphrase    *string
 	PollMinutes   *int
-	AcceptHostKey bool
+	AcceptHostKey string
 }
 
 // Update changes a folder's name, path or address, a share's user or
@@ -517,6 +603,10 @@ type Changes struct {
 // titles follows its files between movies, shows and home videos (see
 // rememberTitles and follow); to or from music, nothing follows. A scan
 // under way stops first.
+//
+// A host key is accepted by the fingerprint the administrator was shown:
+// when the server has offered another key since, or none, nothing changes
+// and Update answers ErrOfferedKeyChanged.
 func (s *Service) Update(ctx context.Context, id accounts.ID, changes Changes) (addons.Addon, error) {
 	current, err := s.Folder(ctx, id)
 	if err != nil {
@@ -593,8 +683,9 @@ func (s *Service) Update(ctx context.Context, id accounts.ID, changes Changes) (
 	}
 	moved := location != current.Addon.ManifestURL
 	retyped := kind != current.Kind
-	credentials := user != current.User || changes.Password != nil || !extra.same(stored) || changes.AcceptHostKey
-	// A folder on another server forgets the host key of the former.
+	credentials := user != current.User || changes.Password != nil || !extra.same(stored) || changes.AcceptHostKey != ""
+	// A folder on another server forgets the host key of the former, and
+	// saves none of the new one without its acceptance.
 	rehosted := serverOf(location) != serverOf(current.Addon.ManifestURL)
 	release := func() {}
 	if moved || retyped {
@@ -626,9 +717,20 @@ func (s *Service) Update(ctx context.Context, id accounts.ID, changes Changes) (
 					return err
 				}
 			}
-			if changes.AcceptHostKey {
-				if _, err := tx.Exec(ctx, `UPDATE local_folders SET share_host_key = share_offered_key, share_offered_key = ''
-					WHERE addon_id = $1 AND share_offered_key <> ''`, id); err != nil {
+			if changes.AcceptHostKey != "" {
+				// The key saved is the one read here, under the row's
+				// lock: a connection offered another key meanwhile
+				// waits, and its key is not the one accepted.
+				var offered string
+				if err := tx.QueryRow(ctx, "SELECT share_offered_key FROM local_folders WHERE addon_id = $1 FOR UPDATE", id).Scan(&offered); err != nil {
+					return err
+				}
+				if offered == "" || Fingerprint(offered) != changes.AcceptHostKey {
+					return ErrOfferedKeyChanged
+				}
+				if _, err := tx.Exec(ctx, `UPDATE local_folders SET share_host_key = $2, share_offered_key = '', share_host_key_forgotten = false
+					WHERE addon_id = $1`, id,
+					offered); err != nil {
 					return err
 				}
 			}
@@ -639,7 +741,8 @@ func (s *Service) Update(ctx context.Context, id accounts.ID, changes Changes) (
 			}
 		}
 		if rehosted {
-			if _, err := tx.Exec(ctx, "UPDATE local_folders SET share_host_key = '', share_offered_key = '' WHERE addon_id = $1", id); err != nil {
+			if _, err := tx.Exec(ctx, `UPDATE local_folders SET share_host_key = '', share_offered_key = '', share_host_key_forgotten = true
+				WHERE addon_id = $1`, id); err != nil {
 				return err
 			}
 		}
@@ -660,11 +763,14 @@ func (s *Service) Update(ctx context.Context, id accounts.ID, changes Changes) (
 		if _, err := tx.Exec(ctx, "DELETE FROM local_links WHERE addon_id = $1", id); err != nil {
 			return err
 		}
+		if _, err := tx.Exec(ctx, "DELETE FROM local_exact_units WHERE addon_id = $1", id); err != nil {
+			return err
+		}
 		if _, err := tx.Exec(ctx, "DELETE FROM local_side_files WHERE addon_id = $1", id); err != nil {
 			return err
 		}
 		for _, table := range []string{"local_tracks", "local_covers", "local_lyrics", "local_playlists", "local_artwork", "local_disc_episodes",
-			"local_extras"} {
+			"local_extras", "local_relinked_units"} {
 			if _, err := tx.Exec(ctx, "DELETE FROM "+table+" WHERE addon_id = $1", id); err != nil {
 				return err
 			}
@@ -682,7 +788,7 @@ func (s *Service) Update(ctx context.Context, id accounts.ID, changes Changes) (
 	if err != nil {
 		return addons.Addon{}, err
 	}
-	if changes.AcceptHostKey || rehosted {
+	if changes.AcceptHostKey != "" || rehosted {
 		// The reader keeps the host key it was made with.
 		s.forgetRemote(id)
 	}
@@ -717,7 +823,7 @@ func (s *Service) Folder(ctx context.Context, id accounts.ID) (Folder, error) {
 	var password, hostKey, offeredKey string
 	err = s.db.QueryRow(ctx, `SELECT kind, checked_at, scanned_at, error, share_user, share_password, use_artwork, read_extras,
 			share_endpoint, share_region, share_remote, share_private_key <> '', share_passphrase <> '', share_host_key, share_offered_key,
-			poll_minutes,
+			share_host_key_forgotten, poll_minutes, search_retry_at, search_retries,
 			(SELECT count(*) FROM local_extras WHERE addon_id = $1),
 			(SELECT count(*) FROM local_files WHERE addon_id = $1) + (SELECT count(*) FROM local_tracks WHERE addon_id = $1),
 			(SELECT count(*) FROM local_files WHERE addon_id = $1 AND stremio_id IS NOT NULL) +
@@ -725,10 +831,12 @@ func (s *Service) Folder(ctx context.Context, id accounts.ID) (Folder, error) {
 			(SELECT count(DISTINCT album_id) FROM local_tracks WHERE addon_id = $1 AND reason = ''),
 			(SELECT count(DISTINCT a) FROM local_tracks, unnest(album_artist_ids) a WHERE addon_id = $1 AND reason = ''),
 			(SELECT count(*) FROM local_tracks WHERE addon_id = $1 AND reason = '' AND (track_gain IS NOT NULL OR loudness > $2)),
-			(SELECT count(*) FROM local_tracks WHERE addon_id = $1 AND reason = '' AND loudness IS NOT NULL)
+			(SELECT count(*) FROM local_tracks WHERE addon_id = $1 AND reason = '' AND loudness IS NOT NULL),
+			`+unlistedCount+`
 		FROM local_folders WHERE addon_id = $1`, id, loudness.Silence).Scan(&f.Kind, &f.CheckedAt, &f.ScannedAt, &f.Error, &f.User, &password,
-		&f.UseArtwork, &f.ReadExtras, &f.Endpoint, &f.Region, &f.Remote, &f.PrivateKeySet, &f.PassphraseSet, &hostKey, &offeredKey,
-		&f.PollMinutes, &f.Extras, &f.Files, &f.Matched, &f.Albums, &f.Artists, &f.Gained, &f.Measured)
+		&f.UseArtwork, &f.ReadExtras, &f.Endpoint, &f.Region, &f.Remote, &f.PrivateKeySet, &f.PassphraseSet, &hostKey, &offeredKey, &f.HostKeyForgotten,
+		&f.PollMinutes, &f.SearchRetryAt, &f.SearchRetries, &f.Extras, &f.Files, &f.Matched, &f.Albums, &f.Artists, &f.Gained, &f.Measured,
+		&f.Unlisted)
 	f.PasswordSet = password != ""
 	f.HostKey, f.OfferedHostKey = Fingerprint(hostKey), Fingerprint(offeredKey)
 	if errors.Is(err, pgx.ErrNoRows) {
@@ -752,21 +860,57 @@ func (s *Service) Folder(ctx context.Context, id accounts.ID) (Folder, error) {
 			f.MatchedBy.NFO = count
 		case bySearch:
 			f.MatchedBy.Search = count
+		case byYear:
+			f.MatchedBy.Year = count
+		case byNumerals:
+			f.MatchedBy.Numerals = count
+		case byYearNumerals:
+			f.MatchedBy.YearNumerals = count
 		case byLink:
 			f.MatchedBy.Link = count
+		case byTMDB:
+			f.MatchedBy.TMDB = count
 		}
 		return nil
 	})
 	if err != nil {
 		return Folder{}, err
 	}
-	rows, err = s.db.Query(ctx, "SELECT unit, imdb_id FROM local_links WHERE addon_id = $1 ORDER BY unit", id)
+	if err := s.db.QueryRow(ctx, "SELECT count(*) FROM local_files WHERE addon_id = $1 AND reason = $2", id, reasonNoSearch).Scan(&f.NoSearch); err != nil {
+		return Folder{}, err
+	}
+	if err := s.db.QueryRow(ctx, "SELECT count(*) FROM local_files WHERE addon_id = $1 AND stremio_id IS NOT NULL AND numbering = $2", id,
+		numberingAbsolute).Scan(&f.Absolute); err != nil {
+		return Folder{}, err
+	}
+	if err := s.db.QueryRow(ctx, "SELECT count(*) FROM local_files WHERE addon_id = $1 AND stremio_id IS NOT NULL AND numbering = $2", id,
+		numberingUnmapped).Scan(&f.Unmapped); err != nil {
+		return Folder{}, err
+	}
+	// The addon that failed the most searches tells why.
+	rows, err = s.db.Query(ctx, `SELECT search_addon, search_failure, count(*) FROM local_files
+		WHERE addon_id = $1 AND reason = $2 GROUP BY 1, 2 ORDER BY 3 DESC, 1, 2`, id, reasonSearchFailed)
+	if err != nil {
+		return Folder{}, err
+	}
+	var failedAddon, failure string
+	_, err = pgx.ForEachRow(rows, []any{&failedAddon, &failure, &count}, func() error {
+		if f.SearchFailed == 0 {
+			f.SearchAddon, f.SearchFailure = failedAddon, failure
+		}
+		f.SearchFailed += count
+		return nil
+	})
+	if err != nil {
+		return Folder{}, err
+	}
+	rows, err = s.db.Query(ctx, "SELECT unit, imdb_id, described FROM local_links WHERE addon_id = $1 ORDER BY unit", id)
 	if err != nil {
 		return Folder{}, err
 	}
 	f.Links, err = pgx.CollectRows(rows, func(row pgx.CollectableRow) (Link, error) {
 		var l Link
-		err := row.Scan(&l.Unit, &l.IMDb)
+		err := row.Scan(&l.Unit, &l.IMDb, &l.Described)
 		return l, err
 	})
 	if err != nil {
@@ -802,9 +946,9 @@ func metaType(kind string) string {
 }
 
 // idPrefixes are the identifiers a folder's titles have: IMDb's, or TMDB's
-// for a title the metadata addons gave no IMDb identifier; a home video's
-// are its own (see videoID).
-var idPrefixes = []string{"tt", "tmdb:"}
+// for a title the metadata addons gave no IMDb identifier, and its plain
+// videos' (see plainID); a home video's are its own (see videoID).
+var idPrefixes = []string{"tt", "tmdb:", library.PlainIDPrefix}
 
 // manifest describes a folder as an addon: one catalog of its titles,
 // searchable, and the descriptions and streams of their identifiers. A

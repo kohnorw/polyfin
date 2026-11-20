@@ -49,6 +49,21 @@ type LiveSession struct {
 	// play session's master playlist offers, the one chosen then the lower
 	// ones, when it offers several: its encodings' Key.Variant index them.
 	Qualities []int
+	// Switched names the version the play session went on from once its
+	// version's source failed, empty when it did not (see
+	// playback.Service.SwitchedTo): Source describes that one then.
+	Switched string
+	// Sent is the bytes per second Polyfin sends the app, and Received
+	// those the version's source sends Polyfin, averaged over
+	// bandwidth.Window (see measure); Redirected tells that the app was
+	// sent to read the source itself, so that none of its bytes pass
+	// through Polyfin. Origin is where the version is read from.
+	Sent, Received float64
+	Redirected     bool
+	Origin         Origin
+	// version is the version played, when the session's report does not
+	// name it.
+	version accounts.ID
 }
 
 // LiveSessions lists the devices playing, DLNA devices included, the guests
@@ -105,20 +120,22 @@ func (h *Handler) LiveSessions(ctx context.Context) ([]LiveSession, error) {
 		if item, err := h.played(ctx, user, now.Item); err == nil {
 			session.Item, session.Found = item, true
 		}
-		// The version played is the one PlaybackInfo chose, which the play
-		// session names, else the media source the app reports. Apps report
-		// a title's own identifier for its first version, which has no
-		// analysis of its own.
-		version, err := accounts.ParseID(now.MediaSourceID)
-		if grant, grantErr := h.Playback.Signer().Verify(now.PlaySessionID); grantErr == nil {
-			version, err = grant.Version, nil
-		}
-		if err == nil {
+		// The version played, which a title's own identifier, reported as
+		// the media source of its first version, does not name; the one
+		// the play went on from once that one failed.
+		if version, ok := h.playedVersion(deviceID, now); ok {
+			if switched, ok := h.Playback.SwitchedTo(now.PlaySessionID); ok && now.PlaySessionID != "" {
+				version, session.Switched = switched.ID, switched.Name
+			}
+			session.version = version
 			if analysis, ok := h.Playback.Analyzed(ctx, version); ok {
 				session.Source = &analysis
 			}
 		}
 		sessions = append(sessions, session)
+	}
+	for i := range sessions {
+		h.measure(ctx, &sessions[i])
 	}
 	slices.SortFunc(sessions, func(a, b LiveSession) int {
 		return cmp.Or(b.Playing.Started.Compare(a.Playing.Started), cmp.Compare(a.Device.ID.String(), b.Device.ID.String()))

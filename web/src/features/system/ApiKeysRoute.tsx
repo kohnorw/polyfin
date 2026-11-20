@@ -151,7 +151,7 @@ function CreateApiKey() {
   return (
     <Panel title={text.createTitle} as="section" flush>
       <form onSubmit={submit} noValidate>
-        <div className="max-w-lg px-6 pb-6 max-sm:px-4">
+        <div className="max-w-[36rem] px-5 max-md:px-4">
           <Field
             label={text.app}
             help={text.appHint}
@@ -211,11 +211,11 @@ function NewKey({ apiKey, onDone }: { apiKey: NewApiKey; onDone: () => void }) {
         </PanelFooter>
       }
     >
-      <div className="space-y-4">
+      <div className="space-y-3">
         <Notice tone="warn" live>
           {text.newKeyNotice}
         </Notice>
-        <code className="block rounded-field border border-line-2 bg-bg px-3.5 py-2.5 font-mono text-control break-all text-ink select-all">
+        <code className="block rounded-field bg-s2 px-3.5 py-2.5 font-mono text-control break-all text-ink select-all">
           {apiKey.key}
         </code>
         <div aria-live="polite">

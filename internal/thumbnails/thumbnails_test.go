@@ -15,7 +15,9 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -46,11 +48,10 @@ type countingSource struct {
 }
 
 type request struct {
-	at        time.Time
-	kind      string
-	off, n    int64
-	ranges    int
-	fetchedAt int64
+	at     time.Time
+	kind   string
+	off, n int64
+	ranges int
 }
 
 func (c *countingSource) record(r request) {
@@ -117,13 +118,16 @@ func fixture(t *testing.T, name string) []byte {
 }
 
 // testService is a service over a fresh database, its settings changed
-// through settings.
+// through settings. Its source cache, when set, holds what plays read;
+// converting tells that a conversion runs on the processor.
 type testService struct {
 	*Service
-	mu       sync.Mutex
-	settings accounts.Settings
-	analysis media.Analysis
-	source   *countingSource
+	mu         sync.Mutex
+	settings   accounts.Settings
+	analysis   media.Analysis
+	source     *countingSource
+	cache      *source.Cache
+	converting atomic.Bool
 }
 
 func newTestService(t *testing.T, ffmpeg string) *testService {
@@ -145,9 +149,19 @@ func newTestService(t *testing.T, ffmpeg string) *testService {
 			defer ts.mu.Unlock()
 			return ts.analysis, ts.analysis.Duration > 0
 		},
-		Pace:   20 * time.Millisecond,
-		Poll:   5 * time.Millisecond,
-		Logger: slog.New(slog.DiscardHandler),
+		Cached: func(v library.Version) (Cached, bool) {
+			if ts.cache == nil {
+				return nil, false
+			}
+			cached, ok := ts.cache.Cached(v.ID)
+			return cached, ok
+		},
+		Converting: ts.converting.Load,
+		Pace:       20 * time.Millisecond,
+		Poll:       5 * time.Millisecond,
+		// Tests extend the thumbnails of plays themselves.
+		LiveEvery: time.Hour,
+		Logger:    slog.New(slog.DiscardHandler),
 	})
 	t.Cleanup(ts.Close)
 	return ts
@@ -183,6 +197,7 @@ var (
 // its chapter images, from its keyframes alone, read paced through its
 // index and decoded by FFmpeg.
 func TestGenerateFromMatroska(t *testing.T) {
+	t.Parallel()
 	ts := newTestService(t, testFFmpeg(t))
 	data := fixture(t, "forced.mkv")
 	ts.source = &countingSource{data: data}
@@ -332,16 +347,20 @@ func closestKeyframe(t *testing.T, ffmpeg, file string, img image.Image, cell im
 // references holds the keyframes FFmpeg decoded for referenceFrame.
 var references sync.Map
 
-// referenceFrame is the frame of a fixture at a keyframe, by time, as
-// FFmpeg decodes it, width pixels square.
+// referenceFrame is the frame of a fixture, or of the file at an absolute
+// path, at a keyframe, by time, as FFmpeg decodes it, width pixels square.
 func referenceFrame(t *testing.T, ffmpeg, file string, at float64, width int) image.Image {
 	t.Helper()
 	key := fmt.Sprint(file, at, width)
 	if img, ok := references.Load(key); ok {
 		return img.(image.Image)
 	}
+	path := file
+	if !filepath.IsAbs(path) {
+		path = filepath.Join("..", "container", "testdata", file)
+	}
 	out, err := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-ss", strconv.FormatFloat(at, 'f', -1, 64),
-		"-i", filepath.Join("..", "container", "testdata", file), "-frames:v", "1",
+		"-i", path, "-frames:v", "1",
 		"-vf", "scale=w="+strconv.Itoa(width)+":h=trunc(ow/dar/2)*2", "-f", "image2pipe", "-c:v", "png", "-").Output()
 	if err != nil {
 		t.Fatal(err)
@@ -358,6 +377,7 @@ func referenceFrame(t *testing.T, ffmpeg, file string, at float64, width int) im
 // thumbnails are stretched over its runtime, one per keyframe the budget
 // lets read, each showing the one read nearest its time.
 func TestGenerateWithinTheBudget(t *testing.T) {
+	t.Parallel()
 	ts := newTestService(t, testFFmpeg(t))
 	ts.budget = 5
 	ts.source = &countingSource{data: fixture(t, "forced.mkv")}
@@ -408,6 +428,7 @@ func TestGenerateWithinTheBudget(t *testing.T) {
 // A host asking to slow down stops the version at once, with nothing
 // kept, and pauses every image of that host; other hosts go on.
 func TestSlowDownPausesTheHost(t *testing.T) {
+	t.Parallel()
 	ts := newTestService(t, testFFmpeg(t))
 	// The size and the index are read; the first keyframe is refused.
 	ts.source = &countingSource{data: fixture(t, "forced.mkv"), slowDownAt: 3}
@@ -444,7 +465,7 @@ func TestSlowDownPausesTheHost(t *testing.T) {
 	}
 	// Nothing more for that host, even another version.
 	before := len(ts.source.count())
-	ts.Queue(other, accounts.ID{})
+	ts.Queue(other, "Other", accounts.ID{})
 	ts.generate(ctx, job{version: other, host: "host.example"})
 	if n := len(ts.source.count()); n != before {
 		t.Errorf("%d requests to a paused host", n-before)
@@ -462,8 +483,10 @@ func TestSlowDownPausesTheHost(t *testing.T) {
 }
 
 // Images wait for the playback that asked for them to stop, and for
-// every playback from the same host to end.
+// every playback from the same host to end; a playback of a version not
+// known holds back no host.
 func TestGenerateWaitsForPlaybacks(t *testing.T) {
+	t.Parallel()
 	ts := newTestService(t, testFFmpeg(t))
 	ts.mu.Lock()
 	ts.source = &countingSource{data: fixture(t, "forced.mkv")}
@@ -492,24 +515,303 @@ func TestGenerateWaitsForPlaybacks(t *testing.T) {
 	}
 	// The viewer still plays, from another host.
 	set(Playing{Device: viewer, URL: "https://other.example/a.mkv"})
-	ts.Queue(testVersion, viewer)
+	ts.Queue(testVersion, "Test", viewer)
 	idle("while its playback goes on")
-	// It stopped, but someone else plays from the same host, or a version
-	// whose host is unknown.
+	// It stopped, but someone else plays from the same host.
 	set(Playing{Device: other, URL: "https://HOST.example/b.mkv"})
 	idle("while the host serves a playback")
-	set(Playing{Device: other})
-	idle("while a playback of an unknown host goes on")
-	// Only another host's playback is left.
-	set(Playing{Device: other, URL: "https://other.example/b.mkv"})
-	deadline := time.Now().Add(20 * time.Second)
+	// Only playbacks of a version not known, and of another host, are
+	// left.
+	set(Playing{Device: other}, Playing{Device: accounts.ID{9}, URL: "https://other.example/b.mkv"})
+	if !madeWithin(t, ts, testVersion, 20*time.Second) {
+		t.Error("no thumbnails were made once the host was free")
+	}
+}
+
+// madeWithin reports whether thumbnails of version are kept within d.
+func madeWithin(t *testing.T, ts *testService, version library.Version, d time.Duration) bool {
+	t.Helper()
+	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		if manifest, _ := ts.Manifest(t.Context(), testVersion.Item); len(manifest) == 1 {
-			return
+		if manifest, _ := ts.Manifest(t.Context(), version.Item); len(manifest[version.ID]) == 1 {
+			return true
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	t.Error("no thumbnails were made once the host was free")
+	return false
+}
+
+// localFile is a file of a local folder, lasting two and a half minutes,
+// made of forced.mkv, with a thumbnail every 10 s asked and no chapter
+// image, and a budget of 5 requests for providers' files: the size and
+// the index would leave 3.
+func localFile(t *testing.T) (*testService, library.Version) {
+	t.Helper()
+	ts := newTestService(t, testFFmpeg(t))
+	ts.change(func(s *accounts.Settings) { s.TrickplayInterval, s.ChapterImages = 10, false })
+	ts.mu.Lock()
+	ts.budget = 5
+	ts.source = &countingSource{data: fixture(t, "forced.mkv")}
+	analysis := forcedAnalysis
+	analysis.Duration = 150 * time.Second
+	ts.analysis = analysis
+	ts.mu.Unlock()
+	return ts, library.Version{ID: accounts.ID{11}, Item: accounts.ID{12}, URL: "http://127.0.0.1:9/file/a.mkv", Addon: "Home", LocalFolder: true}
+}
+
+// A local folder's file, read from the server's own storage, gets a
+// thumbnail every interval asked, whatever the budget, the pace and the
+// hourly cap of providers: 15 for two and a half minutes, one every
+// 10 s, not 3 spread over its runtime as a budget of 5 requests would
+// give.
+func TestLocalFilesTakeEveryThumbnail(t *testing.T) {
+	t.Parallel()
+	ts, file := localFile(t)
+	ts.generate(t.Context(), job{version: file, title: "Home video", host: hostOf(file.URL)})
+	manifest, err := ts.Manifest(t.Context(), file.Item)
+	if info := manifest[file.ID][240]; err != nil || info.Interval != 10000 || info.ThumbnailCount != 15 {
+		t.Errorf("thumbnails %+v, %v: one every 10 s, 15, expected", info, err)
+	}
+}
+
+// localTS is a file of a local folder whose container has no index:
+// half a minute of MPEG-TS, a keyframe every 3 s, made by the test's
+// FFmpeg, with a thumbnail every 5 s asked and no chapter image.
+func localTS(t *testing.T) (*testService, library.Version) {
+	t.Helper()
+	ffmpeg := testFFmpeg(t)
+	file := filepath.Join(t.TempDir(), "home.ts")
+	if out, err := exec.Command(ffmpeg, "-hide_banner", "-loglevel", "error", "-f", "lavfi", "-i", "testsrc2=size=128x72:rate=10:duration=30",
+		"-c:v", "mpeg2video", "-g", "30", "-bf", "0", "-f", "mpegts", file).CombinedOutput(); err != nil {
+		t.Fatalf("making the file: %v: %s", err, out)
+	}
+	data, err := os.ReadFile(file)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := newTestService(t, ffmpeg)
+	ts.change(func(s *accounts.Settings) { s.ChapterImages = false })
+	ts.mu.Lock()
+	ts.source = &countingSource{data: data}
+	ts.analysis = media.Analysis{Format: "mpegts", Duration: 30 * time.Second, Size: int64(len(data)),
+		Streams: []media.Stream{{Index: 0, Type: "video", Codec: "mpeg2video", Width: 128, Height: 72}}}
+	ts.mu.Unlock()
+	return ts, library.Version{ID: accounts.ID{31}, Item: accounts.ID{32}, URL: file, Addon: "Home", LocalFolder: true}
+}
+
+// A local folder's file whose container has no index, here MPEG-TS, gets
+// its thumbnails all the same, FFmpeg reading it whole and decoding its
+// keyframes alone: one every 5 s, each showing a keyframe within half an
+// interval of its time, and its result tells them made. A chapter image
+// shows the keyframe of the thumbnail nearest its start: 15 s for 14 s.
+func TestLocalFilesWithoutAnIndexGetThumbnails(t *testing.T) {
+	t.Parallel()
+	ts, version := localTS(t)
+	ts.change(func(s *accounts.Settings) { s.ChapterImages = true })
+	ts.mu.Lock()
+	ts.analysis.Chapters = []media.Chapter{{Start: 0}, {Start: 14 * time.Second}}
+	ts.mu.Unlock()
+	ctx := t.Context()
+	ts.generate(ctx, job{version: version, title: "Home video", host: hostOf(version.URL)})
+	results, err := ts.Results(ctx, []accounts.ID{version.ID})
+	if result := results[version.ID]; err != nil || result.State != StateMade || result.Count != 6 {
+		t.Fatalf("result %+v, %v: 6 made expected", result, err)
+	}
+	manifest, err := ts.Manifest(ctx, version.Item)
+	info := manifest[version.ID][240]
+	if err != nil || info.Interval != 5000 || info.ThumbnailCount != 6 {
+		t.Fatalf("thumbnails %+v, %v: one every 5 s, 6, expected", info, err)
+	}
+	tile, err := ts.Tile(ctx, version.ID, 240, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	img, err := jpeg.Decode(bytes.NewReader(tile))
+	if err != nil {
+		t.Fatal(err)
+	}
+	keyframes := []float64{0, 3, 6, 9, 12, 15, 18, 21, 24, 27}
+	for i := range info.ThumbnailCount {
+		cell := image.Rect(i*info.Width, 0, (i+1)*info.Width, info.Height)
+		if shown := closestKeyframe(t, ts.FFmpeg, version.URL, img, cell, info.Width, keyframes); math.Abs(shown-float64(5*i)) > 2.5 {
+			t.Errorf("thumbnail %d, at %d s, shows the keyframe at %vs", i, 5*i, shown)
+		}
+	}
+	for chapter, at := range []float64{0, 15} {
+		got, err := ts.ChapterImageOf(ctx, version.ID, chapter, "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		img, err := jpeg.Decode(bytes.NewReader(got.Data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if shown := closestKeyframe(t, ts.FFmpeg, version.URL, img, img.Bounds(), img.Bounds().Dx(), keyframes); shown != at {
+			t.Errorf("chapter %d shows the keyframe at %vs, not %vs", chapter, shown, at)
+		}
+	}
+}
+
+// A local folder's file read whole waits while that file plays.
+func TestLocalFilesWithoutAnIndexWaitForTheirPlays(t *testing.T) {
+	t.Parallel()
+	ts, version := localTS(t)
+	ctx := t.Context()
+	var playing atomic.Bool
+	playing.Store(true)
+	ts.WatchPlaybacks(func() []Playing {
+		if playing.Load() {
+			return []Playing{{Device: accounts.ID{7}, URL: version.URL}}
+		}
+		return nil
+	})
+	want, err := ts.wanted(ctx, version.ID, ts.analysis)
+	if err != nil {
+		t.Fatal(err)
+	}
+	made := make(chan error, 1)
+	go func() {
+		_, err := ts.makeFromFile(ctx, version, ts.analysis, want)
+		made <- err
+	}()
+	select {
+	case err := <-made:
+		t.Fatalf("made while the file plays: %v", err)
+	case <-time.After(100 * time.Millisecond):
+	}
+	playing.Store(false)
+	if err := <-made; err != nil {
+		t.Fatal(err)
+	}
+	if manifest, err := ts.Manifest(ctx, version.Item); err != nil || manifest[version.ID][240].ThumbnailCount != 6 {
+		t.Errorf("thumbnails %+v, %v: 6 expected", manifest, err)
+	}
+}
+
+// A local folder's file waits only while the same file plays, not for the
+// playbacks of the other local files, which come from the same address.
+func TestLocalFilesWaitOnlyForTheirOwnPlays(t *testing.T) {
+	t.Parallel()
+	ts, file := localFile(t)
+	var mu sync.Mutex
+	var playing []Playing
+	set := func(p ...Playing) {
+		mu.Lock()
+		playing = p
+		mu.Unlock()
+		ts.Wake()
+	}
+	ts.WatchPlaybacks(func() []Playing {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(playing)
+	})
+	viewer, other := accounts.ID{7}, accounts.ID{8}
+	set(Playing{Device: viewer, URL: file.URL})
+	ts.Queue(file, "Home video", viewer)
+	// The viewer stopped, someone else plays the same file.
+	set(Playing{Device: other, URL: file.URL})
+	time.Sleep(100 * time.Millisecond)
+	if n := len(ts.source.count()); n != 0 {
+		t.Fatalf("%d requests while the file plays", n)
+	}
+	// Another local file plays.
+	set(Playing{Device: other, URL: "http://127.0.0.1:9/file/b.mkv"})
+	if !madeWithin(t, ts, file, time.Minute) {
+		t.Error("no thumbnails were made while another local file plays")
+	}
+}
+
+// logLines keeps what a logger writes, a line at a time.
+type logLines struct {
+	mu    sync.Mutex
+	lines []string
+}
+
+func (l *logLines) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.lines = append(l.lines, string(p))
+	return len(p), nil
+}
+
+func (l *logLines) all() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return slices.Clone(l.lines)
+}
+
+// A version played that gets no images logs why, with its title, once:
+// a disc is not one file; while the settings turn the images off, one
+// line stands for every version.
+func TestSkippedVersionsAreLoggedOnce(t *testing.T) {
+	t.Parallel()
+	ts := newTestService(t, "")
+	logged := &logLines{}
+	ts.Logger = slog.New(slog.NewTextHandler(logged, nil))
+	disc := library.Version{ID: accounts.ID{21}, Item: accounts.ID{22}, URL: "http://127.0.0.1:9/input/disc", LocalFolder: true}
+	ts.Skip(disc, "Night Train (2021)", SkippedDisc)
+	ts.Skip(disc, "Night Train (2021)", SkippedDisc)
+	lines := logged.all()
+	if len(lines) != 1 || !strings.Contains(lines[0], `title="Night Train (2021)"`) || !strings.Contains(lines[0], SkippedDisc) {
+		t.Errorf("a disc logged %q", lines)
+	}
+	ts.change(func(s *accounts.Settings) { s.Trickplay, s.ChapterImages = false, false })
+	ts.Queue(testVersion, "One", accounts.ID{7})
+	other := testVersion
+	other.ID = accounts.ID{23}
+	ts.Queue(other, "Two", accounts.ID{7})
+	if lines := logged.all()[1:]; len(lines) != 1 || !strings.Contains(lines[0], SkippedTurnedOff) {
+		t.Errorf("turned off, logged %q", lines)
+	}
+}
+
+// A version queued as its playback starts, while the queue reads the
+// playbacks for a check, waits for that playback all the same: the
+// playbacks read before it started do not let the version through.
+func TestQueuedDuringACheckWaitsForItsPlayback(t *testing.T) {
+	t.Parallel()
+	ts := newTestService(t, "")
+	var mu sync.Mutex
+	viewer, watcher := accounts.ID{7}, accounts.ID{8}
+	playing := []Playing{{Device: watcher, URL: "https://third.example/x.mkv"}}
+	// hold has the next read of the playbacks send a channel, and answer
+	// what they were before it once the test closes it.
+	var hold atomic.Bool
+	reads := make(chan chan struct{})
+	ts.WatchPlaybacks(func() []Playing {
+		mu.Lock()
+		now := slices.Clone(playing)
+		mu.Unlock()
+		if hold.CompareAndSwap(true, false) {
+			release := make(chan struct{})
+			reads <- release
+			<-release
+		}
+		return now
+	})
+	// A version waits for the watcher's playback, so that the queue is
+	// checked.
+	ts.Queue(library.Version{ID: accounts.ID{5}, Item: accounts.ID{6}, URL: "https://other.example/w.mkv"}, "Waiting", watcher)
+	hold.Store(true)
+	release := <-reads
+	// The viewer's playback starts, and queues its version, as the queue
+	// reads the playbacks.
+	mu.Lock()
+	playing = append(playing, Playing{Device: viewer, URL: "https://other.example/a.mkv"})
+	mu.Unlock()
+	ts.Queue(testVersion, "Test", viewer)
+	hold.Store(true)
+	close(release)
+	// The next read of the playbacks comes once that check is over.
+	release = <-reads
+	ts.Service.mu.Lock()
+	queued := slices.ContainsFunc(ts.jobs, func(j job) bool { return j.version.ID == testVersion.ID })
+	ts.Service.mu.Unlock()
+	close(release)
+	if !queued {
+		t.Error("the version started during its playback")
+	}
 }
 
 // rangeSource is a countingSource serving several ranges with one
@@ -532,10 +834,11 @@ var hevcKeyframes = []float64{0, 4, 8, 12, 16, 20, 24, 28, 32, 36, 40, 44, 48, 5
 // Every thumbnail and chapter image shows the keyframe read nearest its
 // time, whatever order the keyframes were read in (coarse to fine), one
 // range a request or several, and with a budget too small for a thumbnail
-// every 5 s, which stretches their interval: a decoded frame is tied to
-// its keyframe's time, not to its place in the reads, nor in what the
-// decoder outputs.
+// every 5 s one range a request, which stretches their interval: a decoded
+// frame is tied to its keyframe's time, not to its place in the reads,
+// nor in what the decoder outputs.
 func TestImagesFollowTheKeyframesTimes(t *testing.T) {
+	t.Parallel()
 	ffmpeg := testFFmpeg(t)
 	data := fixture(t, "hevc.mkv")
 	analysis := media.Analysis{Format: "matroska,webm", Duration: 60 * time.Second,
@@ -552,6 +855,7 @@ func TestImagesFollowTheKeyframesTimes(t *testing.T) {
 		{"several ranges a request, a small budget", true, 5},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
 			ts := newTestService(t, ffmpeg)
 			ts.budget = tc.budget
 			counting := &countingSource{data: data}
@@ -568,7 +872,10 @@ func TestImagesFollowTheKeyframesTimes(t *testing.T) {
 			info := manifest[testVersion.ID][240]
 			step := time.Duration(info.Interval) * time.Millisecond
 			wantStep := 5 * time.Second
-			if tc.budget < budget {
+			// Several ranges a request read, within 5 requests, a keyframe
+			// for every thumbnail at 5 s.
+			stretched := tc.budget < budget && !tc.ranges
+			if stretched {
 				wantStep = time.Duration(info.Interval/1000) * time.Second
 				if wantStep <= 5*time.Second || info.ThumbnailCount > tc.budget {
 					t.Errorf("a budget of %d: %d thumbnails every %v", tc.budget, info.ThumbnailCount, step)
@@ -606,7 +913,7 @@ func TestImagesFollowTheKeyframesTimes(t *testing.T) {
 			// out, those read are at least those shown, spread over the
 			// runtime.
 			read := hevcKeyframes
-			if tc.budget < budget {
+			if stretched {
 				read = slices.Compact(slices.Sorted(slices.Values(append(slices.Clone(shownAt), chapters...))))
 				if len(read) < 2 || read[0] > 20 || read[len(read)-1] < 36 {
 					t.Errorf("the keyframes read do not cover the runtime: %v", read)
@@ -635,6 +942,52 @@ func TestImagesFollowTheKeyframesTimes(t *testing.T) {
 	}
 }
 
+// A host serving several ranges with one request has every keyframe a
+// request reads count in the budget, not the request alone: within 5
+// requests, the size and the index included, hevc.mkv's minute gets a
+// thumbnail every 5 s, 12, where one range a request gets 3, one every
+// 20 s.
+func TestSeveralRangesARequestTakeMoreThumbnails(t *testing.T) {
+	t.Parallel()
+	ffmpeg := testFFmpeg(t)
+	data := fixture(t, "hevc.mkv")
+	analysis := media.Analysis{Format: "matroska,webm", Duration: 60 * time.Second,
+		Streams: []media.Stream{{Index: 0, Type: "video", Codec: "hevc", Width: 128, Height: 72}}}
+	for _, tc := range []struct {
+		name     string
+		ranges   bool
+		count    int
+		interval int
+	}{
+		{"one range a request", false, 3, 20000},
+		{"several ranges a request", true, 12, 5000},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			ts := newTestService(t, ffmpeg)
+			ts.change(func(s *accounts.Settings) { s.ChapterImages = false })
+			ts.budget = 5
+			counting := &countingSource{data: data}
+			ts.Open = func(library.Version) Source {
+				if tc.ranges {
+					return rangeSource{counting}
+				}
+				return counting
+			}
+			ts.analysis = analysis
+			ctx := t.Context()
+			ts.generate(ctx, testJob)
+			if n := len(counting.count()); n > 5 {
+				t.Errorf("%d requests, for a budget of 5", n)
+			}
+			manifest, err := ts.Manifest(ctx, testVersion.Item)
+			if info := manifest[testVersion.ID][240]; err != nil || info.ThumbnailCount != tc.count || info.Interval != tc.interval {
+				t.Errorf("thumbnails %+v, %v: %d every %d ms expected", info, err, tc.count, tc.interval)
+			}
+		})
+	}
+}
+
 // Answers some hosts give now and then, which a second request does not
 // get: a whole file for a range, another range, an answer cut short.
 var oddAnswers = map[string]error{
@@ -647,9 +1000,11 @@ var oddAnswers = map[string]error{
 // images are made. Two in a row fail the version, which is left alone for a
 // while, its host not paused.
 func TestOddAnswersAreAskedOnceMore(t *testing.T) {
+	t.Parallel()
 	ffmpeg := testFFmpeg(t)
 	for name, answer := range oddAnswers {
 		t.Run(name, func(t *testing.T) {
+			t.Parallel()
 			ts := newTestService(t, ffmpeg)
 			ts.analysis = forcedAnalysis
 			ctx := t.Context()
@@ -698,6 +1053,7 @@ func TestOddAnswersAreAskedOnceMore(t *testing.T) {
 // A link the source says expired is renewed, once a generation, and asked
 // again.
 func TestExpiredLinksAreRenewedOnce(t *testing.T) {
+	t.Parallel()
 	ffmpeg := testFFmpeg(t)
 	ts := newTestService(t, ffmpeg)
 	ts.analysis = forcedAnalysis

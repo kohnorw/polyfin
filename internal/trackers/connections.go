@@ -143,9 +143,13 @@ type Status struct {
 	LastImport    *ImportResult
 	NextImport    *time.Time
 	// Watchlist tells that Polyfin can import the service's watchlist
-	// (Trakt, Simkl, AniList, MyAnimeList), and ImportWatchlist that it
-	// does, with the imports of the history.
-	Watchlist, ImportWatchlist bool
+	// (Trakt, Simkl, MDBList, AniList, MyAnimeList, PublicMetaDB), and
+	// ImportWatchlist that it does, with the imports of the history.
+	// WatchlistSent tells that the user's own changes of their watchlist
+	// are sent there too while it does (see syncsWatchlist), and
+	// WatchlistFull that the service refused the last title sent there as
+	// the list is full (Trakt), until a change goes through.
+	Watchlist, ImportWatchlist, WatchlistSent, WatchlistFull bool
 	// Ratings tells that the service can keep the user's ratings (AniList,
 	// MyAnimeList), and SyncRatings that they are sent there and imported.
 	Ratings, SyncRatings bool
@@ -197,7 +201,8 @@ func (s *Service) Stopped(ctx context.Context) ([]StoppedConnection, error) {
 
 func (s *Service) status(ctx context.Context, user accounts.ID, service string) (Status, error) {
 	status := Status{Service: service, ByCode: ByCode(service), BySignIn: BySignIn(service), ByPaste: ByPaste(service), Music: Music(service),
-		Available: Available(service, s.settings()), Watchlist: watchlists(service), Ratings: animeLists(service)}
+		Available: Available(service, s.settings()), Watchlist: watchlists(service),
+		WatchlistSent: syncsWatchlist(service), Ratings: animeLists(service)}
 	c, ok, err := s.connection(ctx, user, service)
 	if err != nil {
 		return status, err
@@ -339,7 +344,7 @@ func (s *Service) StartCode(ctx context.Context, user accounts.ID, service strin
 		err error
 	)
 	if service == Trakt {
-		r, err = s.api(ctx, Trakt, "", settings, http.MethodPost, "/oauth/device/code", nil, map[string]string{"client_id": settings.TraktClientID})
+		r, err = s.traktAuth(ctx, settings, "/oauth/device/code", map[string]string{"client_id": settings.TraktClientID})
 	} else {
 		r, err = s.form(ctx, "/oauth2/device", url.Values{"client_id": {settings.SimklClientID}, "scope": {simklScope}})
 	}
@@ -470,11 +475,19 @@ func (s *Service) poll(p *pending) {
 				"user_id", p.user.String(), "service", p.service)
 			return
 		case approved:
-			select {
-			case <-p.done:
+			// The code ends before the connection is saved, in the same step
+			// as the check that it still waits: a status after the saving
+			// would otherwise show the connection with its code.
+			key := laneKey{p.user, p.service}
+			s.mu.Lock()
+			current := s.pending[key] == p
+			if current {
+				delete(s.pending, key)
+			}
+			s.mu.Unlock()
+			if !current {
 				// Disconnected or started again meanwhile.
 				return
-			default:
 			}
 			c := connection{token: t.AccessToken, refresh: t.RefreshToken, expires: s.expiry(t), connectedAt: s.now().UTC().Truncate(time.Second)}
 			account := t.account
@@ -503,8 +516,7 @@ func (s *Service) pollCode(p *pending) (pollState, tokens) {
 		err error
 	)
 	if p.service == Trakt {
-		r, err = s.api(s.ctx, Trakt, "", settings, http.MethodPost, "/oauth/device/token", nil, map[string]string{
-			"code": p.deviceCode, "client_id": settings.TraktClientID, "client_secret": settings.TraktClientSecret})
+		r, err = s.traktAuth(s.ctx, settings, "/oauth/device/token", traktApp(settings, map[string]string{"code": p.deviceCode}))
 	} else {
 		r, err = s.form(s.ctx, "/oauth2/token", url.Values{"grant_type": {"urn:ietf:params:oauth:grant-type:device_code"},
 			"client_id": {settings.SimklClientID}, "device_code": {p.deviceCode}})
@@ -694,8 +706,7 @@ func (s *Service) revoke(service, token, refresh string) {
 	var answer reply
 	var err error
 	if service == Trakt {
-		answer, err = s.api(s.ctx, Trakt, "", settings, http.MethodPost, "/oauth/revoke", nil, map[string]string{
-			"token": token, "client_id": settings.TraktClientID, "client_secret": settings.TraktClientSecret})
+		answer, err = s.traktAuth(s.ctx, settings, "/oauth/revoke", traktApp(settings, map[string]string{"token": token}))
 	} else {
 		// Revoking either token of Simkl revokes both.
 		if refresh != "" {
@@ -771,9 +782,8 @@ func (s *Service) fresh(ctx context.Context, key laneKey, refusedToken string) (
 	var r reply
 	switch key.service {
 	case Trakt:
-		r, err = s.api(ctx, Trakt, "", settings, http.MethodPost, "/oauth/token", nil, map[string]string{
-			"refresh_token": c.refresh, "client_id": settings.TraktClientID, "client_secret": settings.TraktClientSecret,
-			"redirect_uri": traktRedirect, "grant_type": "refresh_token"})
+		r, err = s.traktAuth(ctx, settings, "/oauth/token", traktApp(settings, map[string]string{
+			"refresh_token": c.refresh, "redirect_uri": traktRedirect(settings), "grant_type": "refresh_token"}))
 	case MyAnimeList:
 		r, err = s.oauthForm(ctx, MyAnimeList, url.Values{"grant_type": {"refresh_token"}, "client_id": {settings.MyAnimeListClientID},
 			"client_secret": {settings.MyAnimeListClientSecret}, "refresh_token": {c.refresh}})

@@ -19,6 +19,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -199,16 +200,31 @@ func (f *fakeS3) readRanges() []string {
 }
 
 // fakeSFTP serves the test's disk over SFTP to user, signed in with
-// password or the key authorized, under a host key rekey changes.
+// password or the key authorized, under a host key rekey changes. It
+// keeps the passwords it was sent by the fingerprint of the host key it
+// offered when it got them. With handlers set, it serves theirs instead.
+// With sessions set, it opens that many sessions on a connection at most,
+// and refuses the others; asked counts the sessions it was asked for.
+// With silent set, it opens the sessions after the first and never
+// answers them: neither the request for the subsystem when silent is
+// "subsystem", nor the SFTP version when it is "version". With late set
+// too, the request for the subsystem is answered once late is closed,
+// the session then served, and ended sent to once it ends.
 type fakeSFTP struct {
 	addr           string
 	user, password string
 	authorized     ssh.PublicKey
+	handlers       *sftp.Handlers
+	sessions       int
+	silent         string
+	late, ended    chan struct{}
+	asked          atomic.Int32
 
 	mu       sync.Mutex
 	hostKey  ssh.Signer
 	listener net.Listener
 	conns    []net.Conn
+	sent     map[string][]string
 }
 
 // newSigner makes an Ed25519 key.
@@ -244,11 +260,17 @@ func openSSHKey(t *testing.T, private ed25519.PrivateKey, passphrase string) str
 
 func serveSFTP(t *testing.T, user, password string, authorized ssh.PublicKey) *fakeSFTP {
 	t.Helper()
+	return serveFakeSFTP(t, &fakeSFTP{user: user, password: password, authorized: authorized})
+}
+
+// serveFakeSFTP serves f on the loopback until the test ends.
+func serveFakeSFTP(t *testing.T, f *fakeSFTP) *fakeSFTP {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
-	f := &fakeSFTP{addr: listener.Addr().String(), user: user, password: password, authorized: authorized, listener: listener}
+	f.addr, f.listener = listener.Addr().String(), listener
 	f.hostKey, _ = newSigner(t)
 	t.Cleanup(f.stop)
 	go func() {
@@ -270,6 +292,13 @@ func serveSFTP(t *testing.T, user, password string, authorized ssh.PublicKey) *f
 func (f *fakeSFTP) serve(conn net.Conn, hostKey ssh.Signer) {
 	config := &ssh.ServerConfig{
 		PasswordCallback: func(meta ssh.ConnMetadata, password []byte) (*ssh.Permissions, error) {
+			f.mu.Lock()
+			if f.sent == nil {
+				f.sent = map[string][]string{}
+			}
+			print := ssh.FingerprintSHA256(hostKey.PublicKey())
+			f.sent[print] = append(f.sent[print], string(password))
+			f.mu.Unlock()
 			if meta.User() == f.user && f.password != "" && string(password) == f.password {
 				return nil, nil
 			}
@@ -289,30 +318,70 @@ func (f *fakeSFTP) serve(conn net.Conn, hostKey ssh.Signer) {
 		return
 	}
 	go ssh.DiscardRequests(requests)
+	opened := 0
 	for request := range channels {
 		if request.ChannelType() != "session" {
 			_ = request.Reject(ssh.UnknownChannelType, "")
+			continue
+		}
+		f.asked.Add(1)
+		if opened++; f.sessions > 0 && opened > f.sessions {
+			_ = request.Reject(ssh.Prohibited, "one session")
 			continue
 		}
 		channel, asked, err := request.Accept()
 		if err != nil {
 			continue
 		}
+		silent := opened > 1 && f.silent != ""
 		go func() {
 			for ask := range asked {
+				if silent && f.silent == "subsystem" {
+					if f.late == nil {
+						continue
+					}
+					<-f.late
+				}
 				ok := ask.Type == "subsystem" && len(ask.Payload) > 4 && string(ask.Payload[4:]) == "sftp"
 				_ = ask.Reply(ok, nil)
+				if ok && silent && f.silent == "version" {
+					// What the client sends is read, and never answered.
+					_, _ = io.Copy(io.Discard, channel)
+					return
+				}
 				if ok {
-					server, err := sftp.NewServer(channel, sftp.ReadOnly())
-					if err == nil {
-						_ = server.Serve()
-						server.Close()
+					f.subsystem(channel)
+					if silent {
+						f.ended <- struct{}{}
 					}
 					return
 				}
 			}
 		}()
 	}
+}
+
+// subsystem serves SFTP over channel until it ends.
+func (f *fakeSFTP) subsystem(channel ssh.Channel) {
+	if f.handlers != nil {
+		server := sftp.NewRequestServer(channel, *f.handlers)
+		_ = server.Serve()
+		server.Close()
+		return
+	}
+	server, err := sftp.NewServer(channel, sftp.ReadOnly())
+	if err == nil {
+		_ = server.Serve()
+		server.Close()
+	}
+}
+
+// sentTo are the passwords the server was sent while it offered the host
+// key of fingerprint print.
+func (f *fakeSFTP) sentTo(print string) []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return slices.Clone(f.sent[print])
 }
 
 // cut closes the connections open, as a server restarting does.

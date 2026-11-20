@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"math"
@@ -20,13 +21,16 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
+	"github.com/moodiness/polyfin/internal/anime"
 	"github.com/moodiness/polyfin/internal/cache"
 	"github.com/moodiness/polyfin/internal/eclipse"
 	"github.com/moodiness/polyfin/internal/iptv"
 	"github.com/moodiness/polyfin/internal/ratings"
 	"github.com/moodiness/polyfin/internal/smartlists"
 	"github.com/moodiness/polyfin/internal/stremio"
+	"github.com/moodiness/polyfin/internal/tmdb"
 	"github.com/moodiness/polyfin/internal/userdata"
+	"github.com/moodiness/polyfin/internal/virtualtv"
 	"github.com/moodiness/polyfin/internal/watchlist"
 )
 
@@ -48,6 +52,33 @@ var ErrNotFound = errors.New("item not found")
 
 // ErrSeasonNotFound reports a season that is not one of the series' seasons.
 var ErrSeasonNotFound = errors.New("season not found")
+
+// AddonError reports a failure of the addon, IPTV source or local folder a
+// library asked: its name as logs give it (see addons.Addon.LogName), the
+// catalog asked, empty for another resource, and the error, whose text it
+// keeps. Browsing logs who failed with it.
+type AddonError struct {
+	Addon   string
+	Catalog string
+	Err     error
+}
+
+func (e *AddonError) Error() string { return e.Err.Error() }
+
+func (e *AddonError) Unwrap() error { return e.Err }
+
+// failedAt names the addon of entry, and catalog, in err, a failure of a
+// request to it (see AddonError): nil stays nil, and an error naming an
+// addon already stays as it is.
+func failedAt(entry installed, catalog string, err error) error {
+	if err == nil {
+		return nil
+	}
+	if _, named := errors.AsType[*AddonError](err); named {
+		return err
+	}
+	return &AddonError{Addon: entry.addon.LogName(), Catalog: catalog, Err: err}
+}
 
 // Service browses the libraries of users.
 type Service struct {
@@ -72,13 +103,19 @@ type Service struct {
 	// shared once it waits on the key's fetch: the one it started, or the
 	// one under way it shares.
 	joined func(key string)
+	// streamLogs are what the log lines of the requests for addons'
+	// streams need (see streamsFailed and noticesLogged).
+	streamLogs streamLogs
 	// libraryImages are the libraries' automatic images, by catalog (see
 	// automaticImage).
-	libraryImages *cache.Cache[pageKey, fetched[string]]
+	libraryImages *cache.Cache[pageKey, fetched[foundImage]]
 	sizes         pageSizes
 	// generated remembers what the generated images of collections and
 	// libraries show (see generated.go).
 	generated generatedImages
+	// personal remembers what each user's images of their watchlists and
+	// of the smart lists shown as libraries show (see personalimages.go).
+	personal personalImages
 	// prefetches holds a place for each listing read ahead (see
 	// readAhead); readAhead turns reading ahead on.
 	prefetches chan struct{}
@@ -89,12 +126,24 @@ type Service struct {
 	// iptvHosts tells the hosts of IPTV sources and of their logos (see
 	// IPTVHost).
 	iptvHosts iptvHosts
+	// releaseStatuses remembers what series' posters tell of their
+	// newest episodes, by series (see ReleaseStatuses).
+	releaseStatuses *cache.Cache[string, ReleaseStatus]
+	// choices are the versions administrators pinned and the files they
+	// blocked (see versionchoices.go).
+	choices versionChoices
 
 	// streamLists and subtitleLists are the addons' lists for each title,
 	// kept stale once expired (see staleLists).
 	streamLists   *cache.Cache[streamKey, list[stremio.Stream]]
 	subtitleLists *cache.Cache[streamKey, list[stremio.Subtitle]]
 	versions      *cache.Cache[accounts.ID, Version]
+	// noticed are the addons' answers of notices alone for each title,
+	// kept noticeLife (see noticedAnswer).
+	noticed *cache.Cache[streamKey, []stremio.Stream]
+	// failedLately are the addons' lists for titles they failed to give,
+	// kept failedFor (see gatherStreams).
+	failedLately *cache.Cache[streamKey, struct{}]
 	// asked counts, for each user's title, the addons still asked for its
 	// streams in the background (see VersionsNow).
 	asked *cache.Cache[askedKey, *asked]
@@ -102,42 +151,115 @@ type Service struct {
 	// after each of followUpDelays (see followUpList).
 	followUps      followUps
 	followUpDelays []time.Duration
+	// playGrace is the defaultPlayGrace but in tests (see SetPlayGrace).
+	playGrace time.Duration
 	// tracking follows titles' versions for the pages that show them, and
 	// saves stream lists (see versionTracking).
 	tracking versionTracking
 	// ratingLookups holds a place for each rating looked up (see visible);
-	// ratingWait bounds how long a request waits for them.
+	// ratingWait bounds how long a request waits for them, and ratingEnd
+	// gives what ends that wait, the time left given: time.After, which
+	// tests replace (see SetRatingWaitEnd).
 	ratingLookups chan struct{}
 	ratingWait    time.Duration
+	ratingEnd     func(left time.Duration) <-chan time.Time
 	// wholeWait bounds how long a whole listing waits for addons, and
-	// keptWait how long one does when what was kept fills it (see Whole).
-	wholeWait time.Duration
-	keptWait  time.Duration
+	// keptWait how long one does when what was kept fills it (see Whole):
+	// wholeBound bounds the listing by either, context.WithTimeout, which
+	// tests replace (see SetWholeWaitBound).
+	wholeWait  time.Duration
+	keptWait   time.Duration
+	wholeBound func(ctx context.Context, wait time.Duration) (context.Context, context.CancelFunc)
+	// narrowedWait bounds how long a genre's, studio's or year's page
+	// waits for its catalogs (see Narrowed), and narrowedEnd gives what
+	// ends that wait, the time left given: time.After, which tests
+	// replace to end it by hand.
+	narrowedWait time.Duration
+	narrowedEnd  func(left time.Duration) <-chan time.Time
+	// lifetime ends with the server: the reads no request waits for any
+	// more end with it (see EndWith).
+	lifetime context.Context
+	// creditsWait bounds how long a title's page waits for its credits
+	// (see AwaitTitleCredits): creditsBound bounds the page by it,
+	// context.WithTimeout, which tests replace (see SetCreditsWaitBound).
+	creditsWait  time.Duration
+	creditsBound func(ctx context.Context, wait time.Duration) (context.Context, context.CancelFunc)
+	// searchGrace and searchBound bound how long a search waits for its
+	// title searches, and lateSearches are the search catalogs it leaves
+	// out, as they were late (see searchdeadline.go).
+	searchGrace  time.Duration
+	searchBound  time.Duration
+	lateSearches lateSearches
+	// catalogWaits are the waits hosts asked for, catalogSlots bound the
+	// catalog pages asked of each host at once, and failedRefreshes are
+	// the pages whose refresh failed lately (see catalogwaits.go).
+	catalogWaits    catalogWaits
+	catalogSlots    *addonSlots[string]
+	failedRefreshes *cache.Cache[pageKey, time.Time]
+	// pace paces the background requests for streams and descriptions
+	// to each addon's server (see pacing.go).
+	pace *pacing
+	// hintSpacing is the time between two reads of configure hints (see
+	// ReadConfigureHints).
+	hintSpacing time.Duration
 	// guideDir is where XMLTV guides in ZIP archives are spooled while they
 	// are read (see SpoolGuidesIn); empty, they are not read.
 	guideDir string
 	// guides is what the refreshes of the guides remember between runs
 	// (see guideState).
 	guides guideState
+	// programs finds the guides' programmes by identifier (see
+	// programindex.go).
+	programs programIndex
+	// programRefs remembers the XMLTV programmes listed lately by their
+	// identifier, for apps that open one; past it, or after a restart,
+	// they are found in programs (see unsavedProgram). The guides they
+	// name are this service's: another service in the process, as tests
+	// run, lists the same identifiers in guides of its own.
+	programRefs *cache.Cache[accounts.ID, programRef]
 	// iptv answers for Polyfin's own IPTV sources (see UseIPTV).
 	iptv IPTV
+	// studioIndex remembers what Studios read of the stored lists of IPTV
+	// sources (see studioindex.go).
+	studioIndex studioIndex
 	// local answers for Polyfin's own local folders (see UseLocal).
 	local Local
-	// watchlist holds the users' watchlists, which the Watchlist view
-	// lists (see watchlist.go).
+	// anime maps anime between identifiers and numberings, for the stream
+	// addons that accept other identifiers than a title's (see
+	// streamids.go); nil, it maps nothing.
+	anime *anime.Service
+	// virtual answers for the channels Polyfin airs itself (see
+	// UseVirtual).
+	virtual Virtual
+	// refreshes are the refreshes of libraries' descriptions (see
+	// libraryrefresh.go).
+	refreshes libraryRefreshes
+	// watchlist holds the users' watchlists, playlists of theirs (see
+	// watchlist.go).
 	watchlist *watchlist.Store
 	// ratings looks movies' and series' ratings up on MDBList (see
 	// ratings.go); nil, they show their addons'.
 	ratings *ratings.Service
 	// smart holds the smart lists; smartCache keeps the titles read for
-	// each list, by the catalogs that read them and within smartBytes,
-	// smartFetches holds a place for each description read for them, and
-	// smartWait bounds how long a listing waits for their catalogs (see
-	// smartlists.go).
-	smart        *smartlists.Store
-	smartCache   *cache.Cache[smartKey, []smartTitle]
-	smartFetches chan struct{}
-	smartWait    time.Duration
+	// each list, by the catalogs that read them, at their versions (see
+	// catalogVersions) and within smartBytes, smartFetches holds a place
+	// for each description read for them, and smartWait bounds how long a
+	// listing waits for their catalogs (see smartlists.go).
+	smart           *smartlists.Store
+	smartCache      *cache.Cache[smartKey, smartEntry]
+	smartFetches    chan struct{}
+	smartWait       time.Duration
+	catalogVersions catalogVersions
+	// pageReads holds a place for each catalog page read from the
+	// database, and pageReadHook, set by tests, runs in it (see pageRead).
+	pageReads    chan struct{}
+	pageReadHook func()
+	// saveLater runs a stream list's save again after a wait, once one
+	// failed (see saveStreamsAfter); tests run it when they choose.
+	saveLater func(time.Duration, func())
+	// plain holds the searches in plain words users made lately, which
+	// stand for smart lists (see plainsearch.go).
+	plain plainSearches
 	// userData tells the users' state of titles, which smart lists judge
 	// by, and holds the titles each user hid, which their listings leave
 	// out (see hidden.go).
@@ -152,6 +274,40 @@ type Service struct {
 	// (see overridesNow); overridesMu orders their loading and changes.
 	overrides   atomic.Pointer[overrideSet]
 	overridesMu sync.Mutex
+
+	// warmed tells when Warm read the libraries' first pages, and opened
+	// the users' own libraries opened lately (see warmedposters.go).
+	warmed warmedPosters
+
+	// tmdb looks people up, and personLookups are the people being
+	// looked up (see persondetails.go).
+	tmdb          *tmdb.Client
+	personLookups personLookups
+	// artwork remembers the artwork downloads that failed, which Refresh
+	// forgets (see refreshArtwork).
+	artwork ArtworkFailures
+	// lookups queues the lookups of titles' credits and artwork on TMDB,
+	// and of episodes' lengths (see titlecredits.go, tmdbartwork.go and
+	// lengths.go); nil makes none.
+	lookups *tmdb.Queue
+	// titleArtwork keeps the posters and backdrops TMDB gives titles
+	// lacking their addon's (see tmdbartwork.go).
+	titleArtwork titleArtworks
+	// titleCredits remembers the credits of titles TMDB gives, as kept
+	// (see titlecredits.go).
+	titleCredits titleCreditsMemory
+	// episodeLengths remembers the lengths of episodes TMDB gives, as
+	// kept (see lengths.go).
+	episodeLengths episodeLengthsMemory
+	// moviedbChecks are the verdicts on the TMDB identifiers addons give
+	// as moviedb_id (see tmdbidcheck.go).
+	moviedbChecks moviedbChecks
+	// saved remembers the records saves stored that left their items as
+	// they are (see records.go).
+	saved savedRecords
+	// episodeRecords records in the background the episodes Next Up
+	// listed but did not show (see episoderecords.go).
+	episodeRecords episodeRecording
 }
 
 // IPTV answers, for Polyfin's own IPTV sources, the catalog, meta and
@@ -166,6 +322,7 @@ type IPTV interface {
 	Streams(ctx context.Context, source accounts.ID, id string) ([]stremio.Stream, error)
 	MappingChannels(ctx context.Context, source accounts.ID) ([]stremio.Meta, error)
 	Logo(ctx context.Context, item accounts.ID) (string, bool, error)
+	ChannelSource(ctx context.Context, item accounts.ID) (accounts.ID, error)
 	Archives(ctx context.Context, source accounts.ID) (map[string]int, error)
 	ChannelsIn(ctx context.Context, source accounts.ID, categories []accounts.ID) ([]string, error)
 	GuideArchives(ctx context.Context, guide accounts.ID) (map[string]int, error)
@@ -200,14 +357,49 @@ type Local interface {
 	MusicLyrics(ctx context.Context, source accounts.ID, id string) (string, error)
 	Artwork() map[accounts.ID]Images
 	Open(ctx context.Context, key string) (io.ReadSeekCloser, time.Time, error)
-	// HeldVideos reports which of the home videos of the Stremio
-	// identifiers ids a file of a folder holds now.
+	// HeldVideos reports which of the home videos and plain videos of the
+	// Stremio identifiers ids a folder holds now.
 	HeldVideos(ctx context.Context, ids []string) (map[string]bool, error)
 	// Extras lists the extras of folders that belong to owner, and Extra
 	// describes one by its item, ErrNotFound when no folder holds it (see
 	// extras.go).
 	Extras(ctx context.Context, folders []accounts.ID, owner ExtraOwner) ([]Extra, error)
 	Extra(ctx context.Context, id accounts.ID) (Extra, error)
+	// LinkPlain links the unit of a plain video still listed, by its
+	// Stremio identifier, to an IMDb identifier, as the folder's page
+	// links it; ErrNotFound when no folder lists it. PlainMatch tells the
+	// folder and the Stremio identifier of the title a plain video's unit
+	// was matched to since, empty while it is not.
+	LinkPlain(ctx context.Context, plain, imdb string) error
+	PlainMatch(ctx context.Context, plain string) (accounts.ID, string, error)
+	// LinkMatched links, as LinkPlain does, every unit of the movies or
+	// shows folders (kind) matched to the title of a Stremio identifier;
+	// ErrNotFound when none is. Relinked tells the Stremio identifier of
+	// the title the files of a folder LinkMatched relinked from a title
+	// are matched to now, while none of its files is matched to that
+	// title, empty otherwise. Rematch matches again the units of those
+	// folders matched to a title, or the unit of the plain video it is,
+	// as Jellyfin reads an item's files again when it refreshes it.
+	LinkMatched(ctx context.Context, kind Kind, stremioID, imdb string) error
+	Relinked(ctx context.Context, folder accounts.ID, stremioID string) (string, error)
+	Rematch(ctx context.Context, kind Kind, stremioID string) error
+	// Episodes lists the episodes the files of folders hold for the
+	// series of a Stremio identifier, each named after its file, and
+	// NoteUnlisted records those of them a metadata addon's description
+	// of the series does not list, by season and number, with those it
+	// lists, in order, which the folders' pages show (see
+	// fileepisodes.go).
+	Episodes(ctx context.Context, folders []accounts.ID, stremioID string, catalog *stremio.Meta) ([]stremio.Video, error)
+	NoteUnlisted(ctx context.Context, stremioID string, unlisted, listed [][2]int) error
+	// TitleDurations tells how long the movies of the Stremio identifiers
+	// ids play, as the scans of folders probed their files, and
+	// EpisodeDurations the episodes of a show, by season and number (see
+	// lengths.go): those of no file left out.
+	TitleDurations(ctx context.Context, ids []string) (map[string]time.Duration, error)
+	EpisodeDurations(ctx context.Context, id string) (map[[2]int]time.Duration, error)
+	// HeldTitles reports which of the Stremio identifiers ids the
+	// catalogs of folders list as titles (see skiplocal.go).
+	HeldTitles(ctx context.Context, folders []accounts.ID, ids []string) (map[string]bool, error)
 }
 
 // UseLocal sets what answers for local folders; it is called before the
@@ -248,34 +440,61 @@ func New(db *pgxpool.Pool, store *addons.Store, client *stremio.Client, logger *
 		now:      time.Now,
 		settings: settings,
 		metas: cache.NewLasting[metaKey, fetched[stremio.Meta]](4000, func() time.Duration { return metaKept }, time.Now).
-			Sized(64<<20, fetchedSize[stremio.Meta]),
+			Sized(keptBytes, fetchedSize[stremio.Meta]),
 		versions:       cache.New[accounts.ID, Version](20000, versionsTTL),
 		asked:          cache.New[askedKey, *asked](maxAsked, askedFor),
 		followUps:      followUps{running: map[followKey]*followUp{}},
 		followUpDelays: followUpDelays,
+		playGrace:      defaultPlayGrace,
 		ratingLookups:  make(chan struct{}, ratingFetches),
 		ratingWait:     ratingWait,
+		ratingEnd:      time.After,
 		wholeWait:      wholeListingWait,
 		keptWait:       keptListingWait,
+		wholeBound:     context.WithTimeout,
+		narrowedWait:   narrowedWait,
+		narrowedEnd:    time.After,
+		lifetime:       context.Background(),
+		creditsWait:    titleCreditsWait,
+		creditsBound:   context.WithTimeout,
+		searchGrace:    searchGrace,
+		searchBound:    searchBound,
 		music:          eclipse.NewClient(client),
 		watchlist:      watchlist.New(db),
 		smart:          smartlists.New(db),
 		userData:       userdata.New(db),
-		smartCache:     cache.New[smartKey, []smartTitle](200, smartLife).Sized(smartBytes, smartTitlesSize),
 		smartFetches:   make(chan struct{}, smartFetches),
 		smartWait:      smartWait,
+		pageReads:      make(chan struct{}, pageReadsAtOnce),
+		saveLater:      func(wait time.Duration, save func()) { time.AfterFunc(wait, save) },
+		hintSpacing:    hintSpacing,
+		personLookups:  personLookups{slots: make(chan struct{}, personLookupsAtOnce)},
+		programs:       newProgramIndex(),
+		programRefs:    cache.New[accounts.ID, programRef](200_000, 24*time.Hour),
 	}
 	clock := func() time.Time { return s.now() }
-	s.pages = cache.NewLasting[pageKey, fetched[[]stremio.Meta]](4000, s.keptCatalogLife, clock).Sized(64<<20, fetchedSize[[]stremio.Meta])
+	s.pages = cache.NewLasting[pageKey, fetched[[]stremio.Meta]](4000, s.keptCatalogLife, clock).Sized(keptBytes, fetchedSize[[]stremio.Meta])
+	s.smartCache = s.newSmartCache(smartBytes)
 	s.searchPages = cache.NewLasting[pageKey, fetched[[]stremio.Meta]](500, func() time.Duration { return searchTTL }, clock).
-		Sized(16<<20, fetchedSize[[]stremio.Meta])
-	s.libraryImages = cache.NewLasting[pageKey, fetched[string]](1000, s.keptCatalogLife, clock)
+		Sized(searchBytes, fetchedSize[[]stremio.Meta])
+	s.libraryImages = cache.NewLasting[pageKey, fetched[foundImage]](1000, s.keptCatalogLife, clock)
+	s.catalogSlots = newAddonSlots[string](catalogHostFetches)
+	s.failedRefreshes = cache.NewLasting[pageKey, time.Time](4000, func() time.Duration { return failedRefreshWait }, clock)
+	s.pace = newPacing(clock)
 	s.prefetches = make(chan struct{}, prefetchLimit)
 	s.translations = make(chan struct{}, translationReaders)
 	s.readAhead = true
-	s.streamLists = cache.NewLasting[streamKey, list[stremio.Stream]](2000, s.keptListLife, clock)
-	s.subtitleLists = cache.NewLasting[streamKey, list[stremio.Subtitle]](2000, s.keptListLife, clock)
+	s.streamLists = cache.NewLasting[streamKey, list[stremio.Stream]](2000, s.keptListLife, clock).Sized(streamListBytes, listSize[stremio.Stream])
+	s.subtitleLists = cache.NewLasting[streamKey, list[stremio.Subtitle]](2000, s.keptListLife, clock).
+		Sized(subtitleListBytes, listSize[stremio.Subtitle])
+	s.noticed = cache.NewLasting[streamKey, []stremio.Stream](2000, func() time.Duration { return noticeLife }, clock).
+		Sized(subtitleListBytes, cache.MemorySize[[]stremio.Stream])
+	s.failedLately = cache.NewLasting[streamKey, struct{}](2000, func() time.Duration { return failedFor }, clock)
 	s.musicCache = newMusicCaches(s)
+	s.warmed.opened = cache.New[accounts.ID, struct{}](openedLibraries, openedFor)
+	s.releaseStatuses = cache.NewLasting[string, ReleaseStatus](20000, func() time.Duration { return releaseStatusLife }, clock)
+	s.refreshes.pace, s.refreshes.wait = LibraryRefreshPace, waitFor
+	s.streamLogs.notices = cache.NewLasting[noticeLine, struct{}](2000, func() time.Duration { return noticeLogLife }, clock)
 	return s
 }
 
@@ -310,10 +529,13 @@ type installed struct {
 
 // library is a library of a user with its catalog, the genre it is
 // narrowed to and the most items it lists (see addons.Library), how it
-// finds its image (see addons.Library.Image), and whether the web player's
-// menus leave it out (see addons.Library.HideInMenus). serverName is its
-// name in the server's language, which its generated image shows whatever
-// the user's language.
+// finds its image (see addons.Library.Image), whether the web player's
+// menus leave it out (see addons.Library.HideInMenus), whether it leaves
+// out the titles local folders hold (see skiplocal.go), and whether it
+// shows a catalog of movies or series as movies and shows (see
+// addons.Library.ShowAs and mixedKinds). serverName is its name in the
+// server's language, which its generated image shows whatever the user's
+// language.
 type library struct {
 	item        Item
 	serverName  string
@@ -323,12 +545,15 @@ type library struct {
 	maxItems    int
 	image       string
 	hideInMenus bool
+	skipLocal   bool
+	mixed       bool
 }
 
 // catalogSource is the library's catalog as it lists it: narrowed to its
-// genre and limited to its maximum.
+// genre, limited to its maximum, and without the titles local folders
+// hold when it leaves them out.
 func (l library) catalogSource() source {
-	return source{addon: l.addon, catalog: l.catalog, genre: l.genre, max: l.maxItems}
+	return source{addon: l.addon, catalog: l.catalog, genre: l.genre, max: l.maxItems, skipLocal: l.skipLocal}
 }
 
 // view is what a user can browse: their enabled addons and libraries, the
@@ -347,6 +572,19 @@ type view struct {
 	addons    []installed
 	libraries []library
 	channels  []source
+	// virtual are the channels Polyfin airs that the user sees, in order
+	// (see virtualchannels.go).
+	virtual []virtualtv.Channel
+	// channelFilter is the user's channel rule, which hides channels of
+	// the server's sources (see channellimits.go); nil hides none.
+	channelFilter *accounts.ChannelFilter
+	// country is the server's rating country: the country whose rating a
+	// title shows and is judged by (see certification), US when empty.
+	country string
+	// listedFolders are the local folders whose libraries the user sees,
+	// by the kind of their titles, which the libraries that leave out what
+	// local folders hold leave out (see skiplocal.go).
+	listedFolders map[Kind][]accounts.ID
 	// smart are the smart lists the user sees, in order (see
 	// smartlists.go).
 	smart []smartList
@@ -363,6 +601,20 @@ type view struct {
 	// hidden are the titles the user hid, which listings leave out (see
 	// hidden.go).
 	hidden HiddenTitles
+	// query is the request's rating filter (see ratingfilter.go).
+	query ratingQuery
+	// members is set for a view judging the titles of a container, among
+	// which collections are not judged in turn (see containers.go).
+	members bool
+	// withheld are the server's enabled addons the user does not use (see
+	// addons.UsedBy), in order: the view holds nothing of theirs, and the
+	// titles only they know are out of the user's reach (see withholds).
+	withheld []accounts.ID
+	// waitRelease is set while movies wait for their digital release, and
+	// upcoming for a view whose listings keep those it holds back: a smart
+	// list's read (see releases.go).
+	waitRelease bool
+	upcoming    bool
 	// catalogLimit and channelLimit are the settings' limits when the
 	// request came (see limit).
 	catalogLimit int
@@ -375,6 +627,14 @@ type view struct {
 	language    string
 	translators []installed
 	words       words
+	// peopleLanguage is the language people's biographies are asked of
+	// TMDB in (see persondetails.go).
+	peopleLanguage string
+	// others are the addons other users installed for themselves, whose
+	// titles are none of this user's (see reaches and describedTitle):
+	// none for an administrator or an API key, who manage every item,
+	// those of users' own addons included.
+	others map[accounts.ID]bool
 }
 
 // limit is how many items one read of src's catalog fetches at most: the
@@ -400,37 +660,62 @@ func (v view) limit(src source) int {
 func (s *Service) view(ctx context.Context, user accounts.User) (view, error) {
 	views, _ := ctx.Value(requestViewsKey{}).(*requestViews)
 	if views == nil || time.Since(views.started) > viewReuse {
-		return s.buildView(ctx, user)
+		v, err := s.buildView(ctx, user)
+		return v.withRatingFilter(ctx), err
 	}
 	views.mu.Lock()
 	defer views.mu.Unlock()
 	if v, ok := views.views[user.ID]; ok {
-		return v, nil
+		return v.withRatingFilter(ctx), nil
 	}
 	v, err := s.buildView(ctx, user)
 	if err == nil {
 		views.views[user.ID] = v
 	}
-	return v, err
+	return v.withRatingFilter(ctx), err
+}
+
+// viewSources reports which addons a user's view holds: the server's, the
+// user's own, or both. A user under parental control or blocking genres
+// browses the server's addons only: their own addons could describe titles
+// without the ratings or genres that hide them. So does a user whose own
+// addons the server or their own permission turned off: their addons are
+// kept, but not used. A request without a user, made with an API key,
+// browses the server's addons too.
+func viewSources(user accounts.User, settings accounts.Settings) (shared, personal bool) {
+	if user.Restricted() || user.ID == (accounts.ID{}) || !settings.PersonalAddonsAllowed(user) {
+		return true, false
+	}
+	return user.UseSharedAddons, true
+}
+
+// browsesOwnAddons reports whether user browses their own addons, and so
+// sees their own smart lists (see buildView).
+func browsesOwnAddons(user accounts.User, settings accounts.Settings) bool {
+	_, personal := viewSources(user, settings)
+	return personal
 }
 
 func (s *Service) buildView(ctx context.Context, user accounts.User) (view, error) {
 	settings := s.settings()
-	// A user under parental control or blocking genres browses the server's
-	// addons only: their own addons could describe titles without the
-	// ratings or genres that hide them. So does a user whose own addons the
-	// server or their own permission turned off: their addons are kept, but
-	// not used. A request without a user, made with an API key, browses the
-	// server's addons too.
-	scopes := []addons.Scope{addons.Shared()}
-	if !user.Restricted() && user.ID != (accounts.ID{}) && settings.PersonalAddonsAllowed(user) {
-		scopes = []addons.Scope{addons.Personal(user.ID)}
-		if user.UseSharedAddons {
-			scopes = append([]addons.Scope{addons.Shared()}, scopes...)
-		}
+	shared, personal := viewSources(user, settings)
+	var scopes []addons.Scope
+	if shared {
+		scopes = append(scopes, addons.Shared())
+	}
+	if personal {
+		scopes = append(scopes, addons.Personal(user.ID))
 	}
 	v := view{user: user.ID, parental: user.Parental, genres: user.BlockedGenres, deadline: time.Now().Add(s.ratingWait), lookups: new(atomic.Int32), held: new(atomic.Bool),
-		catalogLimit: settings.CatalogLimit, channelLimit: settings.ChannelLimit}
+		catalogLimit: settings.CatalogLimit, channelLimit: settings.ChannelLimit, channelFilter: user.LiveTvChannels.Filter(), country: settings.RatingCountry,
+		waitRelease: settings.WaitDigitalRelease && s.tmdb.Enabled()}
+	if !user.IsAdministrator {
+		others, err := s.othersOwn(ctx, user.ID)
+		if err != nil {
+			return view{}, err
+		}
+		v.others = others
+	}
 	if user.ID != (accounts.ID{}) {
 		hidden, err := s.hiddenTitles(ctx, user.ID)
 		if err != nil {
@@ -441,17 +726,22 @@ func (s *Service) buildView(ctx context.Context, user accounts.User) (view, erro
 	var visible []addons.Library
 	var entries []installed
 	for _, scope := range scopes {
-		// The server's addons were installed by an administrator; a user's own
-		// addons may only reach the local network if that user is one.
-		confined := scope.Owner != nil && !user.IsAdministrator
+		// A member's own addons stay on public addresses, and so does any
+		// other that is not on a local network itself (see
+		// addons.Addon.Confined).
+		member := addons.Member(scope, user.IsAdministrator)
 		list, err := s.addons.Addons(ctx, scope)
 		if err != nil {
 			return view{}, err
 		}
 		byID := map[accounts.ID]installed{}
 		for _, addon := range list {
-			if addon.Enabled {
-				entry := installed{addon: addon, confined: confined, shared: scope.Owner == nil}
+			switch {
+			case !addon.Enabled:
+			case scope.Owner == nil && !addon.UsedBy.Uses(user):
+				v.withheld = append(v.withheld, addon.ID)
+			default:
+				entry := installed{addon: addon, confined: addon.Confined(member), shared: scope.Owner == nil}
 				v.addons = append(v.addons, entry)
 				byID[addon.ID] = entry
 			}
@@ -496,11 +786,25 @@ func (s *Service) buildView(ctx context.Context, user accounts.User) (view, erro
 			}
 		}
 	}
+	if !shared {
+		// The server's addons the user does not use withhold their titles
+		// as well when the user browses their own addons only.
+		list, err := s.addons.Addons(ctx, addons.Shared())
+		if err != nil {
+			return view{}, err
+		}
+		for _, addon := range list {
+			if addon.Enabled && !addon.UsedBy.Uses(user) {
+				v.withheld = append(v.withheld, addon.ID)
+			}
+		}
+	}
 	v.useLanguage(user.MetadataLanguage, settings.Language)
+	v.peopleLanguage = peopleLanguage(user, settings)
 	serverNames := LibraryNames(visible, settings.Language)
 	for i, name := range LibraryNames(visible, v.words.language) {
 		l := visible[i]
-		collection := collectionType(l.Catalog.Type)
+		collection := libraryCollectionType(l)
 		if music := entries[i].addon.Music; music != nil && music.ContentType == eclipse.ContentAudiobook {
 			// Jellyfin keeps audiobooks in books libraries.
 			collection = "books"
@@ -520,11 +824,18 @@ func (s *Service) buildView(ctx context.Context, user accounts.User) (view, erro
 			maxItems:    l.MaxItems,
 			image:       l.Image,
 			hideInMenus: l.HideInMenus,
+			skipLocal:   l.SkipLocal,
+			mixed:       l.ShowAs == addons.ShowAsMoviesAndShows,
 		})
 	}
+	v.listedFolders = listedFolders(v.libraries)
 	if err := s.smartLists(ctx, &v, user, scopes); err != nil {
 		return view{}, err
 	}
+	if err := s.virtualChannels(ctx, &v, user); err != nil {
+		return view{}, err
+	}
+	s.plainSearchLists(&v, user.ID)
 	return v, nil
 }
 
@@ -560,19 +871,34 @@ func (s *Service) Libraries(ctx context.Context, user accounts.User) ([]Item, er
 		item := l.item
 		image, shown := images[i], !v.restricted()
 		if l.image == addons.LibraryImageGenerated {
-			image, shown = s.libraryImage(ctx, v, l)
+			// A library's generated image is wide.
+			image.wide = true
+			image.url, shown = s.libraryImage(ctx, v, l)
 		}
-		if shown {
-			item.Images.Primary = image
+		if shown && image.url != "" {
+			item.Images.Primary, item.WidePrimary = image.url, image.wide
 		}
 		items = append(items, item)
-		records = append(records, libraryRecord(l, image))
+		records = append(records, libraryRecord(l, image.url))
 	}
+	smart := len(items)
 	for _, l := range v.smart {
 		if l.item.Kind == KindLibrary {
 			items = append(items, l.item)
 		}
 	}
+	// The smart lists' images are compared with their titles a few at a
+	// time (see personalimages.go).
+	var group errgroup.Group
+	group.SetLimit(generatedChecks)
+	for i := smart; i < len(items); i++ {
+		l, _ := v.smartList(items[i].ID)
+		group.Go(func() error {
+			s.withSmartLibraryImage(ctx, v, l, &items[i])
+			return nil
+		})
+	}
+	_ = group.Wait()
 	return s.overridden(items), s.save(ctx, records)
 }
 
@@ -594,16 +920,17 @@ func (s *Service) HiddenInMenus(ctx context.Context, user accounts.User) ([]acco
 }
 
 // LibraryID is the item of a library in Jellyfin apps, which keeps its
-// identifier when its catalog's type changes (see addons.Library.KeyType).
+// identifier when its catalog's type or identifier changes (see
+// addons.Library.Key).
 func LibraryID(l addons.Library) accounts.ID {
-	return itemID(libraryKey(l.AddonID, cmp.Or(l.KeyType, l.Catalog.Type), l.Catalog.ID))
+	return itemID(libraryKey(l.AddonID, cmp.Or(l.Key.Type, l.Catalog.Type), cmp.Or(l.Key.ID, l.Catalog.ID)))
 }
 
 // ServerLibrary is one of the server's libraries, with the genres its
 // catalog can be narrowed to, which name its genre pages: only its own
 // when it is narrowed to one. CollectionType is the content its catalog
-// holds, as collectionType tells it: "movies", "tvshows", "boxsets" for
-// collections, "music", or another.
+// holds, as libraryCollectionType tells it: "movies", "tvshows",
+// "boxsets" for collections, "music", or another.
 type ServerLibrary struct {
 	ID             accounts.ID
 	Name           string
@@ -637,7 +964,7 @@ func ServerLibraries(ctx context.Context, store *addons.Store, lists *smartlists
 	}
 	result := make([]ServerLibrary, 0, len(shown))
 	for i, name := range LibraryNames(shown, language) {
-		library := ServerLibrary{ID: LibraryID(shown[i]), Name: name, Genres: []string{}, CollectionType: collectionType(shown[i].Catalog.Type)}
+		library := ServerLibrary{ID: LibraryID(shown[i]), Name: name, Genres: []string{}, CollectionType: libraryCollectionType(shown[i])}
 		if genre := shown[i].Genre; genre != "" {
 			library.Genres = append(library.Genres, genre)
 		} else {
@@ -683,6 +1010,9 @@ type source struct {
 	// shows, in place of the catalog limit; 0 for that limit (see
 	// view.limit).
 	max int
+	// skipLocal leaves out the titles the local folders of the view hold
+	// (see skiplocal.go).
+	skipLocal bool
 }
 
 // paged reports whether the catalog can be read past its first page.
@@ -727,15 +1057,20 @@ func (src source) extras(skip int) ([]stremio.ExtraValue, bool) {
 // short first page is only trusted once a second page confirms it, so
 // that a small catalog is not asked for many empty pages. Titles the
 // user's parental control hides, and those the user hid, are left out
-// before positions are counted. A restricted listing reads at most
-// hiddenReach times as far as an unrestricted one, and stops where titles
-// wait for their rating: it reports that more may follow, which apps ask
-// for later, once the ratings are known.
+// before positions are counted, and so are the titles local folders hold
+// for a library that leaves them out (see skiplocal.go): those do not
+// count toward the limit either, so that such a library lists as many
+// titles as another. A restricted listing reads at most hiddenReach times
+// as far as an unrestricted one, and stops where titles wait for their
+// rating: it reports that more may follow, which apps ask for later, once
+// the ratings are known. A page the addon cannot give ends the window
+// there: it returns the items before it, counted as the whole catalog,
+// with errCutShort and why (see cutShort).
 func (s *Service) window(ctx context.Context, v view, src source, start, count int) ([]stremio.Meta, int, error) {
 	// An IPTV source's movies and series are paged and counted from its
-	// stored lists, whole, but for a restricted user, or one who hid
-	// titles, whose listing leaves those titles out as it reads.
-	if src.addon.addon.IPTV() && !LiveCatalog(src.catalog.Type) && s.iptv != nil && !v.restricted() && len(v.hidden) == 0 && src.date == "" {
+	// stored lists, whole, but for a restricted user, one who hid titles,
+	// or a listing narrowed by rating, which leaves titles out as it reads.
+	if s.storedWindow(v, src) {
 		return s.iptv.CatalogWindow(ctx, src.addon.addon.ID, src.catalog.Type, src.catalog.ID, src.genre, src.search, start, count)
 	}
 	var collected []stremio.Meta
@@ -749,12 +1084,15 @@ func (s *Service) window(ctx context.Context, v view, src source, start, count i
 	more := true
 	limit := v.limit(src)
 	reach := limit
-	if v.restricted() {
+	if v.narrows() {
 		reach = min(limit, hiddenReach*(start+count))
 	}
+	// skipped counts the titles left out as local folders hold them.
+	skipped := 0
+	var failed error
 	for len(collected) < start+count {
-		if received >= reach {
-			more = received < limit
+		if received-skipped >= reach {
+			more = received-skipped < limit
 			if more {
 				v.held.Store(true)
 			}
@@ -769,7 +1107,7 @@ func (s *Service) window(ctx context.Context, v view, src source, start, count i
 			if _, ok := s.readyPage(ctx, src.key(received)); !ok {
 				uncached++
 			}
-			for next := received + size; next < min(received+needed, limit); next += size {
+			for next := received + size; next < min(received+needed, limit+skipped); next += size {
 				if kept, ok := s.cachedPage(src.key(offsets[len(offsets)-1])); ok && len(kept) == 0 {
 					break
 				}
@@ -783,14 +1121,19 @@ func (s *Service) window(ctx context.Context, v view, src source, start, count i
 				offsets = append(offsets, next)
 			}
 		}
-		pages, missing, err := s.pagesAt(ctx, src, offsets)
-		if err != nil {
-			return nil, 0, err
+		pages, missing, errs := s.pagesAt(ctx, src, offsets)
+		if ctx.Err() != nil {
+			return nil, 0, ctx.Err()
 		}
 		var fresh []stremio.Meta
 		repeated, unknown := false, false
 		for i, metas := range pages {
 			if offsets[i] != received {
+				break
+			}
+			// A page the addon could not give ends what can be listed.
+			if errs[i] != nil {
+				failed = errs[i]
 				break
 			}
 			// A page not kept, read without asking the addon (see
@@ -818,10 +1161,18 @@ func (s *Service) window(ctx context.Context, v view, src source, start, count i
 			}
 		}
 		trusted = trusted || filled >= 2
-		visible, held := s.visibleMetas(ctx, v, src, fresh)
+		kept, err := s.withoutLocal(ctx, v, src, fresh)
+		if err != nil {
+			return nil, 0, err
+		}
+		skipped += len(fresh) - len(kept)
+		visible, held := s.visibleMetas(ctx, v, src, kept)
 		collected = append(collected, visible...)
 		if held {
 			v.held.Store(true)
+			break
+		}
+		if failed != nil {
 			break
 		}
 		if repeated || unknown {
@@ -835,6 +1186,13 @@ func (s *Service) window(ctx context.Context, v view, src source, start, count i
 	}
 	if trusted && size > remembered {
 		s.learnPageSize(ctx, src, size)
+	}
+	if failed != nil {
+		err := fmt.Errorf("%w: %w", errCutShort, failed)
+		if start >= len(collected) {
+			return nil, len(collected), err
+		}
+		return collected[start:min(start+count, len(collected))], len(collected), err
 	}
 	total := len(collected)
 	if more {
@@ -850,23 +1208,35 @@ func (s *Service) window(ctx context.Context, v view, src source, start, count i
 // catalog's page size: the catalog may simply hold that few titles.
 const shortPage = 10
 
-// pagesAt fetches the catalog pages starting at each offset together. The
-// pages kept answer at once: reads bound the pages they fetch (see
-// window). missing tells the pages a read that asks no addon does not
-// know.
-func (s *Service) pagesAt(ctx context.Context, src source, offsets []int) (pages [][]stremio.Meta, missing []bool, err error) {
-	pages, missing = make([][]stremio.Meta, len(offsets)), make([]bool, len(offsets))
-	group, groupCtx := errgroup.WithContext(ctx)
+// errCutShort reports a window that ends at a page its addon could not
+// give (see window).
+var errCutShort = errors.New("a catalog page could not be read")
+
+// cutShort reports whether a window's err leaves its items to list: it
+// stopped at a page its addon could not give, after items of the window
+// were read. Apps then get those items as the whole listing, and the rest
+// once the addon gives its pages again.
+func cutShort(err error, items int) bool {
+	return errors.Is(err, errCutShort) && items > 0
+}
+
+// pagesAt fetches the catalog pages starting at each offset together, and
+// tells each page's error. The pages kept answer at once: reads bound the
+// pages they fetch (see window). missing tells the pages a read that asks
+// no addon does not know.
+func (s *Service) pagesAt(ctx context.Context, src source, offsets []int) (pages [][]stremio.Meta, missing []bool, errs []error) {
+	pages, missing, errs = make([][]stremio.Meta, len(offsets)), make([]bool, len(offsets)), make([]error, len(offsets))
+	var wg sync.WaitGroup
 	for i, offset := range offsets {
-		group.Go(func() (err error) {
-			pages[i], err = s.page(groupCtx, src, offset)
-			if errors.Is(err, errNotKept) {
-				missing[i], err = true, nil
+		wg.Go(func() {
+			pages[i], errs[i] = s.page(ctx, src, offset)
+			if errors.Is(errs[i], errNotKept) {
+				missing[i], errs[i] = true, nil
 			}
-			return err
 		})
 	}
-	return pages, missing, group.Wait()
+	wg.Wait()
+	return pages, missing, errs
 }
 
 // listed is a title of a catalog, with the catalog that listed it.
@@ -876,9 +1246,10 @@ type listed struct {
 }
 
 // title describes a listed title as an item under parent, with the record
-// that finds it again through the catalog that listed it.
-func (l listed) title(parent accounts.ID) (Item, record, error) {
-	return titleItem(l.src.addon.addon.ID, l.src.catalog, l.meta, parent, l.src.addon.confined)
+// that finds it again through the catalog that listed it, rated as
+// country rates it.
+func (l listed) title(s *Service, parent accounts.ID, country string) (Item, record, error) {
+	return s.titleItem(l.src.addon, l.src.catalog, l.meta, parent, country)
 }
 
 // merged interleaves several catalogs, one item of each in turn, without
@@ -889,6 +1260,10 @@ func (l listed) title(parent accounts.ID) (Item, record, error) {
 func (s *Service) merged(ctx context.Context, v view, sources []source, start, count int) ([]listed, int, error) {
 	if len(sources) == 1 {
 		metas, total, err := s.window(ctx, v, sources[0], start, count)
+		if cutShort(err, len(metas)) {
+			s.logger.Debug("A listing ends at a catalog page the addon could not give", "catalog", sources[0].catalog.ID, "error", err)
+			err = nil
+		}
 		result := make([]listed, 0, len(metas))
 		for _, meta := range metas {
 			result = append(result, listed{meta, sources[0]})
@@ -896,9 +1271,9 @@ func (s *Service) merged(ctx context.Context, v view, sources []source, start, c
 		return result, total, err
 	}
 	need := start + count
-	// A quarter more than an even share, as duplicates and short catalogs
-	// leave the share short, saves most listings a second round.
-	per := (need+need/4)/len(sources) + 1
+	// An even share each; a second round asks for what duplicates and
+	// short catalogs left the listing short of.
+	per := need/len(sources) + 1
 	limit := 0
 	for _, src := range sources {
 		limit = max(limit, v.limit(src))
@@ -936,7 +1311,7 @@ func (s *Service) merged(ctx context.Context, v view, sources []source, start, c
 			}
 			return result[start:min(need, len(result))], total, nil
 		}
-		per *= 2
+		per += need - len(result)
 	}
 }
 
@@ -968,6 +1343,10 @@ type Page struct {
 	// Total is the number of children, or a lower bound when More is true.
 	Total int
 	More  bool
+	// Partial is set when Total is a lower bound: it counts the titles
+	// read so far of a catalog that may list more. An IPTV source's stored
+	// lists are counted whole, so their pages are never partial.
+	Partial bool
 }
 
 // Children lists a folder's children: a library's titles or collections, a
@@ -1014,11 +1393,15 @@ func (s *Service) KnownPages(ctx context.Context, user accounts.User, count int)
 }
 
 // children lists a folder's children (see Children), its titles showing
-// the user's language as far as it is kept (see translate).
+// the user's language as far as it is kept (see translate). An app's
+// listing of one of the user's own libraries opens it (see WithOpening).
 func (s *Service) children(ctx context.Context, user accounts.User, parent accounts.ID, start, count int, genre string, first bool) (Page, error) {
 	v, err := s.view(ctx, user)
 	if err != nil {
 		return Page{}, err
+	}
+	if l, ok := v.library(parent); ok && opening(ctx) {
+		s.openedLibrary(l)
 	}
 	page, err := s.childrenIn(ctx, v, user, parent, start, count, genre, first)
 	s.translate(ctx, v, page.Items)
@@ -1030,6 +1413,9 @@ func (s *Service) childrenIn(ctx context.Context, v view, user accounts.User, pa
 		return s.libraryChildren(ctx, v, l, start, count, genre, first)
 	}
 	if l, ok := v.smartList(parent); ok {
+		if err := s.shownSmartList(ctx, v, l); err != nil {
+			return Page{}, err
+		}
 		return s.smartChildren(ctx, v, l, start, count)
 	}
 	if parent == ReplayViewID {
@@ -1043,9 +1429,6 @@ func (s *Service) childrenIn(ctx context.Context, v view, user accounts.User, pa
 		folders, err := s.liveCategories(ctx, v)
 		return slicePage(folders, start, count), err
 	}
-	if parent == WatchlistViewID {
-		return s.watchlistChildren(ctx, v, start, count, first)
-	}
 	r, err := s.load(ctx, parent)
 	if err != nil {
 		return Page{}, err
@@ -1053,11 +1436,22 @@ func (s *Service) childrenIn(ctx context.Context, v view, user accounts.User, pa
 	switch r.Kind {
 	case KindCollection:
 		return s.collectionChildren(ctx, v, r, start, count, first)
+	case KindFolder, KindVideo:
+		if !r.otherTitle() {
+			return Page{}, ErrNotFound
+		}
+		return s.folderChildren(ctx, v, parent, start, count)
 	case KindSeries:
 		seasons, err := s.Seasons(ctx, user, parent)
+		if err == nil {
+			seasons, err = s.ratingFiltered(ctx, v, seasons)
+		}
 		return slicePage(seasons, start, count), err
 	case KindSeason:
 		episodes, err := s.Episodes(ctx, user, r.seriesItemID(), &parent)
+		if err == nil {
+			episodes, err = s.ratingFiltered(ctx, v, episodes)
+		}
 		return slicePage(episodes, start, count), err
 	case KindReplayFolder:
 		programmes, err := s.replayProgrammes(ctx, v, r)
@@ -1090,6 +1484,13 @@ func slicePage(items []Item, start, count int) Page {
 
 func (r record) seriesItemID() accounts.ID { return itemID(titleKey(KindSeries, r.SeriesID)) }
 
+// covers reports whether the series or season of r holds a video of its
+// series' description. A season of an episode order is taken to hold all
+// of them: which it holds is TMDB's to tell.
+func (r record) covers(video stremio.Video) bool {
+	return r.Kind == KindSeries || r.Group != "" || int(video.Season) == r.Season
+}
+
 func (s *Service) libraryChildren(ctx context.Context, v view, l library, start, count int, genre string, first bool) (Page, error) {
 	if l.addon.addon.HasMusic() {
 		records, err := s.musicLibraryRecords(ctx, v, l)
@@ -1111,14 +1512,27 @@ func (s *Service) libraryChildren(ctx context.Context, v view, l library, start,
 	if l.catalog.Type == "collection" && titlesThrough(ctx) {
 		return s.collectionLibraryTitles(ctx, v, l, src, start, count)
 	}
+	if otherType(l.catalog.Type) && titlesThrough(ctx) && !l.addon.addon.ShowsAsTitles(l.catalog.Type, l.catalog.ID) {
+		return s.otherLibraryVideos(ctx, v, l, src, start, count)
+	}
 	// A listing that keeps none of what the library lists, its collections
 	// or its titles, lists nothing, out of none.
 	if kind, ok := listedKind(l.catalog.Type); l.catalog.Type == "collection" && !keepsKind(ctx, KindCollection) ||
-		ok && !keepsKind(ctx, kind) {
+		ok && !l.mixed && !keepsKind(ctx, kind) {
 		return Page{}, nil
 	}
+	// One that keeps only some of the kinds its titles may be counts and
+	// pages those alone.
+	if kinds := mixedKinds(l); slices.ContainsFunc(kinds, func(kind Kind) bool { return !keepsKind(ctx, kind) }) {
+		if !slices.ContainsFunc(kinds, func(kind Kind) bool { return keepsKind(ctx, kind) }) {
+			return Page{}, nil
+		}
+		return s.narrowedLibraryTitles(ctx, v, l, src, start, count)
+	}
 	metas, total, err := s.window(ctx, v, src, start, count)
-	if err != nil {
+	if cutShort(err, len(metas)) {
+		s.logger.Debug("A listing ends at a catalog page the addon could not give", "catalog", src.catalog.ID, "error", err)
+	} else if err != nil {
 		return Page{}, err
 	}
 	var items []Item
@@ -1128,18 +1542,93 @@ func (s *Service) libraryChildren(ctx context.Context, v view, l library, start,
 		var item Item
 		var r record
 		if l.catalog.Type == "collection" {
-			item, r = collectionItem(addon, meta, l.item.ID, l.addon.confined)
-		} else if item, r, err = titleItem(addon, l.catalog, meta, l.item.ID, l.addon.confined); err != nil {
+			item, r = s.collectionItem(addon, meta, l.item.ID, l.addon.confined, v.country)
+		} else if item, r, err = s.titleItem(l.addon, l.catalog, meta, l.item.ID, v.country); err != nil {
 			continue
 		}
 		items, records = append(items, item), append(records, r)
 	}
+	s.shapeOthers(ctx, v, items, records)
 	if l.catalog.Type == "collection" {
 		s.addGenerated(ctx, v, items, records)
 	}
 	result := page(items, start, totalWithinMax(total, l.maxItems))
+	// A catalog without pages is read whole, and an IPTV source's stored
+	// lists are counted whole: only a paged catalog's total can be short.
+	result.Partial = result.More && src.paged() && !s.storedWindow(v, src)
 	if result.More && !first {
 		s.prefetch(ctx, v, l.addon, func(ctx context.Context) { _, _, _ = s.window(ctx, v, src, start+count, count) })
+	}
+	return result, s.save(ctx, records)
+}
+
+// mixedKinds is the kinds the titles of a library may be when its
+// catalog's type does not tell one (see listedKind): a movie or a series
+// for a catalog of other videos shown as movies and shows, a folder or a
+// video for one that is not, and any of them for another type, such as
+// anime, whose titles' own types tell theirs, or for a catalog of movies
+// or series shown as movies and shows, which lists each title as its own
+// type tells, as a movie catalog that also lists series. It is none for
+// another catalog of movies, series or collections, or of no titles.
+func mixedKinds(l library) []Kind {
+	if _, ok := listedKind(l.catalog.Type); ok && !l.mixed || l.catalog.Type == "collection" {
+		return nil
+	}
+	if otherType(l.catalog.Type) {
+		if l.addon.addon.ShowsAsTitles(l.catalog.Type, l.catalog.ID) {
+			return []Kind{KindMovie, KindSeries}
+		}
+		return []Kind{KindFolder, KindVideo}
+	}
+	if _, ok := titleKind(l.catalog.Type); ok {
+		return []Kind{KindMovie, KindSeries, KindFolder, KindVideo}
+	}
+	return nil
+}
+
+// narrowedLibraryTitles lists the titles of library l that the listing of
+// ctx keeps, when its catalog lists several kinds of titles and the
+// listing keeps only some (see mixedKinds and WithKinds), as Jellyfin
+// counts and pages a library's items of the types asked for: the
+// catalog's first WholeListing titles, or the library's maximum when
+// lower, are read whole and described as a listing describes them (see
+// shapeOthers), so that the total and the pages count the kept ones
+// alone. A title whose description is not known in time has no kind yet
+// and is left out, and so is the part of the catalog not read, such as
+// what a restricted user's listing has not reached: the listing then
+// tells that more may follow, as otherLibraryVideos does.
+func (s *Service) narrowedLibraryTitles(ctx context.Context, v view, l library, src source, start, count int) (Page, error) {
+	most := WholeListing
+	if l.maxItems > 0 {
+		most = min(most, l.maxItems)
+	}
+	metas, total, err := s.window(ctx, v, src, 0, most)
+	if cutShort(err, len(metas)) {
+		s.logger.Debug("A listing ends at a catalog page the addon could not give", "catalog", src.catalog.ID, "error", err)
+	} else if err != nil {
+		return Page{}, err
+	}
+	items := make([]Item, 0, len(metas))
+	records := make([]record, 0, len(metas))
+	for _, meta := range metas {
+		if item, r, err := s.titleItem(l.addon, l.catalog, meta, l.item.ID, v.country); err == nil {
+			items, records = append(items, item), append(records, r)
+		}
+	}
+	unknown := s.shapeOthers(ctx, v, items, records)
+	guessed := make([]bool, len(items))
+	for _, i := range unknown {
+		guessed[i] = true
+	}
+	kept := make([]Item, 0, len(items))
+	for i, item := range items {
+		if !guessed[i] && keepsKind(ctx, item.Kind) {
+			kept = append(kept, item)
+		}
+	}
+	result := slicePage(kept, start, count)
+	if len(unknown) > 0 || total > len(metas) && len(metas) < most {
+		result.More, result.Total = true, max(result.Total, start+len(result.Items)+1)
 	}
 	return result, s.save(ctx, records)
 }
@@ -1162,9 +1651,17 @@ func totalWithinMax(total, most int) int {
 	return min(total, most)
 }
 
-// page makes a Page of a window of children, out of total.
+// page makes a Page of a window of children, out of total, which counts
+// the children read so far when more may follow.
 func page(items []Item, start, total int) Page {
-	return Page{Items: items, Total: total, More: start+len(items) < total}
+	more := start+len(items) < total
+	return Page{Items: items, Total: total, More: more, Partial: more}
+}
+
+// storedWindow reports whether window reads src from an IPTV source's
+// stored lists, which it counts whole.
+func (s *Service) storedWindow(v view, src source) bool {
+	return src.addon.addon.IPTV() && !LiveCatalog(src.catalog.Type) && s.iptv != nil && !v.narrows() && len(v.hidden) == 0 && src.date == ""
 }
 
 // prefetchLimit bounds the listings read ahead at once.
@@ -1187,10 +1684,13 @@ func (s *Service) prefetch(ctx context.Context, v view, addon installed, read fu
 	default:
 		return
 	}
-	ctx = context.WithoutCancel(ctx)
 	go func() {
 		defer func() { <-s.prefetches }()
-		read(ctx)
+		// The listing ending does not stop the read, the server stopping
+		// does (see detached).
+		detached, done := s.detached(ctx)
+		defer done()
+		read(detached)
 	}()
 }
 
@@ -1221,8 +1721,9 @@ type kindsKey struct{}
 // collection then reads only the catalogs whose titles it keeps, so that
 // its pages and its total count those alone, and a collection library
 // lists no collection when collections are not kept. The titles of a
-// catalog are told by its type, movies or series (see listedKind); other
-// catalogs are read as before.
+// catalog are told by its type, movies or series (see listedKind); a
+// library of a catalog of several kinds is read whole and narrowed (see
+// narrowedLibraryTitles); other catalogs are read as before.
 func WithKinds(ctx context.Context, keeps func(Kind) bool) context.Context {
 	return context.WithValue(ctx, kindsKey{}, keeps)
 }
@@ -1284,12 +1785,13 @@ func (s *Service) collectionLibraryTitles(ctx context.Context, v view, l library
 	var items []Item
 	var records []record
 	for _, title := range titles {
-		item, r, err := title.title(l.item.ID)
+		item, r, err := title.title(s, l.item.ID, v.country)
 		if err != nil {
 			continue
 		}
 		items, records = append(items, item), append(records, r)
 	}
+	s.shapeOthers(ctx, v, items, records)
 	result := page(items, start, totalWithinMax(total, l.maxItems))
 	if result.More && !src.first {
 		s.prefetch(ctx, v, l.addon, func(ctx context.Context) { _, _, _ = s.merged(ctx, v, sources, start+count, count) })
@@ -1297,32 +1799,43 @@ func (s *Service) collectionLibraryTitles(ctx context.Context, v view, l library
 	return result, s.save(ctx, records)
 }
 
-func collectionItem(addon accounts.ID, meta stremio.Meta, parent accounts.ID, confined bool) (Item, record) {
+func (s *Service) collectionItem(addon accounts.ID, meta stremio.Meta, parent accounts.ID, confined bool, country string) (Item, record) {
 	key := collectionKey(addon, meta.ID)
 	item := Item{ID: itemID(key), Kind: KindCollection, ParentID: parent}
-	fromMeta(&item, meta)
+	s.fromMeta(&item, meta, country)
 	preview := meta
 	return item, record{ID: item.ID, Key: key, Kind: KindCollection, Addon: &addon, Parent: &parent, Meta: &preview, Confined: confined}
 }
 
 var errUnsupported = errors.New("unsupported title type")
 
-func titleItem(addon accounts.ID, catalog stremio.Catalog, meta stremio.Meta, parent accounts.ID, confined bool) (Item, record, error) {
+// titleItem describes a title a catalog of entry lists, as an item under
+// parent, rated as country rates it, with the record that finds it again
+// through that catalog.
+func (s *Service) titleItem(entry installed, catalog stremio.Catalog, meta stremio.Meta, parent accounts.ID, country string) (Item, record, error) {
 	metaType := meta.Type
 	if metaType == "" {
 		metaType = catalog.Type
 	}
-	kind, ok := titleKind(metaType)
+	kind, ok := catalogTitleKind(entry, catalog, metaType)
 	if !ok || meta.ID == "" {
 		return Item{}, record{}, errUnsupported
 	}
 	meta.Type = metaType
 	key := titleKey(kind, meta.ID)
+	// Until its description tells (see shapeOthers), a title of the other
+	// or channel type is a folder: one without videos lists itself. Shown
+	// as movies and shows, it is a series (see showastitles.go).
+	if otherType(metaType) && kind != KindSeries {
+		kind = KindFolder
+	}
 	item := Item{ID: itemID(key), Kind: kind, ParentID: parent, Available: true}
-	fromMeta(&item, meta)
+	s.correctMeta(&meta, metaType)
+	s.fromMeta(&item, meta, country)
 	preview := meta
+	addon := entry.addon.ID
 	return item, record{ID: item.ID, Key: key, Kind: kind, Addon: &addon, CatalogType: catalog.Type, CatalogID: catalog.ID,
-		Parent: &parent, Meta: &preview, Confined: confined}, nil
+		Parent: &parent, Meta: &preview, Confined: entry.confined}, nil
 }
 
 // collectionChildren lists an addon's collection: the titles of the
@@ -1346,6 +1859,9 @@ func (s *Service) collectionChildren(ctx context.Context, v view, r record, star
 	if err != nil {
 		return Page{}, err
 	}
+	if err := s.shownCollection(ctx, v, addon, r); err != nil {
+		return Page{}, err
+	}
 	// A collection lists at most the items of the library it belongs to.
 	most := s.collectionMax(ctx, v, r)
 	count = withinMax(start, count, most)
@@ -1361,12 +1877,13 @@ func (s *Service) collectionChildren(ctx context.Context, v view, r record, star
 	var items []Item
 	var records []record
 	for _, title := range titles {
-		item, rec, err := title.title(r.ID)
+		item, rec, err := title.title(s, r.ID, v.country)
 		if err != nil {
 			continue
 		}
 		items, records = append(items, item), append(records, rec)
 	}
+	s.shapeOthers(ctx, v, items, records)
 	result := page(items, start, totalWithinMax(total, most))
 	if nested && start == 0 && !result.More {
 		slices.SortStableFunc(result.Items, func(a, b Item) int { return releaseOf(a).Compare(releaseOf(b)) })
@@ -1473,6 +1990,15 @@ const (
 	keptListingWait  = time.Second
 )
 
+// SetWholeWaitBound replaces, before the service is used, what bounds a
+// whole listing's wait for addons, wholeListingWait or keptListingWait
+// given (see upTo): context.WithTimeout, which the server keeps. A test
+// that lists a library whole gives one that does not end it, so that the
+// listing waits for every page however long a busy machine takes.
+func (s *Service) SetWholeWaitBound(bound func(ctx context.Context, wait time.Duration) (context.Context, context.CancelFunc)) {
+	s.wholeBound = bound
+}
+
 // wholeKey marks the context of a whole listing, which reads no page
 // ahead: apps ask for no next page.
 type wholeKey struct{}
@@ -1498,13 +2024,87 @@ func (s *Service) Whole(ctx context.Context, user accounts.User, parent accounts
 	if err != nil {
 		return Page{}, err
 	}
+	return s.upTo(ctx, user, parent, start, count, most, atOnce, genre)
+}
+
+// RandomPool is how many of a library's first titles a listing of them
+// at random draws among, at the least (see DrawPool).
+const RandomPool = 100
+
+// DrawPool lists the titles a listing of the titles of library parent at
+// random draws among: its first pool, at most WholeListing and the
+// library's maximum, as a whole listing reads them (see Whole), and so
+// with what the user may see only. A collection library gives the titles
+// of its collections, as its listings of titles do (see WithTitlesThrough).
+// ok is false when parent is not one of the user's libraries, such as a
+// smart list, which keeps its own order.
+func (s *Service) DrawPool(ctx context.Context, user accounts.User, parent accounts.ID, count, pool int, genre string) (page Page, ok bool, err error) {
+	v, err := s.view(ctx, user)
+	if err != nil {
+		return Page{}, false, err
+	}
+	l, ok := v.library(parent)
+	if !ok {
+		return Page{}, false, nil
+	}
+	most := min(max(pool, RandomPool), WholeListing)
+	if l.maxItems > 0 {
+		most = min(most, l.maxItems)
+	}
+	page, err = s.upTo(ctx, user, parent, 0, min(count, most), most, false, genre)
+	return page, true, err
+}
+
+// StoredNamePool bounds the titles of a library whose titles Polyfin
+// stores that a listing of them by name sorts: every one, up to this.
+const StoredNamePool = 50000
+
+// NamePool lists the titles of library parent that a listing of them by
+// name sorts, when Polyfin stores them (see stored): every one, up to
+// StoredNamePool and the library's maximum, read from the database, with
+// what the user may see only. bound is how many it read at most, so that
+// a page of fewer, and not More, holds every title it sorts. stored is
+// false for a library whose catalog an addon pages through, which is not
+// read: a listing by name keeps its catalog's order, as Jellyfin apps
+// see it. ok is false when parent is not one of the user's libraries.
+func (s *Service) NamePool(ctx context.Context, user accounts.User, parent accounts.ID, genre string) (page Page, bound int, stored, ok bool,
+	err error) {
+	v, err := s.view(ctx, user)
+	if err != nil {
+		return Page{}, 0, false, false, err
+	}
+	l, ok := v.library(parent)
+	if !ok || !l.stored() {
+		return Page{}, 0, false, ok, nil
+	}
+	bound = StoredNamePool
+	if l.maxItems > 0 {
+		bound = min(bound, l.maxItems)
+	}
+	page, err = s.Children(ctx, user, parent, 0, bound, genre)
+	return page, bound, true, true, err
+}
+
+// stored reports whether Polyfin stores the library's titles, so that it
+// lists them all without asking an addon: an IPTV source's movies or
+// series, or a local folder's videos. A library of collections, and a
+// music library, are not.
+func (l library) stored() bool {
+	a := l.addon.addon
+	return l.catalog.Type != "collection" && !a.HasMusic() && (a.IPTV() && !LiveCatalog(l.catalog.Type) || a.Local())
+}
+
+// upTo lists the children of parent from start for a listing of count as
+// Whole does, reading up to most of them; atOnce lists them without
+// waiting for addons, for parents that read no catalog.
+func (s *Service) upTo(ctx context.Context, user accounts.User, parent accounts.ID, start, count, most int, atOnce bool, genre string) (Page, error) {
 	// Other folders list a page, and a library's maximum bounds its own
 	// listings (see withinMax).
 	if most <= count {
 		return s.Children(ctx, user, parent, start, count, genre)
 	}
-	// The Replay view and its folders, and the Watchlist view, read no
-	// catalog: they are listed whole at once.
+	// The Replay view and its folders read no catalog: they are listed
+	// whole at once.
 	if atOnce {
 		return s.Children(ctx, user, parent, start, most, genre)
 	}
@@ -1518,7 +2118,7 @@ func (s *Service) Whole(ctx context.Context, user accounts.User, parent accounts
 	if err == nil && len(known.Items) >= count {
 		wait = s.keptWait
 	}
-	waiting, cancel := context.WithTimeout(context.WithValue(ctx, wholeKey{}, true), wait)
+	waiting, cancel := s.wholeBound(context.WithValue(ctx, wholeKey{}, true), wait)
 	page, err := s.Children(waiting, user, parent, start, most, genre)
 	late := waiting.Err() != nil
 	cancel()
@@ -1562,13 +2162,14 @@ func (s *Service) readRest(ctx context.Context, user accounts.User, parent accou
 }
 
 // listedAddon returns the addon whose catalogs list parent: a library's,
-// or a collection's.
+// or a collection's. A season names the addon that described its series,
+// whose catalogs do not list it.
 func (s *Service) listedAddon(ctx context.Context, v view, parent accounts.ID) (installed, bool) {
 	if l, ok := v.library(parent); ok {
 		return l.addon, true
 	}
 	r, err := s.load(ctx, parent)
-	if err != nil || r.Addon == nil {
+	if err != nil || r.Addon == nil || r.Kind == KindSeason {
 		return installed{}, false
 	}
 	return v.addon(*r.Addon)
@@ -1577,9 +2178,9 @@ func (s *Service) listedAddon(ctx context.Context, v view, parent accounts.ID) (
 // listingLimit is how many items a listing of parent that asks for no
 // limit gets: WholeListing, or the maximum of the library the library or
 // collection parent belongs to when lower; 0 for any other parent but the
-// Replay view and its folders, the Watchlist view and the smart lists,
-// which get WholeListing, a smart list's maximum when lower, atOnce set: a
-// smart list bounds its own wait (see smartRead).
+// Replay view and its folders and the smart lists, which get WholeListing,
+// a smart list's maximum when lower, atOnce set: a smart list bounds its
+// own wait (see smartRead).
 func (s *Service) listingLimit(ctx context.Context, user accounts.User, parent accounts.ID) (most int, atOnce bool, err error) {
 	v, err := s.view(ctx, user)
 	if err != nil {
@@ -1587,7 +2188,7 @@ func (s *Service) listingLimit(ctx context.Context, user accounts.User, parent a
 	}
 	if l, ok := v.library(parent); ok {
 		most = l.maxItems
-	} else if parent == ReplayViewID || parent == WatchlistViewID || parent == LiveCategoriesViewID {
+	} else if parent == ReplayViewID || parent == LiveCategoriesViewID {
 		return WholeListing, true, nil
 	} else if l, ok := v.smartList(parent); ok {
 		if l.list.MaxItems > 0 {
@@ -1618,13 +2219,19 @@ func (s *Service) listingLimit(ctx context.Context, user accounts.User, parent a
 }
 
 // fetchMeta asks an addon, an IPTV source or a local folder for its
-// description of a title.
+// description of a title. Background work's requests to an addon are
+// paced (see request).
 func (s *Service) fetchMeta(ctx context.Context, addon installed, metaType, id string) (stremio.Meta, error) {
 	switch {
 	case addon.addon.Stremio():
-		meta, err := s.client.Meta(ctx, addon.addon.ManifestURL, metaType, id, addon.confined)
+		meta, err := request(ctx, s, addon.addon, paceMetas, func(ctx context.Context) (stremio.Meta, error) {
+			return s.client.Meta(ctx, addon.addon.ManifestURL, metaType, id, addon.confined)
+		})
 		withoutGenerated(&meta)
-		return meta, err
+		// The check of an identifier not checked yet is queued once the
+		// description is kept (see keepMeta).
+		s.correctMeta(&meta, metaType)
+		return meta, failedAt(addon, "", err)
 	case addon.addon.Local():
 		if s.local == nil {
 			return stremio.Meta{}, stremio.ErrNotFound
@@ -1647,25 +2254,56 @@ func (s *Service) titleMeta(ctx context.Context, v view, r record) (stremio.Meta
 // gives. A description from one of the server's addons gives the rating
 // kept for the title.
 func (s *Service) describe(ctx context.Context, v view, r record, shared bool) (stremio.Meta, bool) {
+	meta, _, _, ok := s.describeBy(ctx, v, r, shared)
+	return meta, ok
+}
+
+// describeBy is describe, which also returns the addon that described the
+// title and the one whose description completed it, if any (see
+// completed).
+func (s *Service) describeBy(ctx context.Context, v view, r record, shared bool) (meta stremio.Meta, by, completedBy installed, ok bool) {
 	for _, candidate := range describers(v, r, shared) {
 		kept, err := s.keptMeta(ctx, candidate, r.Meta.Type, r.Meta.ID)
 		if err == nil {
-			meta := kept.value
-			if candidate.addon.IPTV() {
-				how := inDatabase
-				if iptv.IsOpening(ctx) {
-					how = fromAddons
-				}
-				meta, _ = s.enrich(ctx, v, candidate, meta, shared, how)
-			}
-			if candidate.shared && !candidate.addon.Local() {
-				s.learnTraits(ctx, r, meta, kept.at)
-			}
-			return meta, true
+			meta, completedBy = s.completed(ctx, v, r, candidate, kept, shared)
+			return meta, candidate, completedBy, true
 		}
-		s.logger.Debug("An addon could not describe a title", "addon", candidate.addon.Manifest.Name, "error", err)
+		if !notOwn(candidate, err) {
+			s.logger.Debug("An addon could not describe a title", "addon", candidate.addon.LogName(), "error", err)
+		}
 	}
-	return stremio.Meta{}, false
+	return stremio.Meta{}, installed{}, installed{}, false
+}
+
+// notOwn reports whether err tells that a local folder or an IPTV source
+// does not have a title: asked after every addon that may describe it, as
+// they describe only their own titles, they do not know most titles, which
+// is not worth a log record each time a title opens.
+func notOwn(candidate installed, err error) bool {
+	return own(candidate.addon) && errors.Is(err, stremio.ErrNotFound)
+}
+
+// completed is the description of r that candidate gave, completed as
+// describeBy returns it, an IPTV source's with the details of the
+// descriptions kept, a series' with the episodes local folders hold that
+// it does not list (see withFileEpisodes), a title shown as a series with
+// its videos numbered (see shownMeta); one from one of the server's
+// addons gives the rating kept for the title. It also returns the addon
+// whose description completed an IPTV source's, if any (see enrichBy).
+func (s *Service) completed(ctx context.Context, v view, r record, candidate installed, kept fetched[stremio.Meta], shared bool) (stremio.Meta, installed) {
+	meta := kept.value
+	var by installed
+	if candidate.addon.IPTV() {
+		how := inDatabase
+		if iptv.IsOpening(ctx) {
+			how = fromAddons
+		}
+		meta, by, _ = s.enrichBy(ctx, v, candidate, meta, shared, how)
+	}
+	if candidate.shared && !candidate.addon.Local() {
+		s.learnTraits(ctx, r, meta, kept.at, v.country)
+	}
+	return shownMeta(r, s.withFileEpisodes(ctx, v, r, candidate, meta)), by
 }
 
 // describers lists the user's addons, the server's only when shared is
@@ -1728,7 +2366,7 @@ func (s *Service) describedMeta(ctx context.Context, v view, r record, shared bo
 		switch {
 		case !own(candidate.addon):
 			if meta, ok := s.keptDescription(ctx, candidate, metaKey{candidate.addon.ID, r.Meta.Type, r.Meta.ID}, how); ok {
-				return meta, candidate, true
+				return shownMeta(r, s.withFileEpisodes(ctx, v, r, candidate, meta)), candidate, true
 			}
 		case r.Addon != nil && candidate.addon.ID == *r.Addon:
 			if candidate.addon.IPTV() {
@@ -1760,7 +2398,7 @@ func (s *Service) TitleMeta(ctx context.Context, metaType, id string) (stremio.M
 // those given one (see standIn).
 func (s *Service) serverMeta(ctx context.Context, v view, metaType, id string) (stremio.Meta, bool) {
 	for _, candidate := range v.addons {
-		if own(candidate.addon) || !v.factual(candidate, metaType, id, false) || !candidate.addon.Manifest.Serves("meta", metaType, id) {
+		if own(candidate.addon) || !v.factual(candidate, metaType, id, false) || !serves(candidate, "meta", metaType, id) {
 			continue
 		}
 		if kept, err := s.keptMeta(ctx, candidate, metaType, id); err == nil {
@@ -1771,7 +2409,9 @@ func (s *Service) serverMeta(ctx context.Context, v view, metaType, id string) (
 }
 
 // Item describes one item. Titles are completed with their addon's full
-// metadata when available.
+// metadata when available. A movie waiting for its digital release has
+// the day it is out at home as its premiere date, and first in its
+// overview (see releases.go).
 func (s *Service) Item(ctx context.Context, user accounts.User, id accounts.ID) (Item, error) {
 	v, err := s.view(ctx, user)
 	if err != nil {
@@ -1781,7 +2421,18 @@ func (s *Service) Item(ctx context.Context, user accounts.User, id accounts.ID) 
 	if err != nil {
 		return Item{}, err
 	}
-	return s.overriddenItem(item), nil
+	item = s.overriddenItem(item)
+	if item.Kind == KindMovie {
+		day, held, err := s.upcoming(ctx, v, id)
+		if err != nil {
+			return Item{}, err
+		}
+		if held && !day.IsZero() {
+			item.PremiereDate = &day
+			homeReleaseNote(&item, v.words, day)
+		}
+	}
+	return item, nil
 }
 
 // Original describes one item as its addon and MDBList do, without what
@@ -1837,7 +2488,14 @@ func (s *Service) itemsOf(ctx context.Context, v view, ids []accounts.ID, kinds 
 	if err != nil {
 		return nil, err
 	}
+	// Seasons and episodes are described from their series, read together
+	// rather than one by one.
+	if ctx, err = s.withPreloaded(ctx, unloadedSeries(ctx, records)); err != nil {
+		return nil, err
+	}
 	found := make([]*Item, len(ids))
+	// credited are the titles whose people are left to titlesFromTMDB.
+	credited := make([]bool, len(ids))
 	var g errgroup.Group
 	g.SetLimit(8)
 	for i, id := range ids {
@@ -1854,7 +2512,7 @@ func (s *Service) itemsOf(ctx context.Context, v view, ids []accounts.ID, kinds 
 			var item Item
 			var err error
 			if recorded && !isLibrary {
-				item, err = s.described(ctx, v, r)
+				item, credited[i], err = s.describedUncredited(ctx, v, r)
 			} else {
 				item, err = s.item(ctx, v, id)
 			}
@@ -1871,6 +2529,14 @@ func (s *Service) itemsOf(ctx context.Context, v view, ids []accounts.ID, kinds 
 		})
 	}
 	_ = g.Wait()
+	var titles []*Item
+	for i, item := range found {
+		if item != nil && credited[i] {
+			titles = append(titles, item)
+		}
+	}
+	s.titlesFromTMDB(ctx, titles)
+	s.localLengths(ctx, titles)
 	items := make([]Item, 0, len(ids))
 	for _, item := range found {
 		if item != nil {
@@ -1880,29 +2546,55 @@ func (s *Service) itemsOf(ctx context.Context, v view, ids []accounts.ID, kinds 
 	return items, nil
 }
 
+// unloadedSeries returns the series of the seasons and episodes of
+// records, each once, but those already read ahead in ctx.
+func unloadedSeries(ctx context.Context, records []record) []accounts.ID {
+	var series []accounts.ID
+	seen := map[accounts.ID]bool{}
+	for _, r := range records {
+		if r.Kind != KindSeason && r.Kind != KindEpisode {
+			continue
+		}
+		if id := r.seriesItemID(); !seen[id] && !isPreloaded(ctx, id) {
+			seen[id] = true
+			series = append(series, id)
+		}
+	}
+	return series
+}
+
 // goneVideos are the items of records that are home videos no folder
 // holds now: deleted, or their folder holding something else. Within 30
 // days, a video found again is the same title (see localfiles.recognize).
+// So are the plain videos no folder lists now, matched or gone, with
+// their seasons and episodes: what users did with them went to the title
+// they were matched to (see localfiles.follow).
 func (s *Service) goneVideos(ctx context.Context, records []record) (map[accounts.ID]bool, error) {
 	var videos []string
+	held := func(r record) (string, bool) {
+		if r.homeVideo() {
+			return r.Meta.ID, true
+		}
+		return r.plainVideo()
+	}
 	for _, r := range records {
-		if r.Kind == KindVideo && r.Meta != nil {
-			videos = append(videos, r.Meta.ID)
+		if id, ok := held(r); ok {
+			videos = append(videos, id)
 		}
 	}
 	if len(videos) == 0 {
 		return nil, nil
 	}
-	held := map[string]bool{}
+	holding := map[string]bool{}
 	if s.local != nil {
 		var err error
-		if held, err = s.local.HeldVideos(ctx, videos); err != nil {
+		if holding, err = s.local.HeldVideos(ctx, videos); err != nil {
 			return nil, err
 		}
 	}
 	gone := map[accounts.ID]bool{}
 	for _, r := range records {
-		if r.Kind == KindVideo && r.Meta != nil && !held[r.Meta.ID] {
+		if id, ok := held(r); ok && !holding[id] {
 			gone[r.ID] = true
 		}
 	}
@@ -1914,22 +2606,31 @@ func (s *Service) item(ctx context.Context, v view, id accounts.ID) (Item, error
 		item := l.item
 		switch {
 		case l.image == addons.LibraryImageAutomatic && !v.restricted():
-			item.Images.Primary = s.automaticImage(ctx, l.catalogSource(), func() string {
+			image := s.automaticImage(ctx, l.catalogSource(), func() string {
 				r, err := s.load(ctx, id)
 				if err != nil {
 					return ""
 				}
 				return r.Poster
 			})
+			if image.url != "" {
+				item.Images.Primary, item.WidePrimary = image.url, image.wide
+			}
 		case l.image == addons.LibraryImageGenerated:
-			if image, shown := s.libraryImage(ctx, v, l); shown {
-				item.Images.Primary = image
+			if image, shown := s.libraryImage(ctx, v, l); shown && image != "" {
+				item.Images.Primary, item.WidePrimary = image, true
 			}
 		}
 		return item, nil
 	}
 	if l, ok := v.smartList(id); ok {
+		if err := s.shownSmartList(ctx, v, l); err != nil {
+			return Item{}, err
+		}
 		items := []Item{l.item}
+		if l.item.Kind == KindLibrary {
+			s.withSmartLibraryImage(ctx, v, l, &items[0])
+		}
 		s.smartCollectionImages(ctx, v, items)
 		return items[0], nil
 	}
@@ -1945,18 +2646,32 @@ func (s *Service) item(ctx context.Context, v view, id accounts.ID) (Item, error
 		}
 		return Item{ID: id, Kind: KindLiveCategory, Name: v.words.favorites, ParentID: LiveCategoriesViewID, CollectionType: "folders", Available: true}, nil
 	}
-	if id == WatchlistViewID {
-		return s.watchlistView(ctx, v)
-	}
-	r, err := s.load(ctx, id)
+	r, err := s.loadListed(ctx, v, id)
 	if errors.Is(err, ErrNotFound) {
 		if extra, err := s.extra(ctx, v, id); !errors.Is(err, ErrNotFound) {
 			return extra, err
+		}
+		if channel, ok, err := s.unlistedVirtualChannel(ctx, v, id); ok || err != nil {
+			return channel, err
+		}
+		if program, ok, err := s.findVirtualProgram(ctx, v, id); ok || err != nil {
+			return program, err
 		}
 		return s.unsavedProgram(ctx, v, id)
 	}
 	if err != nil {
 		return Item{}, err
+	}
+	// A plain video matched or gone is no more: its title has its users'
+	// data (see goneVideos).
+	if _, plain := r.plainVideo(); plain {
+		gone, err := s.goneVideos(ctx, []record{r})
+		if err != nil {
+			return Item{}, err
+		}
+		if gone[r.ID] {
+			return Item{}, ErrNotFound
+		}
 	}
 	return s.described(ctx, v, r)
 }
@@ -1969,73 +2684,70 @@ func (s *Service) described(ctx context.Context, v view, r record) (Item, error)
 		if r.Meta == nil || r.Addon == nil {
 			return Item{}, ErrNotFound
 		}
-		if _, ok := v.addon(*r.Addon); !ok {
+		addon, ok := v.addon(*r.Addon)
+		if !ok {
 			return Item{}, ErrNotFound
 		}
+		if err := s.shownCollection(ctx, v, addon, r); err != nil {
+			return Item{}, err
+		}
 		item := Item{ID: id, Kind: KindCollection, ParentID: deref(r.Parent)}
-		fromMeta(&item, *r.Meta)
+		s.fromMeta(&item, *r.Meta, v.country)
 		items := []Item{item}
 		s.addGenerated(ctx, v, items, []record{r})
 		return items[0], nil
-	case KindMovie, KindSeries, KindVideo:
-		meta := *r.Meta
-		full, described := s.titleMeta(ctx, v, r)
-		if described {
-			meta = full
+	case KindMovie, KindSeries, KindVideo, KindFolder:
+		item, uncredited, err := s.describedTitle(ctx, v, r)
+		if uncredited {
+			s.titlesFromTMDB(ctx, []*Item{&item})
+			s.localLengths(ctx, []*Item{&item})
 		}
-		// A restricted user's addons are the server's (see view): the
-		// description gives the rating and genres.
-		t := describedTraits(meta)
-		if !described {
-			t, _ = s.knownTraits(ctx, v, r)
-		}
-		// Jellyfin answers a title the user may not see as one that does not
-		// exist.
-		if !v.allows(r.Kind, s.overriddenTraits(id, t)) {
-			return Item{}, ErrNotFound
-		}
-		item := Item{ID: id, Kind: r.Kind, ParentID: deref(r.Parent), Available: true}
-		// The user's language changes what the title shows, never the facts
-		// judged above.
-		fromMeta(&item, s.shown(ctx, v, r.Meta.Type, r.Meta.ID, meta))
-		item.OfficialRating = t.rating
-		if r.Kind == KindSeries && len(meta.Videos) > 0 {
-			item.Contents = contents(meta, nil, s.now())
-		}
-		// Apps show the credited people and open them by identifier: those
-		// of an addon's description are recorded when it is fetched (see
-		// fetchKeptMeta), those of an IPTV source's here, as it describes
-		// its titles anew each time.
-		if r.Addon != nil {
-			if entry, ok := v.addon(*r.Addon); ok && entry.addon.IPTV() {
-				return item, s.saveCredits(ctx, id, item.People, r.Confined)
-			}
-		}
-		return item, nil
+		return item, err
 	case KindSeason, KindEpisode:
-		series, meta, _, err := s.series(ctx, v, r.seriesItemID())
+		series, meta, full, err := s.series(ctx, v, r.seriesItemID())
 		if err != nil {
 			return Item{}, err
 		}
-		if r.Kind == KindSeason {
+		switch {
+		case r.Group != "":
+			// A season of an episode order is one while the series shows
+			// in it.
+			if layout := s.layoutOf(ctx, series.ID, full, v.words); layout != nil && layout.group == r.Group {
+				if season, ok := layout.season(id); ok {
+					return layout.seasonItem(season, series, meta, videosByID(meta), s.now()), nil
+				}
+			}
+		case r.Kind == KindSeason:
 			for _, season := range seasons(series, meta, seasonPosters(meta), v.words, s.now()) {
 				if season.ID == id {
 					return season, nil
 				}
 			}
-		} else {
+		default:
 			for _, episode := range episodes(series, meta, seasonPosters(meta), nil, v.words, s.now()) {
 				if episode.ID == id {
+					found := []Item{episode}
+					s.episodeLengthsOf(ctx, meta.ID, found)
+					episode = found[0]
+					if layout := s.layoutOf(ctx, series.ID, full, v.words); layout != nil {
+						layout.place(&episode)
+					}
 					return episode, nil
 				}
 			}
 		}
 		return Item{}, ErrNotFound
 	case KindPerson:
+		if same, ok := r.sameAs(); ok {
+			var err error
+			if r, err = s.load(ctx, same); err != nil || r.Kind != KindPerson {
+				return Item{}, ErrNotFound
+			}
+		}
 		if _, err := s.credited(ctx, v, r); err != nil {
 			return Item{}, err
 		}
-		return Item{ID: id, Kind: KindPerson, Name: r.Person.Name, Images: Images{Primary: r.Person.Image}}, nil
+		return personItem(r.ID, r, v.peopleLanguage, s.now()), nil
 	case KindChannel:
 		return s.channel(ctx, v, r)
 	case KindProgram:
@@ -2053,6 +2765,98 @@ func (s *Service) described(ctx context.Context, v view, r record) (Item, error)
 	}
 }
 
+// describedUncredited is described, but for the people of a movie or a
+// series, which it leaves to titlesFromTMDB: it reports
+// whether it did.
+func (s *Service) describedUncredited(ctx context.Context, v view, r record) (Item, bool, error) {
+	switch r.Kind {
+	case KindMovie, KindSeries, KindVideo, KindFolder:
+		return s.describedTitle(ctx, v, r)
+	}
+	item, err := s.described(ctx, v, r)
+	return item, false, err
+}
+
+// describedTitle describes the title Polyfin recorded as r, a movie, a
+// series, a video or a folder, as described does, but for its people as
+// TMDB credits them, which it leaves to titlesFromTMDB: it reports whether
+// it did.
+func (s *Service) describedTitle(ctx context.Context, v view, r record) (Item, bool, error) {
+	id := r.ID
+	// A title only an addon the user does not use knows is no title of
+	// theirs, nor one its library no longer shows so.
+	if s.withholdsHolder(ctx, v, r) || v.misplaced(r) {
+		return Item{}, false, ErrNotFound
+	}
+	if r.folderVideo() {
+		item, err := s.folderVideoItem(ctx, v, r)
+		return item, false, err
+	}
+	if r.Meta == nil {
+		return Item{}, false, ErrNotFound
+	}
+	meta := *r.Meta
+	full, described := s.titleMeta(ctx, v, r)
+	if described {
+		meta = full
+	}
+	// The preview of a title another user's own addon holds is that
+	// user's: a title none of this user's addons describes is then none
+	// of theirs. Their own addon, even one they do not use now, shows
+	// them nothing of anyone else; an administrator edits every item.
+	if !described && r.Addon != nil && v.others[*r.Addon] {
+		return Item{}, false, ErrNotFound
+	}
+	// A restricted user's addons are the server's (see view): the
+	// description gives the rating and genres.
+	t := describedTraits(meta, v.country)
+	if !described {
+		t, _ = s.knownTraits(ctx, v, r)
+	}
+	// Jellyfin answers a title the user may not see as one that does not
+	// exist.
+	kind := r.Kind
+	switch {
+	case described && r.otherTitle():
+		kind = otherKind(meta)
+	case described && r.shownTitle():
+		kind = shownKind(meta)
+		// A title shown as a movie plays as one (see target).
+		if kind != r.Kind {
+			r.Kind = kind
+			if err := s.save(ctx, []record{r}); err != nil {
+				s.logger.Debug("The kind of a title could not be recorded", "title", r.Meta.ID, "error", err)
+			}
+		}
+	}
+	if !v.allows(kind, s.overriddenTraits(id, t)) {
+		return Item{}, false, ErrNotFound
+	}
+	item := Item{ID: id, Kind: kind, ParentID: deref(r.Parent), Available: true}
+	// The user's language changes what the title shows, never the facts
+	// judged above.
+	s.fromMeta(&item, s.shown(ctx, v, r.Meta.Type, r.Meta.ID, meta), v.country)
+	item.OfficialRating = t.rating
+	switch {
+	case kind == KindSeries && len(meta.Videos) > 0:
+		item.Contents = contents(meta, nil, s.now())
+	case kind == KindFolder && described:
+		item.Contents = folderContents(meta, s.now())
+	}
+	// Apps show the credited people and open them by identifier: those of
+	// an addon's description are recorded when it is fetched (see
+	// fetchKeptMeta), those of an IPTV source's here, as it describes its
+	// titles anew each time.
+	if r.Addon != nil {
+		if entry, ok := v.addon(*r.Addon); ok && entry.addon.IPTV() {
+			return item, false, s.saveCredits(ctx, id, item.People, r.Confined)
+		}
+	}
+	// While TMDB credits the title, its people are TMDB's (see
+	// titlecredits.go).
+	return item, true, nil
+}
+
 func deref(id *accounts.ID) accounts.ID {
 	if id == nil {
 		return accounts.ID{}
@@ -2062,17 +2866,43 @@ func deref(id *accounts.ID) accounts.ID {
 
 // series returns a series item and its complete metadata, with videos, as
 // the user of v sees them (see shown), and its description itself, whose
-// facts and episodes are those Polyfin records.
+// facts and episodes are those Polyfin records. A title shown as movies
+// and shows is a series while its description has videos.
 func (s *Service) series(ctx context.Context, v view, id accounts.ID) (Item, stremio.Meta, stremio.Meta, error) {
+	item, shown, meta, _, err := s.describedSeries(ctx, v, id)
+	return item, shown, meta, err
+}
+
+// seriesRecords is what the records of a series' seasons and episodes
+// keep of the description they are made from (see describedSeries).
+type seriesRecords struct {
+	// addon described the series, or completed the description of one of
+	// the server's IPTV sources when it is the user's own: its owner
+	// decides whether the records replace the stored ones (see
+	// savedData), so that a user's own description, or completion, never
+	// replaces the records of a series the server's addons describe.
+	addon accounts.ID
+	// confined tells whether the records are confined to public
+	// addresses (see record.Confined).
+	confined bool
+}
+
+// describedSeries is series, which also tells what the records of its
+// seasons and episodes keep (see seriesRecords): the posters of its
+// seasons and the thumbnails of its episodes are the addon's that
+// described the series, or the one's that completed its description,
+// whichever addon listed it. They are confined when either addon is, or
+// when the series is.
+func (s *Service) describedSeries(ctx context.Context, v view, id accounts.ID) (Item, stremio.Meta, stremio.Meta, seriesRecords, error) {
 	// A series' seasons and episodes need its details: they open it.
 	ctx = iptv.Opening(ctx)
 	r, err := s.load(ctx, id)
-	if err != nil || r.Kind != KindSeries {
-		return Item{}, stremio.Meta{}, stremio.Meta{}, ErrNotFound
+	if err != nil || r.Kind != KindSeries && !r.shownTitle() || v.withholds(r) || v.misplaced(r) {
+		return Item{}, stremio.Meta{}, stremio.Meta{}, seriesRecords{}, ErrNotFound
 	}
-	meta, ok := s.titleMeta(ctx, v, r)
-	if !ok || !v.allows(KindSeries, s.overriddenTraits(id, describedTraits(meta))) {
-		return Item{}, stremio.Meta{}, stremio.Meta{}, ErrNotFound
+	meta, by, completedBy, ok := s.describeBy(ctx, v, r, false)
+	if !ok || r.shownTitle() && shownKind(meta) != KindSeries || !v.allows(KindSeries, s.overriddenTraits(id, describedTraits(meta, v.country))) {
+		return Item{}, stremio.Meta{}, stremio.Meta{}, seriesRecords{}, ErrNotFound
 	}
 	// The seasons' and episodes' identifiers, and the series their records
 	// lead back to, follow the series' own identifier: the one it was listed
@@ -2083,9 +2913,13 @@ func (s *Service) series(ctx context.Context, v view, id accounts.ID) (Item, str
 	meta.ID = r.Meta.ID
 	shown := s.shown(ctx, v, r.Meta.Type, r.Meta.ID, meta)
 	item := Item{ID: id, Kind: KindSeries, ParentID: deref(r.Parent), Available: true}
-	fromMeta(&item, shown)
+	s.fromMeta(&item, shown, v.country)
 	item.Contents = contents(meta, nil, s.now())
-	return item, shown, meta, nil
+	owner := by.addon.ID
+	if completedBy.addon.ID != (accounts.ID{}) && !completedBy.shared {
+		owner = completedBy.addon.ID
+	}
+	return item, shown, meta, seriesRecords{addon: owner, confined: r.Confined || by.confined || completedBy.confined}, nil
 }
 
 func seasonNumbers(meta stremio.Meta) []int {
@@ -2197,58 +3031,80 @@ func seasons(series Item, meta stremio.Meta, posters map[int]string, w words, no
 	return result
 }
 
+// episodes lists the episodes of a series described by meta, as aired, of
+// one season when season is set (see episodeOrder and episodeItem).
 func episodes(series Item, meta stremio.Meta, posters map[int]string, season *int, w words, now time.Time) []Item {
-	var result []Item
-	for _, video := range meta.Videos {
-		number := int(video.Season)
-		if season != nil && number != *season {
-			continue
-		}
-		item := Item{
-			ID:                itemID(episodeKey(video.ID)),
-			Kind:              KindEpisode,
-			Name:              video.DisplayName(),
-			ParentID:          itemID(seasonKey(meta.ID, number)),
-			Overview:          video.Overview,
-			PremiereDate:      parseDate(video.Released),
-			Runtime:           parseRuntime(string(video.Runtime)),
-			Images:            Images{Primary: video.Thumbnail, Backdrop: series.Images.Backdrop},
-			SeriesID:          series.ID,
-			SeriesName:        series.Name,
-			SeriesPoster:      series.Images.Primary,
-			SeasonID:          itemID(seasonKey(meta.ID, number)),
-			SeasonName:        w.seasonName(number),
-			SeasonPoster:      posters[number],
-			IndexNumber:       video.EpisodeNumber(),
-			ParentIndexNumber: number,
-			Available:         released(video, now),
-			StremioType:       meta.Type,
-			StremioID:         video.ID,
-		}
-		if item.Name == "" {
-			item.Name = w.episodeName(item.IndexNumber)
-		}
-		if item.PremiereDate != nil {
-			item.ProductionYear = item.PremiereDate.Year()
-		}
-		result = append(result, item)
+	order := episodeOrder(meta, season)
+	if len(order) == 0 {
+		return nil
 	}
-	slices.SortStableFunc(result, func(a, b Item) int {
-		if a.ParentIndexNumber != b.ParentIndexNumber {
-			return a.ParentIndexNumber - b.ParentIndexNumber
-		}
-		return a.IndexNumber - b.IndexNumber
-	})
+	result := make([]Item, len(order))
+	for i, video := range order {
+		result[i] = episodeItem(series, meta, posters, w, now, meta.Videos[video])
+	}
 	return result
 }
 
-// Seasons lists a series' seasons.
+// episodeOrder returns the indexes of meta's videos in the order their
+// episodes are listed as aired: by season, then number, those of one
+// season only when season is set.
+func episodeOrder(meta stremio.Meta, season *int) []int {
+	order := make([]int, 0, len(meta.Videos))
+	for i, video := range meta.Videos {
+		if season == nil || int(video.Season) == *season {
+			order = append(order, i)
+		}
+	}
+	slices.SortStableFunc(order, func(a, b int) int {
+		if seasonA, seasonB := int(meta.Videos[a].Season), int(meta.Videos[b].Season); seasonA != seasonB {
+			return seasonA - seasonB
+		}
+		return meta.Videos[a].EpisodeNumber() - meta.Videos[b].EpisodeNumber()
+	})
+	return order
+}
+
+// episodeItem describes video, an episode of the series described by
+// meta, as episodes lists it.
+func episodeItem(series Item, meta stremio.Meta, posters map[int]string, w words, now time.Time, video stremio.Video) Item {
+	number := int(video.Season)
+	item := Item{
+		ID:                itemID(episodeKey(video.ID)),
+		Kind:              KindEpisode,
+		Name:              video.DisplayName(),
+		ParentID:          itemID(seasonKey(meta.ID, number)),
+		Overview:          video.Overview,
+		PremiereDate:      parseDate(video.Released),
+		Runtime:           parseRuntime(string(video.Runtime)),
+		Images:            Images{Primary: video.Thumbnail, Backdrop: series.Images.Backdrop},
+		SeriesID:          series.ID,
+		SeriesName:        series.Name,
+		SeriesPoster:      series.Images.Primary,
+		SeasonName:        w.seasonName(number),
+		SeasonPoster:      posters[number],
+		IndexNumber:       video.EpisodeNumber(),
+		ParentIndexNumber: number,
+		Available:         released(video, now),
+		StremioType:       meta.Type,
+		StremioID:         video.ID,
+	}
+	item.SeasonID = item.ParentID
+	if item.Name == "" {
+		item.Name = w.episodeName(item.IndexNumber)
+	}
+	if item.PremiereDate != nil {
+		item.ProductionYear = item.PremiereDate.Year()
+	}
+	return item
+}
+
+// Seasons lists a series' seasons, in its order (see episodeorder.go).
 func (s *Service) Seasons(ctx context.Context, user accounts.User, seriesID accounts.ID) ([]Item, error) {
 	v, err := s.view(ctx, user)
 	if err != nil {
 		return nil, err
 	}
-	series, shown, meta, err := s.series(ctx, v, seriesID)
+	series, shown, meta, recorded, err := s.describedSeries(ctx, v, seriesID)
 	if err != nil {
 		return nil, err
 	}
@@ -2259,22 +3115,97 @@ func (s *Service) Seasons(ctx context.Context, user accounts.User, seriesID acco
 	}
 	records := make([]record, 0, len(result))
 	for _, season := range result {
-		records = append(records, record{ID: season.ID, Key: seasonKey(meta.ID, season.IndexNumber), Kind: KindSeason,
-			Parent: &series.ID, SeriesID: meta.ID, Season: season.IndexNumber, Poster: posters[season.IndexNumber]})
+		records = append(records, record{ID: season.ID, Key: seasonKey(meta.ID, season.IndexNumber), Kind: KindSeason, Addon: &recorded.addon,
+			Parent: &series.ID, SeriesID: meta.ID, Season: season.IndexNumber, Poster: posters[season.IndexNumber], Confined: recorded.confined})
+	}
+	if layout := s.layoutOf(ctx, series.ID, meta, v.words); layout != nil {
+		result = layout.seasonItems(result, series, shown, s.now())
+		records = append(records, layout.records(series.ID, meta.ID)...)
 	}
 	return s.overridden(result), s.save(ctx, records)
 }
 
-// Episodes lists a series' episodes, of one season when seasonID is set.
+// Episodes lists a series' episodes, of one season when seasonID is set:
+// in the series' order (see episodeorder.go), where seasonID may be one of
+// the order's seasons, unless ctx is marked InAiredOrder.
 func (s *Service) Episodes(ctx context.Context, user accounts.User, seriesID accounts.ID, seasonID *accounts.ID) ([]Item, error) {
 	v, err := s.view(ctx, user)
 	if err != nil {
 		return nil, err
 	}
-	series, shown, meta, err := s.series(ctx, v, seriesID)
+	result, records, err := s.orderedEpisodes(ctx, v, seriesID, seasonID)
 	if err != nil {
 		return nil, err
 	}
+	return s.overridden(result), s.save(ctx, records)
+}
+
+// SeriesEpisodes lists the episodes of each of series as Episodes does,
+// by series, leaving out those it cannot list. The series are read
+// together, and the episodes recorded at once: Upcoming lists those of up
+// to 50 series. It fails when the episodes could not be recorded.
+func (s *Service) SeriesEpisodes(ctx context.Context, user accounts.User, series []accounts.ID) (map[accounts.ID][]Item, error) {
+	return s.PickedEpisodes(ctx, user, series, func(_ accounts.ID, episodes []EpisodeOutline) []int {
+		all := make([]int, len(episodes))
+		for i := range all {
+			all[i] = i
+		}
+		return all
+	})
+}
+
+// orderedEpisodes lists a series' episodes for v as Episodes does, with
+// the records of them, of the series' seasons, and of the seasons of its
+// order.
+func (s *Service) orderedEpisodes(ctx context.Context, v view, seriesID accounts.ID, seasonID *accounts.ID) ([]Item, []record, error) {
+	series, shown, meta, recorded, err := s.describedSeries(ctx, v, seriesID)
+	if err != nil {
+		return nil, nil, err
+	}
+	var layout *episodeLayout
+	if !inAiredOrder(ctx) {
+		layout = s.layoutOf(ctx, series.ID, meta, v.words)
+	}
+	if layout == nil {
+		result, records, err := listEpisodes(series, shown, meta, recorded, seasonID, v.words, s.now())
+		result = s.withoutSpecials(result)
+		s.episodeLengthsOf(ctx, meta.ID, result)
+		return result, records, err
+	}
+	result, records, err := listEpisodes(series, shown, meta, recorded, nil, v.words, s.now())
+	if err != nil {
+		return nil, nil, err
+	}
+	result = s.withoutSpecials(result)
+	s.episodeLengthsOf(ctx, meta.ID, result)
+	result, found := layout.arrange(result, seasonID)
+	if !found {
+		return nil, nil, ErrSeasonNotFound
+	}
+	return result, append(records, layout.records(series.ID, meta.ID)...), nil
+}
+
+// episodes lists a series' episodes for v as aired, of one season when
+// seasonID is set, and records them and the series' seasons.
+func (s *Service) episodes(ctx context.Context, v view, seriesID accounts.ID, seasonID *accounts.ID) ([]Item, error) {
+	series, shown, meta, recorded, err := s.describedSeries(ctx, v, seriesID)
+	if err != nil {
+		return nil, err
+	}
+	result, records, err := listEpisodes(series, shown, meta, recorded, seasonID, v.words, s.now())
+	if err != nil {
+		return nil, err
+	}
+	result = s.withoutSpecials(result)
+	s.episodeLengthsOf(ctx, meta.ID, result)
+	return s.overridden(result), s.save(ctx, records)
+}
+
+// listEpisodes lists the episodes of a series described (see
+// describedSeries) as aired, of one season when seasonID is set, with the
+// records of them and of the series' seasons, which keep what recorded
+// tells.
+func listEpisodes(series Item, shown, meta stremio.Meta, recorded seriesRecords, seasonID *accounts.ID, w words, now time.Time) ([]Item, []record, error) {
 	var season *int
 	if seasonID != nil {
 		for _, number := range seasonNumbers(meta) {
@@ -2284,17 +3215,17 @@ func (s *Service) Episodes(ctx context.Context, user accounts.User, seriesID acc
 			}
 		}
 		if season == nil {
-			return nil, ErrSeasonNotFound
+			return nil, nil, ErrSeasonNotFound
 		}
 	}
 	posters := seasonPosters(meta)
 	// The episodes show the user's language; their records keep the
 	// description's names and images.
-	result := episodes(series, shown, posters, season, v.words, s.now())
+	result := episodes(series, shown, posters, season, w, now)
 	records := make([]record, 0, len(result)+len(seasonNumbers(meta)))
 	for _, number := range seasonNumbers(meta) {
-		records = append(records, record{ID: itemID(seasonKey(meta.ID, number)), Key: seasonKey(meta.ID, number), Kind: KindSeason,
-			Parent: &series.ID, SeriesID: meta.ID, Season: number, Poster: posters[number]})
+		records = append(records, record{ID: itemID(seasonKey(meta.ID, number)), Key: seasonKey(meta.ID, number), Kind: KindSeason, Addon: &recorded.addon,
+			Parent: &series.ID, SeriesID: meta.ID, Season: number, Poster: posters[number], Confined: recorded.confined})
 	}
 	videos := make(map[string]stremio.Video, len(meta.Videos))
 	for _, video := range meta.Videos {
@@ -2302,15 +3233,10 @@ func (s *Service) Episodes(ctx context.Context, user accounts.User, seriesID acc
 	}
 	for i, episode := range result {
 		video := videos[episode.StremioID]
-		records = append(records, record{ID: episode.ID, Key: episodeKey(video.ID), Kind: KindEpisode,
-			Parent: &result[i].SeasonID, SeriesID: meta.ID, Season: episode.ParentIndexNumber, Video: &video})
+		records = append(records, record{ID: episode.ID, Key: episodeKey(video.ID), Kind: KindEpisode, Addon: &recorded.addon,
+			Parent: &result[i].SeasonID, SeriesID: meta.ID, Season: episode.ParentIndexNumber, Video: &video, Confined: recorded.confined})
 	}
-	if s.settings().HideSpecials {
-		// Specials (season 0) are left out of listings; their records stay,
-		// so a link to one still opens.
-		result = slices.DeleteFunc(result, func(episode Item) bool { return episode.ParentIndexNumber == 0 })
-	}
-	return s.overridden(result), s.save(ctx, records)
+	return result, records, nil
 }
 
 // Search looks a term up in the search catalogs of the user's addons, for
@@ -2372,7 +3298,12 @@ const peopleGrace = 300 * time.Millisecond
 // language searches titles of a kind: then every translator searches
 // them, for every user.
 func (s *Service) search(ctx context.Context, v view, term string, kinds []Kind, limit int) ([]Item, error) {
-	sources := standInCatalogs(v, kinds, true, func(entry installed, catalog stremio.Catalog) (source, bool) {
+	// The catalogs of folders are those of videos (see titleKind).
+	catalogKinds := kinds
+	if slices.Contains(kinds, KindFolder) && !slices.Contains(kinds, KindVideo) {
+		catalogKinds = append(slices.Clone(kinds), KindVideo)
+	}
+	sources := standInCatalogs(v, catalogKinds, true, func(entry installed, catalog stremio.Catalog) (source, bool) {
 		return source{addon: entry, catalog: catalog, search: term, first: true}, searchable(catalog)
 	})
 	if len(sources) == 0 {
@@ -2384,16 +3315,27 @@ func (s *Service) search(ctx context.Context, v view, term string, kinds []Kind,
 	}
 	titles = append(titles, s.fallbackSearch(ctx, v, term, kinds, titles, min(limit, searchLimit))...)
 	titles = titles[:min(len(titles), limit, searchLimit)]
-	var items []Item
-	var records, translated []record
+	found := make([]Item, 0, len(titles))
+	listed := make([]record, 0, len(titles))
+	var translators []bool
 	for _, title := range titles {
-		item, r, err := title.title(accounts.ID{})
+		item, r, err := title.title(s, accounts.ID{}, v.country)
 		if err != nil {
 			continue
 		}
 		r.Parent = nil
-		items = append(items, item)
-		if translator(title.src.addon) && !v.standIn(r.Meta.Type, r.Meta.ID, false) {
+		found, listed = append(found, item), append(listed, r)
+		translators = append(translators, translator(title.src.addon) && !v.standIn(r.Meta.Type, r.Meta.ID, false))
+	}
+	s.shapeOthers(ctx, v, found, listed)
+	var items []Item
+	var records, translated []record
+	for i, r := range listed {
+		if r.shapedTitle() && !slices.Contains(kinds, found[i].Kind) {
+			continue
+		}
+		items = append(items, found[i])
+		if translators[i] {
 			// What a translator found is described in its language: it
 			// stands for the title only until another addon lists it, and
 			// never replaces what another addon listed.
@@ -2411,14 +3353,22 @@ func (s *Service) search(ctx context.Context, v view, term string, kinds []Kind,
 
 // searched reads the first page of each search catalog, together, and
 // interleaves their titles as merged does. It answers once the title
-// searches did, waiting peopleGrace more for the people searches, and for
-// all of them when there are only people searches. Searches still running
-// then answer for the next request: their pages are kept (see page).
+// searches did, or at its deadline: searchGrace after one of them found
+// its page, searchBound at most. It then waits peopleGrace more for the
+// people searches, and only for them, within searchBound, when there are
+// only people searches. Searches still running then answer for the next
+// request: their pages are kept (see page). The title searches that
+// missed the deadline are left out of the searches for a while, and so
+// are those already left out (see lateSearch).
 func (s *Service) searched(ctx context.Context, v view, sources []source, need int) []listed {
+	sources = slices.DeleteFunc(slices.Clone(sources), s.skipsSearch)
 	lists := make([][]stremio.Meta, len(sources))
+	asked, answered := make([]bool, len(sources)), make([]bool, len(sources))
 	var mu sync.Mutex
 	var titleSearches, all sync.WaitGroup
 	fetches := make(chan struct{}, catalogFetches)
+	found := make(chan struct{})
+	var foundOnce sync.Once
 	people, titles := false, 0
 	for i, src := range sources {
 		byPeople := searchesPeople(src.catalog)
@@ -2435,36 +3385,60 @@ func (s *Service) searched(ctx context.Context, v view, sources []source, need i
 			}
 			fetches <- struct{}{}
 			defer func() { <-fetches }()
+			mu.Lock()
+			asked[i] = true
+			mu.Unlock()
 			metas, _, err := s.window(ctx, v, src, 0, need)
 			// An app that stops waiting cancels ctx: nothing failed.
 			if err != nil && ctx.Err() == nil {
-				s.logger.Warn("A search catalog could not be read", "catalog", src.catalog.ID, "error", err)
+				s.logger.Warn("A search catalog could not be read", "addon", src.addon.addon.LogName(), "catalog", src.catalog.ID, "error", err)
 			}
 			mu.Lock()
-			defer mu.Unlock()
-			lists[i] = metas
+			lists[i], answered[i] = metas, true
+			mu.Unlock()
+			if err == nil && !byPeople {
+				foundOnce.Do(func() { close(found) })
+			}
 		}()
 	}
 	everything := done(&all)
-	if people && titles > 0 {
+	titlesDone, firstFound := everything, (<-chan struct{})(nil)
+	if titles > 0 {
+		titlesDone, firstFound = done(&titleSearches), found
+	}
+	bound := time.NewTimer(s.searchBound)
+	defer bound.Stop()
+	var grace <-chan time.Time
+	finished, late := false, false
+	for !finished && !late && ctx.Err() == nil {
 		select {
-		case <-done(&titleSearches):
-			select {
-			case <-everything:
-			case <-time.After(peopleGrace):
-			case <-ctx.Done():
-			}
-		case <-everything:
+		case <-titlesDone:
+			finished = true
+		case <-firstFound:
+			firstFound, grace = nil, time.After(s.searchGrace)
+		case <-grace:
+			late = true
+		case <-bound.C:
+			late = true
 		case <-ctx.Done():
 		}
-	} else {
+	}
+	if finished && people && titles > 0 {
 		select {
 		case <-everything:
+		case <-time.After(peopleGrace):
 		case <-ctx.Done():
 		}
 	}
 	mu.Lock()
 	defer mu.Unlock()
+	if late && ctx.Err() == nil {
+		for i, src := range sources {
+			if asked[i] && !answered[i] && !searchesPeople(src.catalog) && !own(src.addon.addon) {
+				s.lateSearch(src)
+			}
+		}
+	}
 	return interleave(sources, slices.Clone(lists))
 }
 
@@ -2517,15 +3491,30 @@ func (s *Service) Genres(ctx context.Context, user accounts.User, libraryID acco
 }
 
 // Artwork is an item's image as Artwork finds it. URL stands for it (see
-// ImageTag); downloading it is confined to public addresses when Confined.
-// Generated, when set, is the image Polyfin draws for the item (see
-// GeneratedImage): only Polyfin's own choice is one, never an artwork URL
-// in the scheme of generated images.
+// ImageTag); downloading it is confined to public addresses when Confined,
+// unless Templated (see URLConfined). Generated, when set, is the image
+// Polyfin draws for the item (see GeneratedImage): only Polyfin's own
+// choice is one, never an artwork URL in the scheme of generated images.
+// Templated tells the poster address template gave URL (see
+// templatePoster), and Fallback is the addon's poster to download when
+// URL cannot be, confined when Confined. Photo tells a person's photo,
+// which PhotoFailed marks dead. Lookup is what stood for a poster TMDB
+// gives before it was looked up, whose tag listings gave meanwhile (see
+// Item.TMDBPoster).
 type Artwork struct {
 	URL       string
 	Confined  bool
 	Generated *GeneratedImage
+	Templated bool
+	Fallback  string
+	Photo     bool
+	Lookup    string
 }
+
+// URLConfined reports whether downloading URL is confined to public
+// addresses: the poster address template is an administrator's, which may
+// point to a server of the local network, so that its posters never are.
+func (a Artwork) URLConfined() bool { return a.Confined && !a.Templated }
 
 // Artwork returns an item's image: the artwork an administrator uploaded,
 // else a local folder's (see Local.Artwork), else the addon's (see
@@ -2561,10 +3550,14 @@ func (s *Service) Artwork(ctx context.Context, id accounts.ID, imageType string)
 		}
 	}
 	// An IPTV channel shows its line-up's logo at once, listed or not: the
-	// admin app shows those of hidden channels too.
+	// admin app shows those of hidden channels too. One without a logo
+	// shows its guide channel's icon (see guideIcons).
 	if s.iptv != nil && strings.EqualFold(imageType, "Primary") && (errors.Is(err, ErrNotFound) || err == nil && r.Kind == KindChannel &&
 		r.Meta != nil && strings.HasPrefix(r.Meta.ID, iptv.IDPrefix)) {
 		logo, confined, lineupErr := s.iptv.Logo(ctx, id)
+		if lineupErr == nil && logo == "" {
+			logo, lineupErr = s.guideIcon(ctx, id)
+		}
 		switch {
 		case lineupErr == nil && logo == "":
 			return Artwork{}, ErrNotFound
@@ -2584,6 +3577,8 @@ func (s *Service) Artwork(ctx context.Context, id accounts.ID, imageType string)
 		return s.Artwork(ctx, itemID(channelKey(r.Channel)), imageType)
 	}
 	var images Images
+	var fallback string
+	var templated bool
 	confined := r.Confined
 	switch {
 	case r.Kind == KindChannel && r.Meta != nil:
@@ -2595,27 +3590,58 @@ func (s *Service) Artwork(ctx context.Context, id accounts.ID, imageType string)
 		channel, err := s.load(ctx, itemID(channelKey(r.Channel)))
 		confined = r.Confined || err != nil || channel.Confined
 	case r.Meta != nil:
-		var item Item
-		fromMeta(&item, *r.Meta)
+		item := Item{ID: r.ID, Kind: r.Kind}
+		// Only the images and identifiers are read: no rating needed.
+		s.fromMeta(&item, *r.Meta, "")
 		images = item.Images
-		if images.URL(imageType) == "" {
+		template := s.settings().PosterTemplate
+		_, templatable := PosterAddress(template, r.Kind, item.ProviderIDs)
+		if images.URL(imageType) == "" || template != "" && !templatable && strings.EqualFold(imageType, "Primary") {
+			// The description may give what the listing lacks: the image,
+			// or the identifier the poster address template names.
 			v, err := s.artworkView(ctx, r)
 			if err != nil {
 				return Artwork{}, err
 			}
 			if full, describer, ok := s.describedMeta(ctx, v, r, false, inDatabase); ok {
-				fromMeta(&item, full)
-				images = item.Images
-				confined = confined || describer.confined
+				listed := images
+				s.fromMeta(&item, full, "")
+				images = withLocal(item.Images, listed)
+				if listed.URL(imageType) == "" {
+					confined = confined || describer.confined
+				}
+			}
+		}
+		primary := strings.EqualFold(imageType, "Primary")
+		if primary {
+			item.Kind, item.Images = r.Kind, images
+			fallback, templated = templatePoster(&item, template)
+			images.Primary = item.Images.Primary
+		}
+		// A movie or series lacking the image, or whose own is dead, shows
+		// TMDB's as kept (see withTMDBArtwork), unless the poster address
+		// template gives its poster. It is kept by the identifiers of the
+		// title's listing, as TMDBArtwork looks it up.
+		if !(primary && templated) && s.titleArtworkShown() && s.lacking(images.URL(imageType)) {
+			if url := s.keptTMDBImage(ctx, r.Kind, s.providerIDs(r.ID, *r.Meta), imageType); url != "" {
+				confined = false
+				if primary {
+					images.Primary = url
+				} else {
+					images.Backdrop = url
+				}
 			}
 		}
 	case r.Kind == KindEpisode && r.Video != nil:
+		// The thumbnail is the addon's that described the series when the
+		// episode was recorded, which may be another than the one that
+		// listed it: either one confines it, and so does a series that
+		// is not found.
 		images.Primary = r.Video.Thumbnail
-		if series, err := s.load(ctx, r.seriesItemID()); err == nil {
-			confined = series.Confined
-		}
+		series, err := s.load(ctx, r.seriesItemID())
+		confined = r.Confined || err != nil || series.Confined
 	case r.Kind == KindPerson && r.Person != nil:
-		images.Primary = r.Person.Image
+		images.Primary = r.personPhoto(s.now())
 	case r.Kind == KindLibrary:
 		// A library's automatic or generated image, when it was last
 		// looked up.
@@ -2648,16 +3674,24 @@ func (s *Service) Artwork(ctx context.Context, id accounts.ID, imageType string)
 				setImage(&images, imageType, url)
 			}
 		}
-		poster := r.Poster
-		if described {
-			poster = seasonPosters(full)[r.Season]
+		// The poster the record keeps is the addon's that described the
+		// series when the season was recorded, and confined as the record
+		// tells; the one of the description read here is its describer's.
+		poster, recorded := r.Poster, true
+		if described && r.Group == "" {
+			poster, recorded = seasonPosters(full)[r.Season], false
 		}
 		if poster != "" {
 			images.Primary = poster
 		}
-		confined = series.Confined || describer.confined
+		confined = series.Confined || describer.confined || recorded && r.Confined
 	}
 	url := images.URL(imageType)
+	if url == "" && r.Kind == KindEpisode && strings.EqualFold(imageType, "Primary") {
+		// An episode without an image shows a frame of its file (see
+		// applyLocal).
+		url = local[id].Frame
+	}
 	if url == "" && r.Kind == KindCollection && images.Primary == "" {
 		// An addon's collection without a poster shows its generated
 		// images, if any.
@@ -2670,7 +3704,7 @@ func (s *Service) Artwork(ctx context.Context, id accounts.ID, imageType string)
 	if url == "" || strings.HasPrefix(url, generatedScheme) {
 		return Artwork{}, ErrNotFound
 	}
-	return Artwork{URL: url, Confined: confined}, nil
+	return Artwork{URL: url, Confined: confined, Templated: templated, Fallback: fallback, Photo: r.Kind == KindPerson}, nil
 }
 
 // artworkView is the view a title's artwork is found with (see

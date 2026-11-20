@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strconv"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -16,6 +17,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/process"
 )
 
 // fakeProbe is an ffprobe that counts its runs and, once released, answers
@@ -40,7 +42,7 @@ func newFakeProbe(t *testing.T, released bool) fakeProbe {
 	if err := os.WriteFile(f.path+".json", data, 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(f.path, []byte(script), 0o700); err != nil {
+	if err := process.WriteExecutable(f.path, strings.NewReader(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	if released {
@@ -195,6 +197,9 @@ func TestNextEpisodeIsPreparedNearTheEnd(t *testing.T) {
 	versions := listed()
 	if len(versions) != 2 {
 		t.Fatalf("8 minutes left: next episode's versions %+v", versions)
+	}
+	if _, ok := tr.handler.subtitleFiles.Get(next); !ok {
+		t.Error("the next episode's subtitles were not listed")
 	}
 	if _, ok := tr.handler.Playback.Analyzed(t.Context(), versions[0].ID); !ok || probe.runs() != 1 {
 		t.Errorf("first version analyzed %v, %d runs", ok, probe.runs())

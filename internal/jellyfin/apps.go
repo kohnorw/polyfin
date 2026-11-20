@@ -35,7 +35,7 @@ func (h *Handler) appRoutes(rt *router) {
 	signedIn(http.MethodPost, "/LiveStreams/Open", h.openLiveStream)
 	signedIn(http.MethodPost, "/LiveStreams/Close", h.closeLiveStream)
 	// Like the download route, which it serves as: see streamAccess.
-	rt.handle(http.MethodGet, "/Items/{itemId}/File", http.HandlerFunc(h.itemFile))
+	rt.handle(http.MethodGet, "/Items/{itemId}/File", h.meteredFile(h.itemFile))
 	signedIn(http.MethodGet, "/Items/{itemId}/Images", h.itemImages)
 	signedIn(http.MethodGet, "/FallbackFont/Fonts", h.fallbackFonts)
 	signedIn(http.MethodGet, "/FallbackFont/Fonts/{name}", h.fallbackFont)
@@ -152,8 +152,9 @@ func (h *Handler) searchHints(w http.ResponseWriter, r *http.Request) {
 	}
 	found = slices.DeleteFunc(found, func(item library.Item) bool { return !keep(item) })
 	hints := make([]SearchHint, 0, len(found))
+	badges := h.posterBadges(r.Context(), found)
 	for _, item := range found {
-		hints = append(hints, h.searchHint(item))
+		hints = append(hints, h.searchHint(item, badges))
 	}
 	total := len(hints)
 	hints = hints[min(max(start, 0), len(hints)):]
@@ -165,11 +166,12 @@ func (h *Handler) searchHints(w http.ResponseWriter, r *http.Request) {
 
 // searchHint describes an item as a search hint, with the artwork its
 // page shows: a season's or an episode's backdrop and thumbnail are their
-// series'.
-func (h *Handler) searchHint(item library.Item) SearchHint {
+// series'. badges holds what the badges over posters show (see
+// posterBadges).
+func (h *Handler) searchHint(item library.Item, badges map[accounts.ID]string) SearchHint {
 	var images BaseItemDto
 	images.ImageTags = map[string]string{}
-	h.setImages(&images, item)
+	h.setImages(&images, item, badges)
 	hint := SearchHint{
 		ItemId:                  item.ID.String(),
 		Id:                      item.ID.String(),
@@ -492,7 +494,7 @@ func (h *Handler) itemImages(w http.ResponseWriter, r *http.Request) {
 	}
 	var dto BaseItemDto
 	dto.ImageTags = map[string]string{}
-	h.setImages(&dto, item)
+	h.setImages(&dto, item, h.posterBadges(r.Context(), []library.Item{item}))
 	images := []ImageInfo{}
 	for _, imageType := range []string{"Primary", "Logo", "Thumb", "Banner", "Art", "Disc"} {
 		if tag := dto.ImageTags[imageType]; tag != "" {
@@ -510,9 +512,16 @@ var metadataRefreshModes = []string{"None", "ValidationOnly", "Default", "FullRe
 
 // refreshItem is Jellyfin's metadata refresh, for administrators: Polyfin
 // forgets what it keeps of the title and asks the addons to describe it
-// again (see library.Service.Refresh). The modes and replace options,
-// which choose what Jellyfin reads again from disk and providers, change
-// nothing: addons are always asked for everything.
+// again (see library.Service.Refresh). On one of the server's libraries,
+// it queues the paced refresh of its titles' descriptions, as Content ›
+// Libraries does, when a mode asks for metadata (see
+// library.Service.RefreshItem), and answers at once, as Jellyfin answers
+// once it queued the refresh. The replace options for metadata and
+// images, which choose what Jellyfin keeps of what it read before, change
+// nothing: addons are always asked for everything, and a description
+// replaces the one kept. regenerateTrickplay, with a FullRefresh mode as
+// in Jellyfin, makes again the images of the local folders' files of the
+// title, or under it (see regenerateThumbnails).
 func (h *Handler) refreshItem(w http.ResponseWriter, r *http.Request) {
 	user := callerFrom(r.Context()).User
 	if !user.IsAdministrator {
@@ -521,21 +530,39 @@ func (h *Handler) refreshItem(w http.ResponseWriter, r *http.Request) {
 	}
 	b := bindErrors{}
 	id := b.pathID(r, "itemId")
+	// A library's titles are described again when either mode asks
+	// providers for metadata, Default or FullRefresh, as jellyfin-web's
+	// Refresh metadata does: its images come with the descriptions. None,
+	// Jellyfin's default, and ValidationOnly ask none.
+	descriptions, full := false, false
 	for _, name := range []string{"metadataRefreshMode", "imageRefreshMode"} {
 		if raw, _ := queryParam(r, name); strings.TrimSpace(raw) != "" {
-			b.enum(name, raw, metadataRefreshModes)
+			mode := b.enum(name, raw, metadataRefreshModes)
+			descriptions = descriptions || mode == "Default" || mode == "FullRefresh"
+			full = full || mode == "FullRefresh"
 		}
 	}
-	for _, name := range []string{"replaceAllMetadata", "replaceAllImages", "regenerateTrickplay"} {
+	for _, name := range []string{"replaceAllMetadata", "replaceAllImages"} {
 		b.bool(r, name)
 	}
+	regenerate, _ := b.bool(r, "regenerateTrickplay")
 	if len(b) > 0 {
 		validationProblem(w, b)
 		return
 	}
-	if err := h.Library.Refresh(r.Context(), user, id); err != nil {
+	if err := h.Library.RefreshItem(r.Context(), user, id, descriptions); err != nil {
 		h.browseError(w, r, err)
 		return
+	}
+	if kept, ok := h.subtitleFiles.Get(id); ok {
+		for _, file := range kept.Files {
+			h.subtitleCache.Delete(file.ID)
+			h.subtitleReads.forget(file.ID)
+		}
+		h.subtitleFiles.Delete(id)
+	}
+	if full && regenerate {
+		h.regenerateThumbnails(r.Context(), id)
 	}
 	w.WriteHeader(http.StatusNoContent)
 }

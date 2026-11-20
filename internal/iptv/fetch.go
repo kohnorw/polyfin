@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/moodiness/polyfin/internal/addons"
+	"github.com/moodiness/polyfin/internal/serverfile"
 	"github.com/moodiness/polyfin/internal/stremio"
 )
 
@@ -26,6 +27,10 @@ const (
 	maxChannels    = 100_000
 	maxVODListSize = 400 << 20
 	maxTitles      = 400_000
+	// maxLoginSize bounds an Xtream account's login answer, a few fields,
+	// and maxCategories the categories read of one of its category lists.
+	maxLoginSize  = 1 << 20
+	maxCategories = 10_000
 	// A list download must answer within listAnswer, send something at
 	// least every listStall and end within listTimeout.
 	listAnswer  = 30 * time.Second
@@ -68,6 +73,9 @@ type downloaded struct {
 	timezone string
 	// tuner is what a tuner said of itself, nil for another source.
 	tuner *Tuner
+	// network is where the account was when it was read (see
+	// Service.located); empty when the download does not tell.
+	network addons.Network
 }
 
 // merge adds to d the parts of more that d lacks.
@@ -79,6 +87,9 @@ func (d *downloaded) merge(more downloaded) {
 	d.timezone = cmp.Or(d.timezone, more.timezone)
 	if d.tuner == nil {
 		d.tuner = more.tuner
+	}
+	if d.network == "" {
+		d.network = more.network
 	}
 	if more.got.live && !d.got.live {
 		d.entries, d.got.live = more.entries, true
@@ -92,11 +103,13 @@ func (d *downloaded) merge(more downloaded) {
 }
 
 // fetch downloads the parts of an account that want names: an M3U
-// playlist whole, or the Xtream player API lists of each part. confined
-// keeps the requests on public addresses. Errors never contain an address:
-// they embed credentials. Entries of a kind not wanted as titles count as
-// channels, as they become.
+// playlist whole, or the Xtream player API lists of each part, with the
+// account's User-Agent. confined keeps the requests on public addresses,
+// and refuses a playlist that is a file of the server (ErrLocalFile).
+// Errors never contain an address: they embed credentials. Entries of a
+// kind not wanted as titles count as channels, as they become.
 func fetch(ctx context.Context, client requester, account Account, confined bool, want parts) (downloaded, error) {
+	client = client.as(account)
 	var d downloaded
 	channels, titles := 0, 0
 	add := func(e Entry) error {
@@ -119,7 +132,12 @@ func fetch(ctx context.Context, client requester, account Account, confined bool
 		if want.movies || want.series {
 			limit = maxVODListSize
 		}
-		err = download(ctx, client, account.URL, confined, limit, func(body io.Reader) error { return ParseM3U(body, add) })
+		read := func(body io.Reader) error { return ParseM3U(body, add) }
+		if path, ok := serverfile.Path(account.URL); ok {
+			err = readFile(path, confined, limit, read)
+		} else {
+			err = download(ctx, client, account.URL, confined, limit, read)
+		}
 		d.got = parts{live: true, movies: true, series: true}
 	case addons.KindXtream:
 		d, err = fetchXtream(ctx, client, account, confined, want)
@@ -129,6 +147,21 @@ func fetch(ctx context.Context, client requester, account Account, confined bool
 		err = ErrInvalidAddress
 	}
 	return d, err
+}
+
+// readFile hands read a list that is a file of the server, bounded in size
+// (limit) as a download is; a source confined to public addresses may not
+// read one.
+func readFile(path string, confined bool, limit int64, read func(io.Reader) error) error {
+	if confined {
+		return ErrLocalFile
+	}
+	file, err := serverfile.Open(path)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	return read(&bounded{r: file, left: limit})
 }
 
 // download requests address in its host's turn (see Pacer) and hands its
@@ -158,7 +191,7 @@ func downloadOnce(ctx context.Context, client requester, address string, confine
 	ctx, cancel := context.WithTimeout(ctx, listTimeout)
 	defer cancel()
 	answered := time.AfterFunc(listAnswer, cancel)
-	response, err := client.client.Open(ctx, http.MethodGet, address, nil, confined)
+	response, err := client.client.OpenSource(ctx, http.MethodGet, address, client.header(), confined)
 	answered.Stop()
 	if err != nil {
 		return err
@@ -180,7 +213,7 @@ func downloadOnce(ctx context.Context, client requester, address string, confine
 }
 
 // bounded reads at most left bytes, then fails with ErrTooLarge; each read
-// that brings something pushes the stall timer back.
+// that brings something pushes the stall timer back, when there is one.
 type bounded struct {
 	r     io.Reader
 	left  int64
@@ -200,7 +233,7 @@ func (b *bounded) Read(p []byte) (int, error) {
 	}
 	n, err := b.r.Read(p)
 	b.left -= int64(n)
-	if n > 0 {
+	if n > 0 && b.stall != nil {
 		b.stall.Reset(listStall)
 	}
 	if err != nil && !errors.Is(err, io.EOF) {
@@ -245,7 +278,7 @@ func fetchXtream(ctx context.Context, client requester, account Account, confine
 			Timezone string `json:"timezone"`
 		} `json:"server_info"`
 	}
-	if err := download(ctx, client, account.api(""), confined, maxListSize, decodeJSON(&login)); err != nil {
+	if err := download(ctx, client, account.api(""), confined, maxLoginSize, decodeJSON(&login)); err != nil {
 		return d, err
 	}
 	if login.UserInfo.Auth != "1" {
@@ -296,18 +329,39 @@ func (a Account) api(action string) string {
 	return address
 }
 
-// xtreamCategories reads the names of a category list of the player API.
+// xtreamCategories reads the names of a category list of the player API,
+// one category at a time; null is a list of none. A list of more than
+// maxCategories is ErrTooLarge.
 func xtreamCategories(ctx context.Context, client requester, account Account, confined bool, action string) (map[text]string, error) {
-	var categories []struct {
-		ID   text   `json:"category_id"`
-		Name string `json:"category_name"`
-	}
-	if err := download(ctx, client, account.api(action), confined, maxListSize, decodeJSON(&categories)); err != nil {
+	var names map[text]string
+	err := download(ctx, client, account.api(action), confined, maxListSize, func(body io.Reader) error {
+		names = map[text]string{}
+		decoder := json.NewDecoder(body)
+		switch opening, err := decoder.Token(); {
+		case err != nil:
+			return jsonError(err)
+		case opening == nil:
+			return nil
+		case opening != json.Delim('['):
+			return ErrInvalidList
+		}
+		for read := 0; decoder.More(); read++ {
+			if read >= maxCategories {
+				return ErrTooLarge
+			}
+			var category struct {
+				ID   text   `json:"category_id"`
+				Name string `json:"category_name"`
+			}
+			if err := decoder.Decode(&category); err != nil {
+				return jsonError(err)
+			}
+			names[category.ID] = strings.TrimSpace(category.Name)
+		}
+		return nil
+	})
+	if err != nil {
 		return nil, err
-	}
-	names := make(map[text]string, len(categories))
-	for _, category := range categories {
-		names[category.ID] = strings.TrimSpace(category.Name)
 	}
 	return names, nil
 }
@@ -353,13 +407,13 @@ func fetchXtreamLive(ctx context.Context, client requester, account Account, con
 			if stream.ID == "" || heading(name) {
 				return nil
 			}
-			number, _ := strconv.Atoi(string(stream.Number))
+			number, guideNumber := channelNumber(string(stream.Number))
 			var catchup Catchup
 			if strings.TrimSpace(string(stream.Archive)) == "1" {
 				days, _ := strconv.Atoi(strings.TrimSpace(string(stream.Days)))
 				catchup = Catchup{Type: CatchupXtream, Days: days}.normalized()
 			}
-			return add(Entry{ID: string(stream.ID), Name: name, Number: max(number, 0), Logo: strings.TrimSpace(stream.Icon),
+			return add(Entry{ID: string(stream.ID), Name: name, Number: number, GuideNumber: guideNumber, Logo: strings.TrimSpace(stream.Icon),
 				Group: names[stream.Category], GuideID: strings.TrimSpace(stream.Guide), URL: account.streamURL(string(stream.ID), hls),
 				Catchup: catchup})
 		})

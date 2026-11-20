@@ -1,0 +1,30 @@
+# Tests allowed over 30 s in CI's race jobs (scripts/test-times.py): one a
+# line, the package as go test prints it, the test, then why after a #.
+# Only a test a pull request adds fails its job over 30 s; any other gets a
+# warning. So a line here is for a new test slow on purpose, or silences
+# the warning of an existing one: the lines of the first group below are
+# of the latter.
+# A job's summary lists the tests of this file now under 30 s, whose lines
+# can go.
+#
+# These make, convert or decode video and audio with FFmpeg, record in real
+# time, or build large data on purpose: CI's first run with this check,
+# 42417985281, took 30.4 to 44.0 s each under the race detector.
+github.com/moodiness/polyfin/internal/jellyfin TestShareBluRaysPlayCopied # plays three Blu-ray discs (folder, ISO, UDF) through FFmpeg from a WebDAV share, whole and from a seek
+github.com/moodiness/polyfin/internal/jellyfin TestARecordingTakingTheViewersTunerAnswers503 # FFmpeg converts a live 5.1 channel until a recording takes its tuner, waited for up to 2 min
+github.com/moodiness/polyfin/internal/jellyfin TestProgrammeIsRecordedAndPlays # records a live stream with FFmpeg for at least 30 s of real time, then plays the file
+github.com/moodiness/polyfin/internal/jellyfin TestLocalMPEGTSFilesPlayConvertedUntilTheirKeyframesAreRead # encodes a 750 s MPEG-TS file with FFmpeg, plays it converted, then copied
+github.com/moodiness/polyfin/internal/thumbnails TestThumbnailsDuringThePlay # encodes a long video with FFmpeg and makes thumbnails over 10 minutes of play
+github.com/moodiness/polyfin/internal/thumbnails TestImagesFollowTheKeyframesTimes # decodes HEVC keyframes with FFmpeg, once for each read order and budget
+github.com/moodiness/polyfin/internal/iptv TestLargeLineupsStayFast # a line-up of 5,400 entries under the race detector (54,000 without), on purpose: its time bounds are the test
+github.com/moodiness/polyfin/internal/playback TestManifestsNamingMoreAddressesThanTheBoundAreRefused # rewrites manifests of 100,000 addresses, the bound, and past it, on purpose: the bound is the test
+github.com/moodiness/polyfin/internal/playback TestManifestsWrittenPastTheBoundAreRefusedBeforeTheyAreBuilt # rewrites manifests of 32 MiB once written, the bound, and past it, on purpose: the bound is the test
+#
+# These restore a whole database, or make its whole schema in one
+# transaction, in a few seconds each: their time is their turn, which
+# they wait for behind every other test that does (testdb.LockRestores).
+github.com/moodiness/polyfin/internal/backup TestAStatementInABackupIsNotRun # waits its turn to restore a database, then restores one
+github.com/moodiness/polyfin/internal/backup TestAStatementInABackupSentFromTheSetupPageIsNotRun # waits its turn to restore a database, then restores one
+github.com/moodiness/polyfin/internal/backup TestAStatementInABackupOfADestinationIsNotRun # waits its turn to restore a database, then restores one
+github.com/moodiness/polyfin/internal/backup TestARestoredDatabaseIsTheOneBackedUp # waits its turn to restore a database, then restores one
+github.com/moodiness/polyfin/internal/database TestMigrateAsMakesTheSchemaMigrateMakes # waits its turn behind the tests that restore a database, then makes the whole schema in one transaction

@@ -1,16 +1,16 @@
 package jellyfin
 
 import (
-	"encoding/json"
 	"errors"
 	"net/http"
-	"path/filepath"
 	"runtime"
 	"strings"
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/activity"
 	"github.com/moodiness/polyfin/internal/diskspace"
+	"github.com/moodiness/polyfin/internal/i18n"
+	"github.com/moodiness/polyfin/internal/localization"
 	"github.com/moodiness/polyfin/internal/userdata"
 )
 
@@ -18,8 +18,9 @@ import (
 //
 // Jellyfin apps read the server configuration whole, and its dashboard
 // saves it whole. Polyfin answers with its own settings where Jellyfin has
-// them: the server name, its language, the resume thresholds, Quick
-// Connect and the legacy authorization; everything else is a new Jellyfin
+// them: the server name, its language, the rating country
+// (MetadataCountryCode), the resume thresholds, Quick Connect and the
+// legacy authorization; everything else is a new Jellyfin
 // server's default. Saving applies those of Polyfin's settings and ignores
 // the rest.
 
@@ -136,13 +137,9 @@ func uiCulture(language string) string {
 }
 
 // cultureLanguage is the server language of a culture, empty when Polyfin
-// does not speak it.
+// does not speak it (see i18n.Match).
 func cultureLanguage(culture string) string {
-	language, _, _ := strings.Cut(strings.ToLower(strings.TrimSpace(culture)), "-")
-	if accounts.ValidLanguage(language) {
-		return language
-	}
-	return ""
+	return i18n.Match(strings.TrimSpace(culture))
 }
 
 // serverConfiguration answers the server configuration to any signed-in
@@ -156,7 +153,7 @@ func (h *Handler) serverConfiguration(w http.ResponseWriter, _ *http.Request) {
 		EnableCaseSensitiveItemIds:         true,
 		DisableLiveTvChannelUserDataName:   true,
 		PreferredMetadataLanguage:          "en",
-		MetadataCountryCode:                "US",
+		MetadataCountryCode:                settings.RatingCountry,
 		SortReplaceCharacters:              []string{".", "+", "%"},
 		SortRemoveCharacters:               []string{",", "&", "-", "{", "}", "'"},
 		SortRemoveWords:                    []string{"the", "a", "an"},
@@ -196,11 +193,12 @@ func (h *Handler) serverConfiguration(w http.ResponseWriter, _ *http.Request) {
 
 // updateServerConfiguration applies the parts of a configuration Polyfin
 // has: the server name, its language (UICulture, when Polyfin speaks it),
-// the resume thresholds, Quick Connect and the legacy authorization.
-// Unlike Jellyfin, which replaces the configuration whole, a part left out
-// is kept, as is an empty server name; MinResumeDurationSeconds is fixed.
-// Values Polyfin's settings refuse are refused, as the admin interface
-// refuses them.
+// the rating country (MetadataCountryCode, when Polyfin knows its
+// ratings), the resume thresholds, Quick Connect and the legacy
+// authorization. Unlike Jellyfin, which replaces the configuration whole, a
+// part left out is kept, as is an empty server name; MinResumeDurationSeconds
+// is fixed. Values Polyfin's settings refuse are refused, as the admin
+// interface refuses them.
 func (h *Handler) updateServerConfiguration(w http.ResponseWriter, r *http.Request) {
 	errs := bindErrors{}
 	raw, ok := requestBody(w, r, "configuration", errs)
@@ -210,12 +208,13 @@ func (h *Handler) updateServerConfiguration(w http.ResponseWriter, r *http.Reque
 	var body struct {
 		ServerName                *string
 		UICulture                 *string
+		MetadataCountryCode       *string
 		MinResumePct              *int
 		MaxResumePct              *int
 		QuickConnectAvailable     *bool
 		EnableLegacyAuthorization *bool
 	}
-	if raw != nil && json.Unmarshal(raw, &body) != nil {
+	if raw != nil && unmarshalBody(raw, &body) != nil {
 		errs.add("$", "The JSON value could not be converted.")
 		errs.add("configuration", "The configuration field is required.")
 	}
@@ -230,6 +229,11 @@ func (h *Handler) updateServerConfiguration(w http.ResponseWriter, r *http.Reque
 	if body.UICulture != nil {
 		if language := cultureLanguage(*body.UICulture); language != "" {
 			settings.Language = language
+		}
+	}
+	if body.MetadataCountryCode != nil {
+		if country := strings.ToUpper(strings.TrimSpace(*body.MetadataCountryCode)); localization.ValidRatingCountry(country) {
+			settings.RatingCountry = country
 		}
 	}
 	if body.MinResumePct != nil {
@@ -339,10 +343,10 @@ func folderStorage(path string) FolderStorageDto {
 }
 
 // storage describes the folders Polyfin writes to: its cache, where
-// sources and remuxes are kept, its segments, where conversions are, and,
-// when recordings are made, their folder, as a library. Polyfin keeps no
-// program data, web files, logs, metadata or artwork on disk: those
-// folders are left empty and unmeasured.
+// relayed images are kept, its segments, where conversions and
+// repackagings are, and, when recordings are made, their folder, as a
+// library. Polyfin keeps no program data, web files, logs or metadata on
+// disk: those folders are left empty and unmeasured.
 func (h *Handler) storage(w http.ResponseWriter, _ *http.Request) {
 	result := SystemStorageDto{
 		ProgramDataFolder:      folderStorage(""),
@@ -351,17 +355,12 @@ func (h *Handler) storage(w http.ResponseWriter, _ *http.Request) {
 		CacheFolder:            folderStorage(h.CacheDir),
 		LogFolder:              folderStorage(""),
 		InternalMetadataFolder: folderStorage(""),
-		TranscodingTempFolder:  folderStorage(""),
+		TranscodingTempFolder:  folderStorage(h.SegmentsDir),
 		Libraries:              []LibraryStorageDto{},
 	}
-	if h.CacheDir != "" {
-		result.TranscodingTempFolder = folderStorage(filepath.Join(h.CacheDir, "segments"))
-	}
 	if dir := h.Recordings.Dir(); dir != "" {
-		name := "Recordings"
-		if h.Accounts.Settings().Language == "fr" {
-			name = "Enregistrements"
-		}
+		name := i18n.Text{"Recordings", "Enregistrements", "Aufnahmen", "Grabaciones", "Registrazioni", "Gravações"}.
+			In(h.Accounts.Settings().Language)
 		result.Libraries = append(result.Libraries, LibraryStorageDto{Id: recordingsLibrary, Name: name,
 			Folders: []FolderStorageDto{folderStorage(dir)}})
 	}

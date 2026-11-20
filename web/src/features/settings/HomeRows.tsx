@@ -1,10 +1,17 @@
-import { PlusIcon, RowsIcon } from '@phosphor-icons/react'
+import {
+  EyeIcon,
+  FilmSlateIcon,
+  PlusIcon,
+  RowsIcon,
+  TelevisionSimpleIcon,
+} from '@phosphor-icons/react'
 import { useMutation, useQuery } from '@tanstack/react-query'
 import { useId, useState, type FormEvent } from 'react'
 import {
   createHomeRow,
   deleteHomeRow,
   fetchHomeRowChoices,
+  fetchHomeRowPreview,
   fetchHomeRows,
   fetchUsers,
   orderHomeRows,
@@ -17,6 +24,9 @@ import {
   type HomeRowDraft,
   type HomeRowKind,
   type HomeRowPlace,
+  type HomeRowPlaylist,
+  type HomeRowPreviewTitle,
+  type HomeRowSchedule,
   type User,
 } from '@/api'
 import { errorMessage } from '@/format'
@@ -40,14 +50,58 @@ import {
   SkeletonRows,
   Switch,
   TextInput,
+  type SelectOption,
   useToast,
 } from '@/ui'
 
-const kinds: HomeRowKind[] = ['catalog', 'collection', 'because', 'new']
+const kinds: HomeRowKind[] = [
+  'catalog',
+  'collection',
+  'because',
+  'new',
+  'available',
+  'waiting',
+  'trakt',
+  'picks',
+  'watchlist',
+  'playlists',
+  'playlist',
+]
 const places: HomeRowPlace[] = ['top', 'resume', 'nextup', 'bottom']
 
-/** The bounds of Because you watched's rows, as the server checks them. */
+/** The bounds of the rows Because you watched and My playlists make, as the server checks them. */
 const count = { min: 1, max: 10, byDefault: 3 }
+
+/** The days of the week, from Sunday, as schedules number them. */
+const weekdays = [
+  'Sunday',
+  'Monday',
+  'Tuesday',
+  'Wednesday',
+  'Thursday',
+  'Friday',
+  'Saturday',
+] as const
+
+/** An hour of the day on the clock: 18 is 18:00. */
+function clockHour(hour: number) {
+  return `${String(hour).padStart(2, '0')}:00`
+}
+
+/** Whether a schedule bounds the row at all. */
+function scheduled(schedule: HomeRowSchedule) {
+  return (
+    schedule.startDate !== '' ||
+    schedule.endDate !== '' ||
+    schedule.days.length > 0 ||
+    schedule.startHour !== null
+  )
+}
+
+/** Whether a kind makes several rows, up to its `count`. */
+function counted(kind: HomeRowKind) {
+  return kind === 'because' || kind === 'playlists'
+}
 
 /** A catalog's key in the catalog list. */
 function catalogKey(row: Pick<HomeRow, 'addonId' | 'catalogType' | 'catalogId'>) {
@@ -61,13 +115,15 @@ function catalogName(catalog: HomeRowCatalog) {
 
 /**
  * Settings › Web player › Home rows: the rows the web player adds to its home page, in order,
- * each with its kind, place and who it is shown to, Move, Edit and Delete, and Add.
+ * each with its kind, place, who it is shown to and whether its schedule shows it now, Move, Edit
+ * and Delete, Add, and Preview as…, which shows a user's rows as their web player does.
  */
 export default function HomeRows() {
   const { t } = useI18n()
   const text = t.settings.homeRow
   const toast = useToast()
   const [editing, setEditing] = useState<HomeRow | 'new' | null>(null)
+  const [previewing, setPreviewing] = useState(false)
   const rows = useQuery({
     queryKey: queryKeys.homeRows,
     queryFn: ({ signal }) => fetchHomeRows(signal),
@@ -118,30 +174,40 @@ export default function HomeRows() {
               onMove={(to) => move(index, to)}
               catalogs={choices.data?.catalogs ?? []}
               collections={choices.data?.collections ?? []}
+              playlists={choices.data?.playlists ?? []}
               onEdit={() => setEditing(row)}
             />
           ))}
         </RowList>
       )}
-      <div>
+      <div className="flex flex-wrap gap-2">
         <Button icon={PlusIcon} onClick={() => setEditing('new')}>
           {text.add}
         </Button>
+        {list.length > 0 && (
+          <Button variant="ghost" icon={EyeIcon} onClick={() => setPreviewing(true)}>
+            {text.preview}
+          </Button>
+        )}
       </div>
       {editing !== null && (
         <HomeRowModal
           row={editing === 'new' ? null : editing}
           catalogs={choices.data?.catalogs ?? []}
           collections={choices.data?.collections ?? []}
+          playlists={choices.data?.playlists ?? []}
           users={users.data ?? []}
           onClose={() => setEditing(null)}
         />
+      )}
+      {previewing && (
+        <HomeRowPreviewModal users={users.data ?? []} onClose={() => setPreviewing(false)} />
       )}
     </div>
   )
 }
 
-/** A row of the list: its name, what it lists, its place and who sees it. */
+/** A row of the list: its name, what it lists, its place, who sees it and when. */
 function HomeRowEntry({
   row,
   index,
@@ -150,6 +216,7 @@ function HomeRowEntry({
   onMove,
   catalogs,
   collections,
+  playlists,
   onEdit,
 }: {
   row: HomeRow
@@ -159,6 +226,7 @@ function HomeRowEntry({
   onMove: (to: number) => void
   catalogs: HomeRowCatalog[]
   collections: HomeRowCollection[]
+  playlists: HomeRowPlaylist[]
   onEdit: () => void
 }) {
   const { t } = useI18n()
@@ -175,6 +243,7 @@ function HomeRowEntry({
   })
   const catalog = catalogs.find((c) => catalogKey(c) === catalogKey(row))
   const collection = collections.find((c) => c.id === row.collectionId)
+  const playlist = playlists.find((p) => p.id === row.playlistId)
   const source =
     row.kind === 'catalog'
       ? catalog
@@ -182,24 +251,42 @@ function HomeRowEntry({
         : text.unknownCatalog
       : row.kind === 'collection'
         ? (collection?.name ?? text.unknownCollection)
-        : row.kind === 'because'
-          ? `${text.kinds.because} · ${text.rowsCount(row.count)}`
-          : text.kinds.new
+        : row.kind === 'playlist'
+          ? (playlist?.name ?? text.unknownPlaylist)
+          : counted(row.kind)
+            ? `${text.kinds[row.kind]} · ${text.rowsCount(row.count)}`
+            : text.kinds[row.kind]
   return (
     <Row
       title={row.name}
-      titleAside={row.library ? <Badge>{text.libraryBadge}</Badge> : undefined}
+      titleAside={
+        row.library || !row.shownNow ? (
+          <span className="flex gap-1.5">
+            {row.library && <Badge>{text.libraryBadge}</Badge>}
+            {!row.shownNow && <Badge tone="warn">{text.notShownNow}</Badge>}
+          </span>
+        ) : undefined
+      }
       meta={
-        <span className="truncate">
+        <span className="min-w-0 break-words">
           {[
             source,
             text.places[row.place],
             row.everyone ? text.everyone : text.shownToUsers(row.users.length),
+            ...(scheduled(row.schedule) ? [text.scheduled] : []),
           ].join(' · ')}
         </span>
       }
+      // Edit, Delete and Move on the right of the row, as other rows keep their actions, rather
+      // than on a line of their own under it.
       trailing={
-        <div className="flex items-center gap-1.5">
+        <div className="flex flex-wrap items-center justify-end gap-2 max-md:gap-1">
+          <Button variant="ghost" size="sm" onClick={onEdit}>
+            {text.edit}
+          </Button>
+          <Button variant="ghost" size="sm" onClick={() => setConfirming(true)}>
+            {text.delete}
+          </Button>
           <MoveButtons
             name={row.name}
             index={index}
@@ -207,12 +294,6 @@ function HomeRowEntry({
             disabled={moving}
             onMove={onMove}
           />
-          <Button variant="ghost" size="sm" onClick={onEdit}>
-            {text.edit}
-          </Button>
-          <Button variant="ghost" size="sm" onClick={() => setConfirming(true)}>
-            {text.delete}
-          </Button>
           <ConfirmDialog
             open={confirming}
             onClose={() => {
@@ -239,12 +320,14 @@ function HomeRowModal({
   row,
   catalogs,
   collections,
+  playlists,
   users,
   onClose,
 }: {
   row: HomeRow | null
   catalogs: HomeRowCatalog[]
   collections: HomeRowCollection[]
+  playlists: HomeRowPlaylist[]
   users: User[]
   onClose: () => void
 }) {
@@ -258,11 +341,18 @@ function HomeRowModal({
   const [named, setNamed] = useState(row !== null)
   const [catalog, setCatalog] = useState(row?.kind === 'catalog' ? catalogKey(row) : '')
   const [collection, setCollection] = useState(row?.collectionId ?? '')
+  const [playlist, setPlaylist] = useState(row?.playlistId ?? '')
   const [rows, setRows] = useState<number | null>(row?.count ?? count.byDefault)
   const [place, setPlace] = useState<HomeRowPlace>(row?.place ?? 'top')
   const [everyone, setEveryone] = useState(row?.everyone ?? true)
   const [chosen, setChosen] = useState<string[]>(row?.users ?? [])
   const [library, setLibrary] = useState(row?.library ?? false)
+  const [startDate, setStartDate] = useState(row?.schedule.startDate ?? '')
+  const [endDate, setEndDate] = useState(row?.schedule.endDate ?? '')
+  const [days, setDays] = useState<number[]>(row?.schedule.days ?? [])
+  const [someHours, setSomeHours] = useState((row?.schedule.startHour ?? null) !== null)
+  const [startHour, setStartHour] = useState(row?.schedule.startHour ?? 18)
+  const [endHour, setEndHour] = useState(row?.schedule.endHour ?? 23)
   const mutation = useMutation({
     mutationFn: (draft: HomeRowDraft) =>
       row === null ? createHomeRow(draft) : updateHomeRow(row.id, draft),
@@ -284,25 +374,42 @@ function HomeRowModal({
   if (collection !== '' && !collectionOptions.some((option) => option.value === collection)) {
     collectionOptions.unshift({ value: collection, label: text.unknownCollection })
   }
+  const playlistOptions: SelectOption<string>[] = playlists.map((p) => ({
+    value: p.id,
+    label: p.name,
+    detail: `${p.ownerName} · ${text.playlistAccess[p.access]}`,
+  }))
+  if (playlist !== '' && !playlistOptions.some((option) => option.value === playlist)) {
+    playlistOptions.unshift({ value: playlist, label: text.unknownPlaylist })
+  }
 
+  /** What the row lists, as the name follows it: a catalog, a collection or a playlist. */
+  type Source = { catalog: string; collection: string; playlist: string }
+  const source: Source = { catalog, collection, playlist }
   /** The name a row gets from what it lists, until one is typed. */
-  const nameFor = (nextKind: HomeRowKind, nextCatalog: string, nextCollection: string) => {
+  const nameFor = (nextKind: HomeRowKind, next: Source) => {
     if (nextKind === 'catalog') {
-      return catalogs.find((c) => catalogKey(c) === nextCatalog)?.catalogName ?? ''
+      return catalogs.find((c) => catalogKey(c) === next.catalog)?.catalogName ?? ''
     }
     if (nextKind === 'collection')
-      return collections.find((c) => c.id === nextCollection)?.name ?? ''
+      return collections.find((c) => c.id === next.collection)?.name ?? ''
+    if (nextKind === 'playlist') return playlists.find((p) => p.id === next.playlist)?.name ?? ''
     return text.defaultNames[nextKind]
   }
-  const follow = (nextKind: HomeRowKind, nextCatalog: string, nextCollection: string) => {
+  const follow = (nextKind: HomeRowKind, next: Source) => {
     mutation.reset()
-    if (!named) setName(nameFor(nextKind, nextCatalog, nextCollection))
+    if (!named) setName(nameFor(nextKind, next))
   }
+  // My playlists makes a row of each playlist, which other apps could not be given as one library.
+  const libraryOffered = kind !== 'playlists'
+  const asLibrary = libraryOffered && library
 
   const missingUser = !everyone && chosen.length === 0
+  // Dates as YYYY-MM-DD compare as text.
+  const datesOutOfOrder = startDate !== '' && endDate !== '' && endDate < startDate
   function submit(event: FormEvent) {
     event.preventDefault()
-    if (missingUser) return
+    if (missingUser || datesOutOfOrder) return
     const [addonId, catalogType, ...rest] = kind === 'catalog' ? catalog.split('/') : []
     mutation.mutate({
       name: name.trim(),
@@ -312,10 +419,18 @@ function HomeRowModal({
       catalogType: catalogType ?? '',
       catalogId: rest.join('/'),
       collectionId: kind === 'collection' ? collection : '',
-      count: kind === 'because' ? (rows ?? count.byDefault) : count.byDefault,
+      playlistId: kind === 'playlist' ? playlist : '',
+      count: counted(kind) ? (rows ?? count.byDefault) : count.byDefault,
       everyone,
       users: everyone ? [] : chosen,
-      library,
+      library: asLibrary,
+      schedule: {
+        startDate,
+        endDate,
+        days: [...days].sort((a, b) => a - b),
+        startHour: someHours ? startHour : null,
+        endHour: someHours ? endHour : null,
+      },
     })
   }
 
@@ -346,12 +461,16 @@ function HomeRowModal({
         <Field label={text.kind} help={text.kindHelp[kind]}>
           <Select
             value={kind}
-            options={kinds.map((value) => ({ value, label: text.kinds[value] }))}
+            options={kinds.map((value) => ({
+              value,
+              label: text.kinds[value],
+              detail: text.kindDetails[value],
+            }))}
             onValue={(value) => {
               setKind(value)
-              follow(value, catalog, collection)
+              follow(value, source)
             }}
-            className="max-w-xs"
+            className="max-w-[23.75rem]"
           />
         </Field>
         {kind === 'catalog' &&
@@ -364,7 +483,7 @@ function HomeRowModal({
                 options={[{ value: '', label: text.choose, disabled: true }, ...catalogOptions]}
                 onValue={(value) => {
                   setCatalog(value)
-                  follow(kind, value, collection)
+                  follow(kind, { ...source, catalog: value })
                 }}
               />
             </Field>
@@ -379,12 +498,38 @@ function HomeRowModal({
                 options={[{ value: '', label: text.choose, disabled: true }, ...collectionOptions]}
                 onValue={(value) => {
                   setCollection(value)
-                  follow(kind, catalog, value)
+                  follow(kind, { ...source, collection: value })
                 }}
               />
             </Field>
           ))}
-        <Field label={text.name} help={kind === 'because' ? text.becauseNameHelp : text.nameHelp}>
+        {kind === 'playlist' &&
+          (playlistOptions.length === 0 ? (
+            <Notice tone="warn">{text.noPlaylist}</Notice>
+          ) : (
+            <Field label={text.playlist} help={text.playlistHelp}>
+              <Select
+                value={playlist}
+                options={[{ value: '', label: text.choose, disabled: true }, ...playlistOptions]}
+                onValue={(value) => {
+                  setPlaylist(value)
+                  follow(kind, { ...source, playlist: value })
+                }}
+              />
+            </Field>
+          ))}
+        <Field
+          label={text.name}
+          help={
+            kind === 'because'
+              ? text.becauseNameHelp
+              : kind === 'watchlist'
+                ? text.watchlistNameHelp
+                : kind === 'playlists'
+                  ? text.playlistsNameHelp
+                  : text.nameHelp
+          }
+        >
           <TextInput
             value={name}
             onValue={(value) => {
@@ -396,8 +541,11 @@ function HomeRowModal({
             autoComplete="off"
           />
         </Field>
-        {kind === 'because' && (
-          <Field label={text.count} help={text.countHelp}>
+        {counted(kind) && (
+          <Field
+            label={text.count}
+            help={kind === 'playlists' ? text.playlistsCountHelp : text.countHelp}
+          >
             <NumberInput value={rows} onValue={setRows} min={count.min} max={count.max} step={1} />
           </Field>
         )}
@@ -406,7 +554,7 @@ function HomeRowModal({
             value={place}
             options={places.map((value) => ({ value, label: text.places[value] }))}
             onValue={setPlace}
-            className="max-w-xs"
+            className="max-w-[23.75rem]"
           />
         </Field>
         <Field label={text.shownTo} error={missingUser ? text.noUser : undefined}>
@@ -437,17 +585,226 @@ function HomeRowModal({
             ))}
           </fieldset>
         )}
-        <div className="flex items-start justify-between gap-4">
-          <div>
-            <p id={`${formId}-library`} className="text-control font-medium text-ink">
-              {text.library}
-            </p>
-            <p className="mt-1 max-w-[60ch] text-small text-ink-3">{text.libraryHelp}</p>
+        {libraryOffered && (
+          <div className="flex items-start justify-between gap-4">
+            <div>
+              <p id={`${formId}-library`} className="text-control font-medium text-ink">
+                {text.library}
+              </p>
+              <p className="mt-1 max-w-[60ch] text-small text-ink-3">{text.libraryHelp}</p>
+            </div>
+            <Switch checked={library} onChange={setLibrary} labelledBy={`${formId}-library`} />
           </div>
-          <Switch checked={library} onChange={setLibrary} labelledBy={`${formId}-library`} />
-        </div>
+        )}
+        <fieldset className="space-y-4 pt-3">
+          <legend className="sr-only">{text.schedule}</legend>
+          <div>
+            <p className="text-control font-medium text-ink" aria-hidden="true">
+              {text.schedule}
+            </p>
+            <p className="mt-1 max-w-[60ch] text-small text-ink-3">{text.scheduleHelp}</p>
+          </div>
+          <div className="flex flex-wrap gap-4">
+            <Field label={text.startDate}>
+              <TextInput
+                type="date"
+                value={startDate}
+                onValue={(value) => {
+                  mutation.reset()
+                  setStartDate(value)
+                }}
+                className="w-44"
+              />
+            </Field>
+            <Field
+              label={text.endDate}
+              error={datesOutOfOrder ? text.dateOrder : undefined}
+              help={datesOutOfOrder ? undefined : text.datesHelp}
+            >
+              <TextInput
+                type="date"
+                value={endDate}
+                onValue={(value) => {
+                  mutation.reset()
+                  setEndDate(value)
+                }}
+                className="w-44"
+              />
+            </Field>
+          </div>
+          {asLibrary ? (
+            <Notice>{text.libraryDatesOnly}</Notice>
+          ) : (
+            <>
+              <fieldset>
+                <legend className="mb-2 text-control font-medium text-ink">{text.days}</legend>
+                <div className="flex flex-wrap gap-x-4 gap-y-2">
+                  {weekdays.map((weekday, day) => (
+                    <Checkbox
+                      key={weekday}
+                      label={t.users.days[weekday]}
+                      checked={days.includes(day)}
+                      onChange={(checked) =>
+                        setDays((current) =>
+                          checked ? [...current, day] : current.filter((d) => d !== day),
+                        )
+                      }
+                    />
+                  ))}
+                </div>
+                <p className="mt-1.5 text-small text-ink-3">{text.daysHelp}</p>
+              </fieldset>
+              <Field label={text.hours} help={someHours ? text.hoursHelp : undefined}>
+                <Segmented
+                  label={text.hours}
+                  value={someHours ? 'some' : 'all'}
+                  options={[
+                    { value: 'all', label: text.allDay },
+                    { value: 'some', label: text.someHours },
+                  ]}
+                  onChange={(value) => setSomeHours(value === 'some')}
+                />
+              </Field>
+              {someHours && (
+                <div className="flex flex-wrap gap-4">
+                  <Field label={text.startHour}>
+                    <Select
+                      value={startHour}
+                      options={Array.from({ length: 24 }, (_, hour) => ({
+                        value: hour,
+                        label: clockHour(hour),
+                        disabled: hour === endHour,
+                      }))}
+                      onValue={setStartHour}
+                      className="w-32"
+                    />
+                  </Field>
+                  <Field label={text.endHour}>
+                    <Select
+                      value={endHour}
+                      options={Array.from({ length: 24 }, (_, i) => ({
+                        value: i + 1,
+                        label: clockHour(i + 1),
+                        disabled: i + 1 === startHour,
+                      }))}
+                      onValue={setEndHour}
+                      className="w-32"
+                    />
+                  </Field>
+                </div>
+              )}
+            </>
+          )}
+        </fieldset>
         {mutation.isError && <Notice tone="danger">{errorMessage(t, mutation.error)}</Notice>}
       </form>
     </Modal>
+  )
+}
+
+/**
+ * Preview as…: the rows a chosen user's web player shows on its home page now, grouped by place
+ * in the order the page shows them, each with its first titles.
+ */
+function HomeRowPreviewModal({ users, onClose }: { users: User[]; onClose: () => void }) {
+  const { t } = useI18n()
+  const text = t.settings.homeRow
+  const [userId, setUserId] = useState('')
+  const preview = useQuery({
+    queryKey: queryKeys.homeRowPreview(userId),
+    queryFn: ({ signal }) => fetchHomeRowPreview(userId, signal),
+    enabled: userId !== '',
+  })
+  const rows = preview.data?.rows ?? []
+  return (
+    <Modal
+      open
+      onClose={onClose}
+      title={text.previewTitle}
+      width={880}
+      footer={
+        <Button variant="ghost" onClick={onClose}>
+          {t.ui.close}
+        </Button>
+      }
+    >
+      <div className="space-y-5 p-5">
+        <Field label={text.previewUser} help={text.previewHelp}>
+          <Select
+            value={userId}
+            options={[
+              { value: '', label: t.settings.homeRow.choose, disabled: true },
+              ...users.map((user) => ({ value: user.id, label: user.name })),
+            ]}
+            onValue={setUserId}
+            className="max-w-[23.75rem]"
+          />
+        </Field>
+        {userId === '' ? (
+          <p className="text-small text-ink-3">{text.previewChoose}</p>
+        ) : preview.isPending ? (
+          <SkeletonRows rows={2} label={text.previewLoading} />
+        ) : preview.isError ? (
+          <InlineError onRetry={() => void preview.refetch()} retrying={preview.isFetching}>
+            {errorMessage(t, preview.error)}
+          </InlineError>
+        ) : rows.length === 0 ? (
+          <EmptyState icon={RowsIcon} title={text.previewEmpty} />
+        ) : (
+          places
+            .filter((place) => rows.some((row) => row.place === place))
+            .map((place) => (
+              <section key={place} aria-label={text.places[place]} className="space-y-3">
+                <p className="text-small font-medium uppercase tracking-wide text-ink-3">
+                  {text.places[place]}
+                </p>
+                {rows
+                  .filter((row) => row.place === place)
+                  .map((row) => (
+                    <div key={row.id} className="space-y-3">
+                      <p className="text-body font-semibold text-ink">{row.name}</p>
+                      <ul className="flex gap-3 overflow-x-auto pb-2">
+                        {row.titles.map((title) => (
+                          <li key={title.id} className="w-24 shrink-0">
+                            <PreviewPoster title={title} />
+                            <p className="mt-1 truncate text-small text-ink-2" title={title.name}>
+                              {title.name}
+                            </p>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ))}
+              </section>
+            ))
+        )}
+      </div>
+    </Modal>
+  )
+}
+
+/** A title's poster in a preview, or the icon of its kind when it has none or fails to load. */
+function PreviewPoster({ title }: { title: HomeRowPreviewTitle }) {
+  const [failed, setFailed] = useState(false)
+  const KindIcon =
+    title.kind === 'series' || title.kind === 'episode' ? TelevisionSimpleIcon : FilmSlateIcon
+  if (failed) {
+    return (
+      <span
+        aria-hidden="true"
+        className="grid aspect-[2/3] w-full place-items-center rounded-check bg-s2 text-ink-3"
+      >
+        <KindIcon size="1.25rem" />
+      </span>
+    )
+  }
+  return (
+    <img
+      src={`/Items/${encodeURIComponent(title.posterId)}/Images/Primary?maxHeight=216&quality=85`}
+      alt=""
+      loading="lazy"
+      onError={() => setFailed(true)}
+      className="aspect-[2/3] w-full rounded-check bg-s2 object-cover"
+    />
   )
 }

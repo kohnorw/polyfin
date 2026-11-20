@@ -1,39 +1,41 @@
 import type { Icon } from '@phosphor-icons/react'
 import type { AnchorHTMLAttributes, ButtonHTMLAttributes, MouseEvent, ReactNode } from 'react'
 import { Link, type LinkProps } from 'react-router'
-import { cx } from './cx'
+import { cx, rem } from './cx'
 import { Spinner } from './Spinner'
 
 /**
- * Buttons.
- * - `primary`: the one main action of a view (save, add). One per view.
- * - `secondary`: other actions (replace, refresh, cancel in a form).
- * - `ghost`: quiet actions in rows and toolbars (disconnect, reset).
- * - `danger`: destructive actions; pair them with ConfirmDialog.
+ * Buttons: quiet until lit. Under the keyboard each one lights up pale with dark text and rises.
+ * - `primary`: the one main action of a view (save, add), periwinkle with white text. One per view.
+ * - `secondary`: other actions (replace, refresh, cancel in a form), a soft fill.
+ * - `ghost`: quiet actions in rows and toolbars (disconnect, reset), no fill until hovered.
+ * - `danger`: destructive actions, in red words; pair them with ConfirmDialog.
  */
-export type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger'
+type ButtonVariant = 'primary' | 'secondary' | 'ghost' | 'danger'
 
-/** `md` is 36 px tall, the default; `sm` is 30 px, for dense rows. */
-export type ButtonSize = 'md' | 'sm'
+/** `md` is 38 px tall (32 in Compact), the default, 44 on a phone; `sm` is 34 px, for dense rows
+ * and docks. Both grow when a label wraps on a phone. */
+type ButtonSize = 'md' | 'sm'
 
 const variants: Record<ButtonVariant, string> = {
-  primary: 'bg-accent text-white hover:bg-accent-press',
-  secondary: 'border border-line-2 bg-s3 text-ink hover:border-line-3 hover:bg-s4',
-  ghost: 'text-ink-2 hover:bg-s2 hover:text-ink',
-  danger: 'text-danger hover:bg-danger/8',
+  primary: 'bg-accent text-on-accent hover:bg-accent-hover active:bg-accent-press',
+  secondary: 'bg-s3 text-ink hover:bg-s4',
+  ghost: 'text-ink-2 hover:bg-s1 hover:text-ink',
+  danger: 'text-danger hover:bg-danger/14',
 }
 
 const sizes: Record<ButtonSize, string> = {
-  md: 'h-9 px-3.5 text-control',
-  sm: 'h-[30px] px-2.5 text-small',
+  md: 'min-h-9.5 gap-2 px-3.5 py-1.5 text-control max-sm:min-h-11',
+  sm: 'min-h-8.5 gap-1.5 px-3 py-1 text-small',
 }
 
 /** The classes of a button, for the rare element that cannot be a Button or ButtonLink. */
-export function buttonClass(variant: ButtonVariant = 'secondary', size: ButtonSize = 'md'): string {
+function buttonClass(variant: ButtonVariant = 'secondary', size: ButtonSize = 'md'): string {
   return cx(
-    'inline-flex shrink-0 cursor-pointer items-center justify-center gap-2 rounded-field font-medium whitespace-nowrap select-none',
-    'transition-[background-color,border-color,color,translate] duration-160 ease-nuit active:translate-y-px',
-    'disabled:cursor-not-allowed disabled:opacity-45 disabled:active:translate-y-0',
+    // A label too long for a phone wraps inside the button rather than push the page sideways.
+    'inline-flex max-w-full shrink-0 cursor-pointer items-center justify-center rounded-control text-center leading-tight font-[620] whitespace-nowrap select-none max-sm:whitespace-normal',
+    'focus-lit [--lift:1.05] active:scale-[0.97] [&>svg]:shrink-0',
+    'disabled:cursor-not-allowed disabled:opacity-45 disabled:active:scale-none',
     'aria-busy:cursor-progress',
     variants[variant],
     sizes[size],
@@ -55,14 +57,20 @@ type CommonProps = {
 function Content({
   icon: Before,
   iconEnd: After,
+  size,
   loading,
   children,
 }: CommonProps & { loading?: boolean }) {
+  const glyph = size === 'sm' ? 16 : 18
   return (
     <>
-      {loading ? <Spinner /> : Before && <Before size={16} aria-hidden="true" />}
+      {loading ? (
+        <Spinner size={glyph} />
+      ) : (
+        Before && <Before size={rem(glyph)} aria-hidden="true" />
+      )}
       {children}
-      {After && <After size={16} aria-hidden="true" />}
+      {After && <After size={rem(glyph)} aria-hidden="true" />}
     </>
   )
 }
@@ -103,7 +111,7 @@ export function Button({
       }}
       {...rest}
     >
-      <Content icon={icon} iconEnd={iconEnd} loading={loading}>
+      <Content icon={icon} iconEnd={iconEnd} size={size} loading={loading}>
         {children}
       </Content>
     </button>
@@ -124,7 +132,7 @@ export function ButtonLink({
 }: ButtonLinkProps) {
   return (
     <Link className={cx(buttonClass(variant, size), className as string)} {...rest}>
-      <Content icon={icon} iconEnd={iconEnd}>
+      <Content icon={icon} iconEnd={iconEnd} size={size}>
         {children}
       </Content>
     </Link>
@@ -145,7 +153,7 @@ export function ExternalButtonLink({
 }: ExternalButtonLinkProps) {
   return (
     <a className={cx(buttonClass(variant, size), className)} {...rest}>
-      <Content icon={icon} iconEnd={iconEnd}>
+      <Content icon={icon} iconEnd={iconEnd} size={size}>
         {children}
       </Content>
     </a>
@@ -157,7 +165,7 @@ export type IconButtonProps = Omit<ButtonHTMLAttributes<HTMLButtonElement>, 'chi
   label: string
   /** The Phosphor icon. */
   icon: Icon
-  /** `md` is 36 px, `sm` 28 px for rows. */
+  /** `md` is 38 px (32 in Compact, 44 on a phone), `sm` 32 px for rows. */
   size?: 'md' | 'sm'
   /** Red on hover, for removing. */
   danger?: boolean
@@ -191,15 +199,19 @@ export function IconButton({
         if (!loading) onClick?.(event)
       }}
       className={cx(
-        'inline-grid shrink-0 cursor-pointer place-items-center text-ink-2 transition-[background-color,color] duration-160 ease-nuit',
-        'hover:bg-ink/8 hover:text-ink aria-pressed:text-link disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-ink-2',
-        size === 'md' ? 'size-9 rounded-field' : 'size-7 rounded-md',
-        danger && 'hover:bg-danger/10 hover:text-danger',
+        'inline-grid shrink-0 cursor-pointer place-items-center text-ink-2 focus-lit [--lift:1.06]',
+        'hover:bg-s2 hover:text-ink aria-pressed:text-link disabled:cursor-not-allowed disabled:opacity-35 disabled:hover:bg-transparent disabled:hover:text-ink-2',
+        size === 'md' ? 'size-9.5 rounded-control max-sm:size-11' : 'size-8 rounded-[0.5rem]',
+        danger && 'hover:bg-danger/14 hover:text-danger',
         className,
       )}
       {...rest}
     >
-      {loading ? <Spinner /> : <Glyph size={size === 'md' ? 18 : 16} aria-hidden="true" />}
+      {loading ? (
+        <Spinner size={size === 'md' ? 19 : 17} />
+      ) : (
+        <Glyph size={rem(size === 'md' ? 19 : 17)} aria-hidden="true" />
+      )}
     </button>
   )
 }

@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"maps"
 	"net"
 	"net/http"
@@ -28,6 +29,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/eclipse"
 	"github.com/moodiness/polyfin/internal/loudness"
+	"github.com/moodiness/polyfin/internal/media"
 	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/subtitles"
 )
@@ -59,7 +61,7 @@ const (
 	searchResults = 30
 	// variousArtists is the album artist of a compilation that names none.
 	variousArtists = "Various Artists"
-	// maxText bounds a lyrics file or a playlist.
+	// maxText bounds a lyrics file, a lyrics tag or a playlist.
 	maxText = 1 << 20
 )
 
@@ -193,6 +195,11 @@ func readProbe(data []byte) (trackInfo, error) {
 			}
 		}
 	}
+	// A lyrics tag larger than a lyrics file may be is left out, as the
+	// file is.
+	if len(info.lyrics) > maxText {
+		info.lyrics = ""
+	}
 	info.trackGain = tagGain(first("replaygain_track_gain"), first("r128_track_gain"))
 	info.albumGain = tagGain(first("replaygain_album_gain"), first("r128_album_gain"))
 	info.duration, _ = strconv.ParseFloat(p.Format.Duration, 64)
@@ -304,8 +311,10 @@ type probeTarget func(rel string) string
 
 // probeServer serves the files of a share's listing on the loopback
 // interface for ffprobe and FFmpeg, with byte ranges, each at most
-// probeBudget bytes over every request for it. stop ends it.
-func probeServer(list listing) (probeTarget, func(), error) {
+// probeBudget bytes over every request for it. stop ends it. A panic of
+// a request, of what reads the share, is logged with its stack and ends
+// that request, which its reader sees cut short.
+func probeServer(list listing, logger *slog.Logger) (probeTarget, func(), error) {
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, nil, err
@@ -314,6 +323,7 @@ func probeServer(list listing) (probeTarget, func(), error) {
 	paths := map[string]string{}
 	served := map[string]*int64{}
 	server := &http.Server{ReadHeaderTimeout: probeTimeout, Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer logPanic(logger, "Serving a file of a share to ffprobe ended on a panic")
 		mu.Lock()
 		rel, ok := paths[strings.TrimPrefix(r.URL.Path, "/")]
 		count := served[rel]
@@ -335,7 +345,10 @@ func probeServer(list listing) (probeTarget, func(), error) {
 		}
 		http.ServeContent(w, r, path.Base(rel), time.Time{}, &budgeted{ReadSeeker: seeker, mu: &mu, served: count})
 	})}
-	go func() { _ = server.Serve(listener) }()
+	go func() {
+		defer logPanic(logger, "The loopback server of a share's files ended on a panic")
+		_ = server.Serve(listener)
+	}()
 	base := "http://" + listener.Addr().String() + "/"
 	target := func(rel string) string {
 		mu.Lock()
@@ -374,7 +387,8 @@ func (b *budgeted) Read(p []byte) (int, error) {
 func (s *Service) probeTrack(ctx context.Context, target string) (trackInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, s.ffprobe, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", target).Output()
+	out, err := exec.CommandContext(ctx, s.ffprobe, append(append([]string{"-v", "error", "-print_format", "json", "-show_format", "-show_streams"},
+		media.Opens(target, media.File)...), target)...).Output()
 	if err != nil {
 		return trackInfo{}, err
 	}
@@ -386,8 +400,8 @@ func (s *Service) probeTrack(ctx context.Context, target string) (trackInfo, err
 func (s *Service) readCover(ctx context.Context, target string) ([]byte, string, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, s.ffmpeg, "-v", "error", "-nostdin", "-i", target, "-map", "0:v:0", "-frames:v", "1", "-c", "copy",
-		"-f", "image2pipe", "pipe:1")
+	cmd := exec.CommandContext(ctx, s.ffmpeg, append(append([]string{"-v", "error", "-nostdin"}, media.Opens(target, media.File)...),
+		"-i", target, "-map", "0:v:0", "-frames:v", "1", "-c", "copy", "-f", "image2pipe", "pipe:1")...)
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		return nil, "", err
@@ -452,7 +466,7 @@ func (s *Service) scanMusic(ctx context.Context, id accounts.ID, list listing, r
 	target := probeTarget(func(rel string) string { return filepath.Join(list.root, filepath.FromSlash(rel)) })
 	if list.root == "" {
 		var stop func()
-		if target, stop, err = probeServer(list); err != nil {
+		if target, stop, err = probeServer(list, s.logger); err != nil {
 			return err
 		}
 		defer stop()
@@ -466,7 +480,7 @@ func (s *Service) scanMusic(ctx context.Context, id accounts.ID, list listing, r
 			continue
 		}
 		group.Go(func() error {
-			info, err := s.probeTrack(groupCtx, target(rel))
+			info, err := guarded(s.logger, "reading an audio file's tags", rel, func() (trackInfo, error) { return s.probeTrack(groupCtx, target(rel)) })
 			if err != nil {
 				if groupCtx.Err() != nil {
 					return groupCtx.Err()
@@ -482,12 +496,13 @@ func (s *Service) scanMusic(ctx context.Context, id accounts.ID, list listing, r
 			}
 			info, reason := named(rel, info)
 			// A file read again unchanged, for its gains, keeps its
-			// measure.
+			// measure; a new one is added now by the server's clock (see
+			// store).
 			_, err = s.db.Exec(groupCtx, `INSERT INTO local_tracks (addon_id, path, size, modified, title, artist, album, album_artist, artists,
 					artist_ids, album_artists, album_artist_ids, album_id, track, disc, year, genres, duration, codec, container, sample_rate,
-					bit_depth, cover, lyrics, reason, track_gain, album_gain)
+					bit_depth, cover, lyrics, reason, track_gain, album_gain, added_at)
 				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25,
-					$26, $27)
+					$26, $27, $28)
 				ON CONFLICT (addon_id, path) DO UPDATE SET size = $3, modified = $4, title = $5, artist = $6, album = $7, album_artist = $8,
 					artists = $9, artist_ids = $10, album_artists = $11, album_artist_ids = $12, album_id = $13, track = $14, disc = $15,
 					year = $16, genres = $17, duration = $18, codec = $19, container = $20, sample_rate = $21, bit_depth = $22, cover = $23,
@@ -498,7 +513,7 @@ func (s *Service) scanMusic(ctx context.Context, id accounts.ID, list listing, r
 				id, rel, f.size, f.modified, info.title, info.artist, info.album, info.albumArtist, nonNil(info.artists),
 				artistIDs(info.artists), nonNil(info.albumArtists), artistIDs(info.albumArtists), nameID("al", info.albumArtist, info.album),
 				info.track, info.disc, info.year, nonNil(info.genres), info.duration, info.codec, audioContainers[strings.ToLower(path.Ext(rel))],
-				info.sampleRate, info.bitDepth, info.cover, info.lyrics, reason, info.trackGain, info.albumGain)
+				info.sampleRate, info.bitDepth, info.cover, info.lyrics, reason, info.trackGain, info.albumGain, s.now())
 			return err
 		})
 	}
@@ -994,6 +1009,12 @@ func splitJoined(joined string) []string {
 // same name beside it, in any letter case.
 const lyricsOf = `l.addon_id = t.addon_id AND lower(regexp_replace(l.path, '\.[^./]*$', '')) = lower(regexp_replace(t.path, '\.[^./]*$', ''))`
 
+// lyricsTag is the lyrics tag of a track t, empty past maxText, as a scan
+// leaves it out: a tag stored before tags were bounded may be larger, and
+// would be read whole at each request. octet_length reads the size the
+// database keeps of a text, not the text.
+var lyricsTag = `CASE WHEN octet_length(t.lyrics) <= ` + strconv.Itoa(maxText) + ` THEN t.lyrics ELSE '' END`
+
 // coverURL is the address an album's artwork or an artist's picture is
 // served at by the loopback interface (see Open), changing with it; empty
 // for none.
@@ -1018,8 +1039,8 @@ func (s *Service) coverURL(cover *accounts.ID, image, contentType string, modifi
 // tracksQuery lists a music folder's tracks with their artists and album
 // artists, one by one, whether they have lyrics (a lyrics file or tag),
 // their album's artwork, and their track gain tag and measured loudness.
-const tracksQuery = `SELECT t.id, t.title, t.artist, t.album, t.album_artist, t.artists, t.album_artists, t.album_id, t.track, t.disc, t.year,
-	t.genres, t.duration, t.container, t.lyrics <> '' OR EXISTS (SELECT FROM local_lyrics l WHERE ` + lyricsOf + ` AND l.text <> ''),
+var tracksQuery = `SELECT t.id, t.title, t.artist, t.album, t.album_artist, t.artists, t.album_artists, t.album_id, t.track, t.disc, t.year,
+	t.genres, t.duration, t.container, ` + lyricsTag + ` <> '' OR EXISTS (SELECT FROM local_lyrics l WHERE ` + lyricsOf + ` AND l.text <> ''),
 	c.id, coalesce(c.path, ''), coalesce(c.content_type, ''), c.modified, t.track_gain, t.loudness
 FROM local_tracks t LEFT JOIN local_covers c ON c.addon_id = t.addon_id AND c.item_id = t.album_id
 WHERE t.addon_id = $1 AND t.reason = '' `
@@ -1315,7 +1336,7 @@ func (s *Service) MusicLyrics(ctx context.Context, source accounts.ID, id string
 	}
 	var text string
 	err = s.db.QueryRow(ctx, `SELECT coalesce((SELECT l.text FROM local_lyrics l WHERE `+lyricsOf+` AND l.text <> '' ORDER BY l.path LIMIT 1),
-		t.lyrics) FROM local_tracks t WHERE t.addon_id = $1 AND t.id = $2`, source, track).Scan(&text)
+		`+lyricsTag+`) FROM local_tracks t WHERE t.addon_id = $1 AND t.id = $2`, source, track).Scan(&text)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return "", stremio.ErrNotFound
 	}

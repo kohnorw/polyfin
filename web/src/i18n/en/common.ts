@@ -3,7 +3,6 @@
  * vocabulary and the design system (`ui`). Areas add keys here; they never change or remove one.
  */
 const common = {
-  documentTitle: 'Polyfin administration',
   header: {
     productName: 'Polyfin',
   },
@@ -11,6 +10,10 @@ const common = {
     label: 'Interface language',
     en: { short: 'EN', name: 'English' },
     fr: { short: 'FR', name: 'Français' },
+    de: { short: 'DE', name: 'Deutsch' },
+    es: { short: 'ES', name: 'Español' },
+    it: { short: 'IT', name: 'Italiano' },
+    'pt-BR': { short: 'PT', name: 'Português (Brasil)' },
   },
   common: {
     enterNumber: 'Enter a number.',
@@ -25,6 +28,9 @@ const common = {
     passwordRule: 'At least 8 characters.',
     nameRule: "1 to 64 characters: letters, digits, spaces and - _ ' . @ +",
     passwordMismatch: 'The two passwords do not match.',
+    /** An import page's help while the import runs. */
+    importRunningHelp:
+      'You can leave this page: the import goes on. If Polyfin restarts meanwhile, the import stops: what it imported stays, and importing again adds nothing twice.',
     moveUp: (name: string) => `Move ${name} up`,
     moveDown: (name: string) => `Move ${name} down`,
     moved: (name: string, position: number, count: number) =>
@@ -54,11 +60,16 @@ const common = {
       'Administrators must use two-step sign-in on this server: it cannot be turned off.',
     two_step_own: 'Turn your own two-step sign-in off from My account.',
     not_found: 'This item no longer exists. The list has been refreshed.',
+    not_local: 'Only a local folder’s version has its thumbnails made again.',
+    thumbnails_off:
+      'Thumbnails and chapter images are off: turn one on under Settings › Thumbnails (trickplay) first.',
     not_set:
       'Nothing is saved: it was removed, or it cannot be decrypted with POLYFIN_SECRET_KEY. Reload the page.',
     not_revealable: 'This connection holds no key to show.',
     unknown_code: 'No device is waiting with this code. It may have expired or been mistyped.',
     quick_connect_disabled: 'Quick Connect is turned off on this server.',
+    unconfirmed_code: 'Type the code the device shows before approving it.',
+    identity_required: 'Confirm it is you with a two-step code or your password.',
     name_taken: 'This name is already used by another user.',
     invalid_invite_uses: 'Accounts an invite link may create must be a whole number from 1 to 100.',
     invalid_invite_expiry: 'Choose when the invite link expires from the list.',
@@ -78,10 +89,14 @@ const common = {
       'Administrators cannot join a group, as their permissions differ. Reload the page to see who is one now.',
     invalid_group: 'This group no longer exists. Reload the page and choose another one.',
     follows_group:
-      'This user follows their group: change the group, or turn off Follow the group first.',
+      'This user follows their group in this section: change the group, or choose Own for this user first.',
     invalid_copy_from: 'This user no longer exists. Choose another one.',
     invalid_server_name: 'The server name must be 1 to 64 characters long.',
     invalid_language: 'Choose a language from the list.',
+    invalid_used_by: 'A group or a user ticked no longer exists. Reload the page.',
+    used_by_everyone: 'This source is now used by everyone: change who uses it on its page.',
+    invalid_audio_region: 'Choose a region from the list.',
+    invalid_interface_size: 'Choose a size from the list.',
     invalid_catalog_limit: 'Titles read per catalog must be a whole number from 100 to 20,000.',
     invalid_channel_limit:
       'Channels read per Live TV catalog must be a whole number from 100 to 50,000.',
@@ -96,7 +111,7 @@ const common = {
       'The time to analyze a version must be a whole number of seconds from 5 to 120.',
     invalid_version_attempts: 'Versions tried must be a whole number from 1 to 10.',
     invalid_version_order:
-      'Choose at most four criteria to order versions, one of each kind. Reload the page.',
+      'Choose at most six criteria to order versions, one of each kind. Reload the page.',
     invalid_version_codec_order:
       'The order of the video codecs must list each codec once. Reload the page.',
     invalid_version_source_order:
@@ -106,8 +121,27 @@ const common = {
     invalid_hidden_version_codecs: 'This list of hidden codecs is not supported. Reload the page.',
     invalid_hidden_version_words:
       'Enter at most 50 words hiding versions, one a line, each at most 100 characters.',
+    invalid_hidden_releases:
+      'This list of hidden kinds of releases is not supported. Reload the page.',
+    invalid_version_edition_order:
+      'The order of editions must list each edition once. Reload the page.',
+    invalid_version_mb_per_minute:
+      'The size per minute must be a whole number of MB from 0 to 1,000.',
+    invalid_version_label_rules:
+      'Enter at most 40 label rules, each at most 200 characters, a valid regular expression where ticked, and a score from −100 to 100 other than 0 unless it hides.',
     invalid_max_conversions: 'Video conversions at once must be a whole number from 0 to 32.',
     invalid_max_conversion_height: 'Choose the maximum quality of converted video from the list.',
+    invalid_subtitle_ocr: 'Choose from the list when picture subtitles are turned into text.',
+    invalid_subtitle_ocr_tracks:
+      'Picture subtitle tracks read at once must be a whole number from 1 to 4.',
+    tessdata_unknown_language: 'Polyfin has no Tesseract data to download for this language.',
+    tessdata_no_folder:
+      'Set POLYFIN_TESSDATA_DIR to the folder Tesseract data is kept in, then start Polyfin again.',
+    tessdata_folder: 'The folder POLYFIN_TESSDATA_DIR names cannot be written.',
+    tessdata_download: 'The language’s data could not be downloaded.',
+    tessdata_checksum:
+      'The downloaded file is not Tesseract’s data, as its SHA-256 differs: it was not kept.',
+    invalid_default_language: 'Choose a default language from the list.',
     invalid_encoder_preset: 'Choose an encoding speed from the list.',
     invalid_video_quality: 'Video quality must be 0, or a whole number from 1 to 51.',
     invalid_hardware_acceleration: 'Choose a graphics card from the list.',
@@ -146,6 +180,9 @@ const common = {
     invalid_library:
       'A library refers to a catalog that no longer exists or cannot be browsed. Remove the libraries marked as no longer available, then save again.',
     invalid_library_name: 'Library names must be 1 to 64 characters long.',
+    invalid_addon_name: 'Addon names must be 1 to 64 printable characters long.',
+    addon_not_renamable:
+      'Only Stremio and Eclipse addons take a name of their own. IPTV sources, tuners and local folders are named in their own settings.',
     invalid_library_genre:
       'A library’s genre is not offered by its catalog. Choose another one from the list, then save again.',
     invalid_library_max_items:
@@ -159,6 +196,15 @@ const common = {
     invalid_smart_list_max_items:
       'A smart list’s maximum titles must be a whole number from 1 to 20,000, or empty.',
     too_many_smart_lists: 'There are already 100 smart lists here. Delete one to make another.',
+    invalid_own_channel_name: 'A channel’s name must be 1 to 64 characters long.',
+    invalid_channel_number: 'A channel’s number must be a whole number from 1 to 9,999, or empty.',
+    invalid_channel_source:
+      'Choose a collection, a smart list or a series, or at least one title, that still exists.',
+    channel_without_titles:
+      'The titles chosen hold no movie nor episode to air, or more than 5,000. Choose others.',
+    invalid_channel_blocks:
+      'Time blocks must end after they start, within the day, without overlapping, 12 at most.',
+    too_many_channels: 'There are already 100 channels of your titles. Delete one to make another.',
     invalid_image: 'Choose a JPEG, PNG or WebP image of at most 10 MB.',
     invalid_image_url: 'Enter an image address starting with https:// or http://.',
     image_unreachable:
@@ -191,15 +237,23 @@ const common = {
       'Known proxies must be IP addresses, networks such as 172.18.0.0/16 or host names such as traefik, one a line, 64 at most.',
     personal_addons_disabled:
       'Your own addons are turned off by an administrator. They are kept, but you cannot add, refresh or turn on any.',
+    parental_control_own_sources:
+      'Parental control applies to your account: your own sources and smart lists are kept but not used, and none can be added or changed.',
     invalid_hidden_libraries: 'The library list changed in the meantime. Reload the page.',
     invalid_blocked_genres:
       'Genres must be 1 to 100 characters long, and at most 100 can be blocked.',
+    invalid_live_tv_channels:
+      'The channel choice is not valid: All, Only these or All except these, with at most 10,000 groups and 10,000 channels.',
     invalid_access_schedules:
       'Hours run from 00:00 to 24:00, and each end must come after its start (50 rows at most).',
     outside_allowed_hours:
       'This account cannot be used at this time. Try again during its allowed hours.',
+    outside_local_network:
+      'This account may only be used from the local network. Connect from there, or ask an administrator.',
+    remote_access_self:
+      'You are connected from outside the local network: turning off your own remote access would lock you out. Do it from the local network.',
     invalid_guide_url:
-      'Enter a guide address starting with https:// or http://, of at most 4,096 characters.',
+      'Enter a guide address starting with https:// or http://, of at most 4,096 characters, or the absolute path of a file on the server.',
     invalid_app: 'The app name must be 1 to 64 characters long, without special characters.',
     invalid_trickplay_interval:
       'The time between two thumbnails must be a whole number of seconds from 5 to 60.',
@@ -215,8 +269,16 @@ const common = {
     invalid_live_tv_refresh_hours:
       'The refresh interval must be a whole number of hours from 1 to 168.',
     invalid_local_scan_hours: 'The scan interval must be a whole number of hours from 0 to 168.',
+    invalid_watchlist_check_hours:
+      'The watchlist check interval must be a whole number of hours from 0 to 168.',
     invalid_custom_css: 'The custom CSS must take at most 2 MB.',
     invalid_custom_js: 'The custom JavaScript must take at most 2 MB.',
+    invalid_web_theme: 'Choose a theme from the list.',
+    web_theme_locked: 'Your administrator chose your web player theme.',
+    theme_copy_running: 'A copy of the theme is being made already. Try again in a moment.',
+    theme_copy_nothing: 'The saved Custom texts load nothing from elsewhere.',
+    theme_copy_failed: 'No file could be saved, so no copy was made.',
+    custom_texts_changed: 'The Custom texts changed while the copy was made. Try again.',
     invalid_login_disclaimer: 'The sign-in message must take at most 8 KB.',
     invalid_publicmetadb_key:
       'PublicMetaDB did not accept this key. Copy it again from your PublicMetaDB account. Nothing was saved.',
@@ -232,9 +294,20 @@ const common = {
       'MDBList could not be reached to check the key. Nothing was saved: try again later.',
     invalid_tmdb_key:
       'TMDB did not accept this key. Copy the API key or the read access token again from your TMDB account. Nothing was saved.',
+    unknown_episode_group:
+      'TMDB no longer gives this series this order. Open it again and choose another one.',
+    episode_groups_unreachable:
+      'TMDB could not be reached to list this series’ orders. Nothing was saved: try again later.',
+    invalid_numbering:
+      'Choose as the catalog, per season, continuing from season 1, absolute, or an episode order.',
+    no_tmdb_key: 'Add a TMDB key in Settings › Content first: the orders come from TMDB.',
     tmdb_unreachable:
       'TMDB could not be reached to check the key. Nothing was saved: try again later.',
     invalid_critic_rating_shows: 'Choose from the list which score the critic rating shows.',
+    invalid_version_names: 'Choose from the list how version names are written.',
+    invalid_poster_badge_size: 'Choose the size of the badges from the list.',
+    invalid_poster_template:
+      'The poster address template must be a web address starting with http:// or https://, naming {imdb_id} or {tmdb_id}, without spaces, a user name or a fragment.',
     invalid_measure_loudness: 'Choose from the list which songs have their loudness measured.',
     invalid_segment_order:
       'The order of the skip marker sources must list each source once. Reload the page.',
@@ -242,17 +315,29 @@ const common = {
       'The Trakt client ID and secret must be at most 256 characters, without spaces or special characters. Copy them again from your Trakt app.',
     invalid_simkl_app:
       'The Simkl client ID must be at most 256 characters, without spaces or special characters. Copy it again from your Simkl app.',
-    invalid_backup_hour: 'Choose the hour of the backups from the list.',
     invalid_backups_kept: 'The number of backups kept must be a whole number from 1 to 90.',
     invalid_torrent_route:
-      'Torrent streams need one route: a network interface name (Linux only), or a SOCKS5 proxy as host:port, not both.',
+      'Torrent streams need one route alone: a network interface name (Linux only), a SOCKS5 proxy as host:port, or a WireGuard configuration.',
+    invalid_wireguard_config: 'The WireGuard configuration is not valid.',
     invalid_torrent_limit: 'The limits must be whole numbers of Mbps from 0 to 10000.',
+    invalid_torrent_trackers:
+      'Enter at most 30 trackers, each an HTTP, HTTPS or UDP announce URL, UDP with its port, of at most 500 characters.',
     invalid_cache_size: 'The disk space must be a whole number of GB from 1 to 2000.',
+    invalid_source_cache:
+      'Parts read are kept a whole number of days from 0 to 365, with 0 to 30 extra days for each play again.',
+    invalid_preload:
+      'Preloading takes 1 to 3 episodes per series, a speed limit of 1 to 1000 Mbit/s and 1 to 1000 GB of free space to keep.',
     invalid_vaapi_device: 'Choose the graphics card from the list.',
     invalid_recordings_folder:
       'The recordings folder must be an absolute path to a folder Polyfin can write to.',
     invalid_backup_folder:
       'The backups folder must be an absolute path to a folder Polyfin can write to.',
+    invalid_conversion_folder:
+      'The conversion folder must be an absolute path to a folder Polyfin can write to.',
+    invalid_reading_folder:
+      'The folder for files being read must be an absolute path to a folder Polyfin can write to.',
+    invalid_cache_folder:
+      'The cache folder must be an absolute path to a folder Polyfin can write to.',
     too_many_destinations: 'There are already 10 backup destinations: delete one first.',
     too_many_home_rows: 'There are already 20 home rows: delete one first.',
     invalid_home_row:
@@ -287,12 +372,37 @@ const common = {
     too_large: 'The file is too large.',
     destination_failed: 'The destination could not be read.',
     restore_failed: 'The restore could not start: nothing was changed.',
-    invalid_collection_read_hour:
-      'Choose the hour collections are read at, or Never, from the list.',
+    invalid_backup_passphrase:
+      'The backup passphrase is at least 12 characters long, on one line, and at most 256 bytes.',
+    passphrase_required: 'This backup is encrypted: open it with its passphrase first.',
+    wrong_passphrase: 'This passphrase does not open the backup.',
+    damaged_backup:
+      'This encrypted backup is damaged: part of it was changed or is missing. Nothing was restored.',
+    not_encrypted: 'This backup is not encrypted.',
+    unlock_failed: 'The backup could not be decrypted.',
+    task_locked: 'The schedule of this task is fixed: its triggers cannot be changed.',
+    invalid_triggers:
+      'These triggers are not valid for this task. Check their types, times and intervals, and try again.',
     invalid_collection_library_apps:
       'Choose the apps that show collection libraries by collection from the list.',
     invalid_remuxdb_url:
       'The RemuxDB address must be a web address starting with http:// or https://.',
+    invalid_update_tool_url:
+      'The update tool address must be a web address starting with http:// or https://, without a user name or a fragment.',
+    invalid_update_tool_token:
+      'The update tool token holds no spaces, and 1024 characters at most.',
+    invalid_provider:
+      'Check the identity provider: its issuer is a web address starting with http:// or https://, without a query or a fragment; the client ID, the secret and the claims hold no spaces; a claim names the user.',
+    provider_link_refused:
+      'An administrator, or an account with two-step sign-in, links itself under My account.',
+    restart_unconfirmed:
+      'Polyfin cannot tell whether something starts it again: confirm the warning first.',
+    no_update: 'Polyfin Desktop offers no such update now.',
+    not_desktop: 'Polyfin does not run in Polyfin Desktop.',
+    no_update_tool: 'No update tool is set under Settings › General.',
+    update_tool_timeout:
+      'The update tool did not answer within 50 seconds: it may still be updating.',
+    update_tool_unreachable: 'The update tool could not be reached.',
     invalid_public_address:
       'The public address must be a web address starting with http:// or https://, without a query.',
     invalid_local_address:
@@ -327,11 +437,24 @@ const common = {
     invalid_events: 'One of the events chosen is not available for this target.',
     invalid_reminder_settings: 'Choose 1, 5, 10, 15, 30 or 60 minutes.',
     too_many_targets: 'There are 20 targets already. Delete one to add another.',
+    test_too_soon:
+      'This target was sent a test less than half a minute ago, or has reached its messages a minute. Try again in a moment.',
+    too_many_tests: 'At most 10 tests can be sent in an hour. Try again later.',
+    invalid_per_minute: 'Messages a minute: 1 to 60, or empty for no limit.',
+    invalid_group_minutes: 'Grouping: 1 to 1,440 minutes, or empty to send each at once.',
+    invalid_summary: 'Only the weekly summary, the month and the year in review have a preview.',
     target_unreadable:
       'This target’s address or token cannot be decrypted with POLYFIN_SECRET_KEY. Enter it again.',
     invalid_source_name: 'Source names must be 1 to 64 characters long.',
     invalid_source_address:
-      'Enter an address starting with https:// or http://, and for an Xtream Codes account a username and a password.',
+      'Enter an address starting with https:// or http://, or for a playlist the absolute path of a file on the server, and for an Xtream Codes account a username and a password.',
+    file_missing:
+      'There is no file at this path on the server. With Docker, give its path in the container, in a mounted volume.',
+    file_unreadable:
+      'Polyfin cannot read this file: check that it is a file, not a folder, and that Polyfin may read it.',
+    local_file_refused: 'Only administrators can use a file of the server.',
+    invalid_user_agent:
+      'A user agent is at most 512 characters, without line breaks or control characters.',
     tuner_added: 'This tuner is already a source of the server.',
     invalid_folder_name: 'Folder names must be 1 to 64 characters long.',
     invalid_folder_path:
@@ -343,6 +466,8 @@ const common = {
       'Enter the endpoint as an http:// or https:// address, such as https://s3.example.org, and a region of at most 64 characters without spaces.',
     invalid_share_key:
       'Paste a whole OpenSSH or PEM private key, and the passphrase that opens it when it has one.',
+    offered_host_key_changed:
+      'The host key the server offers changed since it was shown, and nothing was accepted. Compare the fingerprint shown now before you accept it.',
     invalid_rclone_remote:
       'Enter the name of one of rclone’s remotes, without a colon or a slash, at most 128 characters.',
     invalid_poll_minutes:
@@ -427,6 +552,7 @@ const common = {
     nuvio_backup_unsupported:
       'Nuvio answered its account data in a form this version of Polyfin does not read. Polyfin reads version 1 of Nuvio’s account backup.',
     stremio_sign_in_refused: 'Stremio refused this email or password.',
+    stremio_pin_refused: 'Stremio refused this PIN.',
     stremio_key_refused:
       'Stremio refused this auth key. Copy it again from Stremio’s web app, signed in to your account.',
     stremio_link_expired: 'The link code expired, or it was used already. Ask for another.',
@@ -436,6 +562,20 @@ const common = {
     app_import_expired:
       'What was read of the account is no longer kept, after a few minutes. Sign in again.',
     app_import_running: 'An import into this account is running. Wait for it to end.',
+    plex_sign_in_ended:
+      'The sign-in to Plex ended: it expired, was replaced, or was used by an import. Sign in with Plex again.',
+    plex_sign_in_pending: 'Plex has not signed you in yet. Finish signing in on Plex’s page.',
+    plex_unknown_profile: 'This Plex Home has no such profile. Sign in with Plex again.',
+    plex_profile_pin_refused: 'Plex refused this PIN. Type the profile’s PIN again.',
+    plex_profile_forbidden: 'Plex does not let this account switch to this profile.',
+    plex_unknown_server: 'Your Plex account does not reach this server. Choose another one.',
+    plex_not_owner:
+      'This Plex account does not own the server. Sign in with the owner’s Plex account.',
+    plex_server_unreachable:
+      'None of the addresses Plex gives for this server answered as that server. Check that it runs, and that Polyfin can reach it.',
+    plex_tv_failed: 'plex.tv did not answer as expected. Try again later.',
+    plex_tv_unreachable:
+      'plex.tv could not be reached. Check Polyfin’s connection to the internet.',
     app_not_connected: 'This app is not connected to the account any longer.',
     app_connection_stopped:
       'The app refused the sign-in Polyfin kept. Sign in again, with Stay connected ticked.',
@@ -446,7 +586,6 @@ const common = {
   },
   status: {
     title: 'Server status',
-    description: 'Health of this Polyfin server at a glance.',
     version: 'Version',
     serverId: 'Server ID',
     database: 'Database',
@@ -474,11 +613,13 @@ const common = {
     movie: 'Movies',
     series: 'Series',
     channel: 'Channels',
+    other: 'Other videos',
     tv: 'TV',
     track: 'Tracks',
     album: 'Albums',
     artist: 'Artists',
     playlist: 'Playlists',
+    collection: 'Collections',
   },
   stremioResources: {
     catalog: 'Catalogs',
@@ -507,12 +648,24 @@ const common = {
     hide: 'Hide',
     close: 'Close',
     dismiss: 'Dismiss',
-    notifications: 'Notifications',
+    /** The name of the toasts' region: not Notifications, a section of My account. */
+    messages: 'Messages',
     unsaved: 'Unsaved changes',
     allSaved: 'All changes saved',
     discard: 'Discard changes',
     searchList: 'Search the list',
     noMatch: 'Nothing matches.',
+    changes: (count: number) => (count === 1 ? '1 change' : `${count} changes`),
+    was: (value: string) => `was ${value}`,
+    moreHelp: 'More',
+    lessHelp: 'Less',
+    notSet: 'Not set',
+    byDefault: 'Default:',
+    ofTotal: (total: number | string) => `of ${total}`,
+    cause: 'Cause',
+    fix: 'Fix',
+    meanwhile: 'Meanwhile',
+    alertKind: { danger: 'Error', warn: 'Warning', info: 'Note' },
     secret: {
       saved: 'Saved',
       notSet: 'Not set',

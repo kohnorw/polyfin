@@ -14,6 +14,7 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/activity"
 	"github.com/moodiness/polyfin/internal/addons"
+	"github.com/moodiness/polyfin/internal/backup"
 	"github.com/moodiness/polyfin/internal/collections"
 	"github.com/moodiness/polyfin/internal/database"
 	"github.com/moodiness/polyfin/internal/hls"
@@ -33,6 +35,7 @@ import (
 	"github.com/moodiness/polyfin/internal/playlists"
 	"github.com/moodiness/polyfin/internal/preferences"
 	"github.com/moodiness/polyfin/internal/quickconnect"
+	"github.com/moodiness/polyfin/internal/secrets"
 	"github.com/moodiness/polyfin/internal/source"
 	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/tasks"
@@ -44,6 +47,14 @@ import (
 )
 
 const testServerID = "0123456789abcdef0123456789abcdef"
+
+// The tests hash passwords and derive backup keys at a small cost (see
+// accounts.LowerPasswordCostForTests and backup.LowerKeyCostForTests).
+func TestMain(m *testing.M) {
+	accounts.LowerPasswordCostForTests()
+	backup.LowerKeyCostForTests()
+	m.Run()
+}
 
 type testServer struct {
 	t       *testing.T
@@ -64,19 +75,61 @@ type testServer struct {
 	warnings *warnings
 }
 
+// waitForEveryLookup has the server's listings wait for every rating and
+// genre they look up, however long a busy machine takes, rather than hide
+// the titles whose lookups are late (see library.Service.SetRatingWaitEnd).
+func (s testServer) waitForEveryLookup() {
+	s.library.SetRatingWaitEnd(func(time.Duration) <-chan time.Time { return nil })
+}
+
+// waitForWholeListings has the server's whole listings, those of an app
+// that asks for no limit, wait for every page, however long a busy machine
+// takes (see library.Service.SetWholeWaitBound).
+func (s testServer) waitForWholeListings() {
+	s.library.SetWholeWaitBound(func(ctx context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(ctx)
+	})
+}
+
+// waitForEveryCatalog has the server's pages of a genre, studio or year
+// wait for every catalog they read, however long a busy machine takes (see
+// library.Service.SetNarrowedWaitEnd).
+func (s testServer) waitForEveryCatalog() {
+	s.library.SetNarrowedWaitEnd(func(time.Duration) <-chan time.Time { return nil })
+}
+
+// waitForCredits has the server's title pages wait for their credits,
+// however long a busy machine takes (see library.Service.SetCreditsWaitBound).
+func (s testServer) waitForCredits() {
+	s.library.SetCreditsWaitBound(func(ctx context.Context, _ time.Duration) (context.Context, context.CancelFunc) {
+		return context.WithCancel(ctx)
+	})
+}
+
 // warnings keeps the messages of the records at WARN or above that a
-// logger handles, discarding the others.
+// logger handles, with their attributes, discarding the others; all of
+// them once all is set.
 type warnings struct {
 	mu       sync.Mutex
 	messages []string
+	attrs    []map[string]string
+	all      atomic.Bool
 }
 
-func (w *warnings) Enabled(_ context.Context, level slog.Level) bool { return level >= slog.LevelWarn }
+func (w *warnings) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= slog.LevelWarn || w.all.Load()
+}
 
 func (w *warnings) Handle(_ context.Context, record slog.Record) error {
+	attrs := map[string]string{}
+	record.Attrs(func(a slog.Attr) bool {
+		attrs[a.Key] = a.Value.String()
+		return true
+	})
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	w.messages = append(w.messages, record.Message)
+	w.attrs = append(w.attrs, attrs)
 	return nil
 }
 
@@ -91,6 +144,19 @@ func (w *warnings) logged() []string {
 	return slices.Clone(w.messages)
 }
 
+// attrsOf returns the attributes of each record logged so far with message.
+func (w *warnings) attrsOf(message string) []map[string]string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	var found []map[string]string
+	for i, m := range w.messages {
+		if m == message {
+			found = append(found, w.attrs[i])
+		}
+	}
+	return found
+}
+
 func newTestServer(t *testing.T, failures int) testServer {
 	t.Helper()
 	// Tests seed analyses instead of running ffprobe, which CI lacks.
@@ -101,6 +167,37 @@ func newTestServer(t *testing.T, failures int) testServer {
 // ffprobe. configure, if any, completes the handler's options.
 func newProbingServer(t *testing.T, failures int, ffprobe string, configure ...func(*Options, *pgxpool.Pool)) testServer {
 	t.Helper()
+	return newServerReaching(t, failures, ffprobe, nil, configure...)
+}
+
+// newServerReaching is newProbingServer whose requests to sources go
+// through reach, when set: a test serves a source on a public address
+// from a local server with it, never reaching that address. Remuxes run
+// FFmpeg when tests are given one.
+func newServerReaching(t *testing.T, failures int, ffprobe string, reach func(source.Opener) source.Opener,
+	configure ...func(*Options, *pgxpool.Pool)) testServer {
+	t.Helper()
+	ffmpeg := os.Getenv("POLYFIN_TEST_FFMPEG")
+	if ffmpeg == "" {
+		ffmpeg = "ffmpeg-not-installed"
+	}
+	return newServerConverting(t, failures, ffprobe, ffmpeg, reach, configure...)
+}
+
+// newServerConverting is newServerReaching converting with the FFmpeg at
+// ffmpeg, whatever the environment gives.
+func newServerConverting(t *testing.T, failures int, ffprobe, ffmpeg string, reach func(source.Opener) source.Opener,
+	configure ...func(*Options, *pgxpool.Pool)) testServer {
+	t.Helper()
+	return newServerSealing(t, failures, ffprobe, ffmpeg, reach, nil, configure...)
+}
+
+// newServerSealing is newServerConverting of a Polyfin started with box's
+// key, nil for none: it signs with what the key derives from the stored
+// secret, as main does.
+func newServerSealing(t *testing.T, failures int, ffprobe, ffmpeg string, reach func(source.Opener) source.Opener, box *secrets.Box,
+	configure ...func(*Options, *pgxpool.Pool)) testServer {
+	t.Helper()
 	pool := migrated.New(t)
 	store, err := accounts.Open(t.Context(), pool)
 	if err != nil {
@@ -110,6 +207,9 @@ func newProbingServer(t *testing.T, failures int, ffprobe string, configure ...f
 	// it on: the others count every request to the sources.
 	settings := store.Settings()
 	settings.PrepareAhead = false
+	// Upstream's tests run with upstream's defaults: this fork's tests turn
+	// its own settings on.
+	settings.HideSpecials, settings.ExactTitleMatch, settings.HiddenReleases = false, false, []string{}
 	if _, err := store.UpdateSettings(t.Context(), settings); err != nil {
 		t.Fatal(err)
 	}
@@ -121,7 +221,12 @@ func newProbingServer(t *testing.T, failures int, ffprobe string, configure ...f
 	if err != nil {
 		t.Fatal(err)
 	}
-	sources, err := source.New(t.TempDir(), func() int64 { return 1 << 30 }, client, logger)
+	secret = box.SigningSecret(secret)
+	var opener source.Opener = client
+	if reach != nil {
+		opener = reach(client)
+	}
+	sources, err := source.New(t.TempDir(), func() source.Policy { return source.Policy{Limit: 1 << 30} }, opener, logger)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,17 +238,13 @@ func newProbingServer(t *testing.T, failures int, ffprobe string, configure ...f
 	channels := iptv.New(pool, addonStore, client, logger, store.Settings)
 	lib.UseIPTV(channels)
 	channels.OnChange(lib.LineupChanged)
-	// Remuxes run FFmpeg when tests are given one.
-	ffmpeg := os.Getenv("POLYFIN_TEST_FFMPEG")
-	if ffmpeg == "" {
-		ffmpeg = "ffmpeg-not-installed"
-	}
+	// Conversions run the FFmpeg given.
 	segments, err := hls.NewManager(ffmpeg, t.TempDir(), logger)
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(segments.Close)
-	player, err := playback.New(pool, client, ffprobe, playback.NewSigner(secret), sources, segments, lib.Renew, logger, store.Settings)
+	player, err := playback.New(pool, opener, ffprobe, playback.NewSigner(secret), sources, segments, lib.Renew, logger, store.Settings)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -165,34 +266,38 @@ func newProbingServer(t *testing.T, failures int, ffprobe string, configure ...f
 	})
 	t.Cleanup(images.Close)
 	options := Options{
-		ServerID:      testServerID,
-		Accounts:      store,
-		QuickConnect:  quickconnect.New(),
-		SignIns:       throttle.New(failures, time.Minute),
-		WebSocketPort: 8096,
-		Library:       lib,
-		IPTV:          channels,
-		Stremio:       client,
-		Playback:      player,
-		Preferences:   preferences.New(pool),
-		UserData:      userdata.New(pool),
-		Playlists:     playlists.New(pool),
-		Collections:   collections.New(pool),
-		HomeRows:      homerows.New(pool),
-		Thumbnails:    images,
-		Logger:        logger,
-		Activity:      activityLog,
-		Tasks:         registry,
-		Logs:          ring,
-		CacheDir:      t.TempDir(),
-		DataDir:       t.TempDir(),
-		// Subtitles are extracted by the FFmpeg tests are given, if any.
-		FFmpeg: os.Getenv("POLYFIN_TEST_FFMPEG"),
+		ServerID:         testServerID,
+		Accounts:         store,
+		QuickConnect:     quickconnect.New(),
+		SignIns:          throttle.New(failures, time.Minute),
+		CrossSiteSignIns: throttle.New(failures, time.Minute),
+		ShareLinks:       throttle.New(failures, time.Minute),
+		WebSocketPort:    8096,
+		Library:          lib,
+		IPTV:             channels,
+		Stremio:          client,
+		Playback:         player,
+		Preferences:      preferences.New(pool),
+		UserData:         userdata.New(pool),
+		Playlists:        playlists.New(pool),
+		Collections:      collections.New(pool),
+		HomeRows:         homerows.New(pool),
+		Thumbnails:       images,
+		Logger:           logger,
+		Activity:         activityLog,
+		Tasks:            registry,
+		Logs:             ring,
+		CacheDir:         t.TempDir(),
 	}
 	for _, c := range configure {
 		c(&options, pool)
 	}
 	handler := New(options)
+	// Refresh metadata forgets the artwork failures the handler remembers,
+	// as in main.
+	if options.Library != nil {
+		options.Library.UseArtworkFailures(handler)
+	}
 	server := httptest.NewServer(handler)
 	t.Cleanup(server.Close)
 	return testServer{t: t, store: store, addons: addonStore, library: lib, pool: pool, url: server.URL, handler: handler,
@@ -222,6 +327,9 @@ func (s testServer) listed(t *testing.T, user accounts.User, items ...string) {
 		if _, err := s.library.Versions(t.Context(), user, id); err != nil {
 			t.Fatal(err)
 		}
+		if _, err := s.library.Subtitles(t.Context(), user, id); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
@@ -231,24 +339,15 @@ func (s testServer) user(name string, change func(*accounts.UserChanges)) accoun
 	if err != nil {
 		s.t.Fatal(err)
 	}
-	if !user.LiveTv {
-		liveTv := true
-		if user, err = s.store.UpdateUser(s.t.Context(), user.ID, accounts.UserChanges{LiveTv: &liveTv}, nil); err != nil {
-			s.t.Fatal(err)
-		}
-	}
-	if change == nil {
-		change = func(*accounts.UserChanges) {}
-	}
-	{
-		// Most tests' users watch Live TV, which new users do not by default.
-		on := true
-		unlimited := 0
-		changes := accounts.UserChanges{LiveTv: &on, MaxPlaybacks: &unlimited}
+	// Most tests' users watch Live TV and play several things at once,
+	// which new users do not by default in this fork.
+	on, unlimited := true, 0
+	changes := accounts.UserChanges{LiveTv: &on, MaxPlaybacks: &unlimited}
+	if change != nil {
 		change(&changes)
-		if user, err = s.store.UpdateUser(s.t.Context(), user.ID, changes, nil); err != nil {
-			s.t.Fatal(err)
-		}
+	}
+	if user, err = s.store.UpdateUser(s.t.Context(), user.ID, changes, nil); err != nil {
+		s.t.Fatal(err)
 	}
 	return user
 }
@@ -260,6 +359,15 @@ func app(device, token string) string {
 	}
 	return header
 }
+
+// testTransport is the tests' own, and testClient its client:
+// httptest.Server.Close closes the idle connections of
+// http.DefaultTransport, which the connection of a parallel test's answer
+// without a body may have just joined (#958).
+var (
+	testTransport = http.DefaultTransport.(*http.Transport).Clone()
+	testClient    = &http.Client{Transport: testTransport}
+)
 
 // call sends a request and returns the status and body.
 func (s testServer) call(method, path, authorization string, body any) (int, []byte) {
@@ -276,7 +384,7 @@ func (s testServer) call(method, path, authorization string, body any) (int, []b
 	if body != nil {
 		request.Header.Set("Content-Type", "application/json")
 	}
-	response, err := http.DefaultClient.Do(request)
+	response, err := testClient.Do(request)
 	if err != nil {
 		s.t.Fatal(err)
 	}
@@ -492,7 +600,7 @@ func TestResponsesMatchJellyfin(t *testing.T) {
 	_, user := s.call(http.MethodGet, "/Users/Me", signedIn, nil)
 	// A new Jellyfin has no custom CSS; a new Polyfin's loads a theme.
 	settings := s.store.Settings()
-	settings.CustomCss = ""
+	settings.WebTheme = accounts.WebThemeNone
 	if _, err := s.store.UpdateSettings(t.Context(), settings); err != nil {
 		t.Fatal(err)
 	}

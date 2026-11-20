@@ -3,17 +3,21 @@ package jellyfin
 import (
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/moodiness/polyfin/internal/accounts"
+	"github.com/moodiness/polyfin/internal/forwarded"
+	"github.com/moodiness/polyfin/internal/playback"
 	"github.com/moodiness/polyfin/internal/quickconnect"
+	"github.com/moodiness/polyfin/internal/throttle"
 )
 
 const quickConnectDisabled = "Quick connect is disabled"
 
 func newQuickConnectResult(request quickconnect.Request) QuickConnectResult {
 	return QuickConnectResult{
-		Authenticated: request.User != nil,
+		Authenticated: request.State == quickconnect.Approved,
 		Secret:        request.Secret,
 		Code:          request.Code,
 		DeviceId:      request.DeviceID,
@@ -38,11 +42,10 @@ func (h *Handler) quickConnectInitiate(w http.ResponseWriter, r *http.Request) {
 		processingError(w, http.StatusBadRequest)
 		return
 	}
-	request, err := h.QuickConnect.Initiate(c.DeviceID, c.Device, c.Client, c.Version)
-	if errors.Is(err, quickconnect.ErrFull) {
-		processingError(w, http.StatusServiceUnavailable)
-		return
-	}
+	// The request keeps where it was asked from, which the approver is
+	// shown, and which bounds the requests one client holds.
+	request, err := h.QuickConnect.Initiate(quickconnect.Origin{Address: forwarded.Client(r), Local: forwarded.InLocalNetwork(r)},
+		c.DeviceID, c.Device, c.Client, c.Version)
 	if err != nil {
 		h.internalError(w, r, err)
 		return
@@ -63,8 +66,27 @@ func (h *Handler) quickConnectConnect(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, newQuickConnectResult(request))
 }
 
+// quickConnectAttempt counts a code before it is looked up, toward the
+// attempts of the user who gives it and of their client's address, as a
+// password is counted (see reserve), or answers 429 when one of them
+// exhausted its failed attempts, and then returns nil. An unknown code is
+// a failed attempt; a known one is taken back.
+func (h *Handler) quickConnectAttempt(w http.ResponseWriter, r *http.Request, user accounts.ID) *throttle.Attempt {
+	attempt, wait := h.SignIns.Reserve(forwarded.Client(r), quickconnect.AttemptKey(user))
+	if attempt == nil {
+		w.Header().Set("Retry-After", strconv.Itoa(int(wait.Seconds())+1))
+		processingError(w, http.StatusTooManyRequests)
+	}
+	return attempt
+}
+
 // quickConnectAuthorize approves a code for the caller or, for an
-// administrator, for the user named by userId.
+// administrator, for the user named by userId. A code is approved once, as
+// Jellyfin refuses a request already authorized
+// (Emby.Server.Implementations/QuickConnect/QuickConnectManager.cs,
+// AuthorizeRequest, lines 146-149 at v12.4). Codes that no request waits
+// with count toward the caller's attempts (see quickConnectAttempt): past
+// them the answer is 429, and the requests waiting stay as they are.
 func (h *Handler) quickConnectAuthorize(w http.ResponseWriter, r *http.Request) {
 	if !h.Accounts.Settings().QuickConnectEnabled {
 		writeJSON(w, http.StatusUnauthorized, quickConnectDisabled)
@@ -84,7 +106,13 @@ func (h *Handler) quickConnectAuthorize(w http.ResponseWriter, r *http.Request) 
 		}
 		user = id
 	}
+	attempt := h.quickConnectAttempt(w, r, caller.User.ID)
+	if attempt == nil {
+		return
+	}
+	defer attempt.Cancel()
 	if err := h.QuickConnect.Authorize(query(r, "code"), user); err != nil {
+		attempt.Fail()
 		processingError(w, http.StatusNotFound)
 		return
 	}
@@ -92,8 +120,12 @@ func (h *Handler) quickConnectAuthorize(w http.ResponseWriter, r *http.Request) 
 }
 
 // authenticateWithQuickConnect signs in the app holding an approved
-// request's secret. Like Jellyfin, the secret stays valid until the request
-// expires, so an app retrying after a network error is not refused.
+// request's secret. Like Jellyfin, the secret of a Jellyfin app's request
+// stays valid until the request expires, so an app retrying after a network
+// error is not refused; that of one of Silo's apps signs in once (see
+// quickconnect.Store.Redeem). It signs in the device that asked, by its
+// identifier, and no other; and no longer once the approver's account was
+// signed out everywhere (see quickconnect.Store.Withdraw).
 func (h *Handler) authenticateWithQuickConnect(w http.ResponseWriter, r *http.Request) {
 	c := readCredentials(r, h.Accounts.Settings().LegacyAuthorization)
 	var body struct{ Secret string }
@@ -106,7 +138,7 @@ func (h *Handler) authenticateWithQuickConnect(w http.ResponseWriter, r *http.Re
 		return
 	}
 	request, err := h.QuickConnect.BySecret(body.Secret)
-	if err != nil || request.User == nil {
+	if err != nil || request.State != quickconnect.Approved || request.DeviceID != c.DeviceID {
 		processingError(w, http.StatusNotFound)
 		return
 	}
@@ -121,6 +153,16 @@ func (h *Handler) authenticateWithQuickConnect(w http.ResponseWriter, r *http.Re
 	}
 	if user.Refused(h.now()) {
 		processingError(w, http.StatusForbidden)
+		return
+	}
+	// The approval came from where the approver may connect (see
+	// authorized); the app signing in must be too.
+	if h.signInRefusedRemote(w, r, user) {
+		return
+	}
+	// Redeemed last, so that a refused account leaves it as it was.
+	if _, err := h.QuickConnect.Redeem(body.Secret); err != nil {
+		processingError(w, http.StatusNotFound)
 		return
 	}
 	h.signIn(w, r, user, c)
@@ -138,7 +180,8 @@ func (h *Handler) logout(w http.ResponseWriter, r *http.Request) {
 
 // signedOut ends the sessions of devices signed out, however they were, as
 // Jellyfin does: their sockets close, and they leave their SyncPlay group.
-// Their last PlaybackInfo profile is forgotten.
+// Their last PlaybackInfo profile is forgotten, in memory: the database
+// forgets it with the device.
 func (h *Handler) signedOut(devices []accounts.ID) {
 	for _, device := range devices {
 		h.sockets.close(device)
@@ -163,23 +206,44 @@ func (h *Handler) capabilities(w http.ResponseWriter, r *http.Request) {
 	h.saveCapabilities(w, r, capabilities)
 }
 
-// fullCapabilities records the capabilities an app reports in a JSON body.
+// fullCapabilities records the capabilities an app reports in a JSON body,
+// and the device profile it may carry, as Jellyfin's ClientCapabilitiesDto
+// does (see rememberCapabilities). Capabilities past their bounds are
+// refused before the profile is kept (see saveCapabilities).
 func (h *Handler) fullCapabilities(w http.ResponseWriter, r *http.Request) {
-	var body ClientCapabilities
+	var body struct {
+		ClientCapabilities
+		DeviceProfile *playback.DeviceProfile
+	}
 	if err := decode(r, &body); err != nil {
 		processingError(w, http.StatusBadRequest)
 		return
 	}
-	h.saveCapabilities(w, r, accounts.Capabilities{
+	capabilities := accounts.Capabilities{
 		PlayableMediaTypes:           body.PlayableMediaTypes,
 		SupportedCommands:            body.SupportedCommands,
 		SupportsMediaControl:         body.SupportsMediaControl,
 		SupportsPersistentIdentifier: body.SupportsPersistentIdentifier,
-	})
+	}
+	if !capabilities.Bounded() {
+		processingError(w, http.StatusBadRequest)
+		return
+	}
+	h.rememberCapabilities(r.Context(), body.DeviceProfile)
+	h.saveCapabilities(w, r, capabilities)
 }
 
+// saveCapabilities records the capabilities of the caller's device. Lists
+// longer than Jellyfin's media types and commands make, or with a longer
+// entry (see accounts.Capabilities.Bounded), are a bad request, as a body
+// Jellyfin cannot read is, and the device keeps the capabilities it had.
 func (h *Handler) saveCapabilities(w http.ResponseWriter, r *http.Request, capabilities accounts.Capabilities) {
-	if err := h.Accounts.SetCapabilities(r.Context(), callerFrom(r.Context()).Device.ID, capabilities); err != nil {
+	err := h.Accounts.SetCapabilities(r.Context(), callerFrom(r.Context()).Device.ID, capabilities)
+	if errors.Is(err, accounts.ErrInvalidCapabilities) {
+		processingError(w, http.StatusBadRequest)
+		return
+	}
+	if err != nil {
 		h.internalError(w, r, err)
 		return
 	}

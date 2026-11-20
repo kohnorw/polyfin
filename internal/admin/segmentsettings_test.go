@@ -35,7 +35,7 @@ func TestSettingsSegmentSources(t *testing.T) {
 	t.Parallel()
 	api := newTestAPI(t, 10)
 	administrator := api.signedIn("administrator", true)
-	byDefault := []string{"theintrodb", "introdb", "publicmetadb"}
+	byDefault := []string{"theintrodb", "introdb", "publicmetadb", "skipdb"}
 	sources := func(body map[string]any) ([]string, []string) {
 		return names(body["segmentOrder"]), names(body["segmentSourcesOff"])
 	}
@@ -48,7 +48,7 @@ func TestSettingsSegmentSources(t *testing.T) {
 	}
 
 	base := map[string]any{"serverName": "Polyfin", "quickConnectEnabled": true, "language": "en"}
-	saved, off := []string{"publicmetadb", "theintrodb", "introdb"}, []string{"introdb"}
+	saved, off := []string{"skipdb", "publicmetadb", "theintrodb", "introdb"}, []string{"introdb"}
 	set := maps.Clone(base)
 	set["segmentOrder"], set["segmentSourcesOff"] = saved, off
 	if status, body, _ := administrator.call(http.MethodPut, "/settings", set); status != http.StatusOK {
@@ -73,10 +73,11 @@ func TestSettingsSegmentSources(t *testing.T) {
 	for _, refused := range [][]string{
 		{"theintrodb"},
 		{"theintrodb", "introdb"},
-		{"theintrodb", "introdb", "introdb"},
+		{"theintrodb", "introdb", "publicmetadb"},
 		{"theintrodb", "introdb", "publicmetadb", "introdb"},
-		{"theintrodb", "introdb", "other"},
-		{"TheIntroDB", "introdb", "publicmetadb"},
+		{"theintrodb", "introdb", "publicmetadb", "skipdb", "introdb"},
+		{"theintrodb", "introdb", "publicmetadb", "other"},
+		{"TheIntroDB", "introdb", "publicmetadb", "skipdb"},
 	} {
 		body := maps.Clone(base)
 		body["segmentOrder"] = refused
@@ -84,7 +85,7 @@ func TestSettingsSegmentSources(t *testing.T) {
 			t.Errorf("%v: %d %v", refused, status, answer)
 		}
 	}
-	for _, refused := range [][]string{{"other"}, {"introdb", "introdb"}} {
+	for _, refused := range [][]string{{"other"}, {"introdb", "introdb"}, {"skipdb", "skipdb"}} {
 		body := maps.Clone(base)
 		body["segmentSourcesOff"] = refused
 		if status, answer, _ := administrator.call(http.MethodPut, "/settings", body); status != http.StatusBadRequest || answer["error"] != "invalid_segment_sources_off" {
@@ -105,11 +106,16 @@ func TestSettingsTheIntroDBKey(t *testing.T) {
 	var mu sync.Mutex
 	var requests []string
 	// TheIntroDB answers a submission with an empty body 400 once it
-	// accepts the key, or as status says.
+	// accepts the key, or as status says. Submissions are /v4's alone.
 	theIntroDB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		mu.Lock()
 		requests = append(requests, r.Method+" "+r.URL.Path+" "+r.Header.Get("Authorization"))
 		mu.Unlock()
+		if r.Method != http.MethodPost || r.URL.Path != "/v4/submit" {
+			w.WriteHeader(http.StatusNotFound)
+			_, _ = io.WriteString(w, "Cannot "+r.Method+" "+r.URL.Path)
+			return
+		}
 		w.WriteHeader(int(status.Load()))
 		_, _ = io.WriteString(w, `{"error":"invalid request body"}`)
 	}))
@@ -182,7 +188,7 @@ func TestSettingsTheIntroDBKey(t *testing.T) {
 		t.Fatalf("accepted: %d %v", got, body["error"])
 	}
 	mu.Lock()
-	if requests[len(requests)-1] != "POST /submit Bearer "+key || api.store.Settings().TheIntroDBKey != key {
+	if requests[len(requests)-1] != "POST /v4/submit Bearer "+key || api.store.Settings().TheIntroDBKey != key {
 		t.Error("the key checked is not the key saved")
 	}
 	mu.Unlock()

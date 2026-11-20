@@ -3,6 +3,7 @@
 package addons
 
 import (
+	"bytes"
 	"cmp"
 	"context"
 	"encoding/json"
@@ -23,6 +24,7 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/eclipse"
+	"github.com/moodiness/polyfin/internal/serverfile"
 	"github.com/moodiness/polyfin/internal/stremio"
 )
 
@@ -47,7 +49,7 @@ var (
 	// ErrInvalidLibraryMaxItems reports a maximum outside 1 to
 	// MaxLibraryItems, or given to a catalog that takes none.
 	ErrInvalidLibraryMaxItems = errors.New("a library's maximum is a whole number from 1 to 20,000")
-	ErrInvalidGuideURL        = errors.New("guide addresses are http or https URLs of at most 4096 characters")
+	ErrInvalidGuideURL        = errors.New("guide addresses are http or https URLs of at most 4096 characters, or files of the server")
 	ErrTooManyGuides          = errors.New("a live TV catalog has at most 10 guides")
 	ErrInvalidGuide           = errors.New("unknown guide")
 	// ErrNotStremio reports an IPTV source asked for a manifest.
@@ -60,7 +62,22 @@ var (
 	// ErrKindChanged reports a new address of an addon that serves another
 	// kind of addon than it did.
 	ErrKindChanged = errors.New("the address serves another kind of addon")
+	// ErrInvalidUsedBy reports a Used by setting given to a user's own
+	// addon, or naming a group or a user that does not exist.
+	ErrInvalidUsedBy = errors.New("invalid Used by setting")
+	// ErrUsedByEveryone reports a group given to, or taken from, a server
+	// addon used by everyone, whose Used by lists no one (see SetGroupUse).
+	ErrUsedByEveryone = errors.New("the addon is used by everyone")
+	// ErrInvalidName reports an addon's name longer than MaxNameLength or
+	// not printable.
+	ErrInvalidName = errors.New("addon names are 1 to 64 printable characters")
+	// ErrNotRenamable reports a name given to one of Polyfin's own
+	// sources, which their own settings name (see SetName).
+	ErrNotRenamable = errors.New("only Stremio and Eclipse addons take a name of their own")
 )
+
+// MaxNameLength bounds, in characters, the name an addon is given.
+const MaxNameLength = 64
 
 // Scope owns addons: the server (no owner) or one user.
 type Scope struct {
@@ -106,15 +123,80 @@ type Addon struct {
 	Settings    map[string]string
 	Enabled     bool
 	RefreshedAt time.Time
-	// LibraryKeyTypes are the catalog types the libraries of its catalogs
-	// take their identifiers from, by catalog identifier, for the catalogs
-	// whose type changed since (see Library.KeyType).
-	LibraryKeyTypes map[string]string
+	// ChosenName is the name a Stremio or Eclipse addon was given in
+	// Polyfin, empty for its manifest's (see Name and SetName). A refresh
+	// of its manifest keeps it.
+	ChosenName string
+	// LibraryKeys are the catalogs whose libraries keep the identifier
+	// they took from another catalog key: the type and identifier their
+	// catalog had when the library was made, before its type or its
+	// identifier changed (see Library.Key and LibraryKey).
+	LibraryKeys []KeptKey
 	// Language is the language of the descriptions of a server addon, as
 	// its manifest address configures it, empty for none: it describes
 	// titles for the users who chose that language only, not for others
 	// (see SetLanguage).
 	Language string
+	// UsedBy is who uses a server addon (see UsedBy); a user's own addon
+	// is used by everyone, its owner being the only one to see it.
+	UsedBy UsedBy
+	// Network is where the addon is, as the connection that last read its
+	// manifest or its list tells; empty when it is not told yet (see
+	// Network and Confined).
+	Network Network
+	// titleCatalogs are its catalogs of other videos whose enabled library
+	// shows their titles as movies and shows (see Library.ShowAs).
+	titleCatalogs []catalogRef
+}
+
+// catalogRef names a catalog of an addon by its type and identifier.
+type catalogRef struct {
+	catalogType, catalogID string
+}
+
+// ShowsAsTitles reports whether the enabled library of the addon's catalog
+// of other videos of catalogType and catalogID shows its titles as movies
+// and shows (see Library.ShowAs), wherever they are listed or found.
+func (a Addon) ShowsAsTitles(catalogType, catalogID string) bool {
+	return slices.Contains(a.titleCatalogs, catalogRef{catalogType, catalogID})
+}
+
+// UsedBy is who uses a server addon: everyone, the default, or only the
+// groups and users listed, which may leave every administrator out. A
+// user who does not use an addon gets nothing from it: no library, no
+// title only it knows, no version, subtitle or channel.
+type UsedBy struct {
+	// Listed limits the addon to Groups and Users; unset, everyone uses
+	// it, and the lists are empty.
+	Listed bool
+	Groups []accounts.ID
+	Users  []accounts.ID
+}
+
+// Uses reports whether user uses an addon set to u: always while everyone
+// does; otherwise when they are listed, or the group they belong to is,
+// whether they follow its settings or keep their own. A request without a
+// user, made with an API key or by the server's own work, uses every
+// addon.
+func (u UsedBy) Uses(user accounts.User) bool {
+	if !u.Listed || user.ID == (accounts.ID{}) {
+		return true
+	}
+	return slices.Contains(u.Users, user.ID) || user.GroupID != nil && slices.Contains(u.Groups, *user.GroupID)
+}
+
+// Name is the name Polyfin shows the addon under: the one it was given,
+// else its manifest's.
+func (a Addon) Name() string { return cmp.Or(a.ChosenName, a.Manifest.Name) }
+
+// LogName names the addon in logs: its name, then its manifest's in
+// parentheses when it was given another, so that a log still tells which
+// addon it is.
+func (a Addon) LogName() string {
+	if a.ChosenName == "" || a.ChosenName == a.Manifest.Name {
+		return a.Manifest.Name
+	}
+	return a.ChosenName + " (" + a.Manifest.Name + ")"
 }
 
 // Stremio reports whether the addon is a Stremio addon, whose resources
@@ -140,6 +222,25 @@ func (a Addon) Eclipse() bool { return a.Kind == KindEclipse && a.Music != nil }
 // Eclipse addon, or a local music folder.
 func (a Addon) HasMusic() bool { return a.Music != nil }
 
+// ConfigureURL is the address of the addon's configure page, and whether
+// it has one: a Stremio or Eclipse addon whose manifest declares itself
+// configurable, at a manifest URL ending in manifest.json (see
+// stremio.ConfigureURL). IPTV sources and local folders have none. The
+// address holds the addon's settings and keys: it is never logged.
+func (a Addon) ConfigureURL() (string, bool) {
+	if !a.Stremio() && !a.Eclipse() || !a.Manifest.BehaviorHints.Configurable {
+		return "", false
+	}
+	return stremio.ConfigureURL(a.ManifestURL)
+}
+
+// Configurable reports whether the addon has a configure page (see
+// ConfigureURL).
+func (a Addon) Configurable() bool {
+	_, ok := a.ConfigureURL()
+	return ok
+}
+
 // ListsVersions reports whether the addon lists streams of movies or
 // episodes: versions of titles, which the version rules order.
 func (a Addon) ListsVersions() bool {
@@ -155,11 +256,12 @@ type Library struct {
 	Name        *string
 	Enabled     bool
 	AddonActive bool
-	// KeyType is the catalog type the library takes its identifier from
-	// when its catalog's type changed since the library was made, as a
-	// local folder's does when it holds something else; empty for the
-	// catalog's own (see Addon.LibraryKeyTypes).
-	KeyType string
+	// Key is the catalog type and identifier the library takes its
+	// identifier from: those its catalog had when the library was made,
+	// kept when its type or its identifier changed since, as a local
+	// folder's type does when it holds something else (see
+	// Addon.LibraryKey). Zero is read as the catalog's own.
+	Key CatalogKey
 	// Filterable tells that the library takes a Genre and MaxItems: a
 	// catalog of titles or collections, not of live TV or music.
 	Filterable bool
@@ -174,6 +276,24 @@ type Library struct {
 	// row, and other apps keep listing it. Always false for a live TV
 	// catalog, which makes no menu entry, and for a disabled catalog.
 	HideInMenus bool
+	// SkipLocal leaves out of an enabled library of movies or series the
+	// titles a local folder's library lists, by the same identifier, for
+	// the users who see that folder's library (see library.view); always
+	// false for a catalog that cannot (see Skippable). Skippable tells
+	// whether it can.
+	SkipLocal bool
+	Skippable bool
+	// ShowAs is how an enabled library shows its catalog's titles, one of
+	// ShowAsChoices: ShowAsHomeVideos or ShowAsMoviesAndShows for a
+	// catalog of other videos, ShowAsListed or ShowAsMoviesAndShows for a
+	// catalog of movies or series, ShowAsMoviesAndShows, ShowAsShows or
+	// ShowAsMovies for an anime catalog. Empty while none is chosen, or
+	// for a catalog that takes none: a catalog of other videos is then
+	// shown as home videos until Polyfin decides from its first page (see
+	// DecidedShowAs and Store.DecideShowAs), an anime catalog as movies
+	// and shows, the others as listed.
+	ShowAs        string
+	ShowAsChoices []string
 	// Image is how an enabled library finds the image apps show on its
 	// tile: LibraryImageNone, LibraryImageAutomatic or
 	// LibraryImageGenerated. An image uploaded for the library's item wins
@@ -192,6 +312,101 @@ type Library struct {
 // music catalogs do not.
 func Filterable(addon Addon, catalog stremio.Catalog) bool {
 	return catalog.Type != "tv" && !addon.HasMusic()
+}
+
+// Skippable reports whether a library of a catalog of addon may leave out
+// the titles local folders hold (see Library.SkipLocal): a catalog of
+// movies or series of an addon, not of a local folder, an IPTV source or
+// a music addon, whose titles are their own.
+func Skippable(addon Addon, catalog stremio.Catalog) bool {
+	return !addon.Local() && !addon.IPTV() && !addon.HasMusic() &&
+		slices.Contains([]string{"movie", "anime.movie", "series", "anime.series", "anime"}, catalog.Type)
+}
+
+// The ways a library may show its catalog's titles (see Library.ShowAs).
+// ShowAsHomeVideos shows those of a catalog of other videos as folders of
+// videos, and videos; ShowAsListed shows those of a catalog of movies or
+// series in a library of that type. ShowAsMoviesAndShows shows them in a
+// library without a type, as Jellyfin's mixed libraries: a catalog of
+// other videos as movies and series made of its titles (see
+// library.shownTitle), a catalog of movies or series as each title's own
+// kind. ShowAsShows and ShowAsMovies show those of an anime catalog, each
+// as its own kind, in a library of shows or of movies, whose tabs apps
+// fill with series only or movies only.
+const (
+	ShowAsHomeVideos     = "home_videos"
+	ShowAsListed         = "listed"
+	ShowAsMoviesAndShows = "movies_and_shows"
+	ShowAsShows          = "shows"
+	ShowAsMovies         = "movies"
+)
+
+// ShowAsChoices lists the ways a library of a catalog of addon may show
+// its titles, the default first: home videos or movies and shows for a
+// catalog of OtherVideos; as listed or movies and shows for a catalog of
+// movies or series, and movies and shows, shows or movies for an anime
+// catalog, of an addon, not of a local folder, an IPTV source or a music
+// addon, which have their own; none for any other.
+func ShowAsChoices(addon Addon, catalog stremio.Catalog) []string {
+	stremioAddon := !addon.Local() && !addon.IPTV() && !addon.HasMusic()
+	switch {
+	case OtherVideos(addon, catalog):
+		return []string{ShowAsHomeVideos, ShowAsMoviesAndShows}
+	case stremioAddon && slices.Contains([]string{"movie", "anime.movie", "series", "anime.series"}, catalog.Type):
+		return []string{ShowAsListed, ShowAsMoviesAndShows}
+	case stremioAddon && catalog.Type == "anime":
+		return []string{ShowAsMoviesAndShows, ShowAsShows, ShowAsMovies}
+	}
+	return nil
+}
+
+// OtherVideos reports whether a catalog of addon lists other videos, which
+// its library shows as home videos unless it shows them as movies and
+// shows (see Library.ShowAs): a catalog of a type Polyfin has no use of
+// its own for (see OtherType), of an addon that is not a music addon.
+func OtherVideos(addon Addon, catalog stremio.Catalog) bool {
+	return !addon.HasMusic() && OtherType(catalog.Type)
+}
+
+// DecidedShowAs is how a library of a catalog of other videos shows its
+// titles when none was chosen, as the titles of the catalog's first page
+// tell: as movies and shows when it lists some and each is a movie or a
+// series by its own type, as an addon of lists of movies and shows types
+// them, which a library of home videos would show none of; as home videos
+// otherwise. A library shown so has items of the same identifiers either
+// way: those of movies and series.
+func DecidedShowAs(first []stremio.Meta) string {
+	if len(first) == 0 {
+		return ""
+	}
+	for _, meta := range first {
+		switch meta.Type {
+		case "movie", "anime.movie", "series", "anime.series", "anime":
+		default:
+			return ShowAsHomeVideos
+		}
+	}
+	return ShowAsMoviesAndShows
+}
+
+// OtherType reports whether titles of a Stremio type are other videos:
+// other, channel, and every type Polyfin has no use of its own for (see
+// knownType).
+func OtherType(stremioType string) bool {
+	return stremioType == "other" || stremioType == "channel" || !knownType(stremioType)
+}
+
+// knownType reports whether Polyfin has a use of its own for a Stremio
+// type: movies, series and anime, other and channel videos, collections,
+// live TV, the rows of Eclipse music addons, and Polyfin's own types, as
+// its home videos' and extras'. A title without a type is not known
+// either way.
+func knownType(stremioType string) bool {
+	switch stremioType {
+	case "", "movie", "anime.movie", "series", "anime.series", "anime", "other", "channel", "collection", "tv":
+		return true
+	}
+	return eclipse.CatalogType(stremioType) || strings.HasPrefix(stremioType, "polyfin.")
 }
 
 // Genres lists the genres a catalog offers in its genre filter, in order.
@@ -227,6 +442,17 @@ const (
 	LibraryImageAutomatic = "automatic"
 	LibraryImageGenerated = "generated"
 )
+
+// NewLibraryImage is the image a library of a catalog of catalogType
+// finds when it is made: a movie or series library gets one Polyfin draws,
+// as Jellyfin draws one for its libraries; the others, none. Libraries
+// made before keep the image they had.
+func NewLibraryImage(catalogType string) string {
+	if catalogType == "movie" || catalogType == "series" {
+		return LibraryImageGenerated
+	}
+	return LibraryImageNone
+}
 
 // MaxGuides bounds the guides of a live TV catalog.
 const MaxGuides = 10
@@ -265,7 +491,8 @@ type LibraryKey struct {
 
 // LibraryChoice selects a catalog as a library, with an optional name,
 // optionally narrowed to a genre and limited to MaxItems titles, and
-// possibly left out of the web player's menus (see Library).
+// possibly left out of the web player's menus (see Library). ShowAs is
+// empty for none chosen.
 type LibraryChoice struct {
 	AddonID     accounts.ID
 	CatalogType string
@@ -274,6 +501,8 @@ type LibraryChoice struct {
 	Genre       *string
 	MaxItems    *int
 	HideInMenus bool
+	SkipLocal   bool
+	ShowAs      string
 }
 
 // Store is the addons repository. Reads of the addons and libraries are
@@ -295,6 +524,16 @@ type Store struct {
 	// database, so that a burst of requests reads one snapshot.
 	snapshot atomic.Pointer[snapshot]
 	loading  sync.Mutex
+	// cleanup runs with each removal (see SetCleanup), carry with each
+	// manifest that renames catalogs (see SetCarry), reconfine when where
+	// a source is changes (see SetReconfine).
+	cleanup   Cleanup
+	carry     CarryRenames
+	reconfine Reconfine
+	// locateWait waits before the sources that could not be read are read
+	// again (see LocateSources), and reports false when ctx ended first;
+	// nil but in tests.
+	locateWait func(ctx context.Context, d time.Duration) bool
 }
 
 func New(db *pgxpool.Pool, client *stremio.Client) *Store {
@@ -311,7 +550,7 @@ func scanAddon(row pgx.Row, extra ...any) (Addon, error) {
 	var addon Addon
 	var manifest []byte
 	err := row.Scan(append([]any{&addon.ID, &addon.Kind, &addon.ManifestURL, &manifest, &addon.Settings, &addon.Enabled, &addon.RefreshedAt,
-		&addon.LibraryKeyTypes, &addon.Language}, extra...)...)
+		&addon.ChosenName, &addon.LibraryKeys, &addon.Language, &addon.UsedBy.Listed, &addon.UsedBy.Groups, &addon.UsedBy.Users, &addon.Network}, extra...)...)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return addon, ErrNotFound
 	}
@@ -354,7 +593,12 @@ func localMusic(m stremio.Manifest) *eclipse.Manifest {
 	return music
 }
 
-const addonColumns = "id, kind, manifest_url, manifest, settings, enabled, refreshed_at, library_key_types, language"
+// addonColumns are the columns scanAddon reads, of the addons table, named
+// addons in the query.
+const addonColumns = `id, kind, manifest_url, manifest, settings, enabled, refreshed_at, coalesce(name, ''), library_keys, language, used_by = 'listed',
+	ARRAY(SELECT u.group_id FROM addon_users u WHERE u.addon_id = addons.id AND u.group_id IS NOT NULL ORDER BY u.group_id),
+	ARRAY(SELECT u.user_id FROM addon_users u WHERE u.addon_id = addons.id AND u.user_id IS NOT NULL ORDER BY u.user_id),
+	coalesce(network, '')`
 
 // Addons lists the scope's addons in order. The addons, their manifests
 // and settings are shared with other callers: they must not be changed.
@@ -382,6 +626,77 @@ func (s *Store) addon(ctx context.Context, db queryer, scope Scope, id accounts.
 	return scanAddon(db.QueryRow(ctx, "SELECT "+addonColumns+" FROM addons WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2", id, scope.Owner))
 }
 
+// InScope returns the addon id of the scope, read from the database:
+// ErrNotFound when it is another scope's, or no addon's.
+func (s *Store) InScope(ctx context.Context, scope Scope, id accounts.ID) (Addon, error) {
+	return s.addon(ctx, s.db, scope, id)
+}
+
+// Unread is an addon whose stored manifest predates the configure hint
+// (see HintsUnread), and whether its requests must stay on public
+// addresses (see Addon.Confined).
+type Unread struct {
+	Addon    Addon
+	Confined bool
+}
+
+// HintsUnread lists the Stremio and Eclipse addons, the server's then
+// users' own, whose stored manifest predates the configure hint, which
+// Polyfin did not keep before: their behaviorHints.configurable is yet
+// to be read (see ReadHint and SetHint).
+func (s *Store) HintsUnread(ctx context.Context) ([]Unread, error) {
+	rows, err := s.db.Query(ctx, "SELECT "+addonColumns+", "+ConfinedSQL("addons")+`
+		FROM addons WHERE NOT hints_read AND kind IN ($1, $2) ORDER BY owner_id NULLS FIRST, position, created_at`, KindStremio, KindEclipse)
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Unread, error) {
+		var u Unread
+		var err error
+		u.Addon, err = scanAddon(row, &u.Confined)
+		return u, err
+	})
+}
+
+// ReadHint downloads the manifest of addon and reads its configure hint
+// alone: nothing else of the manifest is kept. confined keeps the request
+// on public addresses (see stremio.Client).
+func (s *Store) ReadHint(ctx context.Context, addon Addon, confined bool) (bool, error) {
+	body, err := s.client.Fetch(ctx, addon.ManifestURL, addon.ManifestURL, confined)
+	if err != nil {
+		return false, err
+	}
+	var manifest struct {
+		BehaviorHints struct {
+			Configurable bool `json:"configurable"`
+		} `json:"behaviorHints"`
+	}
+	if err := json.Unmarshal(body, &manifest); err != nil {
+		return false, fmt.Errorf("%w: %v", stremio.ErrInvalidManifest, err)
+	}
+	return manifest.BehaviorHints.Configurable, nil
+}
+
+// SetHint stores the configure hint read of the addon id's manifest, and
+// marks it read. Only the hint changes: the rest of the stored manifest,
+// its libraries and when it was refreshed stay as they are. It reports
+// false, changing nothing, when the hint was stored meanwhile, by a
+// refresh or a new address, or the addon was removed.
+func (s *Store) SetHint(ctx context.Context, id accounts.ID, configurable bool) (bool, error) {
+	tag, err := s.db.Exec(ctx, `UPDATE addons SET hints_read = true,
+		manifest = CASE WHEN $2 THEN manifest || jsonb_build_object('behaviorHints',
+			coalesce(manifest->'behaviorHints', '{}'::jsonb) || '{"configurable": true}'::jsonb) ELSE manifest END
+		WHERE id = $1 AND NOT hints_read`, id, configurable)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+	s.changed()
+	return true, nil
+}
+
 // Find returns an installed addon by identifier, whoever installed it.
 // Like Addons, it is shared with other callers.
 func (s *Store) Find(ctx context.Context, id accounts.ID) (Addon, error) {
@@ -394,6 +709,21 @@ func (s *Store) Find(ctx context.Context, id accounts.ID) (Addon, error) {
 		return Addon{}, ErrNotFound
 	}
 	return addon, nil
+}
+
+// FindOwner returns an installed addon by identifier, as Find does, and
+// the user who installed it, the zero ID for one of the server's. While
+// Watch follows the changes, it is answered from memory.
+func (s *Store) FindOwner(ctx context.Context, id accounts.ID) (Addon, accounts.ID, error) {
+	snap, err := s.current(ctx)
+	if err != nil {
+		return Addon{}, accounts.ID{}, err
+	}
+	addon, ok := snap.addons[id]
+	if !ok {
+		return Addon{}, accounts.ID{}, ErrNotFound
+	}
+	return addon, snap.owners[id], nil
 }
 
 // All returns every addon installed, by anyone, in no order.
@@ -419,26 +749,31 @@ func (s *Store) Names(ctx context.Context) (map[string]string, error) {
 	}
 	names := make(map[string]string, len(snap.addons))
 	for _, addon := range snap.addons {
-		names[stremio.BaseURL(addon.ManifestURL)] = addon.Manifest.Name
+		names[stremio.BaseURL(addon.ManifestURL)] = addon.Name()
 	}
 	return names, nil
 }
 
 // fetched is a downloaded manifest: its normalized URL, the kind of addon
-// it describes, what is stored of it, and what libraries see of it.
+// it describes, what is stored of it, what libraries see of it, and the
+// network it was read from (see Network).
 type fetched struct {
 	url      string
 	kind     string
 	encoded  []byte
 	manifest stremio.Manifest
+	network  Network
 }
 
 // fetch normalizes a manifest URL and downloads the manifest, telling a
 // Stremio addon's from an Eclipse addon's by what it declares. An Eclipse
 // addon may also be given by its base address, without /manifest.json,
-// as Eclipse takes it. confined keeps the request on public addresses (see
-// stremio.Client).
-func (s *Store) fetch(ctx context.Context, rawURL string, confined bool) (fetched, error) {
+// as Eclipse takes it. confined tells a member's addon, whose manifest is
+// read from public addresses only. Any other is read where it is, on the
+// local network or on the internet, which the manifest fetched then
+// tells, known being what was told of it before (see Locate): only an
+// answer that is a manifest tells it.
+func (s *Store) fetch(ctx context.Context, rawURL string, confined bool, known Network) (fetched, error) {
 	manifestURL, err := stremio.NormalizeManifestURL(rawURL)
 	based := false
 	if errors.Is(err, stremio.ErrInvalidManifestURL) {
@@ -449,6 +784,21 @@ func (s *Store) fetch(ctx context.Context, rawURL string, confined bool) (fetche
 	if err != nil {
 		return fetched{}, err
 	}
+	readCtx := ctx
+	if !confined {
+		readCtx = stremio.Locating(ctx)
+	}
+	f, network, err := Locate(ctx, manifestURL, confined, known, func(confined bool) (fetched, error) {
+		return s.read(readCtx, manifestURL, based, confined)
+	})
+	f.network = network
+	return f, err
+}
+
+// read downloads the manifest at manifestURL, confined to public
+// addresses or else from local addresses only (see stremio.Client), based
+// telling an address given as an Eclipse addon's base address.
+func (s *Store) read(ctx context.Context, manifestURL string, based, confined bool) (fetched, error) {
 	body, err := s.client.Fetch(ctx, manifestURL, manifestURL, confined)
 	switch {
 	case errors.Is(err, stremio.ErrNotFound):
@@ -502,10 +852,22 @@ func eclipseManifestURL(raw string) (string, bool) {
 }
 
 // Install adds an addon at the end of the scope and enables some of its
-// catalogs as libraries (see enableDefaults).
+// catalogs as libraries (see enableDefaults). A server addon is used by
+// everyone. confined tells a member installs it: its manifest is read
+// from public addresses only. An administrator's is read where it is,
+// which the addon keeps (see Addon.Network).
 func (s *Store) Install(ctx context.Context, scope Scope, rawURL string, confined bool) (Addon, error) {
+	return s.InstallFor(ctx, scope, rawURL, confined, UsedBy{})
+}
+
+// InstallFor is Install for a server addon used by usedBy from the start
+// (see WriteUsedBy).
+func (s *Store) InstallFor(ctx context.Context, scope Scope, rawURL string, confined bool, usedBy UsedBy) (Addon, error) {
+	if usedBy.Listed && scope.Owner != nil {
+		return Addon{}, ErrInvalidUsedBy
+	}
 	defer s.changed()
-	f, err := s.fetch(ctx, rawURL, confined)
+	f, err := s.fetch(ctx, rawURL, confined, "")
 	if err != nil {
 		return Addon{}, err
 	}
@@ -514,9 +876,9 @@ func (s *Store) Install(ctx context.Context, scope Scope, rawURL string, confine
 		if err := lockScope(ctx, tx, scope); err != nil {
 			return err
 		}
-		addon, err = scanAddon(tx.QueryRow(ctx, `INSERT INTO addons (owner_id, kind, manifest_url, manifest, position)
-			VALUES ($1, $2, $3, $4, (SELECT coalesce(max(position), 0) + 1 FROM addons WHERE owner_id IS NOT DISTINCT FROM $1))
-			RETURNING `+addonColumns, scope.Owner, f.kind, f.url, f.encoded))
+		addon, err = scanAddon(tx.QueryRow(ctx, `INSERT INTO addons (owner_id, kind, manifest_url, manifest, position, network)
+			VALUES ($1, $2, $3, $4, (SELECT coalesce(max(position), 0) + 1 FROM addons WHERE owner_id IS NOT DISTINCT FROM $1), $5)
+			RETURNING `+addonColumns, scope.Owner, f.kind, f.url, f.encoded, f.network.stored()))
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return ErrExists
@@ -524,9 +886,121 @@ func (s *Store) Install(ctx context.Context, scope Scope, rawURL string, confine
 		if err != nil {
 			return err
 		}
+		if usedBy.Listed {
+			if addon.UsedBy, err = WriteUsedBy(ctx, tx, addon.ID, usedBy); err != nil {
+				return err
+			}
+		}
 		return enableDefaults(ctx, tx, scope, addon)
 	})
 	return addon, err
+}
+
+// WriteUsedBy sets, in tx, who uses the server addon id, as SetUsedBy
+// does, and returns the setting as stored: each group and user once, in
+// order, and no list for everyone. Polyfin's own sources call it from
+// the setup they give Create, as they are added.
+func WriteUsedBy(ctx context.Context, tx pgx.Tx, id accounts.ID, usedBy UsedBy) (UsedBy, error) {
+	stored := UsedBy{Listed: usedBy.Listed, Groups: []accounts.ID{}, Users: []accounts.ID{}}
+	if usedBy.Listed {
+		stored.Groups, stored.Users = sortedIDs(usedBy.Groups), sortedIDs(usedBy.Users)
+	}
+	mode := "everyone"
+	if stored.Listed {
+		mode = "listed"
+	}
+	tag, err := tx.Exec(ctx, "UPDATE addons SET used_by = $2 WHERE id = $1 AND owner_id IS NULL", id, mode)
+	if err != nil {
+		return UsedBy{}, err
+	}
+	if tag.RowsAffected() == 0 {
+		return UsedBy{}, ErrNotFound
+	}
+	if _, err := tx.Exec(ctx, "DELETE FROM addon_users WHERE addon_id = $1", id); err != nil {
+		return UsedBy{}, err
+	}
+	// The rows are written in the order of their keys, groups then users,
+	// as concurrent writers take them.
+	_, err = tx.Exec(ctx, `INSERT INTO addon_users (addon_id, group_id, user_id)
+		SELECT $1::uuid, g, NULL::uuid FROM unnest($2::uuid[]) g UNION ALL SELECT $1::uuid, NULL::uuid, u FROM unnest($3::uuid[]) u`,
+		id, stored.Groups, stored.Users)
+	var pgErr *pgconn.PgError
+	if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+		return UsedBy{}, ErrInvalidUsedBy
+	}
+	return stored, err
+}
+
+// sortedIDs returns ids sorted, each once.
+func sortedIDs(ids []accounts.ID) []accounts.ID {
+	sorted := append([]accounts.ID{}, ids...)
+	slices.SortFunc(sorted, func(a, b accounts.ID) int { return bytes.Compare(a[:], b[:]) })
+	return slices.Compact(sorted)
+}
+
+// SetUsedBy sets who uses one of the server's addons: everyone, or only
+// the groups and users listed. It answers ErrNotFound for an addon that
+// is not the server's, and ErrInvalidUsedBy for a group or a user that
+// does not exist.
+func (s *Store) SetUsedBy(ctx context.Context, id accounts.ID, usedBy UsedBy) (Addon, error) {
+	defer s.changed()
+	var addon Addon
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		stored, err := WriteUsedBy(ctx, tx, id, usedBy)
+		if err != nil {
+			return err
+		}
+		addon, err = s.addon(ctx, tx, Shared(), id)
+		addon.UsedBy = stored
+		return err
+	})
+	return addon, err
+}
+
+// SetGroupUse lists the group among those who use the server addon id,
+// or takes it off the list, leaving the rest of its Used by as it is:
+// two changes made at once, to one addon or to two, both stay. It
+// reports whether the list changed, and answers ErrNotFound for an addon
+// that is not the server's, ErrUsedByEveryone, changing nothing, for one
+// used by everyone, and ErrInvalidUsedBy for a group that does not
+// exist.
+func (s *Store) SetGroupUse(ctx context.Context, id, group accounts.ID, uses bool) (Addon, bool, error) {
+	defer s.changed()
+	var addon Addon
+	var changed bool
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		// The addon's row is locked first, as WriteUsedBy's update does:
+		// a change of its whole setting waits, or is waited for.
+		var listed bool
+		err := tx.QueryRow(ctx, "SELECT used_by = 'listed' FROM addons WHERE id = $1 AND owner_id IS NULL FOR UPDATE", id).Scan(&listed)
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrNotFound
+		}
+		if err != nil {
+			return err
+		}
+		if !listed {
+			return ErrUsedByEveryone
+		}
+		var tag pgconn.CommandTag
+		if uses {
+			tag, err = tx.Exec(ctx, `INSERT INTO addon_users (addon_id, group_id) VALUES ($1, $2)
+				ON CONFLICT (addon_id, group_id) WHERE group_id IS NOT NULL DO NOTHING`, id, group)
+		} else {
+			tag, err = tx.Exec(ctx, "DELETE FROM addon_users WHERE addon_id = $1 AND group_id = $2", id, group)
+		}
+		var pgErr *pgconn.PgError
+		if errors.As(err, &pgErr) && pgErr.Code == "23503" {
+			return ErrInvalidUsedBy
+		}
+		if err != nil {
+			return err
+		}
+		changed = tag.RowsAffected() > 0
+		addon, err = s.addon(ctx, tx, Shared(), id)
+		return err
+	})
+	return addon, changed, err
 }
 
 // Create adds an IPTV source or a local folder of kind at the end of the
@@ -542,10 +1016,16 @@ func (s *Store) Create(ctx context.Context, scope Scope, kind, address string, b
 		if err := lockScope(ctx, tx, scope); err != nil {
 			return err
 		}
+		// A local folder is on the server itself; any other source tells
+		// where it is with its list (see SetNetwork).
+		var network Network
+		if kind == KindLocal {
+			network = NetworkLocal
+		}
 		var id accounts.ID
-		err := tx.QueryRow(ctx, `INSERT INTO addons (owner_id, kind, manifest_url, manifest, position)
-			VALUES ($1, $2, $3, '{}', (SELECT coalesce(max(position), 0) + 1 FROM addons WHERE owner_id IS NOT DISTINCT FROM $1))
-			RETURNING id`, scope.Owner, kind, address).Scan(&id)
+		err := tx.QueryRow(ctx, `INSERT INTO addons (owner_id, kind, manifest_url, manifest, position, network)
+			VALUES ($1, $2, $3, '{}', (SELECT coalesce(max(position), 0) + 1 FROM addons WHERE owner_id IS NOT DISTINCT FROM $1), $4)
+			RETURNING id`, scope.Owner, kind, address, network.stored()).Scan(&id)
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return ErrExists
@@ -572,8 +1052,8 @@ func (s *Store) Create(ctx context.Context, scope Scope, kind, address string, b
 				continue
 			}
 			last++
-			if _, err := tx.Exec(ctx, "INSERT INTO libraries (addon_id, catalog_type, catalog_id, position) VALUES ($1, $2, $3, $4)",
-				addon.ID, catalog.Type, catalog.ID, last); err != nil {
+			if _, err := tx.Exec(ctx, "INSERT INTO libraries (addon_id, catalog_type, catalog_id, position, image) VALUES ($1, $2, $3, $4, $5)",
+				addon.ID, catalog.Type, catalog.ID, last, NewLibraryImage(catalog.Type)); err != nil {
 				return err
 			}
 		}
@@ -585,7 +1065,7 @@ func (s *Store) Create(ctx context.Context, scope Scope, kind, address string, b
 // Update changes an IPTV source's or a local folder's address and
 // manifest, keeping its libraries: a catalog whose type changes, its
 // identifier kept, keeps its library, and the library its identifier (see
-// Library.KeyType). setup stores, in the same transaction, what changes
+// Library.Key). setup stores, in the same transaction, what changes
 // with them. It answers ErrNotFound for an addon of another kind.
 func (s *Store) Update(ctx context.Context, scope Scope, id accounts.ID, kind, address string, manifest stremio.Manifest,
 	setup func(pgx.Tx) error) (Addon, error) {
@@ -597,9 +1077,9 @@ func (s *Store) Update(ctx context.Context, scope Scope, id accounts.ID, kind, a
 	var addon Addon
 	err = pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
 		var raw []byte
-		var keyTypes map[string]string
-		err := tx.QueryRow(ctx, "SELECT manifest, library_key_types FROM addons WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 AND kind = $3 FOR UPDATE",
-			id, scope.Owner, kind).Scan(&raw, &keyTypes)
+		var keys []KeptKey
+		err := tx.QueryRow(ctx, "SELECT manifest, library_keys FROM addons WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 AND kind = $3 FOR UPDATE",
+			id, scope.Owner, kind).Scan(&raw, &keys)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -610,11 +1090,13 @@ func (s *Store) Update(ctx context.Context, scope Scope, id accounts.ID, kind, a
 		if err := json.Unmarshal(raw, &old); err != nil {
 			return err
 		}
-		if keyTypes, err = retypeLibraries(ctx, tx, scope, id, old, manifest, keyTypes); err != nil {
+		moved, err := retypeLibraries(ctx, tx, scope, id, old, manifest)
+		if err != nil {
 			return err
 		}
-		addon, err = scanAddon(tx.QueryRow(ctx, `UPDATE addons SET manifest_url = $3, manifest = $4, library_key_types = $5, refreshed_at = now()
-			WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 RETURNING `+addonColumns, id, scope.Owner, address, encoded, keyTypes))
+		addon, err = scanAddon(tx.QueryRow(ctx, `UPDATE addons SET manifest_url = $3, manifest = $4, library_keys = $5, refreshed_at = now()
+			WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 RETURNING `+addonColumns, id, scope.Owner, address, encoded,
+			settleKeys(keys, manifest, moved)))
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return ErrExists
@@ -629,41 +1111,37 @@ func (s *Store) Update(ctx context.Context, scope Scope, id accounts.ID, kind, a
 
 // retypeLibraries moves, in tx, the libraries of an addon's catalogs
 // whose type changes from manifest old to manifest, their identifiers
-// kept, to their new type, and returns the addon's LibraryKeyTypes, from
-// keyTypes, that keep the libraries' identifiers.
-func retypeLibraries(ctx context.Context, tx pgx.Tx, scope Scope, id accounts.ID, old, manifest stremio.Manifest,
-	keyTypes map[string]string) (map[string]string, error) {
-	if keyTypes == nil {
-		keyTypes = map[string]string{}
-	}
-	locked := false
+// kept, to their new type, and returns the catalogs moved, by their new
+// key, with the key each had (see settleKeys).
+func retypeLibraries(ctx context.Context, tx pgx.Tx, scope Scope, id accounts.ID, old, manifest stremio.Manifest) (map[CatalogKey]CatalogKey, error) {
+	moved := map[CatalogKey]CatalogKey{}
 	for _, before := range old.Catalogs {
 		if _, kept := manifest.Catalog(before.Type, before.ID); kept {
 			continue
 		}
-		i := slices.IndexFunc(manifest.Catalogs, func(c stremio.Catalog) bool { return c.ID == before.ID })
+		i := slices.IndexFunc(manifest.Catalogs, func(c stremio.Catalog) bool {
+			_, existed := old.Catalog(c.Type, c.ID)
+			return c.ID == before.ID && !existed
+		})
 		if i < 0 {
 			continue
 		}
-		if !locked {
+		after := CatalogKey{Type: manifest.Catalogs[i].Type, ID: before.ID}
+		if _, taken := moved[after]; taken {
+			continue
+		}
+		if len(moved) == 0 {
 			if err := lockScope(ctx, tx, scope); err != nil {
 				return nil, err
 			}
-			locked = true
 		}
-		after := manifest.Catalogs[i].Type
 		if _, err := tx.Exec(ctx, "UPDATE libraries SET catalog_type = $4 WHERE addon_id = $1 AND catalog_type = $2 AND catalog_id = $3",
-			id, before.Type, before.ID, after); err != nil {
+			id, before.Type, before.ID, after.Type); err != nil {
 			return nil, err
 		}
-		first := cmp.Or(keyTypes[before.ID], before.Type)
-		if first == after {
-			delete(keyTypes, before.ID)
-		} else {
-			keyTypes[before.ID] = first
-		}
+		moved[after] = CatalogKey{Type: before.Type, ID: before.ID}
 	}
-	return keyTypes, nil
+	return moved, nil
 }
 
 // SyncCatalogs replaces an IPTV source's manifest, in tx, as its options
@@ -709,20 +1187,16 @@ func SyncCatalogs(ctx context.Context, tx pgx.Tx, id accounts.ID, manifest strem
 			continue
 		}
 		last++
-		if _, err := tx.Exec(ctx, "INSERT INTO libraries (addon_id, catalog_type, catalog_id, position) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-			id, catalog.Type, catalog.ID, last); err != nil {
+		if _, err := tx.Exec(ctx, "INSERT INTO libraries (addon_id, catalog_type, catalog_id, position, image) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+			id, catalog.Type, catalog.ID, last, NewLibraryImage(catalog.Type)); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-// enableDefaults makes libraries of a new addon's catalogs. An addon that
-// groups its catalogs into collections already says how to organize them:
-// its browsable collection catalogs become the libraries.
-// Otherwise its browsable movie, series and live TV catalogs do, or an
-// Eclipse addon's catalog rows, else, for one declaring none, its
-// eclipse.MyMusic, until the scope has DefaultLibraries.
+// enableDefaults makes libraries of a new addon's catalogs, those
+// EnabledByDefault, until the scope has DefaultLibraries.
 func enableDefaults(ctx context.Context, tx pgx.Tx, scope Scope, addon Addon) error {
 	var count, last int
 	err := tx.QueryRow(ctx, `SELECT count(*), coalesce(max(l.position), 0) FROM libraries l
@@ -730,32 +1204,39 @@ func enableDefaults(ctx context.Context, tx pgx.Tx, scope Scope, addon Addon) er
 	if err != nil {
 		return err
 	}
-	wanted := func(catalog stremio.Catalog) bool {
-		return catalog.Type == "movie" || catalog.Type == "series" || catalog.Type == "tv"
-	}
-	if addon.HasMusic() {
-		rowless := len(addon.Music.Catalogs) == 0
-		wanted = func(catalog stremio.Catalog) bool {
-			return eclipse.CatalogType(catalog.Type) && (catalog.ID != eclipse.MyMusic || rowless)
-		}
-	} else if slices.ContainsFunc(addon.Manifest.Catalogs, func(c stremio.Catalog) bool { return c.Type == "collection" && c.Browsable() }) {
-		wanted = func(catalog stremio.Catalog) bool { return catalog.Type == "collection" }
-	}
 	for _, catalog := range addon.Manifest.Catalogs {
 		if count >= DefaultLibraries {
 			break
 		}
-		if !catalog.Browsable() || !wanted(catalog) {
+		if !addon.EnabledByDefault(catalog) {
 			continue
 		}
 		last++
 		count++
-		if _, err := tx.Exec(ctx, "INSERT INTO libraries (addon_id, catalog_type, catalog_id, position) VALUES ($1, $2, $3, $4) ON CONFLICT DO NOTHING",
-			addon.ID, catalog.Type, catalog.ID, last); err != nil {
+		if _, err := tx.Exec(ctx, "INSERT INTO libraries (addon_id, catalog_type, catalog_id, position, image) VALUES ($1, $2, $3, $4, $5) ON CONFLICT DO NOTHING",
+			addon.ID, catalog.Type, catalog.ID, last, NewLibraryImage(catalog.Type)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// EnabledByDefault reports whether installing the addon makes a library of
+// catalog while its scope has fewer than DefaultLibraries. An addon that
+// groups its catalogs into collections already says how to organize them:
+// its browsable collection catalogs become the libraries. Otherwise its
+// browsable movie, series and live TV catalogs do, or an Eclipse addon's
+// catalog rows, else, for one declaring none, its eclipse.MyMusic.
+func (a Addon) EnabledByDefault(catalog stremio.Catalog) bool {
+	switch {
+	case !catalog.Browsable():
+		return false
+	case a.HasMusic():
+		return eclipse.CatalogType(catalog.Type) && (catalog.ID != eclipse.MyMusic || len(a.Music.Catalogs) == 0)
+	case slices.ContainsFunc(a.Manifest.Catalogs, func(c stremio.Catalog) bool { return c.Type == "collection" && c.Browsable() }):
+		return catalog.Type == "collection"
+	}
+	return catalog.Type == "movie" || catalog.Type == "series" || catalog.Type == "tv"
 }
 
 // lockScope serializes changes to the order of a scope's addons and
@@ -792,6 +1273,28 @@ func (s *Store) SetLanguage(ctx context.Context, scope Scope, id accounts.ID, la
 	if errors.Is(err, ErrNotFound) && language != "" {
 		if _, findErr := s.addon(ctx, s.db, scope, id); findErr == nil {
 			return Addon{}, ErrInvalidLanguage
+		}
+	}
+	return addon, err
+}
+
+// SetName gives a Stremio or Eclipse addon a name of its own, trimmed, of
+// 1 to MaxNameLength printable characters; an empty name, or its
+// manifest's, gives it back its manifest's name, which it then follows.
+// Two addons may share a name. Polyfin's own sources are named by their
+// own settings: ErrNotRenamable refuses them.
+func (s *Store) SetName(ctx context.Context, scope Scope, id accounts.ID, name string) (Addon, error) {
+	name = strings.TrimSpace(name)
+	if !validName(name) {
+		return Addon{}, ErrInvalidName
+	}
+	defer s.changed()
+	addon, err := scanAddon(s.db.QueryRow(ctx, `UPDATE addons SET name = nullif(nullif($3, ''), manifest->>'name')
+		WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 AND kind IN ($4, $5) RETURNING `+addonColumns,
+		id, scope.Owner, name, KindStremio, KindEclipse))
+	if errors.Is(err, ErrNotFound) {
+		if _, findErr := s.addon(ctx, s.db, scope, id); findErr == nil {
+			return Addon{}, ErrNotRenamable
 		}
 	}
 	return addon, err
@@ -845,53 +1348,100 @@ func (s *Store) SetSettings(ctx context.Context, scope Scope, id accounts.ID, va
 }
 
 // Replace installs a new manifest URL for an addon, keeping the libraries
-// whose catalogs still exist. The address must serve the same kind of
-// addon: a Stremio addon stays one, and so does an Eclipse addon.
-func (s *Store) Replace(ctx context.Context, scope Scope, id accounts.ID, rawURL string, confined bool) (Addon, error) {
+// whose catalogs still exist or were renamed (see matchRenames), and tells
+// which libraries followed a new identifier and which were removed. The
+// address must serve the same kind of addon: a Stremio addon stays one,
+// and so does an Eclipse addon. Where the addon is is told anew, by the
+// new address (see Install).
+func (s *Store) Replace(ctx context.Context, scope Scope, id accounts.ID, rawURL string, confined bool) (Addon, CatalogChanges, error) {
 	addon, err := s.addon(ctx, s.db, scope, id)
 	if err != nil {
-		return Addon{}, err
+		return Addon{}, CatalogChanges{}, err
 	} else if !addon.Stremio() && !addon.Eclipse() {
-		return Addon{}, ErrNotStremio
+		return Addon{}, CatalogChanges{}, ErrNotStremio
 	}
-	f, err := s.fetch(ctx, rawURL, confined)
+	f, err := s.fetch(ctx, rawURL, confined, "")
 	if err != nil {
-		return Addon{}, err
+		return Addon{}, CatalogChanges{}, err
 	}
 	if f.kind != addon.Kind {
-		return Addon{}, ErrKindChanged
+		return Addon{}, CatalogChanges{}, ErrKindChanged
 	}
-	return s.store(ctx, scope, id, f)
+	return s.store(ctx, scope, id, f, 0)
 }
 
-// Refresh downloads an addon's manifest again.
-func (s *Store) Refresh(ctx context.Context, scope Scope, id accounts.ID, confined bool) (Addon, error) {
+// Refresh downloads an addon's manifest again, and tells which libraries
+// followed a new identifier and which were removed, as Replace does.
+// Where the addon is is told again: one that no longer answers on the
+// network it was on is read from the other (see Locate).
+func (s *Store) Refresh(ctx context.Context, scope Scope, id accounts.ID, confined bool) (Addon, CatalogChanges, error) {
+	return s.refresh(ctx, scope, id, confined, 0)
+}
+
+// refresh is Refresh, but for confirmAfter: unless zero, the manifest is
+// held while it would remove a library whose catalog was first found
+// missing less than confirmAfter ago (see holdRemovals).
+func (s *Store) refresh(ctx context.Context, scope Scope, id accounts.ID, confined bool, confirmAfter time.Duration) (Addon, CatalogChanges, error) {
 	addon, err := s.addon(ctx, s.db, scope, id)
 	if err != nil {
-		return Addon{}, err
+		return Addon{}, CatalogChanges{}, err
 	}
 	if !addon.Stremio() && !addon.Eclipse() {
-		return Addon{}, ErrNotStremio
+		return Addon{}, CatalogChanges{}, ErrNotStremio
 	}
-	f, err := s.fetch(ctx, addon.ManifestURL, confined)
+	f, err := s.fetch(ctx, addon.ManifestURL, confined, addon.Network)
 	if err != nil {
-		return Addon{}, err
+		return Addon{}, CatalogChanges{}, err
 	}
 	if f.kind != addon.Kind {
-		return Addon{}, ErrKindChanged
+		return Addon{}, CatalogChanges{}, ErrKindChanged
 	}
-	return s.store(ctx, scope, id, f)
+	return s.store(ctx, scope, id, f, confirmAfter)
 }
 
 // store saves a manifest downloaded again: a new address, or a refresh.
-func (s *Store) store(ctx context.Context, scope Scope, id accounts.ID, f fetched) (Addon, error) {
-	defer s.changed()
+// The library of a catalog renamed follows its new identifier, keeping its
+// own, and what names the catalog follows it too (see SetCarry); the
+// library of a catalog gone is removed, unless confirmAfter holds the
+// manifest (see refresh). Once stored, no catalog of the addon is missing.
+func (s *Store) store(ctx context.Context, scope Scope, id accounts.ID, f fetched, confirmAfter time.Duration) (Addon, CatalogChanges, error) {
+	var changes CatalogChanges
+	// A manifest held stores nothing apps see.
+	defer func() {
+		if len(changes.Held) == 0 {
+			s.changed()
+		}
+	}()
 	manifestURL, encoded, manifest := f.url, f.encoded, f.manifest
 	var addon Addon
+	var after func()
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
-		var err error
-		addon, err = scanAddon(tx.QueryRow(ctx, `UPDATE addons SET manifest_url = $3, manifest = $4, refreshed_at = now()
-			WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 RETURNING `+addonColumns, id, scope.Owner, manifestURL, encoded))
+		old, err := scanAddon(tx.QueryRow(ctx, "SELECT "+addonColumns+" FROM addons WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 FOR UPDATE",
+			id, scope.Owner))
+		if err != nil {
+			return err
+		}
+		renames := matchRenames(old.Manifest, manifest)
+		if confirmAfter > 0 {
+			held, err := holdRemovals(ctx, tx, old, manifest, renames, confirmAfter)
+			if err != nil {
+				return err
+			}
+			if len(held) > 0 {
+				addon, changes = old, CatalogChanges{Held: held}
+				return nil
+			}
+		}
+		moved := make(map[CatalogKey]CatalogKey, len(renames))
+		for _, r := range renames {
+			moved[CatalogKey{Type: r.CatalogType, ID: r.To}] = CatalogKey{Type: r.CatalogType, ID: r.From}
+		}
+		// The manifest downloaded holds the configure hint: no background
+		// read of it is left to make (see HintsUnread).
+		addon, err = scanAddon(tx.QueryRow(ctx, `UPDATE addons SET manifest_url = $3, manifest = $4, library_keys = $5, refreshed_at = now(),
+			hints_read = true, network = $6
+			WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 RETURNING `+addonColumns, id, scope.Owner, manifestURL, encoded,
+			settleKeys(old.LibraryKeys, manifest, moved), f.network.stored()))
 		var pgErr *pgconn.PgError
 		if errors.As(err, &pgErr) && pgErr.Code == "23505" {
 			return ErrExists
@@ -899,39 +1449,83 @@ func (s *Store) store(ctx context.Context, scope Scope, id accounts.ID, f fetche
 		if err != nil {
 			return err
 		}
-		// Forget libraries whose catalog the addon no longer offers.
-		rows, err := tx.Query(ctx, "SELECT catalog_type, catalog_id FROM libraries WHERE addon_id = $1", id)
-		if err != nil {
+		if changes, err = followLibraries(ctx, tx, scope, old, manifest, renames); err != nil {
 			return err
 		}
-		var catalogType, catalogID string
-		var gone [][2]string
-		if _, err := pgx.ForEachRow(rows, []any{&catalogType, &catalogID}, func() error {
-			if _, ok := manifest.Catalog(catalogType, catalogID); !ok {
-				gone = append(gone, [2]string{catalogType, catalogID})
-			}
-			return nil
-		}); err != nil {
+		if _, err := tx.Exec(ctx, "DELETE FROM missing_catalogs WHERE addon_id = $1", id); err != nil {
 			return err
 		}
-		for _, key := range gone {
-			if _, err := tx.Exec(ctx, "DELETE FROM libraries WHERE addon_id = $1 AND catalog_type = $2 AND catalog_id = $3", id, key[0], key[1]); err != nil {
+		// What was kept of the addon follows where it is now.
+		if addon.Network != old.Network {
+			if err := s.reconfined(ctx, tx, &id); err != nil {
 				return err
 			}
 		}
-		return nil
+		if len(renames) == 0 || s.carry == nil {
+			return nil
+		}
+		after, err = s.carry(ctx, tx, addon, renames)
+		return err
 	})
-	return addon, err
+	if err != nil {
+		return Addon{}, CatalogChanges{}, err
+	}
+	if after != nil {
+		after()
+	}
+	return addon, changes, nil
 }
 
-// Remove uninstalls an addon with its libraries.
-func (s *Store) Remove(ctx context.Context, scope Scope, id accounts.ID) error {
+// Cleanup deletes, in the transaction that removes an addon, what the
+// addon brought to the rest of the database, and returns what to forget
+// once the removal is stored (see SetCleanup).
+type Cleanup func(ctx context.Context, tx pgx.Tx, removed Addon) (after func(), err error)
+
+// SetCleanup has Remove run cleanup with each removal; the foreign keys
+// alone remove the addon's own tables.
+func (s *Store) SetCleanup(cleanup Cleanup) { s.cleanup = cleanup }
+
+// Remove uninstalls an addon with its libraries, and what the cleanup
+// set deletes with them, in one transaction, and returns it.
+func (s *Store) Remove(ctx context.Context, scope Scope, id accounts.ID) (Addon, error) {
 	defer s.changed()
-	tag, err := s.db.Exec(ctx, "DELETE FROM addons WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2", id, scope.Owner)
-	if err == nil && tag.RowsAffected() == 0 {
-		return ErrNotFound
+	var removed Addon
+	var after func()
+	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
+		var err error
+		removed, err = scanAddon(tx.QueryRow(ctx, "SELECT "+addonColumns+" FROM addons WHERE id = $1 AND owner_id IS NOT DISTINCT FROM $2 FOR UPDATE",
+			id, scope.Owner))
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, "DELETE FROM addons WHERE id = $1", id); err != nil {
+			return err
+		}
+		if s.cleanup == nil {
+			return nil
+		}
+		after, err = s.cleanup(ctx, tx, removed)
+		return err
+	})
+	if err != nil {
+		return Addon{}, err
 	}
-	return err
+	if after != nil {
+		after()
+	}
+	return removed, nil
+}
+
+// Installed returns every addon installed, by anyone, as tx reads them,
+// and holds them as they are until tx ends: a refresh, a change or a
+// removal waits for it. The cleanup of what removed addons left (see
+// library's leftovers.go) tells what is gone from them.
+func Installed(ctx context.Context, tx pgx.Tx) ([]Addon, error) {
+	rows, err := tx.Query(ctx, "SELECT "+addonColumns+" FROM addons FOR SHARE")
+	if err != nil {
+		return nil, err
+	}
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (Addon, error) { return scanAddon(row) })
 }
 
 // Reorder sets the order of the scope's addons; ids must list each of them
@@ -1002,20 +1596,22 @@ type libraryRow struct {
 	genre             *string
 	maxItems          *int
 	hideInMenus       bool
+	skipLocal         bool
+	showAs            *string
 }
 
 // libraryRows reads the libraries filter selects, l being the library
 // and a its addon, in order.
 func libraryRows(ctx context.Context, db queryer, filter string, args ...any) ([]libraryRow, error) {
 	rows, err := db.Query(ctx, `SELECT a.owner_id, l.addon_id, l.catalog_type, l.catalog_id, l.name, l.guide_channels, l.guide_matched, l.image,
-		l.genre, l.max_items, l.hide_in_menus FROM libraries l JOIN addons a ON a.id = l.addon_id`+filter+" ORDER BY l.position", args...)
+		l.genre, l.max_items, l.hide_in_menus, l.skip_local, l.show_as FROM libraries l JOIN addons a ON a.id = l.addon_id`+filter+" ORDER BY l.position", args...)
 	if err != nil {
 		return nil, err
 	}
 	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (libraryRow, error) {
 		var r libraryRow
 		err := row.Scan(&r.owner, &r.key.AddonID, &r.key.CatalogType, &r.key.CatalogID, &r.name, &r.channels, &r.matched, &r.image,
-			&r.genre, &r.maxItems, &r.hideInMenus)
+			&r.genre, &r.maxItems, &r.hideInMenus, &r.skipLocal, &r.showAs)
 		return r, err
 	})
 }
@@ -1066,9 +1662,15 @@ func listLibraries(installed []Addon, rows []libraryRow, guides []guideRow) []Li
 			continue
 		}
 		chosen[row.key] = len(enabled)
-		library := Library{AddonID: addon.ID, AddonName: addon.Manifest.Name, Catalog: catalog, KeyType: addon.LibraryKeyTypes[catalog.ID],
+		library := Library{AddonID: addon.ID, AddonName: addon.Name(), Catalog: catalog, Key: addon.LibraryKey(catalog.Type, catalog.ID),
 			Name: row.name, Enabled: true, AddonActive: addon.Enabled, Filterable: Filterable(addon, catalog), Image: row.image,
-			HideInMenus: row.hideInMenus}
+			HideInMenus: row.hideInMenus, Skippable: Skippable(addon, catalog), ShowAsChoices: ShowAsChoices(addon, catalog)}
+		library.SkipLocal = row.skipLocal && library.Skippable
+		// A choice the catalog no longer takes, its type having changed,
+		// is none.
+		if row.showAs != nil && slices.Contains(library.ShowAsChoices, *row.showAs) {
+			library.ShowAs = *row.showAs
+		}
 		// A genre the catalog no longer offers lists the whole catalog.
 		if row.genre != nil && library.Filterable && slices.Contains(GenreChoices(catalog), *row.genre) {
 			library.Genre = *row.genre
@@ -1092,9 +1694,9 @@ func listLibraries(installed []Addon, rows []libraryRow, guides []guideRow) []Li
 			if _, ok := chosen[LibraryKey{AddonID: addon.ID, CatalogType: catalog.Type, CatalogID: catalog.ID}]; ok {
 				continue
 			}
-			result = append(result, Library{AddonID: addon.ID, AddonName: addon.Manifest.Name, Catalog: catalog,
-				KeyType: addon.LibraryKeyTypes[catalog.ID], AddonActive: addon.Enabled, Filterable: Filterable(addon, catalog),
-				Image: LibraryImageNone})
+			result = append(result, Library{AddonID: addon.ID, AddonName: addon.Name(), Catalog: catalog,
+				Key: addon.LibraryKey(catalog.Type, catalog.ID), AddonActive: addon.Enabled, Filterable: Filterable(addon, catalog),
+				Skippable: Skippable(addon, catalog), ShowAsChoices: ShowAsChoices(addon, catalog), Image: NewLibraryImage(catalog.Type)})
 		}
 	}
 	return result
@@ -1103,7 +1705,11 @@ func listLibraries(installed []Addon, rows []libraryRow, guides []guideRow) []Li
 // SetLibraries replaces the scope's libraries with choices, in order. A
 // choice's genre must be one its catalog offers, and its maximum from 1 to
 // MaxLibraryItems, on a Filterable catalog; an empty genre lists the whole
-// catalog. A live TV catalog may not be hidden from the menus.
+// catalog. A live TV catalog may not be hidden from the menus, only a
+// Skippable catalog may leave out the titles local folders hold, and a
+// library shows its titles as one of its ShowAsChoices. A library given
+// no ShowAs keeps the one it had, which Polyfin may have decided (see
+// DecideShowAs).
 func (s *Store) SetLibraries(ctx context.Context, scope Scope, choices []LibraryChoice) ([]Library, error) {
 	defer s.changed()
 	for i, choice := range choices {
@@ -1154,7 +1760,8 @@ func (s *Store) SetLibraries(ctx context.Context, scope Scope, choices []Library
 			if choice.MaxItems != nil && !filterable {
 				return ErrInvalidLibraryMaxItems
 			}
-			if choice.HideInMenus && catalog.Type == "tv" {
+			if choice.HideInMenus && catalog.Type == "tv" || choice.SkipLocal && !Skippable(installed[index], catalog) ||
+				choice.ShowAs != "" && !slices.Contains(ShowAsChoices(installed[index], catalog), choice.ShowAs) {
 				return ErrInvalidLibrary
 			}
 		}
@@ -1182,12 +1789,13 @@ func (s *Store) SetLibraries(ctx context.Context, scope Scope, choices []Library
 			}
 		}
 		for position, choice := range choices {
-			if _, err := tx.Exec(ctx, `INSERT INTO libraries (addon_id, catalog_type, catalog_id, name, position, genre, max_items, hide_in_menus)
-				VALUES ($1, $2, $3, $4, $5, $6, $7, $8) ON CONFLICT (addon_id, catalog_type, catalog_id) DO UPDATE
+			if _, err := tx.Exec(ctx, `INSERT INTO libraries (addon_id, catalog_type, catalog_id, name, position, genre, max_items, hide_in_menus,
+				skip_local, show_as, image)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NULLIF($10, ''), $11) ON CONFLICT (addon_id, catalog_type, catalog_id) DO UPDATE
 				SET name = excluded.name, position = excluded.position, genre = excluded.genre, max_items = excluded.max_items,
-				hide_in_menus = excluded.hide_in_menus`,
+				hide_in_menus = excluded.hide_in_menus, skip_local = excluded.skip_local, show_as = coalesce(excluded.show_as, libraries.show_as)`,
 				choice.AddonID, choice.CatalogType, choice.CatalogID, choice.Name, position+1, choice.Genre, choice.MaxItems,
-				choice.HideInMenus); err != nil {
+				choice.HideInMenus, choice.SkipLocal, choice.ShowAs, NewLibraryImage(choice.CatalogType)); err != nil {
 				return err
 			}
 		}
@@ -1195,6 +1803,27 @@ func (s *Store) SetLibraries(ctx context.Context, scope Scope, choices []Library
 		return err
 	})
 	return result, err
+}
+
+// DecideShowAs stores how the enabled library of a catalog of other videos
+// shows its titles while none is chosen (see DecidedShowAs): it reports
+// whether it did, which it does not once an administrator or a user chose
+// one, or Polyfin decided one before. A choice the catalog no longer
+// takes, its type having changed, is none.
+func (s *Store) DecideShowAs(ctx context.Context, key LibraryKey, showAs string) (bool, error) {
+	if showAs != ShowAsHomeVideos && showAs != ShowAsMoviesAndShows {
+		return false, ErrInvalidLibrary
+	}
+	tag, err := s.db.Exec(ctx, `UPDATE libraries SET show_as = $4 WHERE addon_id = $1 AND catalog_type = $2 AND catalog_id = $3
+		AND (show_as IS NULL OR show_as NOT IN ('home_videos', 'movies_and_shows'))`, key.AddonID, key.CatalogType, key.CatalogID, showAs)
+	if err != nil {
+		return false, err
+	}
+	if tag.RowsAffected() == 0 {
+		return false, nil
+	}
+	s.changed()
+	return true, nil
 }
 
 // SetLibraryImage sets how one of the scope's enabled libraries finds its
@@ -1218,10 +1847,20 @@ func (s *Store) SetLibraryImage(ctx context.Context, scope Scope, key LibraryKey
 	return nil
 }
 
-// validGuideURL checks a guide address.
-func validGuideURL(guideURL string) bool {
-	parsed, err := url.Parse(guideURL)
-	return err == nil && (parsed.Scheme == "http" || parsed.Scheme == "https") && parsed.Host != "" && len(guideURL) <= 4096
+// GuideSource checks a guide's address and returns the one it is kept
+// under: an http or https URL of at most 4096 characters, or a file of the
+// server by its path (see serverfile.Path), which must be readable now.
+// Only an administrator's guide may be a file (see the admin API).
+func GuideSource(address string) (string, error) {
+	address = strings.TrimSpace(address)
+	if path, ok := serverfile.Path(address); ok && len(path) <= 4096 {
+		return path, serverfile.Check(path)
+	}
+	parsed, err := url.Parse(address)
+	if err != nil || parsed.Scheme != "http" && parsed.Scheme != "https" || parsed.Host == "" || len(address) > 4096 {
+		return "", ErrInvalidGuideURL
+	}
+	return address, nil
 }
 
 // lockCatalog locks one of the scope's enabled live TV catalogs in tx.
@@ -1256,8 +1895,11 @@ func catalogGuides(ctx context.Context, db queryer, key LibraryKey) ([]Guide, er
 func (s *Store) SetGuide(ctx context.Context, scope Scope, key LibraryKey, rawURL string) (bool, error) {
 	defer s.changed()
 	guideURL := strings.TrimSpace(rawURL)
-	if guideURL != "" && !validGuideURL(guideURL) {
-		return false, ErrInvalidGuideURL
+	if guideURL != "" {
+		var err error
+		if guideURL, err = GuideSource(guideURL); err != nil {
+			return false, err
+		}
 	}
 	changed := false
 	err := pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
@@ -1310,9 +1952,12 @@ func (s *Store) SetGuides(ctx context.Context, scope Scope, key LibraryKey, list
 		return nil, ErrTooManyGuides
 	}
 	for i := range list {
-		list[i].URL = strings.TrimSpace(list[i].URL)
-		if list[i].ID == nil && !validGuideURL(list[i].URL) {
-			return nil, ErrInvalidGuideURL
+		if list[i].ID == nil {
+			source, err := GuideSource(list[i].URL)
+			if err != nil {
+				return nil, err
+			}
+			list[i].URL = source
 		}
 	}
 	var added []accounts.ID
@@ -1379,15 +2024,20 @@ func recountMapped(ctx context.Context, tx pgx.Tx, key LibraryKey) error {
 	return err
 }
 
-// LiveCatalog is a live TV catalog, and what reaching it needs: Confined is
-// true when it may only reach public addresses, one of a user's own
-// catalogs unless they are an administrator.
+// LiveCatalog is a live TV catalog, and what reaching it needs. Confined
+// is true when its addon's requests, and those for the addresses its
+// answers name, may only reach public addresses (see Addon.Confined).
+// Member is true for one of a user's own catalogs when that user is no
+// administrator (see Member): what its owner gave it themselves, as its
+// guides' addresses, may only be on public addresses then, wherever its
+// addon is.
 type LiveCatalog struct {
 	Scope    Scope
 	Key      LibraryKey
 	Addon    Addon
 	Catalog  stremio.Catalog
 	Confined bool
+	Member   bool
 	Guides   []Guide
 }
 
@@ -1424,8 +2074,8 @@ func (s *Store) liveCatalogsOf(ctx context.Context, filter string, enabledOnly b
 	if enabledOnly {
 		filter += " AND a.enabled"
 	}
-	rows, err := s.db.Query(ctx, `SELECT a.id, a.kind, a.manifest_url, a.manifest, a.enabled, a.refreshed_at, a.owner_id,
-		coalesce(u.is_administrator, true), l.catalog_type, l.catalog_id
+	rows, err := s.db.Query(ctx, `SELECT a.id, a.kind, a.manifest_url, a.manifest, a.enabled, a.refreshed_at, coalesce(a.name, ''), a.owner_id,
+		coalesce(u.is_administrator, true), l.catalog_type, l.catalog_id, coalesce(a.network, '')
 		FROM libraries l JOIN addons a ON a.id = l.addon_id LEFT JOIN users u ON u.id = a.owner_id
 		WHERE l.catalog_type = 'tv' AND a.kind <> '`+KindEclipse+`'`+filter, args...)
 	if err != nil {
@@ -1436,7 +2086,7 @@ func (s *Store) liveCatalogsOf(ctx context.Context, filter string, enabledOnly b
 	var manifest []byte
 	var administrator bool
 	if _, err := pgx.ForEachRow(rows, []any{&c.Addon.ID, &c.Addon.Kind, &c.Addon.ManifestURL, &manifest, &c.Addon.Enabled,
-		&c.Addon.RefreshedAt, &c.Scope.Owner, &administrator, &c.Key.CatalogType, &c.Key.CatalogID}, func() error {
+		&c.Addon.RefreshedAt, &c.Addon.ChosenName, &c.Scope.Owner, &administrator, &c.Key.CatalogType, &c.Key.CatalogID, &c.Addon.Network}, func() error {
 		c.Addon.Manifest = stremio.Manifest{}
 		if err := json.Unmarshal(manifest, &c.Addon.Manifest); err != nil {
 			return err
@@ -1446,9 +2096,8 @@ func (s *Store) liveCatalogsOf(ctx context.Context, filter string, enabledOnly b
 			return nil
 		}
 		c.Key.AddonID, c.Catalog = c.Addon.ID, catalog
-		// The server's addons were installed by an administrator; a user's
-		// own may only reach the local network if that user is one.
-		c.Confined = c.Scope.Owner != nil && !administrator
+		c.Member = Member(c.Scope, administrator)
+		c.Confined = c.Addon.Confined(c.Member)
 		result = append(result, c)
 		return nil
 	}); err != nil {

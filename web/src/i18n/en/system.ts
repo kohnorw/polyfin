@@ -33,13 +33,10 @@ const system = {
       title: 'Schedule',
       description: 'The server’s tasks, the recordings ahead, and the next Live TV refreshes.',
       tasksTitle: 'Tasks',
-      task: 'Task',
       lastRun: 'Last run',
       nextRun: 'Next run',
-      notRunYet: 'Not run since the server started',
+      notRunYet: 'Not run yet',
       byHandOnly: 'Run by hand only',
-      every: (span: string) => `Interval: ${span}`,
-      daily: (time: string) => `Every day at ${time}, server time`,
       took: (span: string) => `took ${span}`,
       results: {
         Completed: 'Completed',
@@ -53,6 +50,45 @@ const system = {
       stop: 'Stop',
       stopLabel: (name: string) => `Stop ${name}`,
       started: (name: string) => `${name} started.`,
+      triggersButton: 'Triggers',
+      triggersLabel: (name: string) => `Change the triggers of ${name}`,
+      triggers: {
+        title: (name: string) => `Triggers: ${name}`,
+        serverTime: 'Times are in the server’s time zone.',
+        none: 'No trigger: this task runs by hand only.',
+        keepOne: 'This task needs at least one trigger.',
+        locked: {
+          settings: 'This task’s schedule is fixed: it follows its settings.',
+          recordings: 'This task’s schedule is fixed: series recordings rely on it.',
+          notifications:
+            'This task’s schedule is fixed: the summary is sent on its own, as Settings › Notifications sets.',
+          byHand: 'This task’s schedule is fixed: it runs only when started by hand.',
+        },
+        daily: (time: string) => `Every day at ${time}`,
+        weekly: (day: string, _index: number, time: string) => `Every ${day} at ${time}`,
+        interval: (count: number, unit: 'minute' | 'hour' | 'day') =>
+          count === 1 ? `Every ${unit}` : `Every ${count} ${unit}s`,
+        startup: 'At startup',
+        stopsAfter: (span: string) => `Stops after ${span}`,
+        remove: 'Remove',
+        removeLabel: (trigger: string) => `Remove the trigger “${trigger}”`,
+        add: 'Add a trigger',
+        type: 'When',
+        types: {
+          daily: 'Every day',
+          weekly: 'Every week',
+          interval: 'At an interval',
+          startup: 'At startup',
+        },
+        time: 'Time',
+        day: 'Day',
+        intervalLabel: 'Interval',
+        duplicate: 'This trigger is in the list already.',
+        full: (max: number) => `A task has ${max} triggers at most.`,
+        reset: 'Reset to defaults',
+        saved: (name: string) => `Triggers saved: ${name}`,
+        resetDone: (name: string) => `Default triggers restored: ${name}`,
+      },
       autoRefresh: 'Updates every 5 seconds.',
       recordingsTitle: 'Upcoming recordings',
       recordingsOff: 'Recording is off. Turn it on under Settings › Recordings.',
@@ -62,9 +98,6 @@ const system = {
       series: 'Series',
       scheduledBy: (name: string) => `Scheduled by ${name}`,
       unknownChannel: 'Channel not found',
-      tunersShort: 'Not enough tuners',
-      tunersShortHelp:
-        'More recordings on this tuner’s channels than it has tuners run at the same time: one of them may fail.',
       refreshesTitle: 'Live TV refreshes',
       refreshesHelp: (hours: number) =>
         `IPTV channel lists and programme guides, the server’s and users’ own, are downloaded again every ${hours} h (Settings › Live TV), by the “Refresh Live TV guides” task.`,
@@ -90,20 +123,61 @@ const system = {
       owner: { server: 'Server', user: (name: string) => `${name}’s addons` },
       description:
         'How the server and its sources are doing, from what Polyfin already records: this page sends no request to them.',
-      problemsTitle: 'Needs attention',
+      problemsTitle: 'To look at',
       allGood: 'No problem found.',
       update: (version: string) => `Polyfin ${version} is available`,
       updateRunning: (version: string) => `This server runs version ${version}.`,
+      updateKind: 'Update',
       releaseNotes: 'Release notes',
       checkedAt: (time: string) => `Checked at ${time}. Updates every 10 seconds.`,
       ok: 'OK',
-      warning: 'Warning',
-      error: 'Error',
+      problemAction: {
+        details: 'Show the details',
+        settings: 'Open the settings',
+        sources: 'Open Sources',
+        source: 'Open the source',
+        user: 'Open the user',
+        schedule: 'Open the schedule',
+        open: 'Open',
+      },
+      checksTitle: 'Checks',
+      moreTitle: 'Also on this page',
+      checks: {
+        summary: (total: number, parts: string[]) =>
+          `${total === 1 ? '1 check' : `${total} checks`}${parts.length > 0 ? ` · ${parts.join(', ')}` : ''}`,
+        fineCount: (count: number) => `${count} fine`,
+        failingCount: (count: number) => `${count} failing`,
+        quietCount: (count: number) => `${count} off or waiting`,
+        none: 'None',
+        off: 'Off',
+        ready: 'Ready',
+        full: 'Full',
+        fine: 'Fine',
+        encrypted: 'Encrypted',
+        notEncrypted: 'Not encrypted',
+        keySet: 'Secret key set',
+        keyNotSet: 'No secret key',
+        processor: 'Processor only',
+        databaseSize: 'Size on disk',
+        details: 'Details',
+        openSettings: 'Settings › Backups',
+        noKey: 'No TMDB key',
+        held: 'Paused',
+        unknown: 'The server tells nothing of this part now.',
+        addons: (count: number) => (count === 1 ? '1 addon' : `${count} addons`),
+        iptv: (count: number) => (count === 1 ? '1 IPTV source' : `${count} IPTV sources`),
+        guides: (count: number) =>
+          count === 1 ? '1 programme guide' : `${count} programme guides`,
+        moreFolders: (folder: string, more: number) => `${folder} and ${more} more`,
+        versionUptime: (version: string, span: string) => `${version} · running for ${span}`,
+      },
       problems: {
         database: 'The database does not answer.',
         disk: (folder: string, free: string) =>
           `Little space left for the ${folder}: ${free} free.`,
         addon: (name: string, failure: string) => `${name}: ${failure}`,
+        addonTimingOut: (name: string, until: string) =>
+          `${name} does not answer in time when asked for versions: Polyfin’s background requests to its server pause until ${until}. Plays still ask it. If it gathers other addons’ versions, turn off the one that no longer answers there, or shorten how long it waits for them; otherwise turn it off.`,
         iptv: (name: string) => `${name}: the last channel list download failed.`,
         tuner: (name: string) => `${name}: the tuner failed to play a channel.`,
         tunerUnreachable: (name: string) => `${name}: the tuner does not answer.`,
@@ -116,6 +190,10 @@ const system = {
           `${name}: the network share refuses Polyfin’s user or password.`,
         shareHostKey: (name: string) =>
           `${name}: the SFTP server offers another host key than the one saved, and Polyfin refuses it until it is accepted.`,
+        shareTooLarge: (name: string) =>
+          `${name}: this network share holds more than Polyfin reads in one scan. Its page tells which limit it met.`,
+        shareTooSlow: (name: string) =>
+          `${name}: a scan of this network share lasted more than 12 hours and was stopped. The next scan goes on from there.`,
         folderWatchLimit: (name: string) =>
           `${name}: Polyfin cannot watch this local folder for changes: the system’s limit of watched folders is reached. It is still scanned on its schedule. Raise fs.inotify.max_user_watches on the host.`,
         folderInstanceLimit: (name: string) =>
@@ -130,14 +208,32 @@ const system = {
           `${name}: Polyfin cannot watch this network share for changes: it refuses Polyfin’s user or password. Check them, and enter them again.`,
         shareUnwatched: (name: string) =>
           `${name}: Polyfin cannot watch this network share for changes. It is still scanned on its schedule.`,
+        folderNoSearch: (name: string) =>
+          `${name}: no addon of the server describes and searches the titles of its files, so they stay unmatched. Add one under Content › Sources: users’ own addons, under My sources, do not count.`,
+        folderSearch: (name: string, addon: string, failure: string) =>
+          `${name}: the titles of its files could not be searched${addon === '' ? '' : failure === '' ? ` (${addon})` : ` (${addon}: ${failure})`}. They stay unmatched until a search goes through, which Polyfin tries again on its own, after a few minutes, then less often.`,
+        searchLate: (name: string) =>
+          `${name}: its search did not answer in time. Searches leave it out for a few minutes, then ask it again.`,
+        smartListEmpty: (name: string, owner: string | null) =>
+          owner === null
+            ? `The smart list ${name} lists nothing: the catalogs it drew from are gone. Choose other catalogs for it.`
+            : `${owner}’s smart list ${name} lists nothing: the catalogs it drew from are gone. Other catalogs are to be chosen for it.`,
+        virtualChannelSource: (name: string) =>
+          `The channel ${name} airs a source that no longer exists. Choose another source for it.`,
         guide: (name: string) => `${name}: the last programme guide fetch failed.`,
         paused: (host: string) => `Thumbnails paused for ${host}: it asked to slow down.`,
+        hostErrorFile: (host: string, since: string) =>
+          `The host ${host} answers an error file instead of the videos, since ${since}.`,
+        hostErrorFileHint:
+          'This often means the account at that service needs attention (a password change, a subscription, a limit reached), or that the service is down: check it on its site.',
         unknownProxy: (address: string) =>
-          `${address} forwards requests (X-Forwarded-For) but is not a known proxy, so its clients all count as ${address}. If it is your reverse proxy, add it to Known proxies under Settings › Security.`,
+          `${address} forwards requests (X-Forwarded-For) but is not a known proxy, so requests through it count as coming from outside the local network. Users who may only connect from the local network are refused through it, and its clients share one limit of failed sign-ins. If it is your reverse proxy, add it to Known proxies under Settings › Security.`,
         discoveryPort: (port: number) =>
           `Polyfin cannot listen on UDP port ${port}, so Jellyfin apps on the local network do not find it by themselves. Another program probably uses it, such as a Jellyfin server on the same host. Saving the settings tries again.`,
         torrentRoute: (why: string) =>
           `Torrent streams do not play: ${why}. Nothing is sent another way; check the route under Settings › Torrents.`,
+        torrentRouteRiding: (why: string, seconds: number) =>
+          `${why}. The torrents playing go on for up to ${seconds} s; new ones cannot start. Nothing is sent another way; check the route under Settings › Torrents.`,
         torrentWhy: {
           interface_missing: (name: string) => `the network interface ${name} is missing`,
           interface_down: (name: string) => `the network interface ${name} is down`,
@@ -145,10 +241,52 @@ const system = {
           interface_unsupported: () => 'a network interface works on Linux only',
           proxy_unreachable: (name: string) => `the SOCKS5 proxy ${name} does not answer`,
           proxy_refused: (name: string) => `the SOCKS5 proxy ${name} refused the user and password`,
+          wireguard_endpoint: (name: string) => `the WireGuard server ${name} cannot be looked up`,
+          wireguard_down: (name: string) => `the WireGuard tunnel to ${name} cannot start`,
+          wireguard_handshake: (name: string) =>
+            `the WireGuard server ${name} does not answer the handshake: it is unreachable, or a key of the configuration is wrong`,
           no_route: () => 'no route is set',
         },
         torrentUdp: (name: string) =>
           `The SOCKS5 proxy ${name} does not offer UDP ASSOCIATE: torrents play over TCP, with UDP trackers and the DHT off.`,
+        torrentStart: (why: string) =>
+          `A torrent did not start in time: ${why}. Check that the route reaches the internet; the log tells each tracker’s answer at debug level.`,
+        torrentStartWhy: {
+          no_udp:
+            'no peer was found, and the route carries no UDP, which the DHT and UDP trackers need',
+          refused: 'its trackers refused the announce or did not answer, and the DHT found no peer',
+          no_peers: 'its trackers and the DHT found no peer',
+          no_trackers: 'the addon named no tracker, and the DHT found no peer',
+          silent: 'peers were found, but none sent it',
+        },
+        torrentStopped: (at: string, why: string) =>
+          `A torrent stopped while playing at ${at}: ${why}. Nothing was sent another way. Check that the route stays reachable; the next play starts the torrent again.`,
+        torrentStoppedWhy: {
+          interface_missing: (name: string) => `the network interface ${name} went missing`,
+          interface_down: (name: string) => `the network interface ${name} went down`,
+          interface_no_address: (name: string) => `the network interface ${name} lost its address`,
+          proxy_unreachable: (name: string) => `the SOCKS5 proxy ${name} did not answer`,
+          proxy_refused: (name: string) => `the SOCKS5 proxy ${name} refused the user and password`,
+          wireguard_endpoint: (name: string) =>
+            `the WireGuard server ${name} could not be looked up`,
+          wireguard_down: (name: string) => `the WireGuard tunnel to ${name} stopped`,
+          wireguard_handshake: (name: string) =>
+            `the WireGuard server ${name} did not answer the handshake`,
+          route: () => 'its route did not answer',
+        },
+        torrentStartPeers: (found: number, why: string) =>
+          `${found} ${found === 1 ? 'peer' : 'peers'} found: ${why}`,
+        torrentPeerWhy: {
+          connected: (n: number) => `${n} connected`,
+          timedOut: (n: number) => `${n} timed out`,
+          refused: (n: number) => `${n} refused the connection`,
+          unreachable: (n: number) => `${n} unreachable`,
+          proxy: (n: number) => `${n} refused by the proxy`,
+          closed: (n: number) => `${n} closed the connection at the handshake`,
+          left: (n: number) => `${n} connected, then left`,
+          other: (n: number) => `${n} failed otherwise`,
+          untried: (n: number) => `${n} not dialed yet`,
+        },
         dlnaPort: (port: number) =>
           `Polyfin cannot listen on UDP port ${port}, so DLNA devices on the local network do not find it by themselves. Another program probably uses it, such as another DLNA server on the same host. Saving the settings tries again.`,
         discoveryAddress: (address: string) =>
@@ -168,10 +306,42 @@ const system = {
           `Let’s Encrypt did not give the HTTPS certificate: ${error}`,
         httpsExpires: (date: string) => `The HTTPS certificate expires on ${date}.`,
         httpsExpired: (date: string) => `The HTTPS certificate expired on ${date}.`,
+        subtitleOcrLanguage: (name: string, file: string) =>
+          `Picture subtitles in ${name} are not read into text: Tesseract has no data for this language. Add the file ${file} to the folder POLYFIN_TESSDATA_DIR names.`,
+        subtitleOcrDownloadFailed: (error: string) =>
+          `The last download of its data failed: ${error}`,
         metadataLanguages: (name: string) =>
           `${name}: every metadata addon of the server has a language, so they describe titles in their language for every user, whatever their metadata language. Keep Language of its descriptions at None on this addon, or on one more metadata addon.`,
+        desktopRolledBack: (version: string, previous: string, error: string) =>
+          `Polyfin Desktop went back to version ${previous}, as version ${version} did not start: ${error}. That version is no longer offered; the next one will be.`,
+        dataFolderTemporary: (path: string, moveTo: string) =>
+          `Polyfin keeps its files in ${path}, the default data folder of earlier versions, in the system’s temporary folder, which the system may empty. Stop Polyfin, move this folder to ${moveTo}, then start Polyfin again; or name the folder to use in POLYFIN_DATA_DIR.`,
+        dataFolderShared: (failure: 'owner' | 'mode', path: string, command: string) =>
+          failure === 'owner'
+            ? `Polyfin’s data folder, ${path}, belongs to another user of this system, who can change the files Polyfin keeps and runs there. Give it to the user Polyfin runs as with ${command}, then restart Polyfin.`
+            : `Polyfin’s data folder, ${path}, can be written by its group or by others: another account of this system can change the files Polyfin keeps and runs there. Take that away with ${command}, then restart Polyfin.`,
+        collationVersion: (name: string, recorded: string, actual: string) =>
+          `The collation version of the database ${name} changed: PostgreSQL recorded ${recorded}, and the system’s collation library now provides ${actual}. Its text indexes may be out of order, which can hide rows or duplicate them.`,
+        collationRepair:
+          'To repair them, stop Polyfin, then, connected as the database’s owner, run these commands one after the other:',
+        collationCopy: 'Copy the commands',
+        collationCopied: 'The commands are copied.',
+        collationCopyFailed: 'The commands could not be copied: select them and copy them by hand.',
+        collationDocs: 'How to repair',
+        themeCopyMissing: (missing: number, files: number) =>
+          `The copy of the web player theme misses ${missing} of its ${files} files in Polyfin’s data folder, as after a backup restored on another system: browsers load them from their original addresses meanwhile, which needs the internet. Update the copy under Settings › Web player, or choose another theme.`,
+        folderUnwritable: (name: string, path: string) =>
+          `${name} (${path}): Polyfin cannot write into this folder, and keeps these files in its data folder’s cache meanwhile. Make the folder writable or choose another, then restart Polyfin.`,
+        folderOccupied: (name: string, path: string, held: string) =>
+          `${name} (${path}): this folder already holds “${held}”, which Polyfin did not make. Polyfin leaves it as it is, and keeps its own files in its data folder’s cache meanwhile. Choose another folder, or move “${held}” elsewhere, then restart Polyfin.`,
+        nvidiaDriver: (version: string) =>
+          `The NVIDIA graphics card does not convert video: its driver is older than version ${version}, which FFmpeg needs for NVENC. Update the driver to use the card.`,
+        nvidiaOlderFFmpeg: (failure: 'download' | 'encode', error: string) =>
+          failure === 'download'
+            ? `The NVIDIA graphics card does not convert video: its driver is older than version 610, and the FFmpeg for such drivers could not be downloaded: ${error}. Polyfin tries again at its next start, or when the conversion settings are saved.`
+            : `The NVIDIA graphics card does not convert video, with the FFmpeg for drivers older than version 610 either: ${error}`,
         backupFailed: 'The last database backup failed.',
-        backupStale: 'The last database backup is more than two days old.',
+        backupStale: 'The last database backup is overdue: it is older than its schedule allows.',
         backupDestinationFailed: (name: string) =>
           `${name}: the last upload of the database backups failed.`,
         backupDestinationStale: (name: string) =>
@@ -208,11 +378,16 @@ const system = {
       lastSuccess: 'Last answer',
       lastFailure: 'Last failure',
       responseTime: 'Response time',
+      /** The term of `requests` in an addon's details, for screen readers. */
+      requestsTerm: 'Requests',
       requests: (count: number, failures: number) =>
         `${count} ${count === 1 ? 'request' : 'requests'}, ${failures} failed`,
       check: 'Check',
       checkLabel: (name: string) => `Check ${name} now`,
       checking: 'Checking…',
+      downloadLanguage: 'Download',
+      downloadLanguageLabel: (name: string) => `Download Tesseract’s data for ${name}`,
+      downloadingLanguage: 'Downloading…',
       iptvTitle: 'IPTV sources',
       guidesTitle: 'Programme guides',
       sharesTitle: 'Network shares',
@@ -264,6 +439,10 @@ const system = {
       noGpu: 'None: video is converted on the CPU',
       toneMapping: 'HDR to SDR on the GPU',
       cpuEncoders: 'CPU encoders',
+      ffmpeg: 'FFmpeg',
+      ffmpegShipped: 'The one Polyfin ships',
+      ffmpegOlderDrivers: 'For NVIDIA drivers older than 610',
+      ffmpegOlderDownloading: 'Downloading the one for NVIDIA drivers older than 610',
       conversions: 'Video conversions',
       noLimit: 'no limit',
       remuxes: 'Remuxes',
@@ -271,40 +450,85 @@ const system = {
       transcodingOff: 'Conversion is turned off in the settings.',
       databaseTitle: 'Database',
       reachable: 'Answering',
+      busy: 'Answering, busy',
       unreachable: 'Not answering',
       size: 'Size',
       cacheTitle: 'Source cache',
       cacheHelp:
-        'Parts of the files being played, kept on disk up to the size set under Settings › Playback. A full cache is normal: the oldest parts make room.',
+        'Parts of the files played, kept on disk up to the size set under Settings › Playback, from one start to the next. A full cache is normal: the parts read longest ago make room, those of titles played again last.',
       cacheUse: (used: string, limit: string) => `${used} of ${limit}`,
+      imagesTitle: 'Image cache',
+      imagesHelp:
+        'The artwork relayed to the apps, its resized copies and the images Polyfin draws, kept on disk up to its limit, the least recently used going first. Clearing it has each image downloaded, resized or drawn again at its next request. The scrubbing thumbnails, uploaded images, the local folders’ artwork and the web player’s theme are not in it.',
+      imagesFiles: 'Images on disk',
+      imagesMemory: 'In memory',
+      clearImages: 'Clear the image cache',
+      imagesCleared: (images: string, bytes: string) =>
+        `Image cache cleared: ${images} images, ${bytes} freed on disk.`,
       sourcesOpen: 'Files open',
       torrentPieces: 'Of which torrent pieces',
+      sourcesKept: 'Files kept',
+      hitRatio: 'Read from the disk',
+      hitRatioValue: (percent: string, read: string) =>
+        `${percent} of the ${read} read since the start`,
+      keptFor: (days: number) =>
+        days > 0
+          ? `Kept ${days} days after their last read, restarts included`
+          : 'Emptied at each start',
       torrentsTitle: 'Torrents',
       torrentsHelp:
         'The torrents playback reads now, over their route alone. A torrent stops when its playback ends: no more peers, no more sharing.',
-      torrentRoute: { interface: 'Network interface', proxy: 'SOCKS5 proxy', '': 'No route' },
+      torrentRoute: {
+        interface: 'Network interface',
+        proxy: 'SOCKS5 proxy',
+        wireguard: 'WireGuard tunnel',
+        '': 'No route',
+      },
+      torrentAddresses: 'Tunnel addresses',
+      torrentHandshake: 'Last handshake',
+      torrentNoHandshake: 'None yet',
       torrentsPlaying: 'Torrents playing',
+      torrentsPlayingOf: (playing: number, atOnce: number) => `${playing} of ${atOnce}`,
       torrentPeers: 'Peers',
+      torrentUTPPeers: 'Peers over uTP',
       torrentsShared: 'Shared since the start',
+      torrentOutageAt: (at: string) => `Outage at ${at}`,
+      torrentOutage: {
+        interface: (span: string) =>
+          `the network interface did not answer for ${span}; the play went on`,
+        proxy: (span: string) => `the proxy did not answer for ${span}; the play went on`,
+        wireguard: (span: string) =>
+          `the WireGuard server did not answer for ${span}; the play went on`,
+        '': (span: string) => `the route did not answer for ${span}; the play went on`,
+      },
       disksTitle: 'Disk space',
-      folders: { cache: 'cache', recordings: 'recordings', backups: 'backups' } as Record<
-        string,
-        string
-      >,
+      folders: {
+        cache: 'cache',
+        conversion: 'conversion folder',
+        reading: 'files being read',
+        recordings: 'recordings',
+        backups: 'backups',
+      } as Record<string, string>,
       folderTitle: {
         cache: 'Cache folder',
+        conversion: 'Conversion folder',
+        reading: 'Folder for files being read',
         recordings: 'Recordings folder',
         backups: 'Backups folder',
       } as Record<string, string>,
       free: (free: string) => `${free} free`,
       notMeasured: 'Cannot be measured here.',
-      thumbnailsTitle: 'Thumbnails',
-      thumbnailsOff: 'Thumbnails and chapter images are off (Settings › Thumbnails).',
+      thumbnailsTitle: 'Thumbnails (trickplay)',
+      thumbnailsOff:
+        'Thumbnails and chapter images are off under Settings › Thumbnails (trickplay).',
       waiting: (count: number, length: number) => `${count} of ${length} waiting`,
       working: 'Making images now',
       idle: 'Idle',
       pausedHosts: 'Paused sources',
       noPausedHosts: 'No source is paused.',
+      localMade: 'Local files with thumbnails',
+      localCannot: 'Local files that cannot have them',
+      localFailed: 'Local files that failed',
       until: (time: string) => `until ${time}`,
       ratingsTitle: 'Ratings from MDBList',
       ratingsHelp:
@@ -322,6 +546,48 @@ const system = {
       notHeld: 'Now',
       titlesWaiting: 'Titles waiting',
       titlesKept: 'Titles with ratings kept',
+      artworkTitle: 'Artwork',
+      artworkHelp:
+        'Artwork downloads from addons’ image servers that failed in the last hour. A failed image is asked for again later, longer each time it fails; a server that asks to wait is asked nothing until then.',
+      artworkFailed: 'Failed in the last hour',
+      artworkKinds: {
+        not_found: 'Not found',
+        rate_limited: 'Asked to slow down',
+        timeout: 'Timed out',
+        server_error: 'Server errors',
+        other: 'Other failures',
+      } as Record<string, string>,
+      artworkHosts: 'Servers that failed',
+      artworkNoFailures: 'No artwork download failed in the last hour.',
+      artworkWaiting: 'Servers waited for',
+      artworkNoWaiting: 'No server is waited for.',
+      artworkWaitingUntil: (time: string) => `asked nothing until ${time}`,
+      artworkSparedUntil: (time: string) => `asked less at once until ${time}`,
+      peopleTitle: 'People',
+      peopleHelp:
+        'Photos and biographies of people from TMDB. A person is looked up once a title’s cast shows them without a photo, or their page opens.',
+      peopleNoKey:
+        'No TMDB API key is saved under Settings › Content: people and casts show only what the addons give. A key from a free TMDB account brings:',
+      peopleNoKeyBrings: [
+        'People’s photos and biographies',
+        'Each title’s cast and crew from TMDB, in billing order, with photos',
+        'Person pages listing every library title they are credited in',
+        'The titles TMDB knows each person best for, on their page, beyond the libraries',
+        'Posters for movies and series whose addon gives none',
+        'Box sets in Silo’s apps',
+        'TMDB images in Edit images',
+      ],
+      peopleNoKeyLink: 'Add the key in Settings › Content',
+      tmdbKey: 'TMDB API key',
+      tmdbKeySaved: 'Saved',
+      peopleFound: 'Found on TMDB',
+      peopleNotFound: 'Not found',
+      peopleFailing: 'Lookups failing',
+      peopleWaiting: 'Lookups waiting',
+      tmdbLimited: 'TMDB’s last rate limit',
+      tmdbNeverLimited: 'None since the server started',
+      tmdbLimitedAt: (time: string, wait: string) =>
+        wait ? `${time}, asked to wait ${wait}` : time,
       backupTitle: 'Backups',
       backupOff: 'Backups are off. Turn them on under Settings › Backups.',
       backup: {
@@ -341,6 +607,13 @@ const system = {
       memory: 'Memory',
       heap: 'In use',
       goroutines: 'Goroutines',
+      goroutinesDownload: 'Download the goroutines',
+      goroutinesHelp:
+        'When a request never answers, download what the server is doing and send it with your report. It holds no address or secret.',
+      lastCrash: 'Last crash',
+      noCrash: 'None',
+      lastCrashHelp:
+        'The start of the trace of the error that last stopped Polyfin, as it started again. Addresses keep only their host, and tokens and keys are hidden.',
       secretsTitle: 'Stored keys',
       secretsHelp:
         'The server’s keys, the users’ tracking tokens and keys, and the network shares’ passwords, encrypted in the database with POLYFIN_SECRET_KEY (openssl rand -base64 32).',
@@ -364,8 +637,11 @@ const system = {
         aniListClientSecret: 'AniList client secret',
         myAnimeListClientSecret: 'MyAnimeList client secret',
         smtpPassword: 'SMTP password',
+        backupPassphrase: 'Backup passphrase',
         torrentProxyPassword: 'Torrents’ SOCKS5 proxy password',
+        torrentWireGuard: 'Torrents’ WireGuard configuration',
         metricsToken: 'Metrics token',
+        updateToolToken: 'Update tool token',
       },
       connectionOf: (service: string, user: string) => `${service} connection of ${user}`,
       targetOf: (target: string, user: string) => `notification target “${target}” of ${user}`,
@@ -378,7 +654,6 @@ const system = {
       noIptvHint: 'Add an IPTV account under Content › Sources.',
       noGuides: 'No programme guide.',
       noGuidesHint: 'Add a programme guide to a TV catalog under Content › Live TV.',
-      serverTitle: 'Server',
     },
     logs: {
       title: 'Logs',

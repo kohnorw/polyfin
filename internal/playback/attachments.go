@@ -3,8 +3,6 @@ package playback
 import (
 	"context"
 	"errors"
-	"os"
-	"path/filepath"
 	"slices"
 	"time"
 
@@ -22,6 +20,22 @@ import (
 // attachedTime bounds reading a version's attached files: one read of a
 // few megabytes.
 const attachedTime = time.Minute
+
+// maxKeptAttached bounds the bytes of the attached files kept in memory:
+// the most the container package reads for one version, so that what was
+// read is always kept, and the fonts of several versions, a few megabytes
+// each as a rule, stay kept together.
+const maxKeptAttached = 128 << 20
+
+// attachedSize is what a version's attached files take in memory: their
+// names, types and data.
+func attachedSize(files []container.Attachment) int {
+	size := 0
+	for _, file := range files {
+		size += len(file.FileName) + len(file.MimeType) + len(file.Data)
+	}
+	return size
+}
 
 // ErrNoAttachment reports a stream that is not a file attached to its
 // version.
@@ -79,7 +93,7 @@ func (s *Service) attachedFiles(ctx context.Context, version library.Version, an
 	if files, ok := s.attached.Get(version.ID); ok {
 		return files, nil
 	}
-	results := s.flight.DoChan("attached "+version.ID.String(), func() (any, error) {
+	results := s.doShared("attached "+version.ID.String(), func() (any, error) {
 		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), attachedTime)
 		defer cancel()
 		src := s.open(version)
@@ -95,7 +109,7 @@ func (s *Service) attachedFiles(ctx context.Context, version library.Version, an
 		}
 		files, err := m.Attachments(ctx)
 		if err != nil {
-			s.logger.Info("The attached files of a version could not be read", "addon", version.Addon, "error", err)
+			s.logger.Info("The attached files of a version could not be read", "addon", version.AddonLog, "error", err)
 			return nil, err
 		}
 		s.attached.Put(version.ID, files)
@@ -110,34 +124,4 @@ func (s *Service) attachedFiles(ctx context.Context, version library.Version, an
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	}
-}
-
-// WriteAttachments writes the files attached to a version into dir, once,
-// as Jellyfin's attachment extractor fills a media source's attachments
-// folder, where libass finds the fonts of a subtitle burned in. A version
-// that is no Matroska file has none.
-func (s *Service) WriteAttachments(ctx context.Context, version library.Version, analysis media.Analysis, dir string) error {
-	if !matroska(analysis) || !slices.ContainsFunc(analysis.Streams, Attached) {
-		return nil
-	}
-	if entries, err := os.ReadDir(dir); err == nil && len(entries) > 0 {
-		return nil
-	}
-	files, err := s.attachedFiles(ctx, version, analysis)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(dir, 0o755); err != nil {
-		return err
-	}
-	for _, file := range files {
-		name := filepath.Base(filepath.Clean("/" + file.FileName))
-		if name == "/" || name == "." {
-			continue
-		}
-		if err := os.WriteFile(filepath.Join(dir, name), file.Data, 0o644); err != nil {
-			return err
-		}
-	}
-	return nil
 }

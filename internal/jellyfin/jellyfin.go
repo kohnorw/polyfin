@@ -1,4 +1,4 @@
-// Package jellyfin serves the Jellyfin 12.2 HTTP API to Jellyfin apps.
+// Package jellyfin serves the Jellyfin 12.4 HTTP API to Jellyfin apps.
 package jellyfin
 
 import (
@@ -11,6 +11,8 @@ import (
 	"github.com/moodiness/polyfin/internal/activity"
 	"github.com/moodiness/polyfin/internal/audiosegments"
 	"github.com/moodiness/polyfin/internal/backup"
+	"github.com/moodiness/polyfin/internal/bandwidth"
+	"github.com/moodiness/polyfin/internal/boxset"
 	"github.com/moodiness/polyfin/internal/cache"
 	"github.com/moodiness/polyfin/internal/collections"
 	"github.com/moodiness/polyfin/internal/commercials"
@@ -30,14 +32,15 @@ import (
 	"github.com/moodiness/polyfin/internal/reminders"
 	"github.com/moodiness/polyfin/internal/remuxdb"
 	"github.com/moodiness/polyfin/internal/stremio"
-	"github.com/moodiness/polyfin/internal/subtitles"
 	"github.com/moodiness/polyfin/internal/tasks"
+	"github.com/moodiness/polyfin/internal/taste"
 	"github.com/moodiness/polyfin/internal/throttle"
 	"github.com/moodiness/polyfin/internal/thumbnails"
 	"github.com/moodiness/polyfin/internal/tmdb"
 	"github.com/moodiness/polyfin/internal/trackers"
 	"github.com/moodiness/polyfin/internal/updates"
 	"github.com/moodiness/polyfin/internal/userdata"
+	"github.com/moodiness/polyfin/internal/webtheme"
 )
 
 const (
@@ -55,6 +58,13 @@ type Options struct {
 	QuickConnect *quickconnect.Store
 	// SignIns throttles failed password sign-ins per client address.
 	SignIns *throttle.Failures
+	// CrossSiteSignIns throttles, per client address, the failed sign-ins
+	// and reset PINs that a page of another site had the browser send,
+	// apart from the sign-ins (see signInFailures).
+	CrossSiteSignIns *throttle.Failures
+	// ShareLinks throttles, per client address, the share links asked for
+	// that do not exist, apart from the sign-ins.
+	ShareLinks *throttle.Failures
 	// AccountBlocked is told of the wrong password that blocked an
 	// account, with the app and address it came from, and NewDevice of a
 	// sign-in from a device the account never used; nil tells nothing.
@@ -100,7 +110,11 @@ type Options struct {
 	// HomeRows keeps the rows the web player adds to its home page (see
 	// customrows.go); nil keeps none.
 	HomeRows *homerows.Store
-	Logger   *slog.Logger
+	// Taste keeps the users' taste profiles, which rank Top picks for you
+	// and reorder similar titles, suggestions and movie recommendations
+	// (see taste.go); nil keeps none.
+	Taste  *taste.Service
+	Logger *slog.Logger
 	// Activity records what happens for the activity log; nil records
 	// nothing.
 	Activity *activity.Store
@@ -112,19 +126,16 @@ type Options struct {
 	Updates *updates.Checker
 	// Logs keeps the recent log lines administrators read; nil keeps none.
 	Logs *logs.Ring
-	// CacheDir is where sources and their remuxes are kept: with the
-	// current folder of Recordings, the folders storage information
-	// describes.
-	CacheDir string
+	// CacheDir is Polyfin's cache folder, which keeps the relayed images
+	// in its images folder, and SegmentsDir the folder of the segments of
+	// conversions and repackagings: with the current folder of
+	// Recordings, the folders storage information describes.
+	CacheDir    string
+	SegmentsDir string
 	// FontsDir holds the fonts apps load to render subtitles whose own
 	// fonts are missing, which also write the names of generated images;
 	// empty or missing, it offers none.
 	FontsDir string
-	// FFmpeg is the path of FFmpeg, which extracts and converts subtitles;
-	// DataDir is Polyfin's data folder, which keeps them, in subtitles and
-	// metadata/library, as Jellyfin's do.
-	FFmpeg  string
-	DataDir string
 	// Thumbnails makes and keeps the scrubbing thumbnails and chapter
 	// images of the versions played; nil makes none.
 	Thumbnails *thumbnails.Service
@@ -146,8 +157,17 @@ type Options struct {
 	// SharePlayed is told of a guest's playback through a share link, at
 	// most once an hour per link; nil tells nothing.
 	SharePlayed func(accounts.ShareLink)
+	// PlayFailed is told of a play that failed: no version played on the
+	// app, a limit refused it, or its stream broke; nil tells nothing.
+	PlayFailed func(plays.Failure)
 	// Reminders keeps the users' programme reminders; nil keeps none.
 	Reminders *reminders.Service
+	// Sent counts the bytes of media sent to apps, by the playback they
+	// serve (see metered); nil counts them for the metrics only.
+	Sent *bandwidth.Meters
+	// BoxSets knows the TMDB collections of movies, whose artwork Silo's
+	// apps load through Polyfin (see boxsetimages.go); nil knows none.
+	BoxSets *boxset.Store
 }
 
 // Handler serves the Jellyfin API.
@@ -155,31 +175,38 @@ type Handler struct {
 	Options
 	routes http.Handler
 	images imageCache
+	// names remembers the genres and studios identifiers were given to
+	// (see names.go).
+	names namedItems
 	// fonts write the names of generated images, from FontsDir (see
 	// fontsFor).
 	fonts    fontsFor
 	sessions *playback.Sessions
-	// endings are the play sessions ended from the server (see ended.go).
+	// endings are the play sessions ended from the server (see ended.go,
+	// this fork).
 	endings endings
-	// subtitleEncoder and subtitleManager are Jellyfin's SubtitleEncoder
-	// and SubtitleManager (see subtitles.go).
-	subtitleEncoder *subtitles.Encoder
-	subtitleManager *subtitles.Manager
+	// subtitleFiles remembers the subtitle files described for each item,
+	// with the user they were described for: a subtitle address names a
+	// file by its index among them (see keptSubtitles).
+	subtitleFiles *cache.Cache[accounts.ID, listedSubtitles]
+	subtitleCache *cache.Cache[accounts.ID, subtitleText]
 	// runtimes remembers, for the reports of a playback, the runtime of
 	// the version they name (see playedRuntime).
 	runtimes *cache.Cache[string, time.Duration]
 	// configurations remembers each user's configuration, which item
 	// listings read for every title.
 	configurations *cache.Cache[accounts.ID, UserConfiguration]
+	// trackChoices remembers the tracks each user chose on titles (see
+	// trackmemory.go).
+	trackChoices *trackChoices
 	// sockets are the WebSockets apps keep open.
 	sockets *sockets
-	// syncPlay holds the groups apps watch together in.
+	// syncPlay holds the groups apps watch together in, invites the
+	// invitations to them (see syncplayinvites.go).
 	syncPlay *syncPlay
+	invites  *syncPlayInvites
 	// preparations bounds the preparations of playback made ahead of it.
 	preparations *preparations
-	// usenet runs the analyses and subtitle extractions of NZB versions
-	// (see usenet.go).
-	usenet *usenetWork
 	// listings lists the versions of home rows' titles ahead of a play.
 	listings *listings
 	// watched are the title pages that follow their versions as addons
@@ -188,8 +215,25 @@ type Handler struct {
 	// searches bounds how often users have titles' addons asked again
 	// (see searchVersions).
 	searches versionSearches
-	// now tells the time users' allowed hours are checked against.
+	// uploads bounds how often each user's apps upload their logs (see
+	// clientLog).
+	uploads clientLogUploads
+	// starts are the plays whose torrents' starts the web client tells
+	// (see startprogress.go).
+	starts starts
+	// subtitleReads shares the reads of subtitle files and remembers the
+	// files refused for their size (see subtitleFile).
+	subtitleReads subtitleReads
+	// customCss hashes the Custom theme's CSS, for the address the web
+	// client loads it from (see brandingCss).
+	customCss webtheme.Hasher
+	// now tells the time users' allowed hours and the home rows' schedules
+	// are checked against.
 	now func() time.Time
+	// patienceEnd gives what ends a play's wait for the versions before
+	// the one it could play, versionPatience given: time.After, which
+	// tests replace to wait for every version (see choose).
+	patienceEnd func(patience time.Duration) <-chan time.Time
 	// newKeys remembers the API keys made from Jellyfin apps until a
 	// listing shows them.
 	newKeys newKeys
@@ -205,9 +249,18 @@ type Handler struct {
 	// of each play session offers, when it offers several, for the admin
 	// dashboard.
 	qualities *cache.Cache[string, []int]
+	// transcodings remembers what each play session was last sent, for
+	// /Sessions between its encodings (see transcodingInfo).
+	transcodings *cache.Cache[string, TranscodingInfo]
 	// plays remembers each device's last PlaybackInfo profile and bitrate,
-	// which item details name versions for (see detailsNamer).
+	// which item details name versions for (see detailsNamer), as kept in
+	// the database, or that the device told none (see devicePlayOf). Kept
+	// for accounts.UnusedDevicePlay, as the database keeps a profile, and
+	// bounded in bytes (see playsBytes).
 	plays *cache.Cache[accounts.ID, devicePlay]
+	// scripted are the devices whose web player runs Polyfin's script, as
+	// they read the user's sound (see boostRelay).
+	scripted *cache.Cache[accounts.ID, struct{}]
 	// guests are the playbacks of guests through share links (see
 	// share.go).
 	guests *guestPlays
@@ -216,36 +269,96 @@ type Handler struct {
 	downloads *downloadPlays
 	// dlna are the playbacks of DLNA devices (see dlna.go).
 	dlna *dlnaPlays
+	// served are the playbacks the media routes send the devices of users
+	// with a limit of playbacks at once (see servedplays.go).
+	served *servedPlays
+	// torrents are the torrents devices last played (see torrentswitch.go).
+	torrents *torrentPlays
+	// chosen is the version each device's last PlaybackInfo chose.
+	chosen *chosenVersions
+	// titles are the play sessions devices reported for the title they
+	// play (see leftplayback.go).
+	titles *titleSessions
+	// grantUses are the grants at the end of their life or past it that
+	// media requests were lately served for (see granted).
+	grantUses *cache.Cache[string, struct{}]
+	// decisions are the last plays of each title, what each tried and
+	// chose, for the admin app's Versions page (see playdecisions.go).
+	decisions *playDecisions
+	// draws are the orders listings of libraries' titles at random drew,
+	// kept for drawLife (see randomLibraryListing).
+	draws *cache.Cache[drawKey, draw]
+	// nameOrders are the orders of libraries' titles by name for Silo's
+	// apps, kept for drawLife (see nameorder.go).
+	nameOrders *cache.Cache[drawKey, nameOrder]
+	// nameBuilds sorts a library by name once for the requests that ask
+	// it at the same time, a few at once on the server.
+	nameBuilds *nameBuilds
 }
 
 // New returns the Jellyfin API handler.
 func New(options Options) *Handler {
 	h := &Handler{
 		Options:        options,
-		sessions:       playback.NewSessions(),
+		subtitleFiles:  cache.New[accounts.ID, listedSubtitles](5000, 12*time.Hour).Sized(16<<20, cache.JSONSize),
+		subtitleCache:  cache.New[accounts.ID, subtitleText](200, time.Hour).Sized(32<<20, subtitleText.size),
 		runtimes:       cache.New[string, time.Duration](2000, 12*time.Hour),
 		configurations: cache.New[accounts.ID, UserConfiguration](1000, 12*time.Hour),
+		trackChoices:   newTrackChoices(),
 		sockets:        newSockets(),
+		invites:        newSyncPlayInvites(),
 		preparations:   newPreparations(options.Logger),
-		usenet:         newUsenetWork(),
 		watched:        newWatchedPages(),
 		now:            time.Now,
+		patienceEnd:    time.After,
 		viewing:        cache.New[accounts.ID, accounts.ID](5000, 12*time.Hour),
 		reasons:        cache.New[string, []string](2000, 12*time.Hour),
 		sizes:          cache.New[string, playback.ConversionSize](2000, 12*time.Hour),
 		qualities:      cache.New[string, []int](2000, 12*time.Hour),
-		plays:          cache.New[accounts.ID, devicePlay](1000, 30*24*time.Hour),
+		transcodings:   cache.New[string, TranscodingInfo](2000, 12*time.Hour),
+		plays:          cache.New[accounts.ID, devicePlay](1000, accounts.UnusedDevicePlay).Sized(playsBytes, devicePlay.size),
+		scripted:       cache.New[accounts.ID, struct{}](1000, 30*24*time.Hour),
 		guests:         newGuestPlays(),
 		downloads:      newDownloadPlays(),
 		dlna:           newDLNAPlays(),
+		served:         newServedPlays(),
+		torrents:       newTorrentPlays(),
+		chosen:         newChosenVersions(),
+		titles:         newTitleSessions(),
+		decisions:      newPlayDecisions(),
 	}
-	h.subtitleEncoder, h.subtitleManager = newSubtitles(options)
-	h.syncPlay = newSyncPlay(h.canPlay, h.writeSyncPlay, options.Logger)
+	// Sessions read the handler's clock, which tests set.
+	h.sessions = playback.NewSessions(func() time.Time { return h.now() })
+	// So does the memory of the grants in use.
+	h.grantUses = cache.NewLasting[string, struct{}](2000, func() time.Duration { return grantIdle }, func() time.Time { return h.now() })
+	// So do the draws of listings at random, which hold the titles drawn.
+	h.draws = cache.NewLasting[drawKey, draw](1000, func() time.Duration { return drawLife }, func() time.Time { return h.now() }).
+		Sized(64<<20, func(d draw) int { return cache.JSONSize(d.items) })
+	// Orders by name hold whole stored libraries: their size is reckoned
+	// from a measure of a title's (see nameOrderTitleSize), rather than
+	// measured at each order, which would encode every title.
+	h.nameOrders = cache.NewLasting[drawKey, nameOrder](100, func() time.Duration { return drawLife }, func() time.Time { return h.now() }).
+		Sized(128<<20, func(o nameOrder) int { return len(o.items) * nameOrderTitleSize })
+	h.nameBuilds = newNameBuilds()
+	h.syncPlay = newSyncPlay(h.canPlay, h.writeSyncPlay, h.syncPlayConnected, func() time.Time { return h.now() }, options.Logger)
+	h.syncPlay.ended = h.groupEnded
 	h.listings = newListings(h.listVersions)
 	if options.Library != nil {
 		options.Library.OnVersionsChanged(h.versionsChanged)
+		options.Library.OnFirstPagesRead(h.warmPosters)
 	}
+	if options.Playback != nil {
+		options.Playback.OnAnalyzed(func(version library.Version) { h.tracksChanged(version.Item) })
+	}
+	options.RemuxDB.OnDescribed(func(versions []library.Version) {
+		for _, version := range versions {
+			h.tracksChanged(version.Item)
+		}
+	})
 	options.Accounts.OnSignOut(h.signedOut)
+	// What a user approved in Quick Connect ends with their devices when
+	// their account is signed out everywhere.
+	options.Accounts.OnSignOutEverywhere(options.QuickConnect.Withdraw)
 	if options.Thumbnails != nil {
 		options.Thumbnails.WatchPlaybacks(h.thumbnailPlaybacks)
 	}
@@ -265,10 +378,13 @@ func New(options Options) *Handler {
 	anonymous(http.MethodGet, "/System/Ping", h.ping)
 	anonymous(http.MethodPost, "/System/Ping", h.ping)
 
-	anonymous(http.MethodGet, "/Branding/Configuration", h.appliedBranding)
+	anonymous(http.MethodGet, "/Branding/Configuration", h.brandingConfiguration)
+	// The server's logo, which the fork's web player shows (see
+	// branding_fork.go).
 	anonymous(http.MethodGet, "/Branding/Logo", h.brandingLogo)
 	anonymous(http.MethodGet, "/Branding/Css", h.brandingCSS)
 	anonymous(http.MethodGet, "/Branding/Css.css", h.brandingCSS)
+	signedIn(http.MethodGet, "/Polyfin/WebTheme", h.webTheme)
 
 	anonymous(http.MethodGet, "/Users/Public", h.publicUsers)
 	anonymous(http.MethodPost, "/Users/AuthenticateByName", h.authenticateByName)
@@ -298,23 +414,27 @@ func New(options Options) *Handler {
 	h.liveTvRoutes(rt)
 	h.playbackRoutes(rt)
 	h.userDataRoutes(rt)
-	h.subtitleRoutes(rt)
+	h.remoteSubtitleRoutes(rt)
 	h.remoteRoutes(rt)
 	h.configurationRoutes(rt)
 	h.localizationRoutes(rt)
 	signedIn(http.MethodGet, "/MediaSegments/{itemId}", h.mediaSegments)
+	signedIn(http.MethodGet, "/Polyfin/MediaSegments/{itemId}", h.segmentOrigins)
 	h.playlistRoutes(rt)
 	h.syncPlayRoutes(rt)
 	h.collectionRoutes(rt)
 	h.administrationRoutes(rt)
 	h.userImageRoutes(rt)
 	h.appRoutes(rt)
+	h.subtitleUploadRoutes(rt)
 	h.absentRoutes(rt)
 	h.backupRoutes(rt)
 	h.metadataRoutes(rt)
 	h.rootRoutes(rt)
+	h.boxSetImageRoutes(rt)
 	signedIn(http.MethodGet, "/Videos/{itemId}/Trickplay/{width}/{file}", h.trickplayFile)
 	signedIn(http.MethodGet, "/Polyfin/Items/{itemId}/Share", h.mayShare)
+	h.soundRoutes(signedIn)
 
 	h.routes = cors(rt)
 	return h
@@ -341,13 +461,15 @@ func processingError(w http.ResponseWriter, status int) {
 	_, _ = w.Write([]byte("Error processing request."))
 }
 
+// internalError answers a request that failed, and logs it with its
+// route, never its path: a share link's and an API key's hold them.
 func (h *Handler) internalError(w http.ResponseWriter, r *http.Request, err error) {
 	// An app that stops waiting cancels its request: nothing failed, and
 	// nobody reads the answer.
 	if r.Context().Err() != nil {
-		h.Logger.Debug("An app abandoned a Jellyfin API request", "method", r.Method, "path", r.URL.Path)
+		h.Logger.Debug("An app abandoned a Jellyfin API request", "method", r.Method, "path", logs.Route(r))
 		return
 	}
-	h.Logger.Error("Jellyfin API request failed", "method", r.Method, "path", r.URL.Path, "error", err)
+	h.Logger.Error("Jellyfin API request failed", "method", r.Method, "path", logs.Route(r), "error", err)
 	processingError(w, http.StatusInternalServerError)
 }

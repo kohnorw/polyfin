@@ -109,7 +109,10 @@ type listState struct {
 }
 
 // New returns a service that reads the copies of the lists kept in
-// options.Dir, then keeps them fresh, in the background until Close.
+// options.Dir, then keeps them fresh, in the background until Close. Its
+// transport is its own, a clone of the default one: whoever closes the
+// idle connections of http.DefaultTransport cannot break its requests
+// (#958).
 func New(options Options) *Service {
 	s := newService(options, defaultTiming)
 	s.start()
@@ -118,8 +121,8 @@ func New(options Options) *Service {
 
 func newService(options Options, t timing) *Service {
 	ctx, cancel := context.WithCancel(context.Background())
-	s := &Service{dir: options.Dir, userAgent: "Polyfin/" + options.Version, logger: options.Logger, client: &http.Client{},
-		now: time.Now, timing: t, ctx: ctx, cancel: cancel}
+	s := &Service{dir: options.Dir, userAgent: "Polyfin/" + options.Version, logger: options.Logger, now: time.Now, timing: t, ctx: ctx,
+		cancel: cancel, client: &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone()}}
 	if s.logger == nil {
 		s.logger = slog.New(slog.DiscardHandler)
 	}
@@ -368,20 +371,31 @@ func (s *Service) load(l *list) error {
 }
 
 // refreshList downloads l unless it did not change, and schedules its next
-// check: a day later, or sooner after a failure.
+// check: a day later, or sooner after a failure. A list put in use is kept
+// with its state even when the service stops meanwhile, so that a restart
+// reads it fresh rather than downloading it again.
 func (s *Service) refreshList(l *list) {
 	changed, err := s.download(l)
-	if s.ctx.Err() != nil {
+	if err != nil && s.ctx.Err() != nil {
 		return
 	}
 	if err != nil {
 		l.failures++
 		wait := min(s.timing.retryFirst<<min(l.failures-1, 16), s.timing.retryMax)
 		l.due = s.now().Add(wait)
+		// The first failure in a row is a warning; those after it, which a
+		// server that cannot reach the lists meets several times a day,
+		// are told at debug level.
+		level := slog.LevelWarn
+		if l.failures > 1 {
+			level = slog.LevelDebug
+		}
 		if l.loaded {
-			s.logger.Warn("An anime mapping list could not be refreshed: the last copy stays in use", "list", l.name, "retry_in", wait.String(), "error", err)
+			s.logger.Log(s.ctx, level, "An anime mapping list could not be refreshed: the last copy stays in use", "list", l.name,
+				"failures", l.failures, "retry_in", wait.String(), "error", err)
 		} else {
-			s.logger.Warn("An anime mapping list could not be downloaded: anime are not mapped until it is", "list", l.name, "retry_in", wait.String(), "error", err)
+			s.logger.Log(s.ctx, level, "An anime mapping list could not be downloaded: anime are not mapped until it is", "list", l.name,
+				"failures", l.failures, "retry_in", wait.String(), "error", err)
 		}
 		return
 	}

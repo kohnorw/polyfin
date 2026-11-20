@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"image"
 	_ "image/gif" // registers GIF with image.DecodeConfig
 	"image/jpeg"
@@ -19,11 +20,13 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
-	"syscall"
+	"sync/atomic"
 	"time"
 
 	xdraw "golang.org/x/image/draw"
@@ -34,6 +37,8 @@ import (
 	"github.com/moodiness/polyfin/internal/cache"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/localfiles"
+	"github.com/moodiness/polyfin/internal/netfail"
+	"github.com/moodiness/polyfin/internal/relayed"
 	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/thumbnails"
 )
@@ -46,19 +51,30 @@ import (
 // download short for the others. At most imageHostFetches downloads go to
 // one host at once, imageSlowHostFetches to a host that serves an IPTV
 // source or its logos, often the provider's panel, and to a host that
-// showed it was overloaded, for imageSlowDown. A download that failed
-// answers the same for
-// imageFailureLife without asking again. Downloaded images are kept in
-// memory, the most recently used up to imageCacheBytes, and on disk under
-// the cache folder's images folder, up to imageDiskBytes, which a restart
-// keeps. An app asking for an image much smaller than the original (see
-// resizedWidth) gets it resized, kept the same way.
+// showed it was overloaded, for imageSlowDown. A host that asked to wait
+// (429 or 503 with a Retry-After) is asked nothing until then,
+// imageHostWaitMost at most: its images answer 503 at once. A download
+// that failed answers the same without asking again, its error telling
+// the first one's cause: an image its server does not have for
+// imageMissingLife, else for imageFailureLife, doubled with each failure
+// running up to imageFailureMost, or as long as the host asked to wait.
+// An image whose server does not have it, or that failed imageDeadAfter
+// times running, is dead: its item stops advertising it (see deadImages),
+// as Jellyfin drops a remote image that answers 404 from its item
+// (LibraryManager.cs, at 12.4), so that apps draw their placeholder rather
+// than an empty card. Downloaded images are kept in memory, the most
+// recently used up to imageCacheBytes, and on disk under the cache
+// folder's images folder, up to imageDiskBytes, which a restart keeps. An
+// app asking for an image much smaller than the original (see
+// resizedWidth) gets it resized, kept the same way. Posters are also
+// warmed ahead of any request (see warmedposters.go).
 
 const (
 	// imageCacheBytes bounds the memory used by recently relayed artwork.
 	imageCacheBytes = 128 << 20
-	// imageDiskBytes bounds the artwork kept on disk.
-	imageDiskBytes = 1 << 30
+	// imageDiskBytes bounds the artwork kept on disk: 1 GB, in the
+	// decimal units sizes are shown in, as the source cache's 10 GB.
+	imageDiskBytes = 1_000_000_000
 	// imageHostFetches bounds the downloads from one host at once, and
 	// imageSlowHostFetches those from a host to spare (see host);
 	// imageSlowDown is how long a host that showed it was overloaded is
@@ -66,16 +82,41 @@ const (
 	imageHostFetches     = 16
 	imageSlowHostFetches = 4
 	imageSlowDown        = 10 * time.Minute
+	// imageWarmShare is the share of a host's places that downloads
+	// warming posters take at most, one at least: 1 in imageWarmShare.
+	imageWarmShare = 4
 	// imageFailureLife is how long a failed download answers again without
-	// asking.
+	// asking, with the same status and cause, the first time it fails;
+	// each failure running doubles it, up to imageFailureMost. An image
+	// its server does not have answers so for imageMissingLife.
 	imageFailureLife = 2 * time.Minute
-	// imageResizes bounds the images resized at once.
-	imageResizes = 2
+	imageFailureMost = time.Hour
+	imageMissingLife = time.Hour
+	// imageHostWaitMost bounds the wait a host asks for.
+	imageHostWaitMost = 15 * time.Minute
+	// imageDeadAfter is the failures running past which an image is dead,
+	// and imageFailureMemory how long failures are remembered: those
+	// running are counted, and a dead image stays dead, that long after
+	// the last one.
+	imageDeadAfter     = 3
+	imageFailureMemory = 24 * time.Hour
+	// imageFailureWindow is the time the failures Health and the summary
+	// line count are in, and maxImageFailureEvents bounds those kept.
+	imageFailureWindow    = time.Hour
+	maxImageFailureEvents = 10_000
 	// immutableImage is how apps may keep an image they asked for by its
 	// tag, which changes with the image.
 	immutableImage = "public, max-age=31536000, immutable"
 	taggedImage    = "public, max-age=604800"
 )
+
+// imageResizes bounds the images resized at once: one for each two of the
+// processors Go runs on, two at least. A resize keeps one busy.
+var imageResizes = max(2, runtime.GOMAXPROCS(0)/2)
+
+// neverUsed is the use time of an image warmed that no app asked for yet:
+// the least recently used of all (see trimDisk).
+var neverUsed = time.Unix(0, 0)
 
 // artwork is a downloaded image.
 type artwork struct {
@@ -85,14 +126,32 @@ type artwork struct {
 
 // imageCache keeps the artwork relayed recently, in memory and on disk,
 // and shares and bounds its downloads. Its zero value is ready to use
-// once opened.
+// once opened; now, when set before, is its clock.
 type imageCache struct {
-	once     sync.Once
-	dir      string
-	logger   *slog.Logger
-	flight   singleflight.Group
-	failures *cache.Cache[string, int]
+	once   sync.Once
+	now    func() time.Time
+	dir    string
+	logger *slog.Logger
+	flight singleflight.Group
+	// failures are the downloads that failed, by address, remembered for
+	// imageFailureMemory, and dead the images found dead since (see
+	// markDead).
+	failures *cache.Cache[string, failedDownload]
+	dead     *cache.Cache[string, struct{}]
 	resizes  chan struct{}
+	// warmResizes holds a place for each resize warming a poster, half of
+	// resizes at most (see warmImage).
+	warmResizes chan struct{}
+	// undecodable are the pictures whose decoding failed, by their bytes,
+	// and decoded counts the pictures decoded; decoding, which tests set,
+	// is called with each picture about to be (see decodePicture).
+	undecodable *cache.Cache[pictureSum, struct{}]
+	decoded     atomic.Int64
+	decoding    atomic.Pointer[func(data []byte)]
+	// drawingBeside is memory counted beside each poster a generated image
+	// draws (see drawPosters): none, more in tests, so that small posters
+	// reach the memory of a picture.
+	drawingBeside int64
 
 	mu sync.Mutex
 	// memory holds the images in memory, most recently used first, by key;
@@ -101,11 +160,20 @@ type imageCache struct {
 	order  *list.List
 	size   int
 	// disk holds the images kept on disk, by key; diskSize counts their
-	// bytes.
-	disk     map[string]*diskImage
-	diskSize int64
+	// bytes, which diskBytes bounds: imageDiskBytes, less in tests.
+	// warmFull tells that warming lacked room (see roomToWarm).
+	disk      map[string]*diskImage
+	diskSize  int64
+	diskBytes int64
+	warmFull  bool
+	// warmed holds the keys of each poster warmed, its original's then its
+	// sizes' (see warmImage).
+	warmed map[string][]string
 	// hosts are the downloads under way from each host.
 	hosts map[string]*hostFetches
+	// events are the downloads that failed in the last
+	// imageFailureWindow, the oldest first.
+	events []failureEvent
 }
 
 type memoryImage struct {
@@ -124,10 +192,18 @@ type diskImage struct {
 func (c *imageCache) open(dir string, logger *slog.Logger) {
 	c.once.Do(func() {
 		c.logger = logger
-		c.failures = cache.New[string, int](5000, imageFailureLife)
+		if c.now == nil {
+			c.now = time.Now
+		}
+		memory := func() time.Duration { return imageFailureMemory }
+		c.failures = cache.NewLasting[string, failedDownload](5000, memory, c.now)
+		c.dead = cache.NewLasting[string, struct{}](5000, memory, c.now)
+		c.undecodable = cache.NewLasting[pictureSum, struct{}](maxUndecodable, memory, c.now)
 		c.resizes = make(chan struct{}, imageResizes)
+		c.warmResizes = make(chan struct{}, max(1, imageResizes/2))
 		c.memory, c.order = map[string]*list.Element{}, list.New()
-		c.disk, c.hosts = map[string]*diskImage{}, map[string]*hostFetches{}
+		c.disk, c.diskBytes, c.hosts = map[string]*diskImage{}, imageDiskBytes, map[string]*hostFetches{}
+		c.warmed = map[string][]string{}
 		if dir == "" {
 			return
 		}
@@ -249,10 +325,10 @@ func (c *imageCache) remember(key string, image artwork) {
 	}
 }
 
-// trimDisk deletes the least recently used images beyond imageDiskBytes;
-// c.mu is held.
+// trimDisk deletes the least recently used images beyond diskBytes, down
+// to keptDisk; c.mu is held.
 func (c *imageCache) trimDisk() {
-	if c.diskSize <= imageDiskBytes {
+	if c.diskSize <= c.diskBytes {
 		return
 	}
 	kept := make([]*diskImage, 0, len(c.disk))
@@ -261,13 +337,176 @@ func (c *imageCache) trimDisk() {
 	}
 	slices.SortFunc(kept, func(a, b *diskImage) int { return a.used.Compare(b.used) })
 	for _, image := range kept {
-		if c.diskSize <= imageDiskBytes*9/10 {
+		if c.diskSize <= c.keptDisk() {
 			return
 		}
 		_ = os.Remove(filepath.Join(c.dir, image.name))
 		delete(c.disk, image.name)
 		c.diskSize -= image.size
 	}
+}
+
+// ImageCacheUsage is what the image cache keeps, or what clearing it
+// freed: Files images on disk, of Bytes bytes, which Limit bounds, and
+// MemoryImages images in memory, of MemoryBytes bytes.
+type ImageCacheUsage struct {
+	Files        int
+	Bytes        int64
+	Limit        int64
+	MemoryImages int
+	MemoryBytes  int64
+}
+
+// usage tells what the cache keeps; c.mu is held.
+func (c *imageCache) usage() ImageCacheUsage {
+	return ImageCacheUsage{Files: len(c.disk), Bytes: c.diskSize, Limit: c.diskBytes, MemoryImages: len(c.memory), MemoryBytes: int64(c.size)}
+}
+
+// clear forgets every image kept, in memory and on disk, the downloads
+// remembered as failed, the images found dead, the pictures that failed
+// to decode and the posters warmed, and returns what it freed. A host
+// that asked to wait still waits. A download or resize under way keeps
+// its image once it ends, as for any request.
+func (c *imageCache) clear() ImageCacheUsage {
+	c.mu.Lock()
+	var freed ImageCacheUsage
+	names := make([]string, 0, len(c.disk))
+	for name, image := range c.disk {
+		names = append(names, name)
+		freed.Bytes += image.size
+	}
+	freed.Files, freed.Limit = len(names), c.diskBytes
+	freed.MemoryImages, freed.MemoryBytes = len(c.memory), int64(c.size)
+	// The places of images warmed being written stay held (see
+	// keepWarmed): only those of the images dropped are given back.
+	c.diskSize -= freed.Bytes
+	c.disk = map[string]*diskImage{}
+	c.memory, c.order, c.size = map[string]*list.Element{}, list.New(), 0
+	c.warmed = map[string][]string{}
+	c.warmFull = false
+	dir := c.dir
+	c.mu.Unlock()
+	c.failures.DeleteFunc(func(string, failedDownload) bool { return true })
+	c.dead.DeleteFunc(func(string, struct{}) bool { return true })
+	c.undecodable.DeleteFunc(func(pictureSum, struct{}) bool { return true })
+	for _, name := range names {
+		if err := os.Remove(filepath.Join(dir, name)); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			c.logger.Debug("A cached image could not be deleted", "error", err)
+		}
+	}
+	return freed
+}
+
+// ImageCache tells what the image cache keeps: the artwork relayed, its
+// resized copies and the images Polyfin draws (see generated.go).
+func (h *Handler) ImageCache() ImageCacheUsage {
+	h.images.open(h.imageDir(), h.Logger)
+	h.images.mu.Lock()
+	defer h.images.mu.Unlock()
+	return h.images.usage()
+}
+
+// ClearImageCache empties the image cache, and returns what it freed.
+// Each image is downloaded, resized or drawn again at its next request;
+// the posters the libraries' first pages show are warmed again by the
+// next warming (see warmPosters). The scrubbing thumbnails and chapter
+// images, kept in the database, uploaded artwork, local folders' artwork
+// files and the web player's theme are not in it.
+func (h *Handler) ClearImageCache() ImageCacheUsage {
+	h.images.open(h.imageDir(), h.Logger)
+	freed := h.images.clear()
+	h.Logger.Info("The image cache was cleared", "images", freed.Files, "bytes", freed.Bytes,
+		"in_memory", freed.MemoryImages)
+	return freed
+}
+
+// keptDisk is what trimDisk leaves on disk, and what warming fills it to
+// at most: nine tenths of diskBytes.
+func (c *imageCache) keptDisk() int64 { return c.diskBytes * 9 / 10 }
+
+// peek returns the image kept for key, in memory or on disk, without
+// making it recently used, nor keeping in memory one read from disk.
+func (c *imageCache) peek(key string) (artwork, bool) {
+	c.mu.Lock()
+	if element, ok := c.memory[key]; ok {
+		c.mu.Unlock()
+		return element.Value.(*memoryImage).image, true
+	}
+	kept, ok := c.disk[fileName(key)]
+	c.mu.Unlock()
+	if !ok {
+		return artwork{}, false
+	}
+	image, err := readImage(filepath.Join(c.dir, kept.name))
+	return image, err == nil
+}
+
+// roomToWarm reports whether the disk has room for images warmed: it is
+// kept, below keptDisk, and refused none since warming started (see
+// startWarming).
+func (c *imageCache) roomToWarm() bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.dir != "" && c.diskSize < c.keptDisk() && !c.warmFull
+}
+
+// startWarming lets warming fill the disk again (see roomToWarm).
+func (c *imageCache) startWarming() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.warmFull = false
+}
+
+// keepWarmed keeps on disk, not in memory, an image warmed ahead of any
+// request, if the disk has room for it below keptDisk: it never makes
+// room by deleting others, and refuses the next ones once it lacks room
+// (see roomToWarm). It is the least recently used until an app asks for
+// it (see get), so the images apps asked for outlast it.
+func (c *imageCache) keepWarmed(key string, image artwork) {
+	name := fileName(key)
+	size := int64(len(image.contentType) + 1 + len(image.body))
+	c.mu.Lock()
+	if _, ok := c.disk[name]; ok || c.dir == "" {
+		c.mu.Unlock()
+		return
+	}
+	if c.diskSize+size > c.keptDisk() {
+		c.warmFull = true
+		c.mu.Unlock()
+		return
+	}
+	// Its place is held while it is written.
+	c.diskSize += size
+	c.mu.Unlock()
+	written, err := writeImage(c.dir, name, image)
+	if err == nil {
+		err = os.Chtimes(filepath.Join(c.dir, name), neverUsed, neverUsed)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.diskSize -= size
+	if err != nil {
+		c.logger.Debug("Artwork could not be kept on disk", "error", err)
+		return
+	}
+	if kept, ok := c.disk[name]; ok {
+		// An app's request kept it meanwhile.
+		c.diskSize -= kept.size
+	}
+	c.disk[name] = &diskImage{name: name, size: written, used: neverUsed}
+	c.diskSize += written
+}
+
+// kept reports whether every one of keys is kept on disk.
+func (c *imageCache) kept(keys []string) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for _, key := range keys {
+		if _, ok := c.disk[fileName(key)]; !ok {
+			return false
+		}
+	}
+	return true
 }
 
 // readImage reads an image file: its content type on the first line, then
@@ -305,17 +544,46 @@ func writeImage(dir, name string, image artwork) (int64, error) {
 	return int64(len(image.contentType) + 1 + len(image.body)), nil
 }
 
+// errImagePanicked reports the making of an image that ended on a panic.
+var errImagePanicked = errors.New("making the image ended on a panic")
+
 // fetch returns the image kept for key, else the one produce makes, once
 // for all the callers at once, on a context the callers giving up do not
 // cancel; each caller waits on its own ctx. What produce makes is kept.
+// produce runs in no request's handler, which would recover a panic of
+// it: such a panic, of what downloads or decodes the image, is the error
+// every caller gets instead, logged once with its stack, and the server
+// goes on.
 func (c *imageCache) fetch(ctx context.Context, key string, produce func(context.Context) (artwork, error)) (artwork, error) {
-	if image, ok := c.get(key); ok {
+	return c.fetchFor(ctx, key, false, produce)
+}
+
+// fetchFor is fetch, for warming when warming: an image kept is then not
+// made recently used, and the one produce makes is kept as warmed (see
+// keepWarmed).
+func (c *imageCache) fetchFor(ctx context.Context, key string, warming bool, produce func(context.Context) (artwork, error)) (artwork, error) {
+	if warming {
+		if image, ok := c.peek(key); ok {
+			return image, nil
+		}
+	} else if image, ok := c.get(key); ok {
 		return image, nil
 	}
 	detached := context.WithoutCancel(ctx)
-	results := c.flight.DoChan(key, func() (any, error) {
+	results := c.flight.DoChan(key, func() (val any, err error) {
+		defer func() {
+			if cause := recover(); cause != nil {
+				c.logger.Error("Making an image ended on a panic", "image", key, "panic", fmt.Sprint(cause),
+					"stack", string(debug.Stack()))
+				val, err = artwork{}, fmt.Errorf("%w: %v", errImagePanicked, cause)
+			}
+		}()
 		image, err := produce(detached)
-		if err == nil {
+		switch {
+		case err != nil:
+		case warming:
+			c.keepWarmed(key, image)
+		default:
 			c.put(key, image)
 		}
 		return image, err
@@ -332,17 +600,23 @@ func (c *imageCache) fetch(ctx context.Context, key string, produce func(context
 }
 
 // hostFetches are the downloads under way from a host: active of them,
-// those waiting woken when one ends, and the host spared until slowUntil.
+// warming of those warming posters, those waiting woken when one ends,
+// the host spared until slowUntil, and asked nothing until waitUntil.
 type hostFetches struct {
 	active    int
+	warming   int
 	slowUntil time.Time
+	waitUntil time.Time
 	ended     chan struct{}
 }
 
 // host waits for a place among the downloads from target's host, and
 // returns what gives it back: imageHostFetches places, imageSlowHostFetches
-// for a host to spare, iptv telling a host that serves an IPTV source.
-func (c *imageCache) host(ctx context.Context, target string, iptv bool) (func(), error) {
+// for a host to spare, iptv telling a host that serves an IPTV source. A
+// download warming a poster takes one of those places only while the
+// downloads warming take less than 1 in imageWarmShare of them: the others
+// stay for apps. While the host asked to wait, it answers 503 at once.
+func (c *imageCache) host(ctx context.Context, target string, iptv, warming bool) (func(), error) {
 	parsed, err := url.Parse(target)
 	if err != nil {
 		return func() {}, nil
@@ -354,17 +628,28 @@ func (c *imageCache) host(ctx context.Context, target string, iptv bool) (func()
 			fetches = &hostFetches{ended: make(chan struct{})}
 			c.hosts[parsed.Host] = fetches
 		}
+		now := c.now()
+		if left := fetches.waitUntil.Sub(now); left > 0 {
+			c.mu.Unlock()
+			return nil, downloadError{http.StatusServiceUnavailable, stremio.AskedToWait(left)}
+		}
 		places := imageHostFetches
-		if iptv || time.Now().Before(fetches.slowUntil) {
+		if iptv || now.Before(fetches.slowUntil) {
 			places = imageSlowHostFetches
 		}
-		if fetches.active < places {
+		if fetches.active < places && (!warming || fetches.warming < max(1, places/imageWarmShare)) {
 			fetches.active++
+			if warming {
+				fetches.warming++
+			}
 			c.mu.Unlock()
 			return func() {
 				c.mu.Lock()
 				defer c.mu.Unlock()
 				fetches.active--
+				if warming {
+					fetches.warming--
+				}
 				close(fetches.ended)
 				fetches.ended = make(chan struct{})
 			}, nil
@@ -388,7 +673,20 @@ func (c *imageCache) spare(target string) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if fetches, ok := c.hosts[parsed.Host]; ok {
-		fetches.slowUntil = time.Now().Add(imageSlowDown)
+		fetches.slowUntil = c.now().Add(imageSlowDown)
+	}
+}
+
+// wait has target's host asked nothing for wait.
+func (c *imageCache) wait(target string, wait time.Duration) {
+	parsed, err := url.Parse(target)
+	if err != nil {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if fetches, ok := c.hosts[parsed.Host]; ok {
+		fetches.waitUntil = c.now().Add(wait)
 	}
 }
 
@@ -399,7 +697,7 @@ func overloaded(err error) bool {
 	case http.StatusTooManyRequests, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout:
 		return true
 	}
-	return errors.Is(err, syscall.ECONNRESET)
+	return netfail.Reset(err)
 }
 
 // downloadError is a download that failed, with the status it answers.
@@ -409,6 +707,98 @@ type downloadError struct {
 }
 
 func (e downloadError) Error() string { return e.err.Error() }
+
+func (e downloadError) Unwrap() error { return e.err }
+
+// failedDownload is a download that failed as it is remembered: failures
+// counts the downloads of its image that failed running, this one
+// included, and until is when it is asked for again.
+type failedDownload struct {
+	downloadError
+	failures int
+	until    time.Time
+}
+
+func (f failedDownload) Unwrap() error { return f.downloadError }
+
+// dead reports an image found dead: its server does not have it, or its
+// downloads failed imageDeadAfter times running.
+func (f failedDownload) dead() bool {
+	return f.status == http.StatusNotFound || f.failures >= imageDeadAfter
+}
+
+// artworkKey is the key the artwork at target is kept by, and its failed
+// downloads remembered by. A download confined to public addresses has
+// its own: a confined request is answered neither an image nor a failure
+// that a request reaching the local network met, nor the other way
+// round. An image kept by its address alone, as all were before the two
+// were told apart, is one downloaded without confinement.
+func artworkKey(target string, confined bool) string {
+	if confined {
+		return target + "\x00confined"
+	}
+	return target
+}
+
+// failed remembers that the download of target, confined or not, failed
+// with err, answering status, for as long as imageCache tells, and counts
+// it (see failureEvent): a host that asked to wait is asked nothing
+// meanwhile, and one that showed it was overloaded is spared.
+func (c *imageCache) failed(target string, confined bool, status int, err error) failedDownload {
+	now := c.now()
+	key := artworkKey(target, confined)
+	failures := 1
+	if before, ok := c.failures.Get(key); ok {
+		failures = before.failures + 1
+	}
+	life := imageMissingLife
+	if status != http.StatusNotFound {
+		life = min(imageFailureLife<<min(failures-1, 10), imageFailureMost)
+	}
+	if wait, ok := stremio.RetryAfter(err); ok {
+		life = min(wait, imageHostWaitMost)
+		c.wait(target, life)
+	}
+	if overloaded(err) {
+		c.spare(target)
+	}
+	failed := failedDownload{downloadError{status, err}, failures, now.Add(life)}
+	c.failures.Put(key, failed)
+	c.count(target, status, err, now)
+	return failed
+}
+
+// markDead remembers an image found dead, for imageFailureMemory: items
+// stop advertising it (see withoutDead).
+func (c *imageCache) markDead(target string) { c.dead.Put(target, struct{}{}) }
+
+// isDead reports an image found dead.
+func (c *imageCache) isDead(target string) bool {
+	_, dead := c.dead.Get(target)
+	return dead
+}
+
+// forget forgets the failures of the images at targets, confined or not,
+// and whether they were found dead, and has their hosts that asked to
+// wait asked again: each is downloaded at its next request.
+func (c *imageCache) forget(targets []string) {
+	hosts := map[string]bool{}
+	for _, target := range targets {
+		c.failures.Delete(target)
+		c.failures.Delete(artworkKey(target, true))
+		c.dead.Delete(target)
+		if parsed, err := url.Parse(target); err == nil && parsed.Host != "" {
+			hosts[parsed.Host] = true
+		}
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	for host := range hosts {
+		if fetches, ok := c.hosts[host]; ok {
+			fetches.waitUntil = time.Time{}
+		}
+	}
+}
 
 // fetchArtwork returns the artwork at target, downloaded once (see
 // imageCache); iptv tells that its host serves an IPTV source. Artwork its
@@ -421,11 +811,20 @@ func (h *Handler) fetchArtwork(ctx context.Context, target string, confined, ipt
 // fetchArtworkHeld is fetchArtwork, the download holding what hold gives
 // besides its place among those from its host, when hold is set.
 func (h *Handler) fetchArtworkHeld(ctx context.Context, target string, confined, iptv bool, hold func(context.Context) (func(), error)) (artwork, error) {
-	if status, failed := h.images.failures.Get(target); failed {
-		return artwork{}, downloadError{status, errors.New("the last download failed")}
+	return h.downloadArtwork(ctx, target, confined, iptv, false, hold)
+}
+
+// downloadArtwork is fetchArtworkHeld, for warming a poster when warming
+// (see fetchFor and host). The image kept, and the failure remembered,
+// are those of a download confined as this one is (see artworkKey).
+func (h *Handler) downloadArtwork(ctx context.Context, target string, confined, iptv, warming bool, hold func(context.Context) (func(), error)) (artwork, error) {
+	key := artworkKey(target, confined)
+	if failed, ok := h.images.failures.Get(key); ok && h.images.now().Before(failed.until) {
+		failed.downloadError = downloadError{failed.status, fmt.Errorf("the last download failed: %w", failed.err)}
+		return artwork{}, failed
 	}
-	return h.images.fetch(ctx, target, func(ctx context.Context) (artwork, error) {
-		release, err := h.images.host(ctx, target, iptv)
+	return h.images.fetchFor(ctx, key, warming, func(ctx context.Context) (artwork, error) {
+		release, err := h.images.host(ctx, target, iptv, warming)
 		if err != nil {
 			return artwork{}, err
 		}
@@ -446,12 +845,9 @@ func (h *Handler) fetchArtworkHeld(ctx context.Context, target string, confined,
 			case stremio.StatusOf(err) == http.StatusNotFound, stremio.StatusOf(err) == http.StatusGone:
 				status = http.StatusNotFound
 			}
-			if overloaded(err) {
-				h.images.spare(target)
-			}
-			h.images.failures.Put(target, status)
-			return artwork{}, downloadError{status, err}
+			return artwork{}, h.images.failed(target, confined, status, err)
 		}
+		h.images.failures.Delete(key)
 		return artwork{body: body, contentType: contentType}, nil
 	})
 }
@@ -466,7 +862,13 @@ const maxLocalImageBytes = 32 << 20
 // imageCache): its URL changes with it. An image no longer in its folder,
 // or that is no image, is not found.
 func (h *Handler) localArtwork(ctx context.Context, target, key string) (artwork, error) {
-	return h.images.fetch(ctx, target, func(ctx context.Context) (artwork, error) {
+	return h.localArtworkFor(ctx, target, key, false)
+}
+
+// localArtworkFor is localArtwork, for warming a poster when warming (see
+// fetchFor).
+func (h *Handler) localArtworkFor(ctx context.Context, target, key string, warming bool) (artwork, error) {
+	return h.images.fetchFor(ctx, target, warming, func(ctx context.Context) (artwork, error) {
 		file, err := h.Library.OpenLocalArtwork(ctx, key)
 		if err != nil {
 			status := http.StatusBadGateway
@@ -541,13 +943,29 @@ func resizedWidth(query url.Values, width, height int) int {
 	return 0
 }
 
+// resizedKey is the key an image resized to width is kept by.
+func resizedKey(target string, width int) string {
+	return target + "\x00width=" + strconv.Itoa(width)
+}
+
 // resized returns the image at target resized to width, made once and
 // kept (see imageCache), or the original when it cannot be resized.
 func (h *Handler) resized(ctx context.Context, target string, original artwork, width int) artwork {
-	image, err := h.images.fetch(ctx, target+"\x00width="+strconv.Itoa(width), func(context.Context) (artwork, error) {
+	return h.resizedFor(ctx, target, original, width, false)
+}
+
+// resizedFor is resized, for warming a poster when warming: the resize
+// then also takes a place among warmResizes, and is kept as warmed (see
+// fetchFor).
+func (h *Handler) resizedFor(ctx context.Context, target string, original artwork, width int, warming bool) artwork {
+	image, err := h.images.fetchFor(ctx, resizedKey(target, width), warming, func(context.Context) (artwork, error) {
+		if warming {
+			h.images.warmResizes <- struct{}{}
+			defer func() { <-h.images.warmResizes }()
+		}
 		h.images.resizes <- struct{}{}
 		defer func() { <-h.images.resizes }()
-		return resize(original, width)
+		return h.resize(original, width)
 	})
 	if err != nil {
 		if ctx.Err() == nil {
@@ -559,9 +977,10 @@ func (h *Handler) resized(ctx context.Context, target string, original artwork, 
 }
 
 // resize scales an image down to width, keeping its proportions: as a
-// PNG when it was one, which may be transparent, else as a JPEG.
-func resize(original artwork, width int) (artwork, error) {
-	source, format, err := image.Decode(bytes.NewReader(original.body))
+// PNG when it was one, which may be transparent, else as a JPEG. An image
+// that may not be decoded is not resized (see decodePicture).
+func (h *Handler) resize(original artwork, width int) (artwork, error) {
+	source, format, err := h.decodePicture(original.body, func(p pictureCost) int64 { return p.resized(width) })
 	if err != nil {
 		return artwork{}, err
 	}
@@ -601,13 +1020,16 @@ func resizable(contentType string) bool {
 // generatedArtwork).
 func (h *Handler) image(w http.ResponseWriter, r *http.Request) {
 	tag := query(r, "tag")
-	h.taggedArtwork(w, r, tag, tag != "")
+	h.taggedArtwork(w, r, tag, tag != "", false)
 }
 
 // taggedArtwork is image for the artwork whose tag is tag, if any (see
 // library.TaggedArtwork). immutable lets the client keep it for good: an
-// address that names the tag changes with the image.
-func (h *Handler) taggedArtwork(w http.ResponseWriter, r *http.Request, tag string, immutable bool) {
+// address that names the tag changes with the image. reached tells that
+// the caller found the item through a user who may see it, so that the
+// artwork of a user's own item is served without its tag (see
+// ownArtworkShown).
+func (h *Handler) taggedArtwork(w http.ResponseWriter, r *http.Request, tag string, immutable, reached bool) {
 	id, err := accounts.ParseID(r.PathValue("itemId"))
 	if err != nil {
 		processingError(w, http.StatusBadRequest)
@@ -626,6 +1048,8 @@ func (h *Handler) taggedArtwork(w http.ResponseWriter, r *http.Request, tag stri
 	url, uploaded := h.Library.UploadedArtwork(id, imageType)
 	if uploaded {
 		found.URL = url
+	} else if view, ok := h.viewArtwork(r.Context(), id, imageType, tag); ok {
+		found = view
 	} else {
 		var collection bool
 		found, collection, err = h.collectionArtwork(r, id, imageType)
@@ -633,9 +1057,12 @@ func (h *Handler) taggedArtwork(w http.ResponseWriter, r *http.Request, tag stri
 			found, err = h.Library.Artwork(r.Context(), id, imageType)
 		}
 	}
+	// subject is the item whose artwork is served.
+	subject := id
 	if errors.Is(err, library.ErrNotFound) {
 		// Apps show a version opened as an item with its title's artwork.
 		if owner, ok := h.Library.VersionOwner(id); ok {
+			subject = owner
 			found, err = h.Library.Artwork(r.Context(), owner, r.PathValue("imageType"))
 		}
 	}
@@ -646,6 +1073,20 @@ func (h *Handler) taggedArtwork(w http.ResponseWriter, r *http.Request, tag stri
 		found = library.Artwork{}
 		found.URL, found.Confined, err = h.Library.ProgramArtwork(r.Context(), id, imageType)
 	}
+	if errors.Is(err, library.ErrNotFound) {
+		if url, ok := h.customRowUpload(r.Context(), id, imageType); ok {
+			found, err, uploaded = library.Artwork{URL: url}, nil, true
+		}
+	}
+	// A studio shows its logo on a plate Polyfin draws (see studios.go).
+	if errors.Is(err, library.ErrNotFound) {
+		if logo, ok := h.studioArtwork(r.Context(), id, imageType, r.URL.Query()); ok {
+			found, err = logo, nil
+		}
+	}
+	// A badged tag stands for the image of its own tag with badges over
+	// it (see badgedTag).
+	tag, badges, preview, badged := h.badgedRequest(id, tag)
 	// Image requests come without a user: a tag that is not the image found
 	// may be that of one in a user's metadata language (see
 	// library.TaggedArtwork).
@@ -653,6 +1094,13 @@ func (h *Handler) taggedArtwork(w http.ResponseWriter, r *http.Request, tag stri
 		err == nil && library.ImageTag(found.URL) != tag) {
 		if tagged, ok := h.Library.TaggedArtwork(r.Context(), id, tag); ok {
 			found, err = tagged, nil
+		}
+	}
+	// A movie or series without the image shows TMDB's, looked up now if
+	// need be (see library.Service.TMDBArtwork).
+	if errors.Is(err, library.ErrNotFound) && !uploaded {
+		if replaced, ok := h.Library.TMDBArtwork(r.Context(), id, imageType); ok {
+			found, err = replaced, nil
 		}
 	}
 	if errors.Is(err, library.ErrNotFound) {
@@ -663,19 +1111,45 @@ func (h *Handler) taggedArtwork(w http.ResponseWriter, r *http.Request, tag stri
 		h.internalError(w, r, err)
 		return
 	}
+	if !reached {
+		// The tag of the image found, or of what stood for TMDB's poster
+		// before it was looked up.
+		tagged := tag != "" && (tag == library.ImageTag(found.URL) || found.Lookup != "" && tag == library.ImageTag(found.Lookup))
+		shown, err := h.ownArtworkShown(r, subject, tagged)
+		if err != nil {
+			h.internalError(w, r, err)
+			return
+		}
+		if !shown {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+	}
 	url = found.URL
 	if owner, ownerType, ok := library.Uploaded(url); ok {
 		h.uploadedImage(w, r, owner, ownerType)
 		return
 	}
+	// Badges are drawn over a Primary image Polyfin does not draw, while
+	// the settings draw them, or for a preview.
+	drawn := badged && found.Generated == nil && strings.EqualFold(imageType, "Primary") &&
+		(preview || h.Accounts.Settings().PosterBadges)
 	etag := `"` + library.ImageTag(url) + `"`
+	if drawn {
+		etag = `"` + library.ImageTag(url) + "-" + badges + `"`
+	}
 	header := w.Header()
 	header.Set("ETag", etag)
 	// Tags change with the artwork, so a tagged image never changes; an
-	// app asking by tag may keep it for good.
-	if immutable {
+	// app asking by tag may keep it for good. A badged tag asked for once
+	// the badges are off answers the image without them, which the app
+	// keeps for a while only; a preview's is not kept.
+	switch {
+	case drawn && preview:
+		header.Set("Cache-Control", "no-store")
+	case immutable && (drawn || !badged):
 		header.Set("Cache-Control", immutableImage)
-	} else {
+	default:
 		header.Set("Cache-Control", taggedImage)
 	}
 	if r.Header.Get("If-None-Match") == etag {
@@ -684,13 +1158,45 @@ func (h *Handler) taggedArtwork(w http.ResponseWriter, r *http.Request, tag stri
 	}
 	h.images.open(h.imageDir(), h.Logger)
 	var image artwork
+	// source is the address of the image downloaded: url, else its
+	// fallback, or TMDB's in place of a dead one.
+	source := url
 	// Only an image Polyfin chose is drawn, whatever an artwork URL says.
 	if found.Generated != nil {
 		image, err = h.generatedArtwork(r.Context(), url, *found.Generated, found.Confined)
 	} else if key, ok := library.LocalArtworkKey(url); ok {
 		image, err = h.localArtwork(r.Context(), url, key)
 	} else {
-		image, err = h.fetchArtwork(r.Context(), url, found.Confined, h.iptvHost(r.Context(), url))
+		// The poster address template is an administrator's: its posters
+		// are not confined as the addons' may be (see URLConfined).
+		image, err = h.fetchArtwork(r.Context(), url, found.URLConfined(), h.iptvHost(r.Context(), url))
+		// The poster address template's poster that cannot be downloaded
+		// gives way to the addon's, which apps keep for a while only.
+		if err != nil && found.Fallback != "" && r.Context().Err() == nil {
+			h.Logger.Debug("The templated poster could not be downloaded", "item", id.String(), "error", err)
+			source = found.Fallback
+			image, err = h.fetchArtwork(r.Context(), source, found.Confined, h.iptvHost(r.Context(), source))
+			if !preview {
+				header.Set("Cache-Control", taggedImage)
+			}
+		}
+		// Artwork relayed that is found dead, the poster address
+		// template's with its fallback, stops being advertised. A movie's
+		// or series' gives way to TMDB's at once, which apps keep for a
+		// while only.
+		if failed, ok := errors.AsType[failedDownload](err); ok && failed.dead() {
+			h.artworkDead(r.Context(), id, found, url)
+			if replaced, ok := h.Library.TMDBArtwork(r.Context(), id, imageType); ok && replaced.URL != url && r.Context().Err() == nil {
+				source = replaced.URL
+				image, err = h.fetchArtwork(r.Context(), source, replaced.Confined, false)
+				if !preview {
+					header.Set("Cache-Control", taggedImage)
+				}
+				if failed, ok := errors.AsType[failedDownload](err); ok && failed.dead() {
+					h.artworkDead(r.Context(), id, replaced, source)
+				}
+			}
+		}
 	}
 	if err != nil {
 		header.Del("ETag")
@@ -699,20 +1205,70 @@ func (h *Handler) taggedArtwork(w http.ResponseWriter, r *http.Request, tag stri
 		if failed, ok := errors.AsType[downloadError](err); ok {
 			status = failed.status
 		}
+		// A host that asked to wait tells apps how long.
+		if wait, ok := stremio.RetryAfter(err); ok && status == http.StatusServiceUnavailable {
+			header.Set("Retry-After", strconv.Itoa(int(math.Ceil(wait.Seconds()))))
+		}
 		if r.Context().Err() == nil {
 			h.Logger.Debug("Artwork could not be downloaded", "item", id.String(), "error", err)
 		}
 		w.WriteHeader(status)
 		return
 	}
+	width := 0
 	if resizable(image.contentType) {
 		if config, _, err := image.decodeConfig(); err == nil {
-			if width := resizedWidth(r.URL.Query(), config.Width, config.Height); width > 0 {
-				image = h.resized(r.Context(), url, image, width)
-			}
+			width = resizedWidth(r.URL.Query(), config.Width, config.Height)
 		}
 	}
-	header.Set("Content-Type", image.contentType)
+	switch {
+	case drawn:
+		image = h.badged(r.Context(), source, image, badges, width)
+	case width > 0:
+		image = h.resized(r.Context(), source, image, width)
+	}
+	answerPicture(w, r, image)
+}
+
+// ownArtworkShown tells whether the artwork of the item id may be served
+// to the request r, tagged telling that r names the tag of the artwork
+// found. Image requests come without a user, and item identifiers can be
+// computed from what addons call items: the artwork of a user's own item
+// (see library.OwnArtwork) is served with its tag, which only the item's
+// listings give, or to a signed-in user who reaches the item, as apps
+// that ask for images without their tag send their sign-in. Any other
+// artwork is served to anyone.
+func (h *Handler) ownArtworkShown(r *http.Request, id accounts.ID, tagged bool) (bool, error) {
+	if tagged {
+		return true, nil
+	}
+	holder, own, err := h.Library.OwnArtwork(r.Context(), id)
+	if err != nil || !own {
+		return err == nil, err
+	}
+	c, ok, err := h.signedInCaller(r)
+	if err != nil || !ok {
+		return false, err
+	}
+	return h.Library.ReachesArtwork(r.Context(), c.User, holder)
+}
+
+// answerPicture writes a relayed picture as the answer, with the type its
+// bytes tell, never the one its source gave, sandboxed (see package
+// relayed). What is no raster picture by its bytes, an SVG image kept
+// before only pictures were among them, is answered as a missing image
+// is: 404, and nothing for an app to keep.
+func answerPicture(w http.ResponseWriter, r *http.Request, image artwork) {
+	header := w.Header()
+	contentType, ok := relayed.Picture(image.body)
+	if !ok {
+		header.Del("ETag")
+		header.Del("Cache-Control")
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+	relayed.Sandbox(header)
+	header.Set("Content-Type", contentType)
 	header.Set("Content-Length", strconv.Itoa(len(image.body)))
 	w.WriteHeader(http.StatusOK)
 	if r.Method != http.MethodHead {

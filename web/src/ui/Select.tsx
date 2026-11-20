@@ -12,14 +12,22 @@ import {
 } from 'react'
 import { createPortal } from 'react-dom'
 import { useI18n } from '@/i18n'
-import { cx, searchable } from './cx'
+import { cx, rem, scaledPx, searchable } from './cx'
 import { useField } from './Field'
-import { control, fieldBox, TextInput, useControlProps, type TextInputProps } from './Input'
+import {
+  control,
+  fieldBox,
+  TextInput,
+  useControlProps,
+  wellSizes,
+  type TextInputProps,
+  type WellSize,
+} from './Input'
 
 /** The tallest a list gets before it scrolls, in px. */
-const maxListHeight = 320
+const maxListHeight = 420
 /** Between the field and its list, and between the list and the window's edge, in px. */
-const gap = 6
+const gap = 10
 const edge = 8
 /** Past this many options, a Select's list starts with a search field. */
 const searchAbove = 12
@@ -75,16 +83,20 @@ function ListPopover({
       const viewport = document.documentElement
       const width = viewport.clientWidth
       const height = viewport.clientHeight
-      list.style.minWidth = `${Math.min(box.width, width - 2 * edge)}px`
-      list.style.maxWidth = `${Math.min(width - 2 * edge, Math.max(box.width, 420))}px`
-      list.style.maxHeight = `${maxListHeight}px`
-      const below = height - box.bottom - gap - edge
-      const above = box.top - gap - top - edge
+      // The sizes below follow the density, as the list's classes do.
+      const [listHeight, listGap, listEdge, listWidth] = [maxListHeight, gap, edge, 420].map(
+        scaledPx,
+      )
+      list.style.minWidth = `${Math.min(box.width, width - 2 * listEdge)}px`
+      list.style.maxWidth = `${Math.min(width - 2 * listEdge, Math.max(box.width, listWidth))}px`
+      list.style.maxHeight = `${listHeight}px`
+      const below = height - box.bottom - listGap - listEdge
+      const above = box.top - listGap - top - listEdge
       const up = list.offsetHeight > below && above > below
-      list.style.maxHeight = `${Math.max(0, Math.min(maxListHeight, up ? above : below))}px`
-      list.style.top = up ? 'auto' : `${box.bottom + gap}px`
-      list.style.bottom = up ? `${height - box.top + gap}px` : 'auto'
-      list.style.left = `${Math.max(edge, Math.min(box.left, width - edge - list.offsetWidth))}px`
+      list.style.maxHeight = `${Math.max(0, Math.min(listHeight, up ? above : below))}px`
+      list.style.top = up ? 'auto' : `${box.bottom + listGap}px`
+      list.style.bottom = up ? `${height - box.top + listGap}px` : 'auto'
+      list.style.left = `${Math.max(listEdge, Math.min(box.left, width - listEdge - list.offsetWidth))}px`
     }
     place()
     const resized = new ResizeObserver(place)
@@ -113,7 +125,7 @@ function ListPopover({
       onMouseDown={(event) => {
         if (!(event.target instanceof HTMLInputElement)) event.preventDefault()
       }}
-      className="fixed inset-auto z-50 m-0 flex animate-fade flex-col overflow-hidden rounded-row border-0 bg-s2 p-0 text-ink shadow-pop"
+      className="fixed inset-auto z-50 m-0 flex animate-pop flex-col overflow-hidden rounded-panel border-0 p-0 text-ink raised"
     >
       {children}
     </div>,
@@ -127,9 +139,10 @@ function useActiveInView(list: RefObject<HTMLElement | null>, activeId: string |
     const scroller = list.current
     const item = activeId === undefined ? null : document.getElementById(activeId)
     if (!scroller || !item) return
-    if (item.offsetTop < scroller.scrollTop) scroller.scrollTop = item.offsetTop - gap
+    if (item.offsetTop < scroller.scrollTop) scroller.scrollTop = item.offsetTop - scaledPx(gap)
     else if (item.offsetTop + item.offsetHeight > scroller.scrollTop + scroller.clientHeight) {
-      scroller.scrollTop = item.offsetTop + item.offsetHeight - scroller.clientHeight + gap
+      scroller.scrollTop =
+        item.offsetTop + item.offsetHeight - scroller.clientHeight + scaledPx(gap)
     }
   }, [list, activeId])
 }
@@ -143,6 +156,9 @@ function ListOption({
   selected,
   checked = false,
   disabled = false,
+  lang,
+  compact = false,
+  detail,
   onActivate,
   onChoose,
   children,
@@ -153,6 +169,12 @@ function ListOption({
   /** Draws the check mark of the chosen option. */
   checked?: boolean
   disabled?: boolean
+  /** A `lang` attribute, for an option written in another language. */
+  lang?: string
+  /** A 32 px row with smaller words, in the list of a compact field. */
+  compact?: boolean
+  /** A line under the label, in smaller words. */
+  detail?: string
   onActivate: () => void
   onChoose: () => void
   children: ReactNode
@@ -161,6 +183,7 @@ function ListOption({
     <div
       id={id}
       role="option"
+      lang={lang}
       aria-selected={selected}
       aria-disabled={disabled || undefined}
       data-active={active || undefined}
@@ -171,14 +194,28 @@ function ListOption({
         if (!disabled) onChoose()
       }}
       className={cx(
-        'flex min-h-9 cursor-pointer items-center gap-2.5 rounded-field px-2.5 py-1.5 text-control text-ink-2 transition-[background-color,color] duration-160 ease-nuit select-none',
-        'data-active:bg-s3 data-active:text-ink active:bg-s4',
-        checked && 'text-ink',
+        'flex cursor-pointer items-center gap-3 text-ink transition-[background-color,color] duration-300 ease-nuit select-none',
+        compact
+          ? 'min-h-8 rounded-[0.5rem] px-2.5 py-1 text-small'
+          : 'min-h-9 rounded-choice px-3 py-1.5 text-control',
+        'data-active:lit',
+        checked && 'font-semibold',
         disabled && 'cursor-not-allowed opacity-45 active:bg-transparent',
       )}
     >
-      <span className="min-w-0 flex-1 break-words">{children}</span>
-      {checked && <CheckIcon size={16} aria-hidden="true" className="shrink-0 text-link" />}
+      <span className="min-w-0 flex-1 break-words">
+        {children}
+        {detail !== undefined && (
+          <span className="block text-small font-normal text-ink-3">{detail}</span>
+        )}
+      </span>
+      {checked && (
+        <CheckIcon
+          size={rem(compact ? 15 : 17)}
+          aria-hidden="true"
+          className="shrink-0 text-link"
+        />
+      )}
     </div>
   )
 }
@@ -187,6 +224,10 @@ export type SelectOption<T extends string | number> = {
   value: T
   label: string
   disabled?: boolean
+  /** A `lang` attribute, for an option written in another language (a language's own name). */
+  lang?: string
+  /** A line under the label in the list, saying what the option does. */
+  detail?: string
 }
 
 export type SelectProps<T extends string | number> = {
@@ -203,6 +244,12 @@ export type SelectProps<T extends string | number> = {
   'aria-describedby'?: string
   /** Classes of the outer box (width, height). */
   className?: string
+  /** The choice shown wraps onto more lines, the box growing, rather than being cut. */
+  wrap?: boolean
+  /** The well's size; see WellSize. Defaults to the 38 px `md`; `compact` lists have 32 px rows. */
+  size?: WellSize
+  /** Marks the button as a setting row's control, which ↑ ↓ move between (`SettingRow`). */
+  'data-setting-head'?: boolean
 }
 
 /**
@@ -225,7 +272,13 @@ export function Select<T extends string | number>({
   'aria-describedby': ownDescribedBy,
   'aria-label': ariaLabel,
   className,
+  wrap,
+  size = 'md',
+  'data-setting-head': settingHead,
 }: SelectProps<T>) {
+  const well = wellSizes[size]
+  // The search at the top of a long list: one step smaller than the field.
+  const searchSize = size === 'compact' ? 'compact' : 'sm'
   const { t } = useI18n()
   const controlProps = useControlProps(id, ownDescribedBy, invalid)
   const ownId = useId()
@@ -389,10 +442,7 @@ export function Select<T extends string | number>({
   }
 
   return (
-    <div
-      ref={box}
-      className={cx(fieldBox, 'h-10', open && 'border-accent ring-3 ring-accent/15', className)}
-    >
+    <div ref={box} className={cx(fieldBox, wrap ? well.min : well.box, className)}>
       <button
         ref={trigger}
         type="button"
@@ -403,6 +453,7 @@ export function Select<T extends string | number>({
         aria-activedescendant={activeId}
         aria-label={ariaLabel}
         disabled={disabled}
+        data-setting-head={settingHead}
         {...controlProps}
         id={triggerId}
         onPointerDown={(event) => {
@@ -417,27 +468,39 @@ export function Select<T extends string | number>({
           onKeyDown(event, false)
         }}
         onBlur={onBlur}
-        className={cx(control, 'flex cursor-pointer items-center pr-9 text-left')}
+        className={cx(
+          control,
+          well.text,
+          'flex cursor-pointer items-center text-left',
+          size === 'compact' ? 'pr-8' : 'pr-9',
+          wrap && cx(well.min, 'py-1.5'),
+        )}
       >
-        <span className="min-w-0 truncate">{chosen >= 0 ? options[chosen].label : ''}</span>
+        <span
+          className={cx('min-w-0', wrap ? '[overflow-wrap:anywhere]' : 'truncate')}
+          lang={chosen >= 0 ? options[chosen].lang : undefined}
+        >
+          {chosen >= 0 ? options[chosen].label : ''}
+        </span>
       </button>
       <CaretDownIcon
-        size={14}
+        size={rem(size === 'compact' ? 14 : 16)}
         aria-hidden="true"
         className={cx(
-          'pointer-events-none absolute right-3 text-ink-3 transition-transform duration-160 ease-nuit',
+          'pointer-events-none absolute text-ink-2 transition-transform duration-300 ease-nuit',
+          size === 'compact' ? 'right-2.5' : 'right-3',
           open && 'rotate-180',
         )}
       />
       {open && (
         <ListPopover anchor={box} ref={popover} onDismiss={() => close(false)}>
           {withSearch && (
-            <div className="border-b border-line p-1.5">
-              <div className={cx(fieldBox, 'h-[34px]')}>
+            <div className={size === 'compact' ? 'px-1 pt-1' : 'px-1.5 pt-1.5'}>
+              <div className={cx(fieldBox, wellSizes[searchSize].box)}>
                 <MagnifyingGlassIcon
-                  size={16}
+                  size={rem(wellSizes[searchSize].icon)}
                   aria-hidden="true"
-                  className="ml-3 shrink-0 text-ink-3"
+                  className={cx('shrink-0 text-ink-2', wellSizes[searchSize].lead)}
                 />
                 <input
                   ref={search}
@@ -459,7 +522,7 @@ export function Select<T extends string | number>({
                   }}
                   onKeyDown={(event) => onKeyDown(event, true)}
                   onBlur={onBlur}
-                  className={cx(control, 'pl-2 text-control')}
+                  className={cx(control, wellSizes[searchSize].text, 'pl-3')}
                 />
               </div>
             </div>
@@ -470,7 +533,7 @@ export function Select<T extends string | number>({
             role="listbox"
             aria-labelledby={ariaLabel === undefined ? triggerId : undefined}
             aria-label={ariaLabel}
-            className={listboxClass}
+            className={cx(listboxClass, size === 'compact' && 'p-1')}
           >
             {shown.map((index) => (
               <ListOption
@@ -480,6 +543,9 @@ export function Select<T extends string | number>({
                 selected={index === chosen}
                 checked={index === chosen}
                 disabled={options[index].disabled}
+                lang={options[index].lang}
+                compact={size === 'compact'}
+                detail={options[index].detail}
                 onActivate={() => setActive(index)}
                 onChoose={() => choose(index)}
               >
@@ -487,7 +553,7 @@ export function Select<T extends string | number>({
               </ListOption>
             ))}
             {shown.length === 0 && (
-              <p role="status" className="px-2.5 py-2 text-small text-ink-3">
+              <p role="status" className="px-3 py-2 text-small text-ink-2">
                 {t.ui.noMatch}
               </p>
             )}
@@ -521,6 +587,7 @@ export function SuggestInput({
   ...rest
 }: SuggestInputProps) {
   const field = useField()
+  const compact = rest.size === 'compact'
   const ownId = useId()
   const inputId = rest.id ?? field?.id
   const listId = `${ownId}-list`
@@ -617,7 +684,7 @@ export function SuggestInput({
             role="listbox"
             aria-labelledby={inputId}
             aria-label={inputId === undefined ? rest['aria-label'] : undefined}
-            className={listboxClass}
+            className={cx(listboxClass, compact && 'p-1')}
           >
             {shown.map((suggestion, index) => (
               <ListOption
@@ -625,6 +692,7 @@ export function SuggestInput({
                 id={optionId(index)}
                 active={index === active}
                 selected={index === active}
+                compact={compact}
                 onActivate={() => setActive(index)}
                 onChoose={() => pick(suggestion)}
               >

@@ -56,7 +56,7 @@ func (s *Service) catalogChannels(ctx context.Context, c addons.LiveCatalog) ([]
 	}
 	settings := s.settings()
 	v := view{deadline: s.now(), lookups: new(atomic.Int32), held: new(atomic.Bool),
-		catalogLimit: settings.CatalogLimit, channelLimit: settings.ChannelLimit}
+		catalogLimit: settings.CatalogLimit, channelLimit: settings.ChannelLimit, country: settings.RatingCountry}
 	src := source{addon: installed{addon: c.Addon, confined: c.Confined, shared: c.Scope.Owner == nil}, catalog: c.Catalog}
 	metas, _, err := s.window(ctx, v, src, 0, v.limit(src))
 	if err != nil {
@@ -239,14 +239,14 @@ func (s *Service) CatalogGuides(ctx context.Context, scope addons.Scope, key add
 
 // SetCatalogGuides replaces one of the scope's live TV catalogs' guides
 // (see addons.Store.SetGuides), downloads the new ones and maps the
-// catalog's channels again. A confined catalog's new addresses must not be
-// on a local network.
+// catalog's channels again. A member's new addresses must not be on a
+// local network.
 func (s *Service) SetCatalogGuides(ctx context.Context, scope addons.Scope, key addons.LibraryKey, list []addons.GuideAddress) (CatalogGuides, error) {
 	c, err := s.addons.LiveCatalogOf(ctx, scope, key)
 	if err != nil {
 		return CatalogGuides{}, err
 	}
-	if c.Confined {
+	if c.Member {
 		for _, entry := range list {
 			if parsed, err := url.Parse(strings.TrimSpace(entry.URL)); entry.ID == nil && err == nil {
 				if err := stremio.CheckPublic(ctx, parsed.Hostname()); err != nil {
@@ -349,11 +349,12 @@ func (s *Service) GuideChannels(ctx context.Context, scope addons.Scope, key add
 	return total, channels, err
 }
 
-// ChannelMapping is a catalog's channel with the guide channel it takes.
+// ChannelMapping is a catalog's channel with the guide channel it takes;
+// Number is the number it shows ("104.5").
 type ChannelMapping struct {
 	Channel accounts.ID
 	Name    string
-	Number  int
+	Number  string
 	GuideID string
 	Mapping *Mapping
 }
@@ -445,7 +446,8 @@ func (s *Service) Mappings(ctx context.Context, scope addons.Scope, key addons.L
 		if number == 0 {
 			number = i + 1
 		}
-		matching = append(matching, ChannelMapping{Channel: id, Name: meta.Name, Number: number, GuideID: meta.GuideID})
+		matching = append(matching, ChannelMapping{Channel: id, Name: meta.Name, Number: cmp.Or(meta.GuideNumber, strconv.Itoa(number)),
+			GuideID: meta.GuideID})
 	}
 	total := len(matching)
 	offset = min(max(offset, 0), total)
@@ -473,7 +475,7 @@ func (s *Service) catalogChannel(ctx context.Context, c addons.LiveCatalog, chan
 	for i, meta := range metas {
 		if itemID(channelKey(meta.ID)) == channel {
 			number := cmp.Or(meta.ChannelNumber, i+1)
-			return ChannelMapping{Channel: channel, Name: meta.Name, Number: number, GuideID: meta.GuideID}, nil
+			return ChannelMapping{Channel: channel, Name: meta.Name, Number: cmp.Or(meta.GuideNumber, strconv.Itoa(number)), GuideID: meta.GuideID}, nil
 		}
 	}
 	return ChannelMapping{}, ErrNotFound

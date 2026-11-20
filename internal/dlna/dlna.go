@@ -41,6 +41,10 @@ type Library interface {
 	Music(ctx context.Context, user accounts.User, q library.MusicQuery) ([]library.Item, error)
 	HasChannels(ctx context.Context, user accounts.User) (bool, error)
 	Channels(ctx context.Context, user accounts.User) ([]library.Item, error)
+	// WatchlistName and WatchlistTitles name the user's watchlist and
+	// list its titles, in its order.
+	WatchlistName(ctx context.Context, user accounts.User) (string, error)
+	WatchlistTitles(ctx context.Context, user accounts.User) ([]library.Item, error)
 }
 
 // Player is what the Jellyfin API's handler does for DLNA devices, as it
@@ -160,6 +164,9 @@ func Start(ctx context.Context, options Options) *Service {
 	if options.now == nil {
 		options.now = time.Now
 	}
+	// The addresses given to devices are signed in a domain of the
+	// server's signer that is DLNA's own (see grantDomain).
+	options.Signer = options.Signer.Domain(grantDomain)
 	s := &Service{options: options, store: newStore(options.DB)}
 	s.ssdp = &ssdp{s: s, port: options.Port, described: map[netip.Addr]*described{}}
 	changed := options.Changed()

@@ -29,6 +29,7 @@ func setup(t *testing.T) (*Store, accounts.ID, accounts.ID) {
 }
 
 func TestDataIsKeptPerUser(t *testing.T) {
+	t.Parallel()
 	store, alice, bob := setup(t)
 	movie := accounts.ID{1}
 	now := time.Date(2026, 10, 2, 20, 0, 0, 0, time.UTC)
@@ -59,6 +60,7 @@ func TestDataIsKeptPerUser(t *testing.T) {
 }
 
 func TestSeriesAndSeasonsCountTheirEpisodes(t *testing.T) {
+	t.Parallel()
 	store, alice, _ := setup(t)
 	series, first, second := accounts.ID{10}, accounts.ID{11}, accounts.ID{12}
 	episodes := []Item{
@@ -86,6 +88,7 @@ func TestSeriesAndSeasonsCountTheirEpisodes(t *testing.T) {
 }
 
 func TestListsFollowWhatUsersDid(t *testing.T) {
+	t.Parallel()
 	store, alice, _ := setup(t)
 	start := time.Date(2026, 10, 2, 20, 0, 0, 0, time.UTC)
 	resume := func(id accounts.ID, at time.Time) {
@@ -122,6 +125,7 @@ func TestListsFollowWhatUsersDid(t *testing.T) {
 }
 
 func TestConcurrentChangesAreNotLost(t *testing.T) {
+	t.Parallel()
 	store, alice, _ := setup(t)
 	item := []Item{{ID: accounts.ID{1}}}
 	var wg sync.WaitGroup
@@ -153,6 +157,7 @@ func entryIDs(entries []Entry) []accounts.ID {
 // it goes to were played before it and so take none; played marks and
 // favorites stay.
 func TestDataFollowsAsAnImport(t *testing.T) {
+	t.Parallel()
 	store, alice, bob := setup(t)
 	older := time.Date(2026, 9, 1, 20, 0, 0, 0, time.UTC)
 	newer := older.Add(48 * time.Hour)
@@ -227,9 +232,38 @@ func TestDataFollowsAsAnImport(t *testing.T) {
 	}
 }
 
+// What one user did with items follows them alone when the moves are
+// theirs, as those of their own library are: another user's data on the
+// same items stays where it is.
+func TestOneUsersDataFollowsAlone(t *testing.T) {
+	t.Parallel()
+	store, alice, bob := setup(t)
+	at := time.Date(2026, 9, 1, 20, 0, 0, 0, time.UTC)
+	from, to := accounts.ID{1}, accounts.ID{2}
+	for _, user := range []accounts.ID{alice, bob} {
+		if _, err := store.Change(t.Context(), user, []Item{{ID: from}}, func(d *Data) {
+			d.Position, d.Runtime, d.LastPlayed, d.Favorite = 30*time.Minute, 2*time.Hour, &at, true
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := store.FollowOf(t.Context(), alice, []Move{{From: []accounts.ID{from}, To: []Item{{ID: to}}}}, jellyfin); err != nil {
+		t.Fatal(err)
+	}
+	hers, err := store.Get(t.Context(), alice, []accounts.ID{from, to})
+	if err != nil || hers[from].Position != 0 || !hers[from].Favorite || hers[to].Position != 30*time.Minute || !hers[to].Favorite {
+		t.Errorf("the user's own: %+v %v", hers, err)
+	}
+	his, err := store.Get(t.Context(), bob, []accounts.ID{from, to})
+	if _, moved := his[to]; err != nil || moved || his[from].Position != 30*time.Minute || !his[from].Favorite {
+		t.Errorf("another user's: %+v %v", his, err)
+	}
+}
+
 // A title taken off Continue Watching keeps its played state, plays and
 // date, and an import brings back only a resume point set after that.
 func TestARemovedResumePointComesBackOnlyNewer(t *testing.T) {
+	t.Parallel()
 	store, alice, _ := setup(t)
 	movie := accounts.ID{1}
 	played := time.Date(2026, 10, 1, 20, 0, 0, 0, time.UTC)
@@ -268,7 +302,23 @@ func TestARemovedResumePointComesBackOnlyNewer(t *testing.T) {
 	}
 }
 
+// A point another service keeps before the resume threshold is dropped,
+// which tells it apart from one Polyfin's newer data keeps out.
+func TestAnImportedResumePointTooEarlyIsDropped(t *testing.T) {
+	t.Parallel()
+	at := time.Date(2026, 10, 1, 20, 0, 0, 0, time.UTC)
+	var d Data
+	if outcome := d.ImportResume(ImportedResume{Position: time.Minute, Runtime: 2 * time.Hour, At: at}, jellyfin); outcome != ResumeDropped || d.Position != 0 {
+		t.Errorf("too early: %d, %+v", outcome, d)
+	}
+	d = Data{Position: time.Hour, Runtime: 2 * time.Hour, LastPlayed: new(at.Add(time.Hour))}
+	if outcome := d.ImportResume(ImportedResume{Position: 40 * time.Minute, Runtime: 2 * time.Hour, At: at}, jellyfin); outcome != ResumeKept {
+		t.Errorf("older than Polyfin's: %d, %+v", outcome, d)
+	}
+}
+
 func TestHiddenTitlesArePerUserLatestFirst(t *testing.T) {
+	t.Parallel()
 	store, alice, bob := setup(t)
 	first, second := accounts.ID{1}, accounts.ID{2}
 	at := time.Date(2026, 10, 1, 20, 0, 0, 0, time.UTC)

@@ -31,6 +31,8 @@ import (
 
 	"github.com/moodiness/polyfin/internal/anime"
 	"github.com/moodiness/polyfin/internal/appimport"
+	"github.com/moodiness/polyfin/internal/redirect"
+	"github.com/moodiness/polyfin/internal/stremio"
 )
 
 // App names Nuvio among the apps imported from.
@@ -104,29 +106,48 @@ var defaultTiming = timing{request: time.Minute, maxWait: 30 * time.Second, wait
 
 // Options are the dependencies of the reader.
 type Options struct {
-	// Anime maps the Kitsu identifiers of anime to Polyfin's titles; nil
-	// finds them as anime catalogs list them only.
+	// Anime maps the anime identifiers of titles ("kitsu:…", "mal:…",
+	// "anidb:…") to Polyfin's titles; nil finds them as anime catalogs
+	// list them only.
 	Anime *anime.Service
 	// Version is Polyfin's, which the backend is told.
 	Version string
+	// Confined is the client of members' requests; nil reaches public
+	// addresses only, checked when connecting, as members' addons do.
+	// Tests give one reaching their backend on the loopback.
+	Confined *http.Client
 }
 
 // Reader reads Nuvio accounts.
 type Reader struct {
 	anime   *anime.Service
 	version string
-	client  *http.Client
-	timing  timing
+	// client reaches any address, for administrators; confined, public
+	// addresses only, for members, as their addons do.
+	client, confined *http.Client
+	timing           timing
 }
 
-// New returns a reader with options.
+// New returns a reader with options. Its transport is its own, a clone of
+// the default one: whoever closes the idle connections of
+// http.DefaultTransport, as httptest.Server.Close does, cannot break a
+// request whose answer without a body has just put its connection back
+// among the idle ones (#958). The confined client's is its own too. Both
+// follow redirects by redirect's rule, which keeps the backend's key and
+// a password or refresh token from another host.
 func New(options Options) *Reader {
-	return &Reader{anime: options.Anime, version: options.Version, client: &http.Client{}, timing: defaultTiming}
+	confined := options.Confined
+	if confined == nil {
+		confined = stremio.HTTPClient(true)
+	}
+	client := &http.Client{Transport: http.DefaultTransport.(*http.Transport).Clone(), CheckRedirect: redirect.Follow(redirect.Default)}
+	return &Reader{anime: options.Anime, version: options.Version, client: client, confined: confined, timing: defaultTiming}
 }
 
 // ParseBackend reads the address of a Nuvio backend as a user types it:
 // the official one when empty, https:// when it names none. A
-// self-hosted backend may be on the local network.
+// self-hosted backend may be on the local network, for an administrator
+// only (see Reader.Read).
 func ParseBackend(text string) (string, error) {
 	text = strings.TrimSpace(text)
 	if text == "" {
@@ -150,14 +171,17 @@ func ParseBackend(text string) (string, error) {
 // the account's backup, and returns the account with each of its
 // profiles. It signs out, unless keep asks to stay connected: then the
 // account holds the session's refresh token, which reads it again (see
-// Reread). It fails with ErrInvalidAddress, ErrUnreachable, ErrNotNuvio,
-// ErrSignInRefused, ErrRateLimited or a BackupError.
-func (r *Reader) Read(ctx context.Context, address, email, password string, keep bool) (appimport.Account, error) {
+// Reread). Confined, for a member, it reaches public addresses only,
+// checked when connecting, redirects included, and so does the sign-in
+// kept. It fails with ErrInvalidAddress, stremio.ErrPrivateNetwork,
+// ErrUnreachable, ErrNotNuvio, ErrSignInRefused, ErrRateLimited or a
+// BackupError.
+func (r *Reader) Read(ctx context.Context, address, email, password string, keep, confined bool) (appimport.Account, error) {
 	backend, err := ParseBackend(address)
 	if err != nil {
 		return appimport.Account{}, err
 	}
-	s, err := r.open(ctx, backend)
+	s, err := r.open(ctx, backend, confined)
 	if err != nil {
 		return appimport.Account{}, err
 	}
@@ -169,7 +193,7 @@ func (r *Reader) Read(ctx context.Context, address, email, password string, keep
 		return appimport.Account{}, err
 	}
 	var t token
-	switch err := s.send(ctx, http.MethodPost, "/auth/v1/token?grant_type=password", credentials, &t); {
+	switch err := s.send(redirect.SecretBody(ctx), http.MethodPost, "/auth/v1/token?grant_type=password", credentials, &t); {
 	case errors.Is(err, errRefused):
 		return appimport.Account{}, ErrSignInRefused
 	case err != nil:
@@ -194,7 +218,7 @@ func (r *Reader) Read(ctx context.Context, address, email, password string, keep
 	if keep && t.RefreshToken != "" {
 		kept = true
 		account.Name = strings.TrimSpace(t.User.Email)
-		account.SignIn = &appimport.SignIn{Secret: t.RefreshToken, Backend: backend, Owned: true}
+		account.SignIn, account.StayConnected = &appimport.SignIn{Secret: t.RefreshToken, Backend: backend, Owned: true, Confined: confined}, true
 	}
 	return account, nil
 }
@@ -210,9 +234,12 @@ type token struct {
 }
 
 // open reads the configuration of the backend at backend, and returns a
-// session about to sign in there.
-func (r *Reader) open(ctx context.Context, backend string) (*session, error) {
-	s := &session{r: r, backend: backend}
+// session about to sign in there, confined or not.
+func (r *Reader) open(ctx context.Context, backend string, confined bool) (*session, error) {
+	s := &session{r: r, backend: backend, client: r.client}
+	if confined {
+		s.client = r.confined
+	}
 	var configuration struct {
 		PublishableKey string `json:"publishable_key"`
 	}
@@ -253,7 +280,7 @@ func (s *session) refresh(ctx context.Context, refresh string) (token, error) {
 		return token{}, err
 	}
 	var t token
-	if err := s.send(ctx, http.MethodPost, "/auth/v1/token?grant_type=refresh_token", body, &t); err != nil {
+	if err := s.send(redirect.SecretBody(ctx), http.MethodPost, "/auth/v1/token?grant_type=refresh_token", body, &t); err != nil {
 		if errors.Is(err, errMissing) {
 			return token{}, ErrNotNuvio
 		}
@@ -274,7 +301,7 @@ func (s *session) refresh(ctx context.Context, refresh string) (token, error) {
 // refuses the refresh token or the session, appimport.ErrAppUnreachable,
 // appimport.ErrAppRateLimited, ErrNotNuvio or a BackupError.
 func (r *Reader) Reread(ctx context.Context, signIn appimport.SignIn) (appimport.Account, appimport.SignIn, error) {
-	s, err := r.open(ctx, signIn.Backend)
+	s, err := r.open(ctx, signIn.Backend, signIn.Confined)
 	if err != nil {
 		return appimport.Account{}, signIn, rereadError(err)
 	}
@@ -300,7 +327,7 @@ func rereadError(err error) error {
 	switch {
 	case errors.Is(err, errRefused):
 		return appimport.ErrSignInRefused
-	case errors.Is(err, ErrUnreachable):
+	case errors.Is(err, ErrUnreachable), errors.Is(err, stremio.ErrPrivateNetwork):
 		return appimport.ErrAppUnreachable
 	case errors.Is(err, ErrRateLimited):
 		return appimport.ErrAppRateLimited
@@ -314,7 +341,7 @@ func rereadError(err error) error {
 func (r *Reader) SignOut(ctx context.Context, signIn appimport.SignIn) error {
 	ctx, cancel := context.WithTimeout(ctx, r.timing.signOut)
 	defer cancel()
-	s, err := r.open(ctx, signIn.Backend)
+	s, err := r.open(ctx, signIn.Backend, signIn.Confined)
 	if err != nil {
 		return err
 	}
@@ -346,6 +373,7 @@ func notFound(err error) error {
 type session struct {
 	r       *Reader
 	backend string
+	client  *http.Client
 	// key is the backend's publishable key, token the session's.
 	key, token string
 }
@@ -361,6 +389,8 @@ func (s *session) send(ctx context.Context, method, path string, body []byte, in
 			return ctx.Err()
 		}
 		switch {
+		case errors.Is(err, stremio.ErrPrivateNetwork):
+			return err
 		case err != nil:
 			return ErrUnreachable
 		case status == http.StatusOK:
@@ -392,9 +422,11 @@ func (s *session) send(ctx context.Context, method, path string, body []byte, in
 }
 
 // do sends one request, with the publishable key and the session's token
-// once known, in headers: never in the URL, which errors would hold.
+// once known, in headers: never in the URL, which errors would hold. A
+// redirect to another host is sent neither: Go's client keeps the token's
+// Authorization from it, and redirect the key.
 func (s *session) do(ctx context.Context, method, path string, body []byte) (int, http.Header, []byte, error) {
-	ctx, cancel := context.WithTimeout(ctx, s.r.timing.request)
+	ctx, cancel := context.WithTimeout(redirect.SecretHeaders(ctx, "apikey"), s.r.timing.request)
 	defer cancel()
 	var content io.Reader
 	if body != nil {
@@ -415,7 +447,7 @@ func (s *session) do(ctx context.Context, method, path string, body []byte) (int
 	if s.token != "" {
 		request.Header.Set("Authorization", "Bearer "+s.token)
 	}
-	response, err := s.r.client.Do(request)
+	response, err := s.client.Do(request)
 	if err != nil {
 		return 0, nil, nil, err
 	}

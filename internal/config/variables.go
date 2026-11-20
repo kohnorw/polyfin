@@ -5,6 +5,9 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+
+	"github.com/moodiness/polyfin/internal/desktop"
+	"github.com/moodiness/polyfin/internal/desktop/tools"
 )
 
 // prefix starts the names of Polyfin's environment variables.
@@ -44,6 +47,7 @@ func Variables(environ []string, cfg Config) []Variable {
 	}
 	effective := map[string]string{
 		"POLYFIN_DATABASE_URL":        databaseLocation(cfg.DatabaseURL),
+		"POLYFIN_DATABASE":            embedded(cfg.Embedded),
 		"POLYFIN_LISTEN":              cfg.Listen,
 		"POLYFIN_DISCOVERY_PORT":      strconv.Itoa(cfg.DiscoveryPort),
 		"POLYFIN_DLNA_PORT":           strconv.Itoa(cfg.DLNAPort),
@@ -51,6 +55,9 @@ func Variables(environ []string, cfg Config) []Variable {
 		"POLYFIN_HDHOMERUN_ADDRESSES": strings.Join(cfg.HDHomeRunAddresses, ","),
 		"POLYFIN_FFPROBE":             cfg.FFprobe,
 		"POLYFIN_FFMPEG":              cfg.FFmpeg,
+		"POLYFIN_TESSERACT":           cfg.Tesseract,
+		"POLYFIN_TESSDATA_DIR":        cfg.TessdataDir,
+		"POLYFIN_TESSDATA_URL":        cfg.TessdataURL,
 		"POLYFIN_DATA_DIR":            cfg.DataDir,
 		"POLYFIN_FONTS_DIR":           cfg.FontsDir,
 		"POLYFIN_WEB_DIR":             cfg.WebDir,
@@ -58,6 +65,14 @@ func Variables(environ []string, cfg Config) []Variable {
 		"POLYFIN_ACME_CA_FILE":        cfg.ACMECAFile,
 		// A secret, never shown: secretName hides it.
 		"POLYFIN_SECRET_KEY": "",
+	}
+	// Polyfin Desktop's own, listed when it runs Polyfin only.
+	if cfg.Desktop {
+		effective[desktop.ServerVariable] = "1"
+	}
+	// The FFmpeg for older NVIDIA drivers of a test, read when set only.
+	if value, ok := set[tools.OlderDriverVariable]; ok {
+		effective[tools.OlderDriverVariable] = value
 	}
 	names := make([]string, 0, len(effective)+len(set))
 	for name := range effective {
@@ -89,6 +104,14 @@ func Variables(environ []string, cfg Config) []Variable {
 	return variables
 }
 
+// embedded is the value of POLYFIN_DATABASE that gives on.
+func embedded(on bool) string {
+	if on {
+		return EmbeddedDatabase
+	}
+	return ""
+}
+
 // secretName reports whether a variable's name tells its value is secret.
 func secretName(name string) bool {
 	name = strings.ToUpper(name)
@@ -98,6 +121,25 @@ func secretName(name string) bool {
 		}
 	}
 	return false
+}
+
+// Credentials returns the names of the variables environ sets, in
+// os.Environ's form, that hold a credential of Polyfin's: the database
+// URL, with its password, and the POLYFIN_ variables named after a
+// password, a token, a key or a secret, POLYFIN_SECRET_KEY above all.
+// Polyfin takes them out of its environment once it has read them, so
+// that the programs it runs inherit none. The names are compared whatever
+// their case, which Windows does not tell apart.
+func Credentials(environ []string) []string {
+	var names []string
+	for _, entry := range environ {
+		name, _, _ := strings.Cut(entry, "=")
+		upper := strings.ToUpper(name)
+		if upper == "POLYFIN_DATABASE_URL" || strings.HasPrefix(upper, prefix) && secretName(upper) {
+			names = append(names, name)
+		}
+	}
+	return names
 }
 
 // databaseLocation is the host and database of a PostgreSQL connection

@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/moodiness/polyfin/internal/process"
 	"golang.org/x/crypto/ssh"
 	"golang.org/x/net/webdav"
 )
@@ -166,6 +167,7 @@ func within(t *testing.T, limit time.Duration, what string, do func()) {
 // on its own once it moved no byte for the idle time: the backup is made,
 // the other destinations get it, and the run ends.
 func TestAStalledDestinationFailsAlone(t *testing.T) {
+	t.Parallel()
 	h := withDestinations(t)
 	h.service.idle = testIdle
 	h.kept = 7
@@ -190,7 +192,7 @@ func TestAStalledDestinationFailsAlone(t *testing.T) {
 	}
 	for _, id := range []Destination{stalledDAV, stalledSFTP} {
 		d, err := h.service.Destination(t.Context(), id.ID)
-		if err != nil || d.Error == "" || d.Problem(time.Date(2026, 10, 1, 5, 0, 0, 0, time.Local)) != ProblemFailed {
+		if err != nil || d.Error == "" || d.Problem(time.Date(2026, 10, 1, 5, 0, 0, 0, time.Local), MinStaleAfter) != ProblemFailed {
 			t.Errorf("%s: %+v %v", id.Name(), d, err)
 		}
 	}
@@ -202,6 +204,7 @@ func TestAStalledDestinationFailsAlone(t *testing.T) {
 // A backup before a restore never waits on a destination: while a run
 // sends to a stalled one, a restore starts at once.
 func TestARestoreDoesNotWaitOnADestination(t *testing.T) {
+	t.Parallel()
 	h := withDestinations(t)
 	stalled := newStallingDAV(t)
 	stalled.stallUpload.Store(true)
@@ -237,6 +240,7 @@ func TestARestoreDoesNotWaitOnADestination(t *testing.T) {
 // more than it lists fails it at once; neither leaves a file. The test
 // file read back is never more than written: an endless answer fails.
 func TestDownloadsAreBounded(t *testing.T) {
+	t.Parallel()
 	h := withDestinations(t)
 	h.service.idle = testIdle
 	h.service.cfg.PgRestore = "true"
@@ -273,6 +277,7 @@ func TestDownloadsAreBounded(t *testing.T) {
 // asking forever. Pages holding no key, or only keys listed before, as
 // storages may send, are followed: the file on the last page is found.
 func TestS3ListingEnds(t *testing.T) {
+	t.Parallel()
 	pages := map[string][]string{
 		// A key per page, and the same token each time.
 		"the same token": {
@@ -297,6 +302,11 @@ func TestS3ListingEnds(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
+		// The pages are asked with the server's client, which no clock
+		// bounds: how long a loaded machine takes to dial or answer is
+		// not what this test is about (TestAStalledDestinationFailsAlone
+		// is).
+		r.client = server.Client()
 		files, err := r.list(t.Context())
 		server.Close()
 		if name == "the same token" {
@@ -315,6 +325,7 @@ func TestS3ListingEnds(t *testing.T) {
 // A WebDAV server that does not tell a file's length lists it as of
 // unknown size; it is downloaded whole, up to maxDownload, and restored.
 func TestAnUnknownSizeIsDownloaded(t *testing.T) {
+	t.Parallel()
 	h := withDestinations(t)
 	h.service.cfg.PgRestore = fakePgRestore(t)
 	name := "polyfin-20261001-040000.dump"
@@ -351,6 +362,7 @@ func TestAnUnknownSizeIsDownloaded(t *testing.T) {
 // A plan whose time ran out while the backup before its restore was made,
 // which then failed, is dropped with its file.
 func TestAPlanExpiredDuringAFailedStartIsDropped(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, nil)
 	h.service.cfg.PgRestore = fakePgRestore(t)
 	plan, err := h.service.PrepareUpload(t.Context(), "sent.dump", strings.NewReader("PGDMP"))
@@ -361,7 +373,7 @@ func TestAPlanExpiredDuringAFailedStartIsDropped(t *testing.T) {
 	h.service.mu.Lock()
 	h.service.plan.expires = time.Now().Add(-time.Second)
 	h.service.mu.Unlock()
-	t.Setenv("FAKE_PG_DUMP_FAIL", "1")
+	h.failDumps(t, true)
 	if err := h.service.Start(t.Context(), plan.ID, true, "root"); err == nil {
 		t.Fatal("a restore started without its backup first")
 	}
@@ -373,7 +385,7 @@ func TestAPlanExpiredDuringAFailedStartIsDropped(t *testing.T) {
 	}
 
 	// One still in its time stays, to try again.
-	t.Setenv("FAKE_PG_DUMP_FAIL", "1")
+	h.failDumps(t, true)
 	plan, err = h.service.PrepareUpload(t.Context(), "sent.dump", strings.NewReader("PGDMP"))
 	if err != nil {
 		t.Fatal(err)
@@ -454,7 +466,7 @@ case "$1" in
 esac
 `
 	path := filepath.Join(t.TempDir(), "pg_restore")
-	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+	if err := process.WriteExecutable(path, strings.NewReader(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return path
@@ -475,6 +487,7 @@ func restoreFiles(t *testing.T, dir string) []string {
 // While a restore is under way, nothing else is prepared, and its file
 // stays; an upload in progress keeps its file while another is prepared.
 func TestARestoreUnderWayKeepsItsFile(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, nil)
 	h.service.cfg.PgRestore = "true"
 	underWay := filepath.Join(h.dir, ".polyfin-restore-0123456789abcdef.dump")
@@ -525,6 +538,7 @@ func TestARestoreUnderWayKeepsItsFile(t *testing.T) {
 // A backup prepared and never restored loses its file when discarded,
 // replaced or expired; those a stop left are deleted at startup.
 func TestRestoreFilesDoNotStay(t *testing.T) {
+	t.Parallel()
 	h := newHarness(t, nil)
 	h.service.cfg.PgRestore = fakePgRestore(t)
 	prepare := func() Plan {

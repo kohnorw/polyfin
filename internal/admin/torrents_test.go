@@ -1,12 +1,20 @@
 package admin
 
 import (
+	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
+	"net/netip"
 	"reflect"
+	"slices"
+	"strings"
 	"testing"
+	"time"
 
+	"github.com/moodiness/polyfin/internal/backup"
 	"github.com/moodiness/polyfin/internal/playback"
 	"github.com/moodiness/polyfin/internal/torrent"
 	"github.com/moodiness/polyfin/internal/torrent/torrenttest"
@@ -35,7 +43,8 @@ func TestHealthTellsWhyTorrentsDoNotPlay(t *testing.T) {
 				t.Fatal(err)
 			}
 			engine, err := torrent.New(torrent.Config{Settings: func() torrent.Settings { return playback.TorrentSettings(o.Accounts.Settings()) },
-				Dir: t.TempDir(), Budget: func() int64 { return 1 << 20 }, Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+				Dir: t.TempDir(), Budget: func() int64 { return 1 << 20 }, Public: torrenttest.OnLoopback,
+				Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -48,5 +57,267 @@ func TestHealthTellsWhyTorrentsDoNotPlay(t *testing.T) {
 		if len(found) != 1 || !reflect.DeepEqual(found[0], test.want) {
 			t.Fatalf("problems: %v", found)
 		}
+	}
+}
+
+// A torrent that did not start in time is a warning of System › Health,
+// which tells why, until a torrent starts.
+func TestHealthTellsATorrentDidNotStart(t *testing.T) {
+	t.Parallel()
+	proxy := torrenttest.StartProxy(t, true, "", "")
+	empty := torrenttest.HTTPTracker(t, "127.0.0.1")
+	var engine *torrent.Engine
+	api := newTestAPI(t, 10, func(o *Options, _ testDeps) {
+		settings := o.Accounts.Settings()
+		settings.TorrentStreams, settings.TorrentProxy = true, proxy.Address()
+		if _, err := o.Accounts.UpdateSettings(t.Context(), settings); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		engine, err = torrent.New(torrent.Config{Settings: func() torrent.Settings { return playback.TorrentSettings(o.Accounts.Settings()) },
+			Dir: t.TempDir(), Budget: func() int64 { return 1 << 20 }, StartTimeout: time.Second, Public: torrenttest.OnLoopback,
+			Logger: slog.New(slog.DiscardHandler)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(engine.Close)
+		o.Health = HealthSources{Torrents: engine}
+	})
+	tor := torrenttest.Build("A Movie", 32<<10, torrenttest.File{Name: "a.mkv", Data: torrenttest.Bytes(100 << 10)})
+	spec, err := torrent.NewSpec(tor.HashHex(), nil, []string{"tracker:" + empty.URL()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Play(spec)()
+	var unstarted *torrent.StartError
+	if _, err := engine.Open(t.Context(), spec); !errors.As(err, &unstarted) {
+		t.Fatalf("got %v, want a StartError", err)
+	}
+	administrator := api.signedIn("administrator", true)
+	_, body, _ := administrator.call(http.MethodGet, "/health/problems?language=en", nil)
+	found, _ := body["problems"].([]any)
+	want := map[string]any{"key": "torrents:start", "code": "torrent_start", "tone": "warning",
+		"to": "/settings/torrents#torrent-route", "transient": false, "failure": "no_peers"}
+	if len(found) != 1 || !reflect.DeepEqual(found[0], want) {
+		t.Fatalf("problems: %v", found)
+	}
+}
+
+// A torrent whose peers were found but did not connect has Health count
+// them by why: here one refused the connection, and one closed it at the
+// handshake. The proxy answers the refusal itself, as when the peer
+// refused, and a redial would reach a port below the ephemeral range: a
+// port freed for the test could be given to any listener before the
+// proxy dials it, and the peer then counts as closed (seen on CI).
+func TestHealthCountsWhyATorrentsPeersDidNotConnect(t *testing.T) {
+	t.Parallel()
+	proxy := torrenttest.StartProxy(t, false, "", "")
+	closing, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { closing.Close() })
+	go func() {
+		for {
+			conn, err := closing.Accept()
+			if err != nil {
+				return
+			}
+			conn.Close()
+		}
+	}()
+	refused := netip.MustParseAddrPort("127.0.0.1:9")
+	proxy.RefuseFirst(refused)
+	tracker := torrenttest.HTTPTracker(t, "127.0.0.1", netip.MustParseAddrPort(closing.Addr().String()), refused)
+	var engine *torrent.Engine
+	api := newTestAPI(t, 10, func(o *Options, _ testDeps) {
+		settings := o.Accounts.Settings()
+		settings.TorrentStreams, settings.TorrentProxy = true, proxy.Address()
+		if _, err := o.Accounts.UpdateSettings(t.Context(), settings); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		engine, err = torrent.New(torrent.Config{Settings: func() torrent.Settings { return playback.TorrentSettings(o.Accounts.Settings()) },
+			Dir: t.TempDir(), Budget: func() int64 { return 1 << 20 }, StartTimeout: 10 * time.Second, Public: torrenttest.OnLoopback,
+			Logger: slog.New(slog.DiscardHandler)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(engine.Close)
+		o.Health = HealthSources{Torrents: engine}
+	})
+	tor := torrenttest.Build("A Movie", 32<<10, torrenttest.File{Name: "a.mkv", Data: torrenttest.Bytes(100 << 10)})
+	spec, err := torrent.NewSpec(tor.HashHex(), nil, []string{"tracker:" + tracker.URL()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Play(spec)()
+	var unstarted *torrent.StartError
+	if _, err := engine.Open(t.Context(), spec); !errors.As(err, &unstarted) {
+		t.Fatalf("got %v, want a StartError", err)
+	}
+	administrator := api.signedIn("administrator", true)
+	_, body, _ := administrator.call(http.MethodGet, "/health/problems?language=en", nil)
+	found, _ := body["problems"].([]any)
+	want := map[string]any{"key": "torrents:start", "code": "torrent_start", "tone": "warning",
+		"to": "/settings/torrents#torrent-route", "transient": false, "failure": "silent",
+		"peers": map[string]any{"found": float64(2), "connected": float64(0), "refused": float64(1), "closed": float64(1)}}
+	// The proxy offers no UDP ASSOCIATE, which Health tells too.
+	if !slices.ContainsFunc(found, func(p any) bool { return reflect.DeepEqual(p, want) }) {
+		t.Fatalf("problems: %v", found)
+	}
+}
+
+// A WireGuard configuration is refused with its line, key and reason,
+// never shown back once saved, only what it says without its keys; a
+// tunnel whose key the server does not know is an error of System ›
+// Health, which still answers meanwhile, backups on as by default.
+func TestWireGuardSettingsAndHealth(t *testing.T) {
+	t.Parallel()
+	server := torrenttest.StartWireGuardServer(t, nil)
+	private := torrenttest.NewPrivateKey()
+	wrongKey := server.ConfigWithKey(private)
+	api := newTestAPI(t, 10, func(o *Options, d testDeps) {
+		settings, dataDir := o.Accounts.Settings, o.DataDir
+		o.Backups = backup.New(backup.Config{Folder: func() string { return settings().BackupDir(dataDir) }, DB: d.pool, Settings: settings,
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		engine, err := torrent.New(torrent.Config{Settings: func() torrent.Settings { return playback.TorrentSettings(o.Accounts.Settings()) },
+			Dir: t.TempDir(), Budget: func() int64 { return 1 << 20 }, Public: torrenttest.OnLoopback,
+			Logger: slog.New(slog.NewTextHandler(io.Discard, nil))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(engine.Close)
+		o.Health = HealthSources{Torrents: engine}
+	})
+	administrator := api.signedIn("administrator", true)
+
+	bad := strings.Replace(wrongKey, "Endpoint = 127.0.0.1:", "Endpoint = 127.0.0.1:x", 1)
+	backups := t.TempDir()
+	put := func(config string) map[string]any {
+		return map[string]any{"serverName": "Polyfin", "language": "en", "torrentStreams": true, "torrentWireGuard": config,
+			"backups": true, "backupFolder": backups}
+	}
+	status, body, _ := administrator.call(http.MethodPut, "/settings", put(bad))
+	if status != http.StatusBadRequest || body["error"] != "invalid_wireguard_config" || body["key"] != "Endpoint" ||
+		body["reason"] != "invalid" || body["line"] != float64(8) || strings.Contains(fmt.Sprint(body), private) {
+		t.Fatalf("an invalid endpoint: %d %v", status, body)
+	}
+	status, body, _ = administrator.call(http.MethodPut, "/settings", put(wrongKey))
+	if status != http.StatusOK {
+		t.Fatalf("saving: %d %v", status, body)
+	}
+	_, body, _ = administrator.call(http.MethodGet, "/settings", nil)
+	saved, _ := body["torrentWireGuardSaved"].(map[string]any)
+	if _, sent := body["torrentWireGuard"]; sent || strings.Contains(fmt.Sprint(body), private) || saved == nil ||
+		!strings.HasPrefix(saved["endpoint"].(string), "127.0.0.1:") || !reflect.DeepEqual(saved["addresses"], []any{"10.64.0.2/32"}) ||
+		!reflect.DeepEqual(saved["dns"], []any{"10.64.0.1"}) {
+		t.Fatalf("settings: %v", body)
+	}
+
+	// While the tunnel's server does not answer, Health still answers,
+	// its route check given up at its own deadline, before the check
+	// waited long enough to know the handshake failed. The check goes on
+	// in the background, and the requests that follow tell the same
+	// failure. That they tell it at once, rather than each waiting out
+	// the deadline for a check of its own, is asserted by the engine's
+	// TestWireGuardHealthTellsTheLastCheckAtOnce, which holds the check
+	// and tells a request that waited by its deadline, not by a clock. A
+	// time bound on these requests would count their database queries
+	// too, which the race detector on a busy machine slows to a second
+	// each.
+	status, body, _ = administrator.call(http.MethodGet, "/health", nil)
+	if torrents, _ := body["torrents"].(map[string]any); status != http.StatusOK || torrents["route"] != "wireguard" {
+		t.Fatalf("Health while the tunnel does not answer: %d %v", status, body)
+	}
+	for range 3 {
+		_, body, _ = administrator.call(http.MethodGet, "/health/problems?language=en", nil)
+		found, _ := body["problems"].([]any)
+		if len(found) != 1 {
+			t.Fatalf("problems: %v", found)
+		}
+		problem, _ := found[0].(map[string]any)
+		if problem["code"] != "torrent_route" || problem["failure"] != torrent.WireGuardHandshake || !strings.HasPrefix(problem["name"].(string), "127.0.0.1:") {
+			t.Fatalf("problem: %v", problem)
+		}
+		_, body, _ = administrator.call(http.MethodGet, "/health", nil)
+		torrents, _ := body["torrents"].(map[string]any)
+		if torrents["route"] != "wireguard" || torrents["lastHandshake"] != nil || !reflect.DeepEqual(torrents["addresses"], []any{"10.64.0.2/32"}) {
+			t.Fatalf("Health's torrents: %v", torrents)
+		}
+	}
+
+	// With the right key, Health tells the last handshake.
+	if status, body, _ := administrator.call(http.MethodPut, "/settings", put(server.Config())); status != http.StatusOK {
+		t.Fatalf("saving: %d %v", status, body)
+	}
+	_, body, _ = administrator.call(http.MethodGet, "/health", nil)
+	torrents, _ := body["torrents"].(map[string]any)
+	if torrents["route"] != "wireguard" || torrents["lastHandshake"] == nil || torrents["peers"] != float64(0) || torrents["utpPeers"] != float64(0) {
+		t.Fatalf("Health's torrents: %v", torrents)
+	}
+}
+
+// A torrent whose addon named no tracker, which the DHT did not find, is
+// told as such by Health, which links to the trackers the settings add.
+func TestHealthTellsTheAddonNamedNoTracker(t *testing.T) {
+	t.Parallel()
+	proxy := torrenttest.StartProxy(t, true, "", "")
+	var engine *torrent.Engine
+	api := newTestAPI(t, 10, func(o *Options, _ testDeps) {
+		settings := o.Accounts.Settings()
+		settings.TorrentStreams, settings.TorrentProxy = true, proxy.Address()
+		if _, err := o.Accounts.UpdateSettings(t.Context(), settings); err != nil {
+			t.Fatal(err)
+		}
+		var err error
+		engine, err = torrent.New(torrent.Config{Settings: func() torrent.Settings { return playback.TorrentSettings(o.Accounts.Settings()) },
+			Dir: t.TempDir(), Budget: func() int64 { return 1 << 20 }, StartTimeout: time.Second, Public: torrenttest.OnLoopback,
+			Logger: slog.New(slog.DiscardHandler)})
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(engine.Close)
+		o.Health = HealthSources{Torrents: engine}
+	})
+	tor := torrenttest.Build("A Movie", 32<<10, torrenttest.File{Name: "a.mkv", Data: torrenttest.Bytes(100 << 10)})
+	spec, err := torrent.NewSpec(tor.HashHex(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer engine.Play(spec)()
+	var unstarted *torrent.StartError
+	if _, err := engine.Open(t.Context(), spec); !errors.As(err, &unstarted) {
+		t.Fatalf("got %v, want a StartError", err)
+	}
+	administrator := api.signedIn("administrator", true)
+	_, body, _ := administrator.call(http.MethodGet, "/health/problems?language=en", nil)
+	found, _ := body["problems"].([]any)
+	want := map[string]any{"key": "torrents:start", "code": "torrent_start", "tone": "warning",
+		"to": "/settings/torrents#torrent-trackers", "transient": false, "failure": "no_trackers"}
+	if len(found) != 1 || !reflect.DeepEqual(found[0], want) {
+		t.Fatalf("problems: %v", found)
+	}
+}
+
+// The trackers added to every torrent are saved from the settings page,
+// sent back, and refused with their own error when one is not valid.
+func TestTorrentTrackersSettings(t *testing.T) {
+	t.Parallel()
+	api := newTestAPI(t, 10)
+	administrator := api.signedIn("root", true)
+	status, body, _ := administrator.call(http.MethodPut, "/settings", map[string]any{"serverName": "Polyfin", "language": "en",
+		"torrentTrackers": []string{"udp://tracker.example:1337/announce", " https://tracker.example/announce "}})
+	if got, _ := body["torrentTrackers"].([]any); status != http.StatusOK || !reflect.DeepEqual(got,
+		[]any{"udp://tracker.example:1337/announce", "https://tracker.example/announce"}) {
+		t.Fatalf("save: %d %v", status, body)
+	}
+	if status, body, _ := administrator.call(http.MethodPut, "/settings", map[string]any{"serverName": "Polyfin", "language": "en",
+		"torrentTrackers": []string{"udp://tracker.example/announce"}}); status != http.StatusBadRequest || body["error"] != "invalid_torrent_trackers" {
+		t.Errorf("a UDP tracker without a port: %d %v", status, body)
+	}
+	// Left out, they are kept.
+	if _, body, _ := administrator.call(http.MethodPut, "/settings", map[string]any{"serverName": "Polyfin", "language": "en"}); len(body["torrentTrackers"].([]any)) != 2 {
+		t.Errorf("left out: %v", body["torrentTrackers"])
 	}
 }

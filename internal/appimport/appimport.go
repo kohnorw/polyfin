@@ -43,6 +43,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/activity"
 	"github.com/moodiness/polyfin/internal/addons"
+	"github.com/moodiness/polyfin/internal/importlinks"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/secrets"
 	"github.com/moodiness/polyfin/internal/stremio"
@@ -62,9 +63,18 @@ var (
 	ErrUnknownProfile = errors.New("the account has no such profile")
 	// ErrUnknownAddon reports an addon the profile does not have.
 	ErrUnknownAddon = errors.New("the profile has no such addon")
+	// ErrProfileLocked reports a profile that asks for its PIN: one not
+	// opened yet, for an import (see Service.Unlock), or, for a
+	// connection, one whose PIN was set or changed since it was chosen
+	// (see Source.Reread), which the user chooses again.
+	ErrProfileLocked = errors.New("the profile asks for its PIN")
 	// ErrAddonsNotAllowed reports addons chosen for a user who may not add
 	// their own (see accounts.Settings.PersonalAddonsAllowed).
 	ErrAddonsNotAllowed = errors.New("the user may not add their own addons")
+	// ErrAddonsParentalControl reports addons chosen for a user whose
+	// parental control or blocked genres keep them to the server's addons:
+	// their own would be kept but not used.
+	ErrAddonsParentalControl = errors.New("parental control keeps the user to the server's addons")
 )
 
 // holdFor is how long an account read is held while the user chooses what
@@ -73,10 +83,6 @@ const holdFor = 5 * time.Minute
 
 // batch is how many items an import resolves and writes at a time.
 const batch = 500
-
-// maxUnmatched bounds the unmatched titles an import lists; the count goes
-// on.
-const maxUnmatched = 500
 
 // Account is an app account a source signed in to and read.
 type Account struct {
@@ -88,9 +94,13 @@ type Account struct {
 	// Name is the account's email or name, as the app gives it, empty
 	// when it gives none.
 	Name string
-	// SignIn reads the account again, for a connection: set when the
-	// user asked to stay connected, nil otherwise. It is never answered
-	// nor logged.
+	// StayConnected tells that the user asked to stay connected: the
+	// account's import then keeps SignIn, for a connection.
+	StayConnected bool
+	// SignIn is the session the account was read with, kept open: for a
+	// connection when the user asked to stay connected, or while the
+	// account is held, to open its profiles that ask for a PIN (see
+	// Service.Unlock); nil otherwise. It is never answered nor logged.
 	SignIn *SignIn
 }
 
@@ -101,6 +111,14 @@ type Profile struct {
 	ID, Name string
 	Entries  []Entry
 	Addons   []Addon
+	// Locked tells a profile that asks for its PIN before it is read: it
+	// holds nothing until it is opened (see Service.Unlock).
+	Locked bool
+	// Session is the session the source opened with the profile's PIN to
+	// read it, kept for a connection to read it again without the PIN,
+	// which is never kept (see SignIn.Session); empty otherwise. It is
+	// never answered nor logged.
+	Session string
 }
 
 // Entry is a title of a profile: a movie, a series, or an episode, and
@@ -191,6 +209,9 @@ type Options struct {
 	// Watchlist keeps the titles of the apps' libraries, on the users'
 	// watchlists; nil keeps none.
 	Watchlist *watchlist.Store
+	// Links keeps the titles the imports did not find, and applies the
+	// links users made of them (see package importlinks); nil keeps none.
+	Links *importlinks.Store
 }
 
 // Service holds the accounts read until the user chooses what to import,
@@ -228,6 +249,9 @@ type Service struct {
 	connecting map[connectionKey]*connectionRun
 	// watchlist keeps the titles of the apps' libraries.
 	watchlist *watchlist.Store
+	// links keeps the titles imports did not find and applies the links
+	// made of them; nil keeps none.
+	links *importlinks.Store
 }
 
 // held is an account read, and the key that names it to its reader.
@@ -246,7 +270,7 @@ func New(options Options) *Service {
 		stopped: options.Stopped,
 		holdFor: holdFor, timing: defaultTiming, ctx: ctx, cancel: cancel, signOuts: signOuts, cancelSignOuts: cancelSignOuts,
 		closeWait: closeWait, held: map[accounts.ID]*held{}, imports: map[accounts.ID]*Status{}, connecting: map[connectionKey]*connectionRun{},
-		watchlist: options.Watchlist}
+		watchlist: options.Watchlist, links: options.Links}
 }
 
 // closeWait is how long Close waits, at most, for the sessions being
@@ -261,7 +285,7 @@ func (s *Service) Close() {
 	for by, h := range s.held {
 		h.timer.Stop()
 		delete(s.held, by)
-		s.release(h.account.SignIn, h.account.App)
+		s.drop(h.account)
 	}
 	s.closed = true
 	s.mu.Unlock()
@@ -290,11 +314,21 @@ func (s *Service) spawn(f func()) bool {
 // with s.mu held.
 func (s *Service) release(signIn *SignIn, app string) {
 	source := s.sources[app]
-	if signIn == nil || !signIn.Owned || source == nil {
+	if signIn == nil || !signIn.opened() || source == nil {
 		return
 	}
 	kept := *signIn
 	s.spawn(func() { s.signOutNow(s.signOuts, source, kept, app) })
+}
+
+// drop signs out, in the background, the sessions Polyfin opened that
+// account, no longer held, keeps open: the account's, and those of the
+// profiles opened with their PIN. It is called with s.mu held.
+func (s *Service) drop(account Account) {
+	s.release(account.SignIn, account.App)
+	for _, p := range account.Profiles {
+		s.release(&SignIn{Session: p.Session}, account.App)
+	}
 }
 
 // signOutNow signs out the session signIn of app keeps open with source,
@@ -308,7 +342,7 @@ func (s *Service) signOutNow(ctx context.Context, source Source, signIn SignIn, 
 // Hold keeps account, which by read, while they choose what to import,
 // for a few minutes at most, and returns the key that names it. It drops
 // the account by held before. An account dropped without being imported
-// has the session it kept open for a connection signed out.
+// has the sessions it kept open signed out.
 func (s *Service) Hold(by accounts.ID, account Account) string {
 	var key [24]byte
 	_, _ = rand.Read(key[:])
@@ -317,7 +351,7 @@ func (s *Service) Hold(by accounts.ID, account Account) string {
 	defer s.mu.Unlock()
 	if previous := s.held[by]; previous != nil {
 		previous.timer.Stop()
-		s.release(previous.account.SignIn, previous.account.App)
+		s.drop(previous.account)
 	}
 	s.held[by] = h
 	h.timer = time.AfterFunc(s.holdFor, func() {
@@ -325,10 +359,65 @@ func (s *Service) Hold(by accounts.ID, account Account) string {
 		defer s.mu.Unlock()
 		if s.held[by] == h {
 			delete(s.held, by)
-			s.release(h.account.SignIn, h.account.App)
+			s.drop(h.account)
 		}
 	})
 	return h.key
+}
+
+// Unlocker opens the profiles of an app's accounts that ask for a PIN.
+type Unlocker interface {
+	// Unlock opens, with pin, the profile of the account signIn reads,
+	// and returns it read. When keep asks to stay connected, the profile
+	// holds the session opened (see Profile.Session); otherwise it is
+	// signed out. The PIN goes to the app only: it is never kept, and
+	// errors never hold it.
+	Unlock(ctx context.Context, signIn SignIn, profile, pin string, keep bool) (Profile, error)
+}
+
+// Unlock opens, with its PIN, the locked profile of the account by holds
+// under key, and returns the account held, with that profile read. The
+// PIN goes to the app only: it is never kept nor logged. It fails with
+// ErrExpired, ErrUnknownProfile for a profile the account does not have,
+// or which does not ask for a PIN, or with what the source's Unlock fails
+// with: the account stays held.
+func (s *Service) Unlock(ctx context.Context, by accounts.ID, key, profile, pin string) (Account, error) {
+	s.mu.Lock()
+	h := s.held[by]
+	if h == nil || key == "" || h.key != key {
+		s.mu.Unlock()
+		return Account{}, ErrExpired
+	}
+	i := slices.IndexFunc(h.account.Profiles, func(p Profile) bool { return p.ID == profile })
+	unlocker, _ := s.sources[h.account.App].(Unlocker)
+	if i < 0 || !h.account.Profiles[i].Locked || unlocker == nil || h.account.SignIn == nil {
+		s.mu.Unlock()
+		return Account{}, ErrUnknownProfile
+	}
+	signIn, keep := *h.account.SignIn, h.account.StayConnected
+	s.mu.Unlock()
+
+	opened, err := unlocker.Unlock(ctx, signIn, profile, pin, keep)
+	if err != nil {
+		return Account{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	switch {
+	case s.held[by] != h:
+		// Dropped, imported or replaced meanwhile.
+		s.release(&SignIn{Session: opened.Session}, h.account.App)
+		return Account{}, ErrExpired
+	case !h.account.Profiles[i].Locked:
+		// Opened by another request meanwhile.
+		s.release(&SignIn{Session: opened.Session}, h.account.App)
+		return h.account, nil
+	}
+	opened.ID, opened.Name = profile, h.account.Profiles[i].Name
+	profiles := slices.Clone(h.account.Profiles)
+	profiles[i] = opened
+	h.account.Profiles = profiles
+	return h.account, nil
 }
 
 // The states of an import.
@@ -347,7 +436,8 @@ const ProblemInternal = "internal"
 // identifiers. ReasonEpisodeList is a series found, whose episodes played
 // the app tells by their place in its list of the series' episodes,
 // which the list Polyfin's addons give does not match: none of them is
-// marked played (see Entry.Problem).
+// marked played (see Entry.Problem). The import keeps the titles with
+// their reasons (see package importlinks).
 const (
 	ReasonOtherIdentifier = "other_identifier"
 	ReasonNotFound        = "not_found"
@@ -390,20 +480,13 @@ type Status struct {
 	// Watchlist the titles the import added to the user's watchlist that
 	// were not on it, nor started.
 	Read, Played, Resumed, Watchlist int
-	// Unmatched lists the first titles not found, UnmatchedCount counts
-	// them all.
-	Unmatched      []Unmatched
+	// UnmatchedCount counts the titles not found, and those the source
+	// could not read whole, which the import keeps (see package
+	// importlinks).
 	UnmatchedCount int
 	// Addons are the addons chosen, in order, and how their installation
 	// went.
 	Addons []AddonStatus
-}
-
-// Unmatched is an entry no Polyfin title matched, or one the source could
-// not read whole, and why.
-type Unmatched struct {
-	Label
-	Reason string
 }
 
 // AddonStatus is an addon an import installs: its name, the address of its
@@ -417,7 +500,6 @@ type AddonStatus struct {
 // clone copies s, so that what the import changes later does not show.
 func (s *Status) clone() *Status {
 	c := *s
-	c.Unmatched = slices.Clone(s.Unmatched)
 	c.Addons = slices.Clone(s.Addons)
 	return &c
 }
@@ -448,10 +530,12 @@ type Choice struct {
 // user's connection to its app, in place of the one there was, which
 // imports the profile chosen again as often as the settings say, and never
 // its addons.
-// Start stops holding the account, and returns the import. It fails with
-// ErrExpired, ErrUnknownProfile, ErrUnknownAddon, ErrAddonsNotAllowed, or
-// ErrRunning while an import into user's account runs, holding the account
-// still but for ErrExpired.
+// Start stops holding the account, signing out the sessions it kept open
+// that the connection does not keep, and returns the import. It fails with
+// ErrExpired, ErrUnknownProfile, ErrProfileLocked for a profile not opened
+// with its PIN yet, ErrUnknownAddon, ErrAddonsNotAllowed,
+// ErrAddonsParentalControl, or ErrRunning while an import into user's
+// account runs, holding the account still but for ErrExpired.
 func (s *Service) Start(by, user accounts.User, key string, choice Choice) (*Status, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -464,6 +548,9 @@ func (s *Service) Start(by, user accounts.User, key string, choice Choice) (*Sta
 		return nil, ErrUnknownProfile
 	}
 	profile := h.account.Profiles[i]
+	if profile.Locked {
+		return nil, ErrProfileLocked
+	}
 	chosen := make([]Addon, 0, len(choice.Addons))
 	for _, a := range choice.Addons {
 		if a < 0 || a >= len(profile.Addons) || slices.Contains(choice.Addons[:len(chosen)], a) {
@@ -473,6 +560,9 @@ func (s *Service) Start(by, user accounts.User, key string, choice Choice) (*Sta
 	}
 	if len(chosen) > 0 && !s.settings().PersonalAddonsAllowed(user) {
 		return nil, ErrAddonsNotAllowed
+	}
+	if len(chosen) > 0 && user.Restricted() {
+		return nil, ErrAddonsParentalControl
 	}
 	if current := s.imports[user.ID]; current != nil && current.State == StateRunning {
 		return nil, ErrRunning
@@ -492,19 +582,22 @@ func (s *Service) Start(by, user accounts.User, key string, choice Choice) (*Sta
 	s.imports[user.ID] = status
 	r := &run{s: s, status: status, by: by, user: user, entries: profile.Entries, addons: chosen, list: watchlist.Import}
 	ctx, stop := s.ctx, context.CancelFunc(func() {})
-	if signIn := h.account.SignIn; signIn != nil {
-		if s.db == nil {
-			s.release(signIn, h.account.App)
-		} else {
-			kept := *signIn
-			kept.Profile = profile.ID
-			r.connection = &newConnection{key: connectionKey{user.ID, h.account.App}, signIn: kept, account: h.account.Name, by: by.ID}
-			// Disconnecting, or deleting the user, stops it as it stops
-			// the later imports.
-			ctx, stop = context.WithCancel(s.ctx)
-			r.connection.run = s.claim(r.connection.key, stop)
-			r.list = watchlist.Connection(h.account.App)
+	if signIn := h.account.SignIn; signIn != nil && h.account.StayConnected && s.db != nil {
+		kept := *signIn
+		kept.Profile, kept.Session = profile.ID, profile.Session
+		r.connection = &newConnection{key: connectionKey{user.ID, h.account.App}, signIn: kept, account: h.account.Name, by: by.ID}
+		// Disconnecting, or deleting the user, stops it as it stops the
+		// later imports.
+		ctx, stop = context.WithCancel(s.ctx)
+		r.connection.run = s.claim(r.connection.key, stop)
+		r.list = watchlist.Connection(h.account.App)
+		for j, p := range h.account.Profiles {
+			if j != i {
+				s.release(&SignIn{Session: p.Session}, h.account.App)
+			}
 		}
+	} else {
+		s.drop(h.account)
 	}
 	s.wg.Add(1)
 	go func() {

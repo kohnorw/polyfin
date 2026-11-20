@@ -1,0 +1,366 @@
+import type en from '../en/home'
+
+/** The GPU methods, as the server names them. */
+const gpuMethodNames: Record<string, string> = {
+  cuda: 'NVIDIA',
+  vaapi: 'VAAPI',
+  videotoolbox: 'VideoToolbox',
+  qsv: 'QSV',
+  amf: 'AMF',
+}
+
+const home: typeof en = {
+  quickConnect: {
+    title: 'Quick Connect',
+    description:
+      'Entre em um aplicativo de TV ou celular sem digitar sua senha: escolha Quick Connect em um aplicativo Jellyfin, ou abra o aplicativo do Silo em uma TV, e digite o código exibido.',
+    code: 'Código do Quick Connect',
+    codeHint: 'Os códigos expiram após 10 minutos.',
+    lookingUp: 'Procurando o dispositivo…',
+    requestTitle: 'Dispositivo aguardando aprovação',
+    device: 'Dispositivo',
+    app: 'Aplicativo',
+    requested: 'Solicitado',
+    address: 'Endereço',
+    network: {
+      own: 'Seu endereço',
+      local: 'Sua rede local',
+      other: 'Outra rede',
+    },
+    claims:
+      'O próprio dispositivo informa seu nome e seu aplicativo. O endereço é aquele de onde o Polyfin recebeu a solicitação.',
+    otherNetwork:
+      'Este dispositivo faz a solicitação a partir de uma rede diferente da sua. Aprove-o somente se você mesmo iniciou este login, em um dispositivo que está à sua frente.',
+    linked:
+      'Você chegou aqui por um link ou um código QR. Para aprovar este dispositivo, digite o código exibido na tela dele.',
+    linkedHint: 'Digite o código que o dispositivo exibe. Os códigos expiram após 10 minutos.',
+    identity:
+      'Sua conta usa o login em duas etapas, e este dispositivo vai entrar sem ele. Confirme que é você.',
+    approve: 'Aprovar e conectar este dispositivo',
+    approving: 'Aprovando…',
+    approved: (device: string, user: string) => `${device} agora está conectado como ${user}.`,
+    another: 'Aprovar outro dispositivo',
+    steps: [
+      'No dispositivo, escolha Quick Connect em um aplicativo Jellyfin, ou abra o aplicativo do Silo em uma TV.',
+      'Digite aqui o código exibido: 6 dígitos no Jellyfin, 8 no Silo.',
+      'Confira o dispositivo e aprove-o.',
+    ],
+    stepsLabel: 'Como funciona',
+  },
+  notFound: {
+    title: 'Página não encontrada',
+    description: 'Esta página não existe.',
+    home: 'Voltar à página inicial',
+  },
+  dashboard: {
+    overview: {
+      greeting: (hour: number, name: string) =>
+        `${hour >= 18 || hour < 5 ? 'Boa noite' : hour >= 12 ? 'Boa tarde' : 'Bom dia'}, ${name}`,
+      summary: (playing: number, problems: number) =>
+        `${playing === 0 ? 'Nada em reprodução' : playing === 1 ? 'Uma reprodução em andamento' : `${playing} reproduções em andamento`}${
+          problems === 0
+            ? ' e nada para verificar. Tudo funciona normalmente.'
+            : problems === 1
+              ? ', e um item para verificar.'
+              : `, e ${problems} itens para verificar.`
+        }`,
+      description: 'O que está sendo reproduzido no servidor e o que aconteceu recentemente.',
+      conversions: 'Conversões de vídeo',
+      conversionsOf: (count: number, limit: number) =>
+        limit > 0 ? `${count} de ${limit}` : `${count}, sem limite`,
+      bandwidth: 'Largura de banda',
+      sentToApps: 'enviados aos apps',
+      receivedFromSources: 'recebidos das fontes',
+      uptime: 'Em execução há',
+      problems: 'Para verificar',
+      problemsEmpty: 'Nada para verificar',
+      problemsEmptyHelp:
+        'O Polyfin verifica seus discos, fontes, guias, backups e tarefas. Tudo o que precisar da sua atenção aparece aqui.',
+      /** The kind word of the tile of a new version, in To look at. */
+      updateKind: 'Nova versão',
+      update: (version: string, running: string) =>
+        `O Polyfin ${version} está disponível. Este servidor executa a versão ${running}.`,
+      releaseNotes: 'Notas da versão',
+      open: 'Abrir',
+      openHealth: 'Abrir Integridade',
+      serverTitle: 'Estado do servidor',
+      version: 'Versão',
+      database: 'Banco de dados',
+      databaseSize: (size: string) => `${size} em disco`,
+      cache: 'Cache',
+      cacheOf: (limit: string) => `de ${limit}`,
+      cacheNoLimit: 'sem limite',
+      cacheOff: 'Desativado',
+      cacheUnit: 'Cache em uso',
+      graphics: 'Placa de vídeo',
+      graphicsNone: 'Nenhuma',
+      graphicsCpu: 'As conversões usam o processador',
+      toneMapping: 'mapeamento de tons',
+    },
+    getStarted: {
+      title: 'Primeiros passos',
+      progress: (done: number, total: number) => `${done} de ${total} etapas concluídas`,
+      next: 'Próxima',
+      showSteps: (count: number) => `Todas as ${count} etapas`,
+      hideSteps: 'Ocultar as etapas',
+      dismiss: 'Ocultar',
+      done: 'Concluído',
+      todo: 'A fazer',
+      steps: {
+        metadata: {
+          title: 'Adicionar um addon de metadados',
+          help: 'Ele dá aos títulos seus pôsteres, sinopses e episódios.',
+        },
+        library: {
+          title: 'Escolher suas bibliotecas',
+          help: 'Os catálogos das suas fontes que os aplicativos mostram como bibliotecas.',
+        },
+        users: {
+          title: 'Criar usuários ou um link de convite',
+          help: 'Uma conta para cada pessoa com quem você compartilha o Polyfin.',
+        },
+        backups: {
+          title: 'Fazer backup do banco de dados todos os dias',
+          help: 'Uma cópia das contas, das configurações e do que cada um assistiu.',
+        },
+        secretKey: {
+          title: 'Definir POLYFIN_SECRET_KEY',
+          help: 'Ela criptografa as chaves e senhas que o Polyfin armazena. Defina-a e reinicie.',
+        },
+        address: {
+          title: 'Servir HTTPS ou definir um endereço público',
+          help: 'Os aplicativos fora de casa se conectam com segurança, e as notificações levam ao Polyfin.',
+        },
+        discovery: {
+          title: 'Deixar os aplicativos da sua rede encontrarem o Polyfin',
+          help: 'Responder à descoberta na rede local com o endereço que os aplicativos alcançam.',
+        },
+      },
+    },
+    server: {
+      restart: 'Reiniciar',
+      updateNow: 'Atualizar agora',
+      install: (version: string) => `Instalar o Polyfin ${version}`,
+      downloading: (percent: number) => `Baixando: ${percent}%`,
+      confirmWith: 'Confirmar com',
+      withPassword: 'Senha',
+      withCode: 'Código de duas etapas',
+      password: 'Sua senha',
+      code: 'Código do seu aplicativo, ou um código de recuperação',
+      identityHelp: 'Cada uma destas ações pede de novo.',
+      restartTitle: 'Reiniciar o Polyfin',
+      restartText:
+        'O Polyfin interrompe o que está fazendo, reproduções e gravações incluídas, e encerra. Os aplicativos se reconectam assim que ele responde.',
+      restartBy: {
+        desktop: 'O Polyfin Desktop o inicia de novo sozinho.',
+        confirmed:
+          'A política de reinício do contêiner, ou o gerenciador de serviços, o inicia de novo, como confirmado nas configurações gerais.',
+      },
+      unknownTitle: 'O Polyfin pode não voltar',
+      unknown: {
+        container:
+          'O Polyfin não vê a política de reinício do contêiner. Sem uma que o inicie de novo, como unless-stopped ou always, o Polyfin fica parado até ser iniciado no host.',
+        other:
+          'O Polyfin não sabe se um gerenciador de serviços o inicia de novo. Sem um, o Polyfin fica parado até ser iniciado no host.',
+      },
+      unknownHelp:
+        'Depois de configurar, ative “O Polyfin é iniciado de novo quando para” nas configurações gerais, e este aviso some.',
+      restartConfirm: 'Reiniciar',
+      restartAnyway: 'Reiniciar mesmo assim',
+      restarting: 'Reiniciando…',
+      waitingTitle: 'O Polyfin está reiniciando',
+      waiting: 'Aguardando o Polyfin responder de novo…',
+      waitingLong: (seconds: number) =>
+        `O Polyfin não responde há ${seconds} segundos. Se nada o iniciar de novo, inicie-o no host.`,
+      secretTitle: 'Criar um novo segredo de assinatura',
+      secretText:
+        'O Polyfin cria um novo segredo de assinatura e depois reinicia: interrompe o que está fazendo, reproduções e gravações incluídas, e encerra. Todos os endereços de reprodução, links de transmissões ao vivo, endereços de imagens e links de Configurar que ele deu antes param de funcionar. Os aplicativos continuam conectados e pedem de novo o que reproduzem assim que ele responde.',
+      secretConfirm: 'Criar e reiniciar',
+      secretAnyway: 'Criar e reiniciar mesmo assim',
+      installTitle: (version: string) => `Instalar o Polyfin ${version}`,
+      installText:
+        'O Polyfin Desktop baixa a nova versão e a verifica, depois para o Polyfin, a instala e a inicia, como Instalar o Polyfin no menu dele. Reproduções e gravações param enquanto isso.',
+      installConfirm: 'Instalar',
+      installing: 'Pedindo…',
+      installWaitingTitle: (version: string) => `Instalando o Polyfin ${version}`,
+      installStopping:
+        'O Polyfin para para instalar a nova versão. Aguardando ele responder de novo…',
+      installFailed:
+        'O Polyfin Desktop não conseguiu instalar a atualização: a pasta de logs diz por quê. O Polyfin continua como estava.',
+      updateTitle: 'Atualizar agora',
+      updateText:
+        'O Polyfin pede à ferramenta de atualização definida nas configurações gerais que atualize agora. O que ela faz depois depende dela: se substituir o contêiner do Polyfin, o Polyfin para por um momento.',
+      updateConfirm: 'Enviar o pedido',
+      sending: 'Enviando…',
+      answer: (status: number) => `A ferramenta de atualização respondeu HTTP ${status}.`,
+      answerEmpty: 'A resposta não contém texto.',
+      watching:
+        'Se a ferramenta substituir o contêiner do Polyfin, esta página recarrega assim que o Polyfin responder de novo.',
+      gone: 'O Polyfin parou antes da resposta da ferramenta: ela provavelmente o está substituindo. Aguardando o Polyfin responder de novo…',
+      tooSoon: 'Isto foi pedido há menos de um minuto. Tente de novo em um instante.',
+      close: 'Fechar',
+    },
+    live: {
+      title: 'Em reprodução',
+      empty: 'Nada está sendo reproduzido no momento.',
+      emptyHelp: 'As reproduções dos aplicativos Jellyfin aparecem aqui em poucos segundos.',
+      autoRefresh: 'Atualiza a cada 3 segundos.',
+      paused: 'Pausado',
+      unknownTitle: 'Título não encontrado',
+      movie: (year: number) => (year > 0 ? `Filme, ${year}` : 'Filme'),
+      liveChannel: 'Ao vivo',
+      progress: (title: string) => `Posição de reprodução de ${title}`,
+      remaining: (time: string) => `${time} restantes`,
+      /** After the position: "of 1:44:00". */
+      ofRuntime: (time: string) => `de ${time}`,
+      startedAt: (time: string) => `Iniciado ${time}`,
+      appOn: (app: string, device: string) => (app ? `${app} em ${device}` : device),
+      sharedLink: 'Link compartilhado',
+      downloadOn: (app: string, device: string) =>
+        app ? `Download, ${app} em ${device}` : 'Download',
+      downloading: 'Baixando',
+      downloadProgress: (title: string) => `Progresso do download de ${title}`,
+      downloadNotControllable:
+        'Um download convertido para exibição offline. Ele para quando o aplicativo o cancela.',
+      howItPlays: 'Como é reproduzido',
+      details: 'Detalhes',
+      delivery: {
+        directPlay: 'Reprodução direta',
+        remux: 'Remux',
+        conversion: 'Conversão',
+        stream: 'Transmissão',
+      } as Record<string, string>,
+      deliveryHelp: {
+        directPlay: 'O aplicativo lê o arquivo como ele está.',
+        remux: 'O Polyfin reempacota o arquivo para o aplicativo, sem recodificá-lo.',
+        conversion: 'O Polyfin recodifica o que o aplicativo não consegue reproduzir.',
+        stream:
+          'O Polyfin transmite o arquivo para o aplicativo. Os detalhes voltam a aparecer quando o aplicativo pedir mais.',
+      } as Record<string, string>,
+      why: 'Por quê',
+      source: 'Fonte',
+      sent: 'Enviado',
+      encoder: 'Codificador',
+      gpu: (method: string) => `GPU (${gpuMethodNames[method] ?? method})`,
+      gpuMethod: (method: string) => gpuMethodNames[method] ?? method,
+      cpu: 'CPU',
+      copied: 'Copiado',
+      toneMapped: 'HDR para SDR',
+      burned: 'Legendas incorporadas',
+      qualityGroup: 'Grupo de qualidade',
+      original: 'Original',
+      sizeLimit: 'Menor que a fonte',
+      qualityPlayed: 'Qualidade reproduzida',
+      switchedVersion: 'Versão de troca',
+      bandwidth: {
+        sent: (rate: string) => `${rate} para o app`,
+        received: (rate: string) => `${rate} da fonte`,
+        redirected: 'O app lê a fonte diretamente',
+      },
+      origins: {
+        addon: 'Complemento',
+        torrent: 'Torrent',
+        localFolder: 'Pasta local',
+        networkShare: 'Compartilhamento de rede',
+        iptv: 'IPTV',
+      } as Record<string, string>,
+      peers: (count: number) => (count === 1 ? '1 peer' : `${count} peers`),
+      qualityAmong: (played: string, offered: string) => `${played}, entre ${offered}`,
+      sizeLimits: {
+        steppedDown: (height: string) => `O aplicativo reduziu a partir de ${height}`,
+        gpu: (height: string) => `${height} no máximo: convertido pela placa de vídeo`,
+        processor: (height: string) => `${height} no máximo: convertido pelo processador`,
+        toneMapping: (height: string) => `${height} no máximo: HDR convertido pelo processador`,
+        gpuToneMapping: (height: string) =>
+          `${height} no máximo: a placa de vídeo só converte o HDR a tempo até aí`,
+        qualityGroup: (height: string) => `Grupo de qualidade: ${height}`,
+        serverMax: (height: string) => `Qualidade máxima do vídeo convertido: ${height}`,
+        app: (height: string) => `Qualidade permitida pelo aplicativo: ${height}`,
+        appBitrate: (rate: string) => `Taxa de bits permitida pelo aplicativo: ${rate}`,
+        userBitrate: (rate: string) => `Qualidade máxima do usuário: ${rate}`,
+      },
+      unknown: 'Desconhecido',
+      stop: 'Parar',
+      stopFor: (user: string) => `Parar a reprodução de ${user}`,
+      stopTitle: 'Parar esta reprodução?',
+      stopConfirm: (user: string, title: string) =>
+        `Parar “${title}” no dispositivo de ${user}? O aplicativo para de reproduzir imediatamente.`,
+      stopped: 'O aplicativo recebeu o pedido para parar.',
+      message: 'Enviar uma mensagem',
+      messageTo: (user: string) => `Enviar uma mensagem para ${user}`,
+      messageLabel: (device: string) => `Mensagem a exibir em ${device}`,
+      messageHint: 'Exibida no dispositivo por 10 segundos. No máximo 500 caracteres.',
+      send: 'Enviar',
+      messageSent: 'Mensagem enviada.',
+      notControllable: 'Este aplicativo não aceita controle remoto.',
+      sharedNotControllable:
+        'Um convidado assistindo por um link de compartilhamento. Revogar o link, na página do usuário, interrompe a reprodução.',
+    },
+    reasons: {
+      ContainerNotSupported: 'Formato de arquivo não suportado',
+      VideoCodecNotSupported: 'Codec de vídeo não suportado',
+      AudioCodecNotSupported: 'Codec de áudio não suportado',
+      SubtitleCodecNotSupported: 'Formato de legenda não suportado',
+      AudioIsExternal: 'Áudio em um arquivo separado',
+      SecondaryAudioNotSupported: 'Segunda faixa de áudio não suportada',
+      VideoProfileNotSupported: 'Perfil de vídeo não suportado',
+      VideoLevelNotSupported: 'Nível de vídeo não suportado',
+      VideoResolutionNotSupported: 'Resolução alta demais',
+      VideoBitDepthNotSupported: 'Profundidade de bits do vídeo não suportada',
+      VideoFramerateNotSupported: 'Taxa de quadros não suportada',
+      RefFramesNotSupported: 'Quadros de referência demais',
+      AnamorphicVideoNotSupported: 'Vídeo anamórfico não suportado',
+      InterlacedVideoNotSupported: 'Vídeo entrelaçado não suportado',
+      VideoCodecTagNotSupported: 'Tag do codec de vídeo não suportada',
+      VideoBitrateNotSupported: 'Taxa de bits do vídeo alta demais',
+      AudioChannelsNotSupported: 'Canais de áudio demais',
+      AudioProfileNotSupported: 'Perfil de áudio não suportado',
+      AudioSampleRateNotSupported: 'Taxa de amostragem do áudio não suportada',
+      AudioBitDepthNotSupported: 'Profundidade de bits do áudio não suportada',
+      AudioBitrateNotSupported: 'Taxa de bits do áudio alta demais',
+      ContainerBitrateExceedsLimit: 'Acima do limite de taxa de bits',
+      UnknownVideoStreamInfo: 'Vídeo sem descrição',
+      UnknownAudioStreamInfo: 'Áudio sem descrição',
+      DirectPlayError: 'Falha na reprodução direta',
+      VideoRangeTypeNotSupported: 'HDR não suportado',
+      StreamCountExceedsLimit: 'Faixas demais',
+    } as Record<string, string>,
+    /** A member's Home. */
+    member: {
+      /** The member in their own playback's tile. */
+      you: 'Você',
+      /** The lede while the member plays one title. */
+      watching: (title: string, device: string) => `Você está assistindo a ${title} em ${device}.`,
+      lede: 'Aprove um dispositivo com o Quick Connect, escolha suas fontes e configure sua conta.',
+      sourceCount: (count: number) =>
+        count === 0 ? 'Nenhuma ainda' : count === 1 ? '1 fonte' : `${count} fontes`,
+    },
+    activity: {
+      title: 'Atividade recente',
+      openLog: 'Abrir o registro',
+      empty: 'Nenhuma atividade ainda.',
+      emptyHelp:
+        'Logins, reproduções e alterações no servidor aparecem aqui à medida que acontecem.',
+      warning: 'Aviso',
+      error: 'Erro',
+      filter: 'Mostrar',
+      filters: {
+        all: 'Tudo',
+        problems: 'Problemas',
+        signIns: 'Logins',
+        playback: 'Reprodução',
+        users: 'Usuários',
+        server: 'Servidor e complementos',
+        recordings: 'Gravações',
+      },
+      search: 'Pesquisar nos eventos exibidos',
+      listLabel: 'Eventos mais recentes',
+      noMatch: 'Nenhum evento corresponde.',
+      noMatchHelp: 'Escolha outro filtro ou limpe a pesquisa.',
+      count: (shown: number, total: number) => `${shown} de ${total} eventos.`,
+      autoRefresh: 'Atualiza a cada 15 segundos.',
+    },
+  },
+}
+
+export default home

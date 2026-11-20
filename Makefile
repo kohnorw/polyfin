@@ -1,10 +1,19 @@
 GO ?= go
+# What runs the tests: go test, or a runner of it ending with the flags it
+# passes on, such as CI's "gotestsum --jsonfile file --", which records
+# each test's time (scripts/test-times.py).
+GOTEST ?= $(GO) test
 NPM ?= npm
 VERSION ?= dev
 # The PostgreSQL image-health starts the image against, on the host.
 IMAGE_DATABASE_URL ?= postgresql://polyfin:polyfin@host.docker.internal:5432/polyfin
+# A folder holding the FFmpeg archives the Dockerfile downloads, as
+# scripts/ffmpeg-archives.sh fetch makes it: image-check takes them from
+# there, checked as a download is, rather than download them.
+FFMPEG_ARCHIVES ?=
+FFMPEG_CONTEXTS = $(if $(FFMPEG_ARCHIVES),--build-context ffmpeg-amd64-archive=$(FFMPEG_ARCHIVES)/amd64 --build-context ffmpeg-arm64-archive=$(FFMPEG_ARCHIVES)/arm64)
 
-.PHONY: web build dev check lint test test-jellyfin test-others bounds compose-check image-check image-health
+.PHONY: web build dev check lint test test-race-1 test-race-2 test-jellyfin-1 test-jellyfin-2 bounds compose-check image-check image-health image-health-embedded
 
 web:
 	$(NPM) --prefix web ci --no-audit --no-fund
@@ -29,19 +38,45 @@ lint:
 	fi
 	$(GO) vet ./...
 
-# Every package's tests under the race detector. CI runs them in two jobs at
-# once: test-jellyfin, by far the longest package, and test-others, which
-# leaves out that package alone (internal/jellyfinimport stays in).
-JELLYFIN := github.com/moodiness/polyfin/internal/jellyfin
+# Every package's tests under the race detector. CI runs them in four jobs
+# at once: internal/jellyfin, by far the longest package, in two halves
+# (test-jellyfin-1 and -2), and the other packages in two shares
+# (test-race-1 and -2), balanced by their times on CI's runners.
+POLYFIN := github.com/moodiness/polyfin/internal
+JELLYFIN := $(POLYFIN)/jellyfin
+
+# go test starts the packages' tests in the order given, 4 at once on CI:
+# the slowest go first, so that none of them starts last and runs alone.
+# test-race-2 takes these, then every package neither list names, so that
+# a new package is tested without being listed.
+RACE_1 := $(addprefix $(POLYFIN)/,playback backup admin library source thumbnails commercials \
+	notifications audiosegments trackers iptv jellyfinimport recordings lyrics)
+RACE_2 := $(addprefix $(POLYFIN)/,localfiles hls accounts database container torrent addons \
+	torrent/utp appimport cluster)
+RACE_REST = $$($(GO) list ./... | grep -vxF $(addprefix -e ,$(JELLYFIN) $(RACE_1) $(RACE_2)))
+
+# internal/jellyfin's halves, by the first letter after Test of each
+# test's name: tests are run by -run and left out by -skip with the same
+# expression, so that each test runs in one half, a new one too.
+JELLYFIN_1 := ^Test[A-K]
 
 test:
-	$(GO) test -race ./...
+	$(GOTEST) -race -timeout 18m $(JELLYFIN) $(RACE_1) $(RACE_2) $(RACE_REST)
 
-test-jellyfin:
-	$(GO) test -race $(JELLYFIN)
+test-race-1:
+	$(GOTEST) -race $(RACE_1)
 
-test-others:
-	$(GO) test -race $$($(GO) list ./... | grep -vxF $(JELLYFIN))
+test-race-2:
+	$(GOTEST) -race $(RACE_2) $(RACE_REST)
+
+# Whole, under the race detector, this package took about 9 minutes on
+# CI's runners, near go test's default of 10, so a slower runner timed out
+# with no test failing: each half keeps the larger bound.
+test-jellyfin-1:
+	$(GOTEST) -race -timeout 18m -run '$(JELLYFIN_1)' $(JELLYFIN)
+
+test-jellyfin-2:
+	$(GOTEST) -race -timeout 18m -skip '$(JELLYFIN_1)' $(JELLYFIN)
 
 # Time bounds checked without the race detector, which slows the work they
 # time tenfold.
@@ -53,16 +88,17 @@ compose-check:
 	POSTGRES_PASSWORD=config-only docker compose --env-file /dev/null -f compose.yaml config --quiet
 	POSTGRES_PASSWORD=config-only docker compose --env-file /dev/null -f compose.yaml -f compose.build.yaml config --quiet
 	POSTGRES_PASSWORD=config-only docker compose --env-file /dev/null -f compose.yaml -f compose.host.yaml config --quiet
+	docker compose --env-file /dev/null -f compose.embedded.yaml config --quiet
 
 # Local tag only: this target never pushes. It also checks that the
 # jellyfin-web source releases attach still matches its checksum.
 image-check:
-	docker buildx build --load --build-arg VERSION=$(VERSION) --tag polyfin-local:check .
+	docker buildx build --load --build-arg VERSION=$(VERSION) $(FFMPEG_CONTEXTS) --tag polyfin-local:check .
 	@printed="$$(docker run --rm --network none polyfin-local:check version)"; \
 	if [ "$$printed" != "$(VERSION)" ]; then \
 		echo "image reports version '$$printed', expected '$(VERSION)'"; exit 1; \
 	fi
-	docker buildx build --platform linux/amd64,linux/arm64 --build-arg VERSION=$(VERSION) --output type=cacheonly .
+	docker buildx build --platform linux/amd64,linux/arm64 --build-arg VERSION=$(VERSION) $(FFMPEG_CONTEXTS) --output type=cacheonly .
 	docker buildx build --target jellyfin-web-source --output type=cacheonly .
 
 # The image image-check built becomes healthy within its start period,
@@ -79,3 +115,8 @@ image-health:
 	if [ "$$status" != healthy ]; then docker logs polyfin-health; fi; \
 	docker rm -f polyfin-health >/dev/null; \
 	[ "$$status" = healthy ]
+
+# The same image with its own database, POLYFIN_DATABASE=embedded: healthy,
+# a clean stop, and a recovery after a kill.
+image-health-embedded:
+	sh scripts/image-health-embedded.sh polyfin-local:check

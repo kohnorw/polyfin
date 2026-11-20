@@ -63,6 +63,7 @@ func (h *harness) create(t *testing.T, draft Draft) Destination {
 // folders stay. What an interrupted upload left is deleted. Each
 // destination records its last upload and its newest backup.
 func TestBackupsAreSentToEachDestination(t *testing.T) {
+	t.Parallel()
 	h := withDestinations(t)
 	h.kept = 3
 	store := newTestS3(t, "backups", "AKIDEXAMPLE")
@@ -132,7 +133,7 @@ func TestBackupsAreSentToEachDestination(t *testing.T) {
 	newestAt := at.AddDate(0, 0, 2)
 	for _, d := range destinations {
 		if d.RanAt == nil || !d.RanAt.Equal(newestAt) || d.Error != "" || d.NewestFile != newest[1] || d.NewestAt == nil ||
-			!d.NewestAt.Equal(newestAt) || d.Problem(newestAt.Add(time.Hour)) != "" || !d.SecretSet || d.Unreadable {
+			!d.NewestAt.Equal(newestAt) || d.Problem(newestAt.Add(time.Hour), MinStaleAfter) != "" || !d.SecretSet || d.Unreadable {
 			t.Errorf("%s: %+v", d.Name(), d)
 		}
 	}
@@ -162,6 +163,7 @@ func TestBackupsAreSentToEachDestination(t *testing.T) {
 // A destination whose newest backup is older than two days is a problem
 // too.
 func TestAFailedUploadIsTriedAgainAtTheNextBackup(t *testing.T) {
+	t.Parallel()
 	h := withDestinations(t)
 	dav := newTestWebDAV(t, "polyfin", "dav password")
 	d := h.create(t, Draft{Kind: KindWebDAV, Address: new(dav.url), Username: new("polyfin"), Secret: new("dav password")})
@@ -175,7 +177,7 @@ func TestAFailedUploadIsTriedAgainAtTheNextBackup(t *testing.T) {
 		t.Fatal(err)
 	}
 	if !strings.Contains(failed.Error, "503") || failed.NewestFile != "polyfin-20261001-040000.dump" ||
-		failed.Problem(at.AddDate(0, 0, 1)) != ProblemFailed {
+		failed.Problem(at.AddDate(0, 0, 1), MinStaleAfter) != ProblemFailed {
 		t.Errorf("after a failure: %+v", failed)
 	}
 	if status, _ := h.service.Status(t.Context()); status.Error != "" || status.File != "polyfin-20261002-040000.dump" {
@@ -189,21 +191,23 @@ func TestAFailedUploadIsTriedAgainAtTheNextBackup(t *testing.T) {
 		t.Errorf("after the next backup: %q", got)
 	}
 	recovered, _ := h.service.Destination(t.Context(), d.ID)
-	if recovered.Error != "" || recovered.Problem(at.AddDate(0, 0, 2)) != "" {
+	if recovered.Error != "" || recovered.Problem(at.AddDate(0, 0, 2), MinStaleAfter) != "" {
 		t.Errorf("after the next backup: %+v", recovered)
 	}
-	if problem := recovered.Problem(at.AddDate(0, 0, 2).Add(StaleAfter + time.Minute)); problem != ProblemStale {
+	if problem := recovered.Problem(at.AddDate(0, 0, 2).Add(MinStaleAfter+time.Minute), MinStaleAfter); problem != ProblemStale {
 		t.Errorf("two days later: %q", problem)
 	}
-	if problem := (Destination{}).Problem(at); problem != "" {
+	if problem := (Destination{}).Problem(at, MinStaleAfter); problem != "" {
 		t.Errorf("before the first upload: %q", problem)
 	}
 }
 
 // Test writes a file, reads it back and deletes it: nothing is left. The
 // SFTP server's key is saved at the first connection; a server offering
-// another key afterwards is refused, until the saved key is forgotten.
+// another key afterwards is refused before any password is sent, and its
+// key is shown until it is accepted by its fingerprint.
 func TestDestinationTestAndHostKey(t *testing.T) {
+	t.Parallel()
 	h := withDestinations(t)
 	store := newTestS3(t, "backups", "AKIDEXAMPLE")
 	dav := newTestWebDAV(t, "polyfin", "dav password")
@@ -230,7 +234,8 @@ func TestDestinationTestAndHostKey(t *testing.T) {
 
 	// Another server answers at the address: the database is changed
 	// directly, as the admin API forgets the key with the address.
-	other := newTestSFTP(t, "polyfin", "sftp password", newHostKey(t), first.dir)
+	otherKey := newHostKey(t)
+	other := newTestSFTP(t, "polyfin", "sftp password", otherKey, first.dir)
 	if _, err := h.service.cfg.DB.Exec(t.Context(), "UPDATE backup_destinations SET port = $2 WHERE id = $1", sftpDestination.ID,
 		other.port); err != nil {
 		t.Fatal(err)
@@ -238,21 +243,22 @@ func TestDestinationTestAndHostKey(t *testing.T) {
 	if _, err := h.service.TestDestination(t.Context(), sftpDestination.ID); !errors.Is(err, ErrHostKeyChanged) {
 		t.Errorf("another host key: %v", err)
 	}
-	if after, _ := h.service.Destination(t.Context(), sftpDestination.ID); after.HostKey != saved.HostKey {
+	after, _ := h.service.Destination(t.Context(), sftpDestination.ID)
+	if after.HostKey != saved.HostKey {
 		t.Error("the saved key was replaced")
 	}
-	forgotten, err := h.service.UpdateDestination(t.Context(), sftpDestination.ID, Draft{HostKey: new("")})
-	if err != nil || forgotten.HostKey != "" {
-		t.Fatalf("forgetting the key: %+v %v", forgotten, err)
+	if want := ssh.FingerprintSHA256(otherKey.PublicKey()); after.OfferedHostKeyFingerprint() != want {
+		t.Errorf("offered key shown: %q, want %q", after.OfferedHostKeyFingerprint(), want)
 	}
-	tested, err := h.service.TestDestination(t.Context(), sftpDestination.ID)
-	if err != nil || tested.HostKey == "" || tested.HostKey == saved.HostKey {
-		t.Errorf("after forgetting the key: %+v %v", tested, err)
+	if n := other.passwords.Load(); n != 0 {
+		t.Errorf("%d passwords sent to a key not accepted", n)
 	}
-	// Another address forgets the key.
-	moved, err := h.service.UpdateDestination(t.Context(), sftpDestination.ID, Draft{Port: new(first.port)})
-	if err != nil || moved.HostKey != "" {
-		t.Errorf("another port: %+v %v", moved, err)
+	accepted, err := h.service.UpdateDestination(t.Context(), sftpDestination.ID, Draft{AcceptHostKey: after.OfferedHostKeyFingerprint()})
+	if err != nil || accepted.HostKeyFingerprint() != after.OfferedHostKeyFingerprint() || accepted.OfferedHostKey != "" {
+		t.Fatalf("accepting the key shown: %+v %v", accepted, err)
+	}
+	if _, err := h.service.TestDestination(t.Context(), sftpDestination.ID); err != nil {
+		t.Errorf("after accepting the key: %v", err)
 	}
 
 	// A wrong password fails the test, saying why.
@@ -264,10 +270,77 @@ func TestDestinationTestAndHostKey(t *testing.T) {
 	}
 }
 
+// Once an SFTP destination's key is forgotten, or its port changed, the
+// key the server offers is refused before any password is sent, and shown;
+// only the key of the fingerprint accepted is saved.
+func TestAForgottenHostKeyIsAcceptedByTheFingerprintShown(t *testing.T) {
+	t.Parallel()
+	h := withDestinations(t)
+	firstKey, otherKey := newHostKey(t), newHostKey(t)
+	first := newTestSFTP(t, "polyfin", "sftp password", firstKey, t.TempDir())
+	other := newTestSFTP(t, "polyfin", "sftp password", otherKey, first.dir)
+	d := h.create(t, Draft{Kind: KindSFTP, Address: new(first.host), Port: new(first.port), Folder: new(first.dir),
+		Username: new("polyfin"), Secret: new("sftp password")})
+	if _, err := h.service.TestDestination(t.Context(), d.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	// Forget: the same server's key is shown, not saved.
+	forgotten, err := h.service.UpdateDestination(t.Context(), d.ID, Draft{HostKey: new("")})
+	if err != nil || forgotten.HostKey != "" || !forgotten.HostKeyForgotten {
+		t.Fatalf("forgetting the key: %+v %v", forgotten, err)
+	}
+	sent := first.passwords.Load()
+	if _, err := h.service.TestDestination(t.Context(), d.ID); !errors.Is(err, ErrHostKeyNotAccepted) {
+		t.Errorf("after forgetting the key: %v", err)
+	}
+	shown, _ := h.service.Destination(t.Context(), d.ID)
+	if shown.HostKey != "" || shown.OfferedHostKeyFingerprint() != ssh.FingerprintSHA256(firstKey.PublicKey()) {
+		t.Errorf("after forgetting the key: saved %q, shown %q", shown.HostKey, shown.OfferedHostKeyFingerprint())
+	}
+	if n := first.passwords.Load(); n != sent {
+		t.Errorf("%d passwords sent to a key not accepted", n-sent)
+	}
+
+	// Another port: the key shown is the new server's.
+	if _, err := h.service.UpdateDestination(t.Context(), d.ID, Draft{Port: new(other.port)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.service.TestDestination(t.Context(), d.ID); !errors.Is(err, ErrHostKeyNotAccepted) {
+		t.Errorf("another port: %v", err)
+	}
+	if n := other.passwords.Load(); n != 0 {
+		t.Errorf("%d passwords sent to a key not accepted", n)
+	}
+	moved, _ := h.service.Destination(t.Context(), d.ID)
+	want := ssh.FingerprintSHA256(otherKey.PublicKey())
+	if moved.OfferedHostKeyFingerprint() != want {
+		t.Fatalf("another port: shown %q, want %q", moved.OfferedHostKeyFingerprint(), want)
+	}
+
+	// The key accepted is the one shown, no other.
+	for _, wrong := range []string{ssh.FingerprintSHA256(firstKey.PublicKey()), "SHA256:x"} {
+		if _, err := h.service.UpdateDestination(t.Context(), d.ID, Draft{AcceptHostKey: wrong}); !errors.Is(err, ErrOfferedKeyChanged) {
+			t.Errorf("accepting %s: %v", wrong, err)
+		}
+	}
+	if still, _ := h.service.Destination(t.Context(), d.ID); still.HostKey != "" || still.OfferedHostKey != moved.OfferedHostKey {
+		t.Errorf("a key not shown changed the destination: %+v", still)
+	}
+	accepted, err := h.service.UpdateDestination(t.Context(), d.ID, Draft{AcceptHostKey: want})
+	if err != nil || accepted.HostKeyFingerprint() != want || accepted.OfferedHostKey != "" || accepted.HostKeyForgotten {
+		t.Fatalf("accepting the key shown: %+v %v", accepted, err)
+	}
+	if _, err := h.service.TestDestination(t.Context(), d.ID); err != nil || other.passwords.Load() == 0 {
+		t.Errorf("after accepting the key: %v", err)
+	}
+}
+
 // A destination is refused when it cannot work; its password is kept when
 // a change leaves it out; with another POLYFIN_SECRET_KEY, it is
 // unreadable and sends nothing, saying why.
 func TestDestinationsAreChecked(t *testing.T) {
+	t.Parallel()
 	h := withDestinations(t)
 	private := newPrivateKey(t)
 	for _, test := range []struct {

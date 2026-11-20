@@ -22,6 +22,7 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/media"
 	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/thumbnails"
 )
@@ -72,6 +73,15 @@ const fingerprintSpan = 1 << 20
 // video found with their contents to take their identifier (see
 // recognize).
 const goneDays = 30
+
+// ForgetGoneVideos forgets the home videos gone more than goneDays days
+// ago, and returns how many. Scans of home videos folders do, and the
+// hourly cleanup of removed sources: a folder removed remembers its videos
+// too (see migration 0098), with no folder left to scan.
+func (s *Service) ForgetGoneVideos(ctx context.Context) (int64, error) {
+	tag, err := s.db.Exec(ctx, "DELETE FROM local_videos_gone WHERE gone_at <= now() - make_interval(days => $1)", goneDays)
+	return tag.RowsAffected(), err
+}
 
 // videoFingerprint reads the fingerprint of a home video of size bytes: a
 // SHA-256 hash of its first and last fingerprintSpan bytes, of all of it
@@ -250,7 +260,8 @@ func parseCreation(value string) (time.Time, bool) {
 func (s *Service) probeVideo(ctx context.Context, target string) (videoProbe, error) {
 	ctx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, s.ffprobe, "-v", "error", "-print_format", "json", "-show_format", "-show_streams", target).Output()
+	out, err := exec.CommandContext(ctx, s.ffprobe, append(append([]string{"-v", "error", "-print_format", "json", "-show_format", "-show_streams"},
+		media.Opens(target, media.File)...), target)...).Output()
 	if err != nil {
 		return videoProbe{}, err
 	}
@@ -336,7 +347,7 @@ func (s *Service) scanHomeVideos(ctx context.Context, id accounts.ID, root strin
 			return err
 		}
 	}
-	if _, err := s.db.Exec(ctx, "DELETE FROM local_videos_gone WHERE gone_at <= now() - make_interval(days => $1)", goneDays); err != nil {
+	if _, err := s.ForgetGoneVideos(ctx); err != nil {
 		return err
 	}
 	entries := make(map[string]entry, len(files))
@@ -352,7 +363,7 @@ func (s *Service) scanHomeVideos(ctx context.Context, id accounts.ID, root strin
 	target := probeTarget(func(rel string) string { return filepath.Join(list.root, filepath.FromSlash(rel)) })
 	if list.root == "" {
 		var stop func()
-		if target, stop, err = probeServer(list); err != nil {
+		if target, stop, err = probeServer(list, s.logger); err != nil {
 			return err
 		}
 		defer stop()
@@ -368,7 +379,7 @@ func (s *Service) scanHomeVideos(ctx context.Context, id accounts.ID, root strin
 			continue
 		}
 		group.Go(func() error {
-			print, err := readFingerprint(groupCtx, list, rel, f.size)
+			print, err := guarded(s.logger, "fingerprinting a home video", rel, func() ([]byte, error) { return readFingerprint(groupCtx, list, rel, f.size) })
 			if err != nil {
 				if groupCtx.Err() != nil {
 					return groupCtx.Err()
@@ -415,7 +426,7 @@ func (s *Service) scanHomeVideos(ctx context.Context, id accounts.ID, root strin
 			probe := old.probe
 			if !probed {
 				var err error
-				if probe, err = s.probeVideo(groupCtx, target(rel)); err != nil {
+				if probe, err = guarded(s.logger, "probing a home video", rel, func() (videoProbe, error) { return s.probeVideo(groupCtx, target(rel)) }); err != nil {
 					if groupCtx.Err() != nil {
 						return groupCtx.Err()
 					}
@@ -465,7 +476,8 @@ func contents(size int64, print []byte) string {
 // changed, probed again, has its frame made again. A video stored before
 // keeps its identifier, and a new one takes a new one, or that of the
 // video gone it is when it is recognizable, no other video of its scan
-// having its contents (see recognize).
+// having its contents (see recognize), with when that one was first found;
+// else it is added now by the server's clock (see store).
 func (s *Service) storeVideo(ctx context.Context, id accounts.ID, rel string, f found, t homeTitle, probe videoProbe, changed bool,
 	print []byte, recognizable bool) error {
 	return pgx.BeginFunc(ctx, s.db, func(tx pgx.Tx) error {
@@ -479,14 +491,17 @@ func (s *Service) storeVideo(ctx context.Context, id accounts.ID, rel string, f 
 				videoID, added, recognized = gone, at, true
 			}
 		}
+		if !recognized {
+			added = new(s.now())
+		}
 		if _, err := tx.Exec(ctx, `INSERT INTO local_files (addon_id, path, size, modified, unit, title, stremio_id, name, title_year, matched_by,
 					added_at)
-				VALUES ($1, $2, $3, $4, $2, $5, $6, $5, $7, $8, CASE WHEN $9 THEN $10::timestamptz ELSE now() END)
+				VALUES ($1, $2, $3, $4, $2, $5, $6, $5, $7, $8, $9)
 				ON CONFLICT (addon_id, path) DO UPDATE SET size = $3, modified = $4, unit = $2, title = $5, year = NULL, season = NULL,
 					episode = NULL, last_episode = NULL, height = NULL,
 					stremio_id = CASE WHEN local_files.matched_by = $8 THEN local_files.stremio_id ELSE $6 END,
 					imdb_id = '', tmdb_id = '', name = $5, poster = '', title_year = $7, matched_by = $8, reason = '', nfo_id = ''`,
-			id, rel, f.size, f.modified, t.name, videoID, t.released.Year(), byOwn, recognized, added); err != nil {
+			id, rel, f.size, f.modified, t.name, videoID, t.released.Year(), byOwn, added); err != nil {
 			return err
 		}
 		_, err := tx.Exec(ctx, `INSERT INTO local_videos (addon_id, path, size, modified, created, duration, hdr, released, dated_by, plot,
@@ -654,7 +669,9 @@ func (s *Service) storeFrames(ctx context.Context, id accounts.ID, target probeT
 	group.SetLimit(s.workers)
 	for _, p := range wanted {
 		group.Go(func() error {
-			frame, err := s.homeFrame(groupCtx, target(p.rel), p.duration, p.hdr)
+			frame, err := guarded(s.logger, "making a home video's frame", p.rel, func() ([]byte, error) {
+				return s.homeFrame(groupCtx, target(p.rel), p.duration, p.hdr)
+			})
 			if err != nil {
 				if groupCtx.Err() != nil {
 					return groupCtx.Err()
@@ -723,10 +740,13 @@ func (s *Service) homeCatalog(ctx context.Context, source accounts.ID, skip int,
 // HeldVideos reports which of the home videos of the Stremio identifiers
 // ids a file of a home videos folder holds now: the others are gone, from
 // disk or as their folder holds something else, and may come back within
-// goneDays days (see recognize).
+// goneDays days (see recognize). Of the plain videos among ids, it reports
+// those a movies or shows folder lists now (see plainvideos.go).
 func (s *Service) HeldVideos(ctx context.Context, ids []string) (map[string]bool, error) {
 	rows, err := s.db.Query(ctx, `SELECT DISTINCT f.stremio_id FROM local_files f JOIN local_folders l ON l.addon_id = f.addon_id
-		WHERE l.kind = $1 AND f.stremio_id = ANY($2)`, KindHomeVideos, ids)
+		WHERE l.kind = $1 AND f.stremio_id = ANY($2)
+		UNION SELECT DISTINCT f.plain_id FROM local_files f JOIN local_folders l ON l.addon_id = f.addon_id
+		WHERE f.plain_id = ANY($2) AND `+plainListed, KindHomeVideos, ids)
 	if err != nil {
 		return nil, err
 	}

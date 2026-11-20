@@ -3,7 +3,9 @@ package admin
 import (
 	"context"
 	"errors"
+	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,7 +18,8 @@ import (
 // written to, empty when backups are off, which leaves the rest empty.
 type backupJSON struct {
 	Folder string `json:"folder"`
-	// Next is when the next backup is made, at the settings' hour.
+	// Next is when the backup task's triggers make the next backup, null
+	// without a timed trigger.
 	Next *time.Time `json:"next"`
 	// RanAt is when the last run started, null before the first; Error is
 	// why it failed, empty after a success.
@@ -52,39 +55,59 @@ type restoreJSON struct {
 // destinationJSON is a destination. Its password, secret key and private
 // key are never answered: SecretSet and PrivateKeySet tell whether they
 // are set. HostKey is the SHA-256 fingerprint of the SFTP server's key
-// saved at the first connection, empty before it. RanAt and Error are its
+// saved at the first connection or accepted since, empty before it.
+// OfferedHostKey is that of a key the server offered instead, to accept;
+// HostKeyForgotten tells that the key was forgotten, so that the next one
+// offered is shown rather than saved. RanAt and Error are its
 // last upload, NewestFile and NewestAt the newest backup there; Problem
 // is null, "failed" or "stale"; Unreadable tells that POLYFIN_SECRET_KEY
 // cannot decrypt its password or keys.
 type destinationJSON struct {
-	ID            string     `json:"id"`
-	Kind          string     `json:"kind"`
-	Name          string     `json:"name"`
-	Address       string     `json:"address"`
-	Port          int        `json:"port"`
-	Bucket        string     `json:"bucket"`
-	Folder        string     `json:"folder"`
-	Region        string     `json:"region"`
-	Username      string     `json:"username"`
-	SecretSet     bool       `json:"secretSet"`
-	PrivateKeySet bool       `json:"privateKeySet"`
-	HostKey       string     `json:"hostKey"`
-	Kept          int        `json:"kept"`
-	CreatedAt     time.Time  `json:"createdAt"`
-	RanAt         *time.Time `json:"ranAt"`
-	Error         string     `json:"error"`
-	NewestFile    string     `json:"newestFile"`
-	NewestAt      *time.Time `json:"newestAt"`
-	Problem       *string    `json:"problem"`
-	Unreadable    bool       `json:"unreadable"`
+	ID               string     `json:"id"`
+	Kind             string     `json:"kind"`
+	Name             string     `json:"name"`
+	Address          string     `json:"address"`
+	Port             int        `json:"port"`
+	Bucket           string     `json:"bucket"`
+	Folder           string     `json:"folder"`
+	Region           string     `json:"region"`
+	Username         string     `json:"username"`
+	SecretSet        bool       `json:"secretSet"`
+	PrivateKeySet    bool       `json:"privateKeySet"`
+	HostKey          string     `json:"hostKey"`
+	OfferedHostKey   string     `json:"offeredHostKey"`
+	HostKeyForgotten bool       `json:"hostKeyForgotten"`
+	Kept             int        `json:"kept"`
+	CreatedAt        time.Time  `json:"createdAt"`
+	RanAt            *time.Time `json:"ranAt"`
+	Error            string     `json:"error"`
+	NewestFile       string     `json:"newestFile"`
+	NewestAt         *time.Time `json:"newestAt"`
+	Problem          *string    `json:"problem"`
+	Unreadable       bool       `json:"unreadable"`
 }
 
-func newDestinationJSON(d backup.Destination, now time.Time) destinationJSON {
+// backupSchedule is when the backup task runs next, nil without a timed
+// trigger, and the age past which a backup is stale by its triggers.
+func (h *handler) backupSchedule() (*time.Time, time.Duration) {
+	if h.Tasks == nil {
+		return nil, backup.MinStaleAfter
+	}
+	info, ok := h.Tasks.Task(tasks.ID(backup.TaskKey), "en")
+	if !ok {
+		return nil, backup.MinStaleAfter
+	}
+	return info.Next, backup.StaleAfter(tasks.LongestGap(info.Triggers))
+}
+
+func (h *handler) newDestinationJSON(d backup.Destination, now time.Time) destinationJSON {
 	result := destinationJSON{ID: d.ID.String(), Kind: d.Kind, Name: d.Name(), Address: d.Address, Port: d.Port, Bucket: d.Bucket,
 		Folder: d.Folder, Region: d.Region, Username: d.Username, SecretSet: d.SecretSet, PrivateKeySet: d.PrivateKeySet,
-		HostKey: d.HostKeyFingerprint(), Kept: d.Kept, CreatedAt: d.CreatedAt.UTC().Truncate(time.Second), RanAt: utcSeconds(d.RanAt),
+		HostKey: d.HostKeyFingerprint(), OfferedHostKey: d.OfferedHostKeyFingerprint(), HostKeyForgotten: d.HostKeyForgotten,
+		Kept: d.Kept, CreatedAt: d.CreatedAt.UTC().Truncate(time.Second), RanAt: utcSeconds(d.RanAt),
 		Error: d.Error, NewestFile: d.NewestFile, NewestAt: d.NewestAt, Unreadable: d.Unreadable}
-	if problem := d.Problem(now); problem != "" {
+	_, staleAfter := h.backupSchedule()
+	if problem := d.Problem(now, staleAfter); problem != "" {
 		result.Problem = &problem
 	}
 	return result
@@ -108,11 +131,12 @@ func (h *handler) backupStatus(ctx context.Context) (*backupJSON, error) {
 		return nil, err
 	}
 	now := h.now()
-	result := &backupJSON{Folder: h.Backups.Dir(), Next: new(tasks.NextDaily(now, h.Backups.Hour())), RanAt: status.RanAt,
-		Error: status.Error, MadeAt: status.MadeAt, File: status.File, Size: status.Size, Problem: status.Problem(now),
+	next, staleAfter := h.backupSchedule()
+	result := &backupJSON{Folder: h.Backups.Dir(), Next: next, RanAt: status.RanAt,
+		Error: status.Error, MadeAt: status.MadeAt, File: status.File, Size: status.Size, Problem: status.Problem(now, staleAfter),
 		Destinations: []destinationJSON{}}
 	for _, d := range destinations {
-		result.Destinations = append(result.Destinations, newDestinationJSON(d, now))
+		result.Destinations = append(result.Destinations, h.newDestinationJSON(d, now))
 	}
 	if errors.Is(h.Backups.CanRestore(), backup.ErrNoPgRestore) {
 		result.Restore = "pg_restore_missing"
@@ -167,6 +191,11 @@ func backupError(w http.ResponseWriter, err error) bool {
 		{backup.ErrNoPlan, http.StatusConflict, "restore_expired"},
 		{backup.ErrUnreadableSecrets, http.StatusConflict, "unreadable_secrets"},
 		{backup.ErrRestoring, http.StatusConflict, "restoring"},
+		{backup.ErrPassphraseRequired, http.StatusConflict, "passphrase_required"},
+		{backup.ErrWrongPassphrase, http.StatusBadRequest, "wrong_passphrase"},
+		{backup.ErrDamagedBackup, http.StatusBadRequest, "damaged_backup"},
+		{backup.ErrNotEncrypted, http.StatusBadRequest, "not_encrypted"},
+		{backup.ErrOfferedKeyChanged, http.StatusConflict, "offered_host_key_changed"},
 	} {
 		if errors.Is(err, known.err) {
 			writeError(w, known.status, known.code)
@@ -179,25 +208,28 @@ func backupError(w http.ResponseWriter, err error) bool {
 // destinationDraftJSON adds a destination, or changes one: on a change,
 // the fields left out keep their values, and kind is ignored. secret is
 // an S3 secret key or a password, privateKey an SFTP private key, both
-// emptied by "" and kept when left out; hostKey may only be "", to accept
-// the key the SFTP server offers at the next connection.
+// emptied by "" and kept when left out; hostKey may only be "", to forget
+// the saved key, after which the key the SFTP server offers is shown, not
+// saved. acceptHostKey is the fingerprint of offeredHostKey, to accept it.
 type destinationDraftJSON struct {
-	Kind       string  `json:"kind"`
-	Address    *string `json:"address"`
-	Port       *int    `json:"port"`
-	Bucket     *string `json:"bucket"`
-	Folder     *string `json:"folder"`
-	Region     *string `json:"region"`
-	Username   *string `json:"username"`
-	Secret     *string `json:"secret"`
-	PrivateKey *string `json:"privateKey"`
-	HostKey    *string `json:"hostKey"`
-	Kept       *int    `json:"kept"`
+	Kind          string  `json:"kind"`
+	Address       *string `json:"address"`
+	Port          *int    `json:"port"`
+	Bucket        *string `json:"bucket"`
+	Folder        *string `json:"folder"`
+	Region        *string `json:"region"`
+	Username      *string `json:"username"`
+	Secret        *string `json:"secret"`
+	PrivateKey    *string `json:"privateKey"`
+	HostKey       *string `json:"hostKey"`
+	AcceptHostKey string  `json:"acceptHostKey"`
+	Kept          *int    `json:"kept"`
 }
 
 func (d destinationDraftJSON) draft() backup.Draft {
 	return backup.Draft{Kind: d.Kind, Address: d.Address, Port: d.Port, Bucket: d.Bucket, Folder: d.Folder, Region: d.Region,
-		Username: d.Username, Secret: d.Secret, PrivateKey: d.PrivateKey, HostKey: d.HostKey, Kept: d.Kept}
+		Username: d.Username, Secret: d.Secret, PrivateKey: d.PrivateKey, HostKey: d.HostKey, AcceptHostKey: d.AcceptHostKey,
+		Kept: d.Kept}
 }
 
 // destinationsJSON lists the destinations, and the kinds they may be.
@@ -215,7 +247,7 @@ func (h *handler) backupDestinations(w http.ResponseWriter, r *http.Request) {
 	now := h.now()
 	result := destinationsJSON{Destinations: []destinationJSON{}, Kinds: backup.Kinds}
 	for _, d := range destinations {
-		result.Destinations = append(result.Destinations, newDestinationJSON(d, now))
+		result.Destinations = append(result.Destinations, h.newDestinationJSON(d, now))
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -233,7 +265,7 @@ func (h *handler) createBackupDestination(w http.ResponseWriter, r *http.Request
 		h.internalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusCreated, newDestinationJSON(d, h.now()))
+	writeJSON(w, http.StatusCreated, h.newDestinationJSON(d, h.now()))
 }
 
 // updateBackupDestination changes a destination.
@@ -253,7 +285,7 @@ func (h *handler) updateBackupDestination(w http.ResponseWriter, r *http.Request
 		h.internalError(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, newDestinationJSON(d, h.now()))
+	writeJSON(w, http.StatusOK, h.newDestinationJSON(d, h.now()))
 }
 
 // deleteBackupDestination removes a destination; the backups sent there
@@ -294,7 +326,7 @@ func (h *handler) testBackupDestination(w http.ResponseWriter, r *http.Request) 
 		writeError(w, http.StatusNotFound, "not_found")
 		return
 	}
-	result := destinationTestJSON{OK: err == nil, Destination: newDestinationJSON(d, h.now())}
+	result := destinationTestJSON{OK: err == nil, Destination: h.newDestinationJSON(d, h.now())}
 	if err != nil {
 		result.Error = err.Error()
 	}
@@ -302,18 +334,20 @@ func (h *handler) testBackupDestination(w http.ResponseWriter, r *http.Request) 
 }
 
 // backupFileJSON is a backup that can be restored: Size is -1 when its
-// destination, a WebDAV server, does not tell it.
+// destination, a WebDAV server, does not tell it. Encrypted tells one
+// encrypted with a passphrase, from its name.
 type backupFileJSON struct {
 	Name          string    `json:"name"`
 	Size          int64     `json:"size"`
 	MadeAt        time.Time `json:"madeAt"`
 	BeforeRestore bool      `json:"beforeRestore"`
+	Encrypted     bool      `json:"encrypted"`
 }
 
 func newBackupFilesJSON(files []backup.File) []backupFileJSON {
 	result := make([]backupFileJSON, len(files))
 	for i, f := range files {
-		result[i] = backupFileJSON{Name: f.Name, Size: f.Size, MadeAt: f.MadeAt.UTC(), BeforeRestore: f.BeforeRestore}
+		result[i] = backupFileJSON{Name: f.Name, Size: f.Size, MadeAt: f.MadeAt.UTC(), BeforeRestore: f.BeforeRestore, Encrypted: f.Encrypted}
 	}
 	return result
 }
@@ -343,7 +377,7 @@ func (h *handler) backupFiles(w http.ResponseWriter, r *http.Request) {
 	now := h.now()
 	result := backupFilesJSON{Folder: newBackupFilesJSON(listing.Folder), Destinations: []destinationFilesJSON{}}
 	for _, d := range listing.Destinations {
-		files := destinationFilesJSON{Destination: newDestinationJSON(d.Destination, now), Files: newBackupFilesJSON(d.Files)}
+		files := destinationFilesJSON{Destination: h.newDestinationJSON(d.Destination, now), Files: newBackupFilesJSON(d.Files)}
 		if d.Error != nil {
 			files.Error = d.Error.Error()
 		}
@@ -356,6 +390,9 @@ func (h *handler) backupFiles(w http.ResponseWriter, r *http.Request) {
 // confirmation shows. Unreadable counts, by kind, the stored secrets of
 // the backup that POLYFIN_SECRET_KEY cannot decrypt: "settings",
 // "tracking", "apps", "notifications", "shares" and "destinations".
+// Encrypted tells an encrypted backup, Locked one whose passphrase is
+// still needed: it is checked once unlocked, and Unreadable is empty
+// until then.
 type restorePlanJSON struct {
 	ID          string         `json:"id"`
 	File        string         `json:"file"`
@@ -364,12 +401,14 @@ type restorePlanJSON struct {
 	MadeAt      *time.Time     `json:"madeAt"`
 	Size        int64          `json:"size"`
 	Unreadable  map[string]int `json:"unreadable"`
+	Encrypted   bool           `json:"encrypted"`
+	Locked      bool           `json:"locked"`
 	ServerName  string         `json:"serverName"`
 }
 
 func (h *handler) newRestorePlanJSON(plan backup.Plan) restorePlanJSON {
 	result := restorePlanJSON{ID: plan.ID, File: plan.File, Uploaded: plan.Uploaded, Size: plan.Size, Unreadable: plan.Unreadable,
-		ServerName: h.Accounts.Settings().ServerName}
+		Encrypted: plan.Encrypted, Locked: plan.Locked, ServerName: h.Accounts.Settings().ServerName}
 	if plan.MadeAt != nil {
 		result.MadeAt = new(plan.MadeAt.UTC())
 	}
@@ -444,6 +483,122 @@ func (h *handler) discardRestore(w http.ResponseWriter, r *http.Request) {
 	}
 	h.Backups.Discard(body.ID)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// unlockRestore opens the encrypted backup prepared with the passphrase
+// the administrator typed, then checks it: the plan, unlocked. A wrong
+// passphrase leaves it prepared, to try another.
+func (h *handler) unlockRestore(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		ID         string `json:"id"`
+		Passphrase string `json:"passphrase"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	plan, err := h.Backups.Unlock(r.Context(), body.ID, body.Passphrase)
+	h.answerUnlocked(w, r, plan, err)
+}
+
+// answerUnlocked answers the plan Unlock gave.
+func (h *handler) answerUnlocked(w http.ResponseWriter, r *http.Request, plan backup.Plan, err error) {
+	if backupError(w, err) {
+		return
+	}
+	if err != nil {
+		if r.Context().Err() == nil {
+			h.Logger.Warn("An encrypted backup could not be opened for a restore", "error", err)
+		}
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "unlock_failed", "message": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, h.newRestorePlanJSON(plan))
+}
+
+// downloadBackup sends a backup of the folder as it is, encrypted or not.
+func (h *handler) downloadBackup(w http.ResponseWriter, r *http.Request) {
+	f, file, err := h.Backups.OpenBackup(r.PathValue("name"))
+	if backupError(w, err) {
+		return
+	} else if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	defer f.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+file.Name+`"`)
+	w.Header().Set("Cache-Control", "no-store")
+	// A download cut short resumes where it stopped.
+	http.ServeContent(w, r, "", time.Time{}, f)
+}
+
+// decryptedDownload is a download of a backup decrypted, which
+// checkBackupPassphrase allows once, for a minute, to the administrator
+// who typed its passphrase.
+type decryptedDownload struct {
+	name, passphrase string
+	user             accounts.ID
+}
+
+// decryptedDownloadLifetime is how long a download decrypted may start.
+const decryptedDownloadLifetime = time.Minute
+
+// checkBackupPassphrase checks that a passphrase opens an encrypted backup
+// of the folder, and answers the ticket that downloads it decrypted, once,
+// within a minute (see downloadDecryptedBackup): the browser then follows
+// a plain link to it, and saves the dump as it comes, never holding it
+// whole, while the passphrase never appears in an address.
+func (h *handler) checkBackupPassphrase(w http.ResponseWriter, r *http.Request) {
+	var body struct {
+		Passphrase string `json:"passphrase"`
+	}
+	if !decode(w, r, &body) {
+		return
+	}
+	name := r.PathValue("name")
+	dump, err := h.Backups.OpenDecrypted(name, body.Passphrase)
+	if backupError(w, err) {
+		return
+	} else if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	_ = dump.Close()
+	ticket, now := randomToken(), h.now()
+	h.decryptedDownloads.add(ticket, decryptedDownload{name: name, passphrase: body.Passphrase, user: sessionFrom(r.Context()).User.ID},
+		now.Add(decryptedDownloadLifetime), now)
+	writeJSON(w, http.StatusOK, map[string]string{"ticket": ticket})
+}
+
+// downloadDecryptedBackup sends the dump an encrypted backup of the folder
+// holds, for the ticket checkBackupPassphrase gave the same administrator.
+// The download stops at the first part of the backup changed or missing,
+// short of its length: the browser tells it failed.
+func (h *handler) downloadDecryptedBackup(w http.ResponseWriter, r *http.Request) {
+	download, ok := h.decryptedDownloads.take(r.URL.Query().Get("ticket"), h.now())
+	if !ok || download.name != r.PathValue("name") || download.user != sessionFrom(r.Context()).User.ID {
+		writeError(w, http.StatusNotFound, "download_expired")
+		return
+	}
+	dump, err := h.Backups.OpenDecrypted(download.name, download.passphrase)
+	if backupError(w, err) {
+		return
+	} else if err != nil {
+		h.internalError(w, r, err)
+		return
+	}
+	defer dump.Close()
+	w.Header().Set("Content-Type", "application/octet-stream")
+	w.Header().Set("Content-Disposition", `attachment; filename="`+dump.Name+`"`)
+	w.Header().Set("Content-Length", strconv.FormatInt(dump.Size, 10))
+	w.Header().Set("Cache-Control", "no-store")
+	if _, err := io.Copy(w, dump); err != nil {
+		if r.Context().Err() == nil {
+			h.Logger.Warn("A backup downloaded decrypted stopped", "file", dump.Name, "error", err)
+		}
+		// The connection is closed without ending the answer.
+		panic(http.ErrAbortHandler)
+	}
 }
 
 // startRestore restores the backup prepared, once the administrator typed

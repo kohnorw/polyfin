@@ -20,9 +20,11 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/addons"
 	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/pace"
 	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/testdb/migrated"
 	"github.com/moodiness/polyfin/internal/userdata"
+	"github.com/moodiness/polyfin/internal/watchlist/watchlisttest"
 )
 
 // request is a request one of the fake services received.
@@ -45,8 +47,9 @@ type answer struct {
 }
 
 // fakes stands in for every service, each under a path named after it:
-// /trakt, /simkl, /mdblist, /publicmetadb. Unless told otherwise, it
-// accepts every request with an empty object.
+// /trakt, /trakt-auth (Trakt's authentication host), /simkl, /mdblist,
+// /publicmetadb. Unless told otherwise, it accepts every request with an
+// empty object.
 type fakes struct {
 	mu       sync.Mutex
 	requests []request
@@ -242,12 +245,13 @@ func newService(pool *pgxpool.Pool, store *accounts.Store, f *fakes, log io.Writ
 	s := New(Options{DB: pool, Settings: store.Settings, Version: "1.2.3", Logger: logger,
 		URLs: map[string]string{Trakt: f.url + "/trakt", Simkl: f.url + "/simkl", MDBList: f.url + "/mdblist", PublicMetaDB: f.url + "/publicmetadb",
 			LastFM: f.url + "/lastfm/2.0/", ListenBrainz: f.url + "/listenbrainz", AniList: f.url + "/anilist/", MyAnimeList: f.url + "/myanimelist"},
-		AuthURLs: map[string]string{AniList: f.url + "/anilist-auth", MyAnimeList: f.url + "/myanimelist-auth"},
+		AuthURLs: map[string]string{Trakt: f.url + "/trakt-auth", AniList: f.url + "/anilist-auth", MyAnimeList: f.url + "/myanimelist-auth"},
 		Titles:   library.New(pool, addons.New(pool, client), client, logger, store.Settings),
-		UserData: userdata.New(pool)})
+		UserData: userdata.New(pool), Watchlist: watchlisttest.Store(pool)})
 	s.now = func() time.Time { return clockStart }
 	s.timing.gaps = map[string]time.Duration{}
-	s.timing.sharedGaps = map[string]time.Duration{}
+	s.paces = map[string]*pace.Pace{LastFM: pace.New(0), AniList: pace.New(0)}
+	s.publicMetaDBPace = pace.New(0)
 	s.timing.retryFirst, s.timing.retryMax = 10*time.Millisecond, 40*time.Millisecond
 	s.timing.pollUnit = 5 * time.Millisecond
 	s.timing.importGaps = map[string]time.Duration{}
@@ -335,6 +339,7 @@ func play(event Event, title Title, minutes float64, paused, played bool) Playba
 }
 
 func TestTitlesNeedAnIdentifier(t *testing.T) {
+	t.Parallel()
 	if _, ok := Movie(accounts.ID{1}, map[string]string{}); ok {
 		t.Error("a movie without identifiers is tracked")
 	}

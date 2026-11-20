@@ -111,6 +111,7 @@ func (h *handler) saveCatalogGuides(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	list := make([]addons.GuideAddress, 0, len(body.URLs))
+	var addresses []string
 	for _, raw := range body.URLs {
 		var entry guideAddress
 		if err := json.Unmarshal(raw, &entry); err != nil {
@@ -118,6 +119,10 @@ func (h *handler) saveCatalogGuides(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		list = append(list, addons.GuideAddress(entry))
+		addresses = append(addresses, entry.URL)
+	}
+	if serverFileRefused(w, r, addresses...) {
+		return
 	}
 	guides, err := h.Guides.SetCatalogGuides(context.WithoutCancel(r.Context()), scope, key, list)
 	h.answerCatalogGuides(w, r, guides, err)
@@ -227,7 +232,7 @@ func (h *handler) guideChannels(w http.ResponseWriter, r *http.Request) {
 type channelMappingJSON struct {
 	ChannelID string       `json:"channelId"`
 	Name      string       `json:"name"`
-	Number    int          `json:"number"`
+	Number    string       `json:"number"`
 	GuideID   string       `json:"guideId"`
 	Mapping   *mappingJSON `json:"mapping"`
 }

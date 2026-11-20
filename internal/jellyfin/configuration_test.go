@@ -148,7 +148,7 @@ func TestInvalidConfigurationsAreRefused(t *testing.T) {
 		request, _ := http.NewRequestWithContext(t.Context(), http.MethodPost, s.url+"/Users/Configuration", strings.NewReader(body))
 		request.Header.Set("Authorization", app("tv", token))
 		request.Header.Set("Content-Type", contentType)
-		response, err := http.DefaultClient.Do(request)
+		response, err := testClient.Do(request)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -223,7 +223,8 @@ func TestLibrariesFollowTheHomeScreenSettings(t *testing.T) {
 		s.get(t, path, token, &page)
 		return itemNames(page.Items)
 	}
-	if got := list("/UserViews"); !slices.Equal(got, []string{"Top", "Shows", "Groups"}) {
+	// The Playlists view holds the member's watchlist playlist.
+	if got := list("/UserViews"); !slices.Equal(got, []string{"Top", "Shows", "Groups", "Playlists"}) {
 		t.Fatalf("libraries before any setting: %v", got)
 	}
 	id, _ := parseGUID(views["Groups"])
@@ -233,11 +234,11 @@ func TestLibrariesFollowTheHomeScreenSettings(t *testing.T) {
 	}); status != http.StatusNoContent {
 		t.Fatalf("saving: %d", status)
 	}
-	if got := list("/UserViews"); !slices.Equal(got, []string{"Groups", "Top"}) {
+	if got := list("/UserViews"); !slices.Equal(got, []string{"Groups", "Top", "Playlists"}) {
 		t.Errorf("ordered libraries without the excluded one: %v", got)
 	}
 	// The settings screen lists every library.
-	if got := list("/UserViews?includeHidden=true"); !slices.Equal(got, []string{"Groups", "Top", "Shows"}) {
+	if got := list("/UserViews?includeHidden=true"); !slices.Equal(got, []string{"Groups", "Top", "Shows", "Playlists"}) {
 		t.Errorf("libraries with the hidden ones: %v", got)
 	}
 }

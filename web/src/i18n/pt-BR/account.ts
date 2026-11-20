@@ -1,0 +1,832 @@
+import type en from '../en/account'
+
+const account: typeof en = {
+  account: {
+    title: 'Minha conta',
+    signedInAs: 'Conectado como ',
+    roles: { administrator: 'Administrador', member: 'Membro' },
+    sectionsLabel: 'Seções da conta',
+    sections: {
+      statistics: 'Estatísticas',
+      tracking: 'Acompanhamento',
+      resume: 'Continuar assistindo',
+      nextUp: 'A seguir',
+      hidden: 'Títulos ocultos',
+      homeRows: 'Fileiras do início',
+      trackChoices: 'Escolha de faixas',
+      taste: 'Perfil de gosto',
+      metadataLanguage: 'Idioma dos metadados',
+      webTheme: 'Tema do player web',
+      audioRegion: 'Região do áudio',
+      interfaceSize: 'Tamanho da interface',
+      sound: 'Som',
+      sharedLinks: 'Links compartilhados',
+      reminders: 'Lembretes',
+      import: 'Importar de outro servidor',
+      appImport: 'Importar de um aplicativo',
+      notifications: 'Notificações',
+      devices: 'Dispositivos',
+      password: 'Senha',
+      twoStep: 'Login em duas etapas',
+      provider: 'Provedor de identidade',
+    },
+    metadataLanguage: {
+      help: 'O idioma dos nomes, sinopses e imagens dos títulos nos seus aplicativos, quando um dos complementos do servidor os descreve nesse idioma; os títulos que nenhum complemento descreve nele mantêm a descrição do servidor. Gêneros, classificações etárias e pessoas continuam iguais para todos. Os nomes que o próprio Polyfin cria, como os das temporadas, seguem esse idioma quando o Polyfin o fala: inglês, francês, alemão, espanhol, italiano ou português.',
+      label: 'Idioma dos metadados',
+      server: 'O do servidor',
+      noLanguage:
+        'Nenhum complemento do servidor tem um idioma ainda, então os títulos são descritos no idioma do servidor. Um administrador define o idioma dos complementos em Conteúdo › Fontes.',
+      saved: 'Idioma dos metadados salvo.',
+    },
+    webTheme: {
+      help: 'A aparência do player web em cada navegador em que você entra. A aparência do jellyfin-web é mais leve, para TVs e celulares antigos; navegadores antigos demais para o LumaaGlaass a recebem sozinhos. Um navegador mostra uma alteração quando o player web é aberto de novo nele, ou assim que você entra nele.',
+      label: 'Tema do player web',
+      server: (theme: string) => `O do servidor (${theme})`,
+      choices: {
+        aiostreams: 'AIOStreams',
+        lumaaglaass: 'LumaaGlaass',
+        none: 'Aparência do jellyfin-web',
+        custom: 'Personalizado',
+      },
+      saved: 'Tema do player web salvo.',
+    },
+    audioRegion: {
+      help: 'A dublagem que você prefere quando um idioma é dublado à parte para uma região: o francês da França ou do Québec, o espanhol da Espanha ou da América Latina, o português do Brasil ou de Portugal. Ela vale para o idioma de áudio escolhido nos seus aplicativos, ou então o do servidor, quando ele é o idioma da região, e o define quando nenhum foi escolhido. Nesse idioma, as faixas de áudio da região tocam primeiro, e as versões dela vêm primeiro quando o servidor ordena as versões por idioma.',
+      label: 'Região do áudio',
+      none: 'Nenhuma',
+      saved: 'Região do áudio salva.',
+      regions: {
+        'fr-FR': 'Francês (França)',
+        'fr-CA': 'Francês (Québec)',
+        'es-ES': 'Espanhol (Espanha)',
+        'es-419': 'Espanhol (América Latina)',
+        'pt-BR': 'Português (Brasil)',
+        'pt-PT': 'Português (Portugal)',
+      },
+    },
+    interfaceSize: {
+      help: 'O tamanho dos textos e controles deste aplicativo de administração em cada navegador em que você entra. Compacto mostra mais de uma página em um computador; Grande é mais fácil de ler em uma TV, um tablet ou de longe. Um celular mostra os dois do mesmo jeito. Sem sessão, um navegador mantém o último tamanho que mostrou.',
+      label: 'Tamanho da interface',
+      compact: 'Compacto',
+      large: 'Grande',
+      saved: 'Tamanho da interface salvo.',
+    },
+    sound: {
+      help: 'Duas formas de deixar seus vídeos mais altos e mais uniformes do que seus aplicativos os reproduzem, cada uma com seu custo. Elas valem a partir da sua próxima reprodução.',
+      boostVolume: 'Aumentar o volume no player web',
+      boostVolumeHelp:
+        'Deixa os vídeos mais altos no player web, em um navegador e nos aplicativos Jellyfin para Android e iOS: cerca de 8 dB nas passagens calmas e 5 dB nas altas, com um compressor contendo os picos, e o volume do player continua funcionando. Seu navegador faz o trabalho, mas para que ele alcance as transmissões dos complementos, o servidor envia ele mesmo essas transmissões ao seu player web em vez de mandá-lo à fonte delas, o que usa a banda do servidor. Não alcança os players próprios dos aplicativos, nem as transmissões que um iPhone ou iPad reproduz como HLS. O menu de configurações do player também o liga e desliga.',
+      convertSound: 'Converter o som para equalizá-lo',
+      convertSoundHelp:
+        'O servidor converte o áudio dos seus vídeos e canais e o equaliza em -16 LUFS, com a imagem copiada, para que todo aplicativo o reproduza mais alto e uniforme. O custo: nada é reproduzido diretamente, cada reprodução usa um pouco do processador do servidor, e o som surround chega a um receiver convertido em vez de como a faixa original.',
+      saved: 'Som salvo.',
+      group: 'Seu grupo define estas opções: um administrador as altera na página dele.',
+    },
+    taste: {
+      help: 'O que o Polyfin aprendeu do seu gosto a partir dos filmes e séries que você terminou, reviu, largou cedo, curtiu, não curtiu, marcou como favoritos e ocultou, os mais recentes contando mais. Quando conhece você o suficiente, ele ordena Escolhas para você, os títulos semelhantes e as sugestões. Ele fica no servidor: só você o vê.',
+      notBuilt: 'Ainda não criado',
+      notBuiltHelp: 'O Polyfin cria o seu perfil em segundo plano, a cada hora.',
+      certainty: 'Quanto ele conhece você',
+      builtFrom: (titles: number) =>
+        `Criado a partir de ${titles === 1 ? '1 título' : `${titles} títulos`},`,
+      belowGate:
+        'O Polyfin ainda não conhece você o suficiente: termine ou curta mais alguns filmes e séries. Até lá, Escolhas para você mostra os títulos mais populares, e as outras listas mantêm a ordem de sempre.',
+      facets: {
+        genre: 'Gêneros',
+        director: 'Direção',
+        cast: 'Elenco',
+        decade: 'Décadas',
+        language: 'Idiomas',
+      },
+      liked: 'Você gosta',
+      disliked: 'Você gosta menos',
+      vetoed: 'fora de Escolhas para você',
+      taglines: 'Dizer por que um título é para mim',
+      taglinesHelp:
+        'A página de um título começa com “87% para você · porque você gosta de …”, quando o seu perfil conhece você o suficiente.',
+      taglinesOn: 'Os títulos agora dizem por que são para você.',
+      taglinesOff: 'Os títulos não dizem mais por que são para você.',
+    },
+    homeRows: {
+      help: 'As fileiras que o administrador adiciona para você à página inicial do player web. Desative uma para tirá-la da sua página inicial, e também das suas bibliotecas em outros aplicativos quando ela for uma biblioteca neles. As seções próprias do player web ficam em Configurações › Início dele.',
+      empty: 'Nenhuma fileira do início',
+      emptyHelp:
+        'O administrador não adicionou nenhuma fileira para você à página inicial do player web.',
+      watchlistKind: 'Sua playlist Para assistir',
+      playlistsKind: 'Uma linha para cada playlist que você marcou com ♥',
+      on: (name: string) => `${name} voltou à sua página inicial.`,
+      off: (name: string) => `${name} foi removida da sua página inicial.`,
+    },
+    trackChoices: {
+      help: 'Quando você escolhe outra faixa de áudio ou outras legendas além das que uma série ou um filme reproduz por padrão, as próximas reproduções mantêm esse idioma, em cada episódio e em qualquer versão, em todos os apps. Isso segue “Definir faixa de áudio baseado no item anterior” e “Definir legenda baseado no item anterior” nas configurações de reprodução do player web, ativadas a menos que você as tenha desativado.',
+      none: 'Nenhuma escolha de faixas guardada.',
+      kept: (count: number) =>
+        count === 1
+          ? 'Escolhas de faixas guardadas para 1 série ou filme.'
+          : `Escolhas de faixas guardadas para ${count} séries e filmes.`,
+      forget: 'Esquecer minhas escolhas de faixas',
+      title: 'Esquecer suas escolhas de faixas?',
+      confirmHelp:
+        'Cada série e filme volta a reproduzir as faixas que suas preferências de idioma escolhem.',
+      confirm: 'Esquecer',
+      forgetting: 'Esquecendo…',
+      done: 'Suas escolhas de faixas foram esquecidas.',
+    },
+    watching: {
+      resumeHelp:
+        'Os títulos em andamento no seu Continuar assistindo, para os aplicativos que não conseguem remover um. Remover tira um título sem alterar se ele foi reproduzido. Uma importação de um serviço de acompanhamento ou de um aplicativo só o traz de volta com um ponto de retomada mais recente.',
+      hiddenHelp:
+        'Os títulos que você ocultou das suas bibliotecas, fileiras do início, buscas e títulos semelhantes. Eles ainda abrem a partir de um link. No player web, o menu ⋮ de um título o oculta.',
+      remove: 'Remover',
+      removeLabel: (name: string) => `Remover ${name} de Continuar assistindo`,
+      removed: (name: string) => `${name} foi removido de Continuar assistindo.`,
+      resumeEmpty: 'Nada em andamento',
+      resumeEmptyHelp: 'Os filmes e episódios que você começar aparecem aqui até você terminá-los.',
+      progress: (position: string, runtime: string) => `${position} de ${runtime}`,
+      showAgain: 'Mostrar novamente',
+      showLabel: (name: string) => `Mostrar ${name} novamente`,
+      shown: (name: string) => `${name} voltou às suas listas.`,
+      hiddenEmpty: 'Nenhum título oculto',
+      hiddenEmptyHelp: 'Oculte um título pelo menu ⋮ dele no player web.',
+      hiddenOn: 'Oculto',
+      nextUpHelp:
+        'O próximo episódio de cada série que você está assistindo, como seus aplicativos mostram A seguir. Remover tira uma série de A seguir sem alterar o que você assistiu, até você reproduzir um dos episódios dela ou sair um novo; a página dela continua abrindo no próximo episódio. No player web, o menu ⋮ de um cartão de A seguir faz o mesmo.',
+      nextUpRemoveLabel: (name: string) => `Remover ${name} de A seguir`,
+      nextUpRemoved: (name: string) => `${name} foi removido de A seguir.`,
+      nextUpEmpty: 'Nada a seguir',
+      nextUpEmptyHelp: 'As séries que você está assistindo aparecem aqui com o próximo episódio.',
+      nextUpRemovedList: 'Séries removidas de A seguir',
+      nextUpRemovedOn: 'Removida',
+      nextUpDroppedList: 'Abandonadas em um serviço de acompanhamento',
+      nextUpDroppedHelp:
+        'Elas voltam para A seguir, Em breve e Continuar assistindo assim que o serviço deixar de marcá-las como abandonadas ou você reproduzir um dos episódios delas.',
+      nextUpDroppedOn: (service: string) => `Abandonada no ${service}`,
+      nextUpShowLabel: (name: string) => `Mostrar ${name} em A seguir novamente`,
+      nextUpShown: (name: string) => `${name} voltou para A seguir.`,
+      withResume: 'Remover de Continuar assistindo também tira a série de A seguir',
+      withResumeHelp:
+        'Tirar um episódio de Continuar assistindo passa a tirar também a série dele de A seguir, do mesmo jeito, até você reproduzir um dos episódios dela ou sair um novo.',
+      withResumeOn: 'Remover de Continuar assistindo agora também tira a série de A seguir.',
+      withResumeOff: 'Remover de Continuar assistindo não tira mais a série de A seguir.',
+      kinds: {
+        movie: 'Filme',
+        series: 'Série',
+        episode: 'Episódio',
+        video: 'Vídeo caseiro',
+        replay: 'Replay',
+      } as Record<string, string>,
+    },
+    reminders: {
+      help: 'Os programas de TV ao Vivo dos quais você pediu um lembrete na página deles no player web. Cada lembrete chega aos seus destinos que escolheram Início de programa, com a antecedência definida em Notificações.',
+      empty: 'Nenhum lembrete',
+      emptyHelp: 'Na página de um programa futuro no player web, Lembrar-me cria um.',
+      everyAiring: (time: string) => `Todas as exibições por volta das ${time}`,
+      next: 'Próxima: ',
+      noAiring: 'Nenhuma exibição no guia',
+      delete: 'Excluir',
+      deleteLabel: (name: string) => `Excluir o lembrete de ${name}`,
+      deleted: (name: string) => `Lembrete de ${name} excluído.`,
+      settingsTitle: 'Lembretes',
+      before: 'Lembrar-me com antecedência de',
+      beforeHelp: 'Quanto tempo antes do início de um programa o lembrete chega.',
+      minutes: (minutes: number) =>
+        minutes === 1 ? '1 minuto' : minutes === 60 ? '1 hora' : `${minutes} minutos`,
+      onApps: 'Mostrar lembretes também nos meus aplicativos',
+      onAppsHelp:
+        'Cada lembrete também aparece nos seus aplicativos Jellyfin que aceitam mensagens, como o player web enquanto estiver aberto, do mesmo jeito que Enviar mensagem mostra uma.',
+      noTarget:
+        'Nenhum dos seus destinos escolheu Início de programa, e seus aplicativos estão desativados: seus lembretes não chegariam a lugar nenhum.',
+      saved: 'Configurações de lembretes salvas.',
+    },
+    importEvery: (minutes: number) =>
+      minutes < 60
+        ? `a cada ${minutes} minutos`
+        : minutes === 60
+          ? 'a cada hora'
+          : `a cada ${minutes / 60} horas`,
+    serverImport: {
+      description:
+        'Traga seus filmes e episódios reproduzidos, pontos de retomada e favoritos de um servidor Jellyfin, Emby ou Plex que você usava antes, ou seus filmes da sua exportação do Letterboxd. Eles vão apenas para a sua conta e só complementam o que o Polyfin já tem. Nada é gravado no outro servidor.',
+      serverKind: 'Servidor',
+      address: 'Endereço do servidor',
+      addressHelp:
+        'O endereço em que o servidor abre em um navegador, como https://jellyfin.example.com: um endereço público, ou da rede local quando um administrador importa.',
+      privateNetwork:
+        'Este servidor está em um endereço da rede local. Somente administradores podem importar de um servidor desse tipo: peça a um deles para iniciar a importação.',
+      name: 'Seu nome de usuário nesse servidor',
+      password: 'Sua senha nesse servidor',
+      passwordHelp:
+        'Usada apenas para esta importação e nunca guardada. O Polyfin entra com a sua conta, como os aplicativos do servidor fazem, e depois sai. Deixe em branco se a sua conta não tiver senha.',
+      start: 'Importar meu histórico',
+      starting: 'Iniciando…',
+      started: 'A importação foi iniciada. Você pode sair desta página: ela continua.',
+      lastTitle: 'Sua última importação',
+      from: (server: string) => `De ${server}`,
+    },
+    plexImport: {
+      help: 'Entre no Plex pela página do Plex e depois escolha o servidor. O Polyfin lê lá, em seu nome, os filmes e episódios que você reproduziu, marcou como assistidos ou sincronizou, seus pontos de retomada e suas avaliações, e sua Watchlist do Plex. O Polyfin nunca vê sua senha do Plex: o que o Plex lhe dá serve apenas para esta importação e depois é desconectado.',
+      signIn: 'Entrar com o Plex',
+      signingIn: 'Consultando o Plex…',
+      approve: 'Entre no Plex pela página dele, que abre em uma nova aba, e depois volte aqui.',
+      open: 'Abrir a página de login do Plex',
+      waiting: 'Aguardando você entrar no Plex…',
+      signedInAs: (name: string) => `Conectado ao Plex como ${name}.`,
+      profile: 'Perfil do Plex Home',
+      profileHelp:
+        'O perfil cujos dados de exibição são importados. Um perfil gerenciado não tem login próprio: escolha-o aqui.',
+      managed: (name: string) => `${name} (gerenciado)`,
+      pin: 'PIN do perfil',
+      pinHelp: 'O PIN que este perfil pede no Plex.',
+      useProfile: 'Usar este perfil',
+      switching: 'Trocando…',
+      server: 'Servidor',
+      serverHelp:
+        'Os servidores Plex que este perfil acessa. O Polyfin alcança o escolhido pelos endereços que o Plex informa: os públicos, e os da rede local quando um administrador importa.',
+      privateNetwork:
+        'Este servidor não respondeu em nenhum endereço público, e os outros endereços dele estão em uma rede local. Somente administradores podem importar de um servidor desse tipo: peça a um deles para iniciar a importação.',
+      owned: (name: string) => `${name} (seu)`,
+      noServers: 'Este perfil não acessa nenhum servidor Plex.',
+      watchlist: 'Watchlist para a minha playlist “Para assistir”',
+      watchlistHelp:
+        'Os filmes e séries da sua Watchlist do Plex vão para a sua playlist “Para assistir” no Polyfin, uma série como os episódios já exibidos. Só entra o que você ainda não assistiu.',
+      cancel: 'Cancelar',
+    },
+    letterboxd: {
+      option: 'Letterboxd (arquivo de exportação)',
+      help: 'No Letterboxd, abra Settings › Import & Export e escolha Export your data: o Letterboxd gera um arquivo ZIP. Escolha-o aqui como está. O Polyfin o lê na memória e nunca o guarda.',
+      watchedHelp:
+        'Os filmes que você assistiu são marcados como reproduzidos, na data mais recente do seu diário, tantas vezes quanto ele os registra. Cada filme é pesquisado pelo nome e ano nos complementos de metadados do servidor, e mantido quando eles conhecem exatamente um filme com esse nome e ano.',
+      noSearch:
+        'Nenhum complemento de metadados deste servidor pesquisa filmes: nenhum filme da exportação pode ser encontrado. Peça a um administrador para adicionar um.',
+      file: 'Arquivo de exportação',
+      fileHelp: 'O arquivo ZIP gerado pelo Letterboxd, de no máximo 20 MB.',
+      choose: 'Escolher o arquivo',
+      chooseAnother: 'Escolher outro arquivo',
+      tooLarge: 'Este arquivo é maior que 20 MB: escolha o arquivo ZIP gerado pelo Letterboxd.',
+      watchlist: 'Watchlist para a minha playlist “Para assistir”',
+      watchlistHelp:
+        'Os filmes da sua watchlist do Letterboxd vão para a sua playlist “Para assistir” nos aplicativos Jellyfin. Só entram os que você ainda não começou.',
+      ratings: 'Avaliações',
+      ratingsHelp:
+        'Suas estrelas viram sua avaliação de 0 a 10: 3,5 estrelas equivalem a 7. Uma avaliação que você já tem no Polyfin é mantida.',
+      likes: 'Filmes curtidos como favoritos',
+      likesHelp: 'Os filmes que você curtiu no Letterboxd viram seus favoritos.',
+      forUser: {
+        watchedHelp:
+          'Os filmes que a pessoa assistiu são marcados como reproduzidos, na data mais recente do diário dela, tantas vezes quanto ele os registra. Cada filme é pesquisado pelo nome e ano nos complementos de metadados do servidor, e mantido quando eles conhecem exatamente um filme com esse nome e ano.',
+        watchlist: 'Watchlist para a playlist “Para assistir” da pessoa',
+        watchlistHelp:
+          'Os filmes da watchlist do Letterboxd da pessoa vão para a playlist “Para assistir” dela nos aplicativos Jellyfin. Só entram os que ela ainda não começou.',
+        ratingsHelp:
+          'As estrelas da pessoa viram a avaliação dela de 0 a 10: 3,5 estrelas equivalem a 7. Uma avaliação que ela já tem no Polyfin é mantida.',
+        likesHelp: 'Os filmes que a pessoa curtiu no Letterboxd viram favoritos dela.',
+      },
+      start: 'Importar do Letterboxd',
+      starting: 'Enviando…',
+      started: 'A importação foi iniciada. Você pode sair desta página: ela continua.',
+      currentTitle: 'Importação em andamento',
+      lastTitle: 'Última importação',
+      ownLastTitle: 'Sua última importação',
+      from: 'De uma exportação do Letterboxd',
+      startedLabel: 'Iniciada',
+      endedLabel: 'Concluída',
+      startedBy: (name: string) => `Iniciada por ${name}`,
+      states: { running: 'Em andamento', done: 'Concluída', failed: 'Falhou' },
+      problem:
+        'O Polyfin encontrou um erro durante a importação: o registro do servidor tem mais detalhes. O que foi importado é mantido.',
+      searching: (searched: number, movies: number) =>
+        `Pesquisando os filmes: ${searched} de ${movies}.`,
+      searchingLabel: 'Filmes pesquisados',
+      summary: (movies: number, added: string) =>
+        `${movies === 1 ? '1 filme' : `${movies} filmes`}: ${added}.`,
+      played: (count: number) =>
+        count === 1 ? `${count} marcado como reproduzido` : `${count} marcados como reproduzidos`,
+      addedToWatchlist: (count: number) =>
+        count === 1
+          ? `${count} adicionado a “Para assistir”`
+          : `${count} adicionados a “Para assistir”`,
+      rated: (count: number) => (count === 1 ? `${count} avaliado` : `${count} avaliados`),
+      favorites: (count: number) =>
+        count === 1 ? `${count} marcado como favorito` : `${count} marcados como favoritos`,
+      unmatchedHelp:
+        'Estes filmes não foram importados. Cada um é pesquisado pelo nome e ano, e mantido apenas quando os complementos de metadados do servidor conhecem exatamente um filme com esse nome e ano.',
+      reasons: {
+        not_found: 'Não encontrado',
+        ambiguous: 'Vários filmes com esse nome e ano',
+        search_failed: 'Falha na pesquisa',
+      },
+    },
+    appImport: {
+      description:
+        'Traga o que você assistiu em um aplicativo baseado em complementos: os filmes e episódios reproduzidos com as datas, seus pontos de retomada e a biblioteca do aplicativo, que vai para a sua playlist “Para assistir” nos aplicativos Jellyfin, identificados por IMDb, TMDB ou Kitsu. Eles apenas complementam o que o Polyfin já tem, e nada é gravado no aplicativo.',
+      app: 'Aplicativo',
+      apps: { nuvio: 'Nuvio', stremio: 'Stremio' },
+      backend: 'Backend do Nuvio',
+      backendHelp:
+        'Deixe em branco para usar o do próprio Nuvio. Um backend auto-hospedado também funciona, no endereço dele, público, ou na rede local quando um administrador entra.',
+      backendPrivateNetwork:
+        'Este backend está em um endereço da rede local. Somente administradores podem entrar em um backend desse tipo.',
+      email: 'E-mail',
+      password: 'Senha',
+      passwordHelp:
+        'Usada apenas para ler a conta, e nunca armazenada. O Polyfin entra como os aplicativos do Nuvio fazem, lê a conta e depois sai, a menos que você permaneça conectado.',
+      signIn: 'Entrar no Nuvio',
+      signingIn: 'Entrando…',
+      chooseTitle: 'Escolha o que importar',
+      chooseHelp: {
+        nuvio:
+          'O Nuvio mantém um histórico para cada perfil: escolha qual importar. O Polyfin guarda o que leu por apenas alguns minutos.',
+        stremio:
+          'O Stremio mantém um histórico para cada perfil, ou um único para a conta inteira sem perfis: escolha qual importar. O Polyfin guarda o que leu por apenas alguns minutos.',
+      },
+      stayConnected: 'Permanecer conectado',
+      stayConnectedHelp: {
+        nuvio: (every: string) =>
+          `O Polyfin guarda a sessão, nunca a sua senha, e importa novamente o perfil escolhido ${every}. A sessão é criptografada se o servidor tiver uma POLYFIN_SECRET_KEY, e guardada como está caso contrário. Ele apenas lê a conta. Você pode se desconectar a qualquer momento.`,
+        stremio: (every: string) =>
+          `O Polyfin guarda a chave de autenticação, e para um perfil com PIN a sessão desse perfil, nunca o PIN, e importa novamente o perfil escolhido ${every}. Elas são criptografadas se o servidor tiver uma POLYFIN_SECRET_KEY, e guardadas como estão caso contrário. Ele apenas lê a conta. Você pode se desconectar a qualquer momento. Os termos do Stremio proíbem extrair os dados dele por meios automatizados: ler a sua conta ${every} torna essa zona cinzenta mais acentuada do que uma importação única.`,
+      },
+      unencrypted:
+        'Este servidor não tem chave secreta: um login guardado para permanecer conectado seria armazenado sem criptografia.',
+      unencryptedAdministrator:
+        'Este servidor não tem POLYFIN_SECRET_KEY: um login guardado para permanecer conectado seria armazenado sem criptografia. Defina a chave e reinicie o Polyfin para criptografá-lo.',
+      unencryptedDocs: 'Chaves e tokens armazenados',
+      staysConnected: (every: string) =>
+        `Você permanece conectado: este perfil é importado novamente ${every}, da mesma forma. Os complementos são instalados apenas agora.`,
+      wholeAccount: 'A conta inteira',
+      profile: 'Perfil',
+      profileNumber: (id: string) => `Perfil ${id}`,
+      profileCounts: (played: number, resumes: number, library: number) =>
+        `${played} assistidos, ${resumes === 1 ? '1 ponto de retomada' : `${resumes} pontos de retomada`}, ${library} na biblioteca.`,
+      lockedProfile: (name: string) => `${name} (PIN)`,
+      pin: 'PIN',
+      pinHelp:
+        'Este perfil pede o PIN dele. O Polyfin o envia apenas ao Stremio, para abrir o perfil, e nunca o guarda.',
+      unlock: 'Abrir este perfil',
+      unlocking: 'Abrindo…',
+      addons: 'Complementos',
+      addonsHelp:
+        'Cada complemento marcado se torna um complemento próprio da conta, em Minhas fontes. O endereço dele pode conter configurações e chaves: o Polyfin nunca o exibe por inteiro.',
+      addonsOff:
+        'Os complementos próprios estão desativados para esta conta: os complementos do aplicativo não são oferecidos.',
+      addonsParental:
+        'O controle parental se aplica a esta conta: os complementos próprios dela são mantidos, mas não são usados, então os complementos do aplicativo não são oferecidos.',
+      noAddons: 'Este perfil não tem nenhum complemento.',
+      back: 'Entrar novamente',
+      start: 'Importar este perfil',
+      starting: 'Iniciando…',
+      started: 'A importação foi iniciada. Você pode sair desta página: ela continua.',
+      currentTitle: 'Importação em andamento',
+      lastTitle: 'Última importação',
+      ownLastTitle: 'Sua última importação',
+      from: (app: string, profile: string) =>
+        profile === '' ? `Do ${app}` : `Do ${app}, perfil ${profile}`,
+      startedLabel: 'Iniciada',
+      endedLabel: 'Concluída',
+      startedBy: (name: string) => `Iniciada por ${name}`,
+      states: { running: 'Em andamento', done: 'Concluída', failed: 'Falhou' },
+      problem:
+        'O Polyfin encontrou um erro durante a importação: o registro do servidor traz mais detalhes. O que foi importado é mantido.',
+      read: (count: number) => (count === 1 ? '1 título lido.' : `${count} títulos lidos.`),
+      counts: (read: number, played: number, resumed: number, watchlist: number) =>
+        `${read === 1 ? '1 título lido' : `${read} títulos lidos`}: ${played === 1 ? '1 marcado como reproduzido' : `${played} marcados como reproduzidos`}, ${resumed === 1 ? '1 ponto de retomada' : `${resumed} pontos de retomada`}, ${watchlist === 1 ? '1 adicionado' : `${watchlist} adicionados`} a “Para assistir”.`,
+      unmatchedHelp:
+        'Estes títulos não foram importados: o aplicativo os identifica por um identificador que o Polyfin não reconhece, ou nenhum título do Polyfin o possui. No caso de uma série, o aplicativo também pode indicar os episódios assistidos pela posição deles em uma lista de episódios que os complementos do Polyfin organizam de outra forma.',
+      reasons: {
+        other_identifier: 'Não é um identificador IMDb, TMDB, Kitsu ou MyAnimeList',
+        not_found: 'Não está no Polyfin',
+        episode_list:
+          'Os episódios não correspondem à lista do Polyfin: nenhum foi marcado como reproduzido',
+      },
+      addonInstalled: 'adicionado',
+      addonWaiting: 'aguardando',
+      addonProblems: {
+        not_allowed: 'não adicionado: os complementos próprios foram desativados',
+        exists: 'já instalado',
+        invalid_address: 'não adicionado: não é o endereço de um complemento',
+        private_network:
+          'não adicionado: está em uma rede local, que só a importação de um administrador alcança',
+        unreachable: 'não adicionado: o complemento não respondeu',
+        invalid_manifest: 'não adicionado: não é um complemento',
+        internal: 'não adicionado: o Polyfin encontrou um erro',
+      },
+      stremio: {
+        way: 'Entrar com',
+        ways: {
+          link: 'Um código de vinculação',
+          password: 'E-mail e senha',
+          key: 'Uma chave de autenticação',
+        },
+        linkHelp:
+          'O Polyfin pede um código ao Stremio, como fazem os aplicativos de TV do Stremio. Você o aprova em um navegador em que esteja conectado ao Stremio: isso funciona seja qual for a forma de login da sua conta, incluindo Facebook e Apple, e o Polyfin nunca vê sua senha.',
+        getCode: 'Obter um código de vinculação',
+        gettingCode: 'Solicitando ao Stremio…',
+        codeLabel: 'Código de vinculação',
+        approve:
+          'Abra o link em um navegador em que esteja conectado ao Stremio, confira se ele mostra este código e aprove-o.',
+        openLink: 'Abrir o link',
+        waiting:
+          'Aguardando sua aprovação. O código vale por 5 minutos; depois que você o aprovar, o Polyfin lê a conta e depois sai, a menos que você permaneça conectado.',
+        cancel: 'Cancelar',
+        email: 'E-mail',
+        password: 'Senha',
+        passwordHelp:
+          'Usada apenas para ler a conta e nunca armazenada. O Polyfin entra como os aplicativos do Stremio fazem, lê a conta e depois sai, a menos que você permaneça conectado. Uma conta criada com Facebook ou Apple não tem senha: use um código de vinculação.',
+        signIn: 'Entrar no Stremio',
+        signingIn: 'Entrando…',
+        key: 'Chave de autenticação',
+        keyHelp:
+          'A chave que o aplicativo web do Stremio guarda depois que você entra: no console do seu navegador, nesse aplicativo, JSON.parse(localStorage.getItem("profile")).auth.key a retorna. Usada para ler a conta e armazenada apenas se você permanecer conectado. O Polyfin nunca a desconecta, pois isso desconectaria o seu navegador.',
+        readKey: 'Ler a conta',
+        reading: 'Lendo…',
+      },
+      connections: {
+        title: 'Aplicativos conectados',
+        help: (every: string) =>
+          `Importados ${every}, da mesma forma que na primeira importação: o mesmo perfil, sem os complementos. O Polyfin apenas os lê.`,
+        connectedAs: 'Conectado como ',
+        connected: 'Conectado',
+        connectedOn: (date: string) => ` desde ${date}`,
+        connectedBy: (name: string) => ` por ${name}`,
+        status: {
+          connected: 'Conectado',
+          importing: 'Importando',
+          paused: 'Pausado',
+          stopped: 'Entrar novamente',
+        },
+        never: 'Ainda não importado.',
+        lastImport: 'Última importação ',
+        colon: ': ',
+        nextImport: 'Próxima importação ',
+        paused:
+          'O servidor não permite mais que os usuários importem o histórico de reprodução: esta conexão fica pausada até que isso seja permitido novamente.',
+        stopped: (app: string) =>
+          `O ${app} recusou o login que o Polyfin mantinha: nada será importado até que você entre novamente abaixo, com “Permanecer conectado” marcado. Desconectar faz o Polyfin esquecê-lo.`,
+        problems: {
+          unreachable: (app: string) =>
+            `O ${app} não respondeu na última importação. A próxima tentará novamente.`,
+          rate_limited: (app: string) =>
+            `O ${app} pediu ao Polyfin que aguardasse na última importação. A próxima tentará novamente.`,
+          unexpected: (app: string) =>
+            `O ${app} respondeu à última importação de uma forma que esta versão do Polyfin não consegue ler. A próxima tentará novamente.`,
+          profile_missing: (app: string) =>
+            `O perfil importado não está mais na conta do ${app}. Entre novamente para escolher outro.`,
+          profile_locked: (app: string) =>
+            `O perfil importado agora pede um PIN, ou outro diferente, no ${app}. Entre novamente para escolhê-lo com o PIN dele.`,
+          sign_in_refused: (app: string) => `O ${app} recusou o login que o Polyfin mantinha.`,
+          internal: () =>
+            'O Polyfin encontrou um erro durante a última importação: o registro do servidor traz mais detalhes. A próxima tentará novamente.',
+        },
+        importNow: 'Importar agora',
+        importing: 'Importando…',
+        disconnect: 'Desconectar',
+        disconnectTitle: (app: string) => `Desconectar ${app}?`,
+        disconnectBody: (app: string) =>
+          `O Polyfin para de importar esta conta do ${app} e esquece o que guardava para lê-la, depois de encerrar a sessão que abriu. Uma chave de autenticação que você colou é apenas esquecida. O que foi importado permanece.`,
+        disconnected: (app: string) => `${app} desconectado.`,
+      },
+    },
+    sharedLinksHelp:
+      'Compartilhe um filme ou um episódio com alguém que não tem conta: a pessoa assiste no navegador por meio de um link que expira, e isso conta entre as suas reproduções simultâneas.',
+    statisticsHelp:
+      'O que você assistiu neste servidor: horas, títulos, aplicativos e dispositivos, e suas reproduções recentes.',
+    notificationsHelp:
+      'Onde o Polyfin avisa sobre novos episódios das séries que você acompanha, suas gravações e reproduções, suas conexões que caem, os bloqueios da sua conta e os logins dela em novos dispositivos, lembra você dos programas que escolheu e envia seu resumo semanal e suas retrospectivas do mês e do ano.',
+    devicesHelp:
+      'Os aplicativos conectados à sua conta. Um dispositivo que você desconectar pedirá sua senha na próxima vez que for aberto.',
+    passwordHelp: 'Alterar sua senha desconecta todos os seus dispositivos Jellyfin.',
+    currentPassword: 'Senha atual',
+    newPassword: 'Nova senha',
+    confirmPassword: 'Confirmar nova senha',
+    changePassword: 'Alterar senha',
+    changingPassword: 'Alterando…',
+    passwordChanged: 'Sua senha foi alterada.',
+    provider: {
+      help: (name: string) =>
+        `Quando sua conta estiver vinculada à sua conta em ${name}, “Entrar com ${name}” a abre, neste aplicativo de administração e no player web.`,
+      linked: 'Vinculada',
+      notLinked: 'Não vinculada',
+      link: (name: string) => `Vincular com ${name}`,
+      otherAddress: 'Um vínculo começa no endereço público do servidor. Abra esta página lá:',
+      taken:
+        'O vínculo não foi criado: sua conta no provedor está vinculada a outra conta aqui, ou esta conta está vinculada a outra pessoa.',
+    },
+    twoStep: {
+      help: 'Depois da sua senha, este aplicativo de administração pede um código de um aplicativo autenticador no seu celular. Os aplicativos Jellyfin não conseguem pedir esse código: depois que o recurso é ativado, eles entram com o Quick Connect, que você aprova aqui, e sua senha sozinha não permite mais entrar neles. Os aplicativos e navegadores já conectados continuam conectados.',
+      off: 'Desativado',
+      on: 'Ativado',
+      offText: 'Sua senha sozinha permite que você entre.',
+      onText: 'Você entra com sua senha e, em seguida, um código do seu aplicativo autenticador.',
+      required:
+        'Os administradores precisam usar o login em duas etapas neste servidor. Ative-o agora, ou isso será solicitado no seu próximo login.',
+      requiredOn:
+        'Os administradores precisam usar o login em duas etapas neste servidor: ele continua ativado.',
+      unreadable:
+        'A POLYFIN_SECRET_KEY não consegue mais ler a chave do seu aplicativo autenticador, como acontece após uma restauração com outra chave: só seus códigos de recuperação permitem que você entre. Desative o login em duas etapas com sua senha e ative-o novamente.',
+      turnOn: 'Ativar',
+      starting: 'Preparando…',
+      scan: 'Escaneie este código QR com seu aplicativo autenticador ou digite a chave manualmente. O próprio Polyfin gerou o código: a chave não vai para nenhum outro lugar.',
+      qrLabel: 'Código QR da chave, para seu aplicativo autenticador',
+      key: 'Chave',
+      openInApp: 'Abrir em um aplicativo autenticador neste dispositivo',
+      code: 'Código do aplicativo',
+      codeHelp:
+        'O código de 6 dígitos que o aplicativo mostra para o Polyfin. Ele muda a cada 30 segundos.',
+      confirm: 'Ativar',
+      confirming: 'Verificando…',
+      turnedOn: 'Login em duas etapas ativado.',
+      recoveryTitle: 'Seus códigos de recuperação',
+      recoveryHelp:
+        'Cada código permite entrar uma vez, no lugar de um código do aplicativo, caso você perca o celular. Guarde-os em um lugar seguro, como um gerenciador de senhas: eles são mostrados só agora.',
+      copy: 'Copiar os códigos',
+      copied: 'Códigos copiados.',
+      copyFailed: 'Não foi possível copiar os códigos: selecione-os e copie-os manualmente.',
+      saved: 'Já salvei',
+      codesLeft: (n: number) =>
+        n === 1 ? 'Resta 1 código de recuperação' : `Restam ${n} códigos de recuperação`,
+      newCodes: 'Novos códigos de recuperação',
+      newCodesTitle: 'Gerar novos códigos de recuperação?',
+      newCodesText: 'Os novos códigos invalidam os anteriores.',
+      making: 'Gerando…',
+      turnOff: 'Desativar',
+      turnOffTitle: 'Desativar o login em duas etapas?',
+      turnOffText:
+        'Sua senha sozinha passará a permitir que você entre, aqui e nos aplicativos Jellyfin.',
+      turningOff: 'Desativando…',
+      turnedOff: 'Login em duas etapas desativado.',
+      confirmWith: 'Confirmar com',
+      withCode: 'Um código',
+      withPassword: 'Minha senha',
+      codeOrRecovery: 'Código do aplicativo ou código de recuperação',
+      password: 'Senha',
+    },
+    tracking: {
+      title: 'Acompanhamento',
+      description:
+        'Conecte os serviços que acompanham o que você assiste e ouve. O Polyfin informa a cada serviço conectado os filmes e episódios que você assiste, ou as músicas que você reproduz, nos seus aplicativos Jellyfin.',
+      loading: 'Carregando serviços de acompanhamento…',
+      status: {
+        connected: 'Conectado',
+        notConnected: 'Não conectado',
+        waiting: 'Aguardando o código',
+        waitingSignIn: 'Aguardando você',
+        reconnect: 'Precisa conectar novamente',
+        unreachable: 'Tentando novamente',
+        unavailable: 'Não configurado',
+        appRefused: 'Aplicativo recusado',
+      },
+      unavailable: (name: string) =>
+        `${name} ainda não está configurado neste servidor: um administrador precisa primeiro adicionar o aplicativo ${name} nas configurações.`,
+      setUpApp: (name: string) => `Configurar o aplicativo ${name}`,
+      codeIntro: (name: string) =>
+        `Conecte sua conta ${name}: o Polyfin fornece um código para você digitar no site do ${name}.`,
+      keyIntro: (name: string) => `Conecte sua conta ${name} com sua chave da API do ${name}.`,
+      signInIntro: (name: string) =>
+        `Conecte sua conta ${name}: entre no site do ${name} e permita que o Polyfin registre (scrobble) as músicas que você reproduz.`,
+      tokenIntro: (name: string) =>
+        `Conecte sua conta ${name} com seu token de usuário do ${name} para registrar (scrobble) as músicas que você reproduz.`,
+      keyLabel: (name: string) => `Chave da API do ${name}`,
+      tokenLabel: (name: string) => `Token de usuário do ${name}`,
+      savedKeyHelp: 'Só você pode exibi-la. Para usar outra chave, desconecte e conecte novamente.',
+      keyHelp: {
+        mdblist: 'Ela está em mdblist.com, em Preferences, na seção API key.',
+        publicmetadb: 'Ela está na sua conta do PublicMetaDB.',
+        listenbrainz: 'Ele está em listenbrainz.org, nas suas configurações, na seção User token.',
+      },
+      connect: 'Conectar',
+      connecting: 'Conectando…',
+      checking: 'Verificando a chave…',
+      reconnect: 'Conectar novamente',
+      newCode: 'Obter um novo código',
+      signInAgain: 'Recomeçar',
+      enterCode: (site: string) => `Acesse ${site}, entre e digite este código:`,
+      codeLabel: 'Código a digitar',
+      openSite: (site: string) => `Abrir ${site}`,
+      waiting: 'Esta página é atualizada automaticamente depois que você digitar o código.',
+      expires: (when: string) => `O código expira ${when}.`,
+      codeEnded:
+        'O código expirou ou foi recusado antes de ser digitado. Obtenha um novo código para tentar novamente.',
+      signInStep: (site: string) =>
+        `Acesse ${site}, entre se for solicitado e permita que o Polyfin use sua conta.`,
+      signInWaiting: 'Esta página é atualizada automaticamente depois que você der a permissão.',
+      signInExpires: (when: string) => `Esta solicitação expira ${when}.`,
+      signInEnded:
+        'O Polyfin não foi autorizado a tempo ou foi recusado. Recomece para tentar mais uma vez.',
+      pinIntro: (name: string) =>
+        `Conecte suas listas do ${name}: autorize o Polyfin no site do ${name} e cole aqui o código exibido.`,
+      redirectIntro: (name: string) =>
+        `Conecte sua lista do ${name}: autorize o Polyfin no site do ${name}, que trará você de volta para cá.`,
+      pinStep: (site: string) =>
+        `Acesse ${site}, entre se for solicitado, autorize o Polyfin e copie aqui o código exibido.`,
+      redirectStep: (site: string) =>
+        `Acesse ${site}, entre se for solicitado e autorize o Polyfin: você voltará para cá ao concluir.`,
+      codeField: (name: string) => `Código do ${name}`,
+      codeFieldHelp: (name: string) =>
+        `O código que o ${name} exibe depois que você autoriza o Polyfin.`,
+      addressField: 'Endereço ou código',
+      addressFieldHelp: (name: string) =>
+        `Se o seu navegador não conseguiu abrir a página para a qual o ${name} o enviou, copie aqui o endereço dessa página da barra de endereços.`,
+      pasteEnded:
+        'Esta solicitação expirou antes de o Polyfin ser autorizado. Recomece para tentar mais uma vez.',
+      invalidCode: (name: string) =>
+        `O ${name} não aceitou este código, ou ele é de uma solicitação anterior. Recomece para obter um novo.`,
+      tokenExpires: (date: string) => `, até ${date}`,
+      returning: (name: string) => `Conectando sua conta ${name}…`,
+      connectedAs: 'Conectado como ',
+      connectedWithKey: 'Conectado com sua chave da API',
+      connected: 'Conectado',
+      connectedOn: (date: string) => ` em ${date}`,
+      lastSent: ', último envio ',
+      nothingSent: ', nada enviado ainda',
+      connectedToast: (name: string) => `${name} conectado.`,
+      disconnectedToast: (name: string) => `${name} desconectado.`,
+      problemReconnect: (name: string) =>
+        `O ${name} não aceita mais esta conexão, então nada é enviado a ele. Conecte novamente para voltar a enviar o que você assiste.`,
+      problemUnreachable: (name: string) =>
+        `Não foi possível acessar o ${name} recentemente. O Polyfin continua tentando e enviará o que você assistiu assim que ele responder.`,
+      disconnect: 'Desconectar',
+      disconnectTitle: (name: string) => `Desconectar ${name}?`,
+      disconnectBody: (name: string) =>
+        `O Polyfin deixará de informar o que você assiste. O que já foi enviado permanece no ${name}.`,
+      invalidKey: (name: string) =>
+        `O ${name} não aceitou esta chave. Copie-a novamente da sua conta ${name}.`,
+      invalidToken: (name: string) =>
+        `O ${name} não aceitou este token. Copie-o novamente das suas configurações do ${name}.`,
+      serviceUnreachable: (name: string) =>
+        `Não foi possível acessar o ${name}. Tente novamente em alguns minutos.`,
+      notAvailable: (name: string) =>
+        `${name} não está configurado neste servidor: um administrador precisa primeiro adicionar o aplicativo ${name}.`,
+      appRefused: (name: string) =>
+        `${name} recusou o aplicativo deste servidor. Um administrador precisa verificar as credenciais em Configurações › Acompanhamento.`,
+      traktCodeEnded:
+        'O código expirou, ou o Trakt o recusou. Se o Trakt recusou seu acesso, verifique duas coisas: se um administrador adicionou seu nome de usuário do Trakt ao aplicativo Trakt deste servidor, em Members; e, com uma conta gratuita do Trakt, se não há outro aplicativo conectado, pois o Trakt só permite um (desconecte-o no Trakt, em Settings › Connected apps, ou use o Trakt VIP). Depois obtenha um novo código.',
+      traktAppRefused:
+        'O Trakt recusou este acesso. Verifique se um administrador adicionou seu nome de usuário do Trakt ao aplicativo Trakt deste servidor, em Members, e se sua conta gratuita do Trakt não tem outro aplicativo conectado, pois o Trakt só permite um. Caso contrário, um administrador precisa verificar as credenciais do aplicativo em Configurações › Acompanhamento.',
+      history: {
+        toggle: (name: string) => `Importar meu histórico do ${name}`,
+        toggleHelp: (name: string, every: string) =>
+          `Marca como reproduzido no Polyfin o que você assistiu no ${name} e retoma de onde você parou, para que Continuar assistindo e A seguir fiquem iguais. Importado ${every}; nada é enviado de volta ao ${name}.`,
+        listsToggle: (name: string) => `Importar minhas listas do ${name}`,
+        listsToggleHelp: (name: string, every: string) =>
+          `Marca como reproduzidos no Polyfin os episódios que suas listas do ${name} contam como assistidos: até o progresso de cada entrada em Watching, On hold e Dropped, e todos em Completed. Importado ${every}; a importação só adiciona.`,
+        listCounts: (played: number, unmapped: number) =>
+          `${played === 1 ? '1 título marcado' : `${played} títulos marcados`} como reproduzido${played === 1 ? '' : 's'}, ${unmapped === 1 ? '1 título não encontrado' : `${unmapped} títulos não encontrados`} no Polyfin.`,
+        importNow: 'Importar agora',
+        importing: 'Importando…',
+        importingStatus: 'Importando seu histórico…',
+        never: 'Ainda não importado.',
+        lastImport: 'Última importação',
+        colon: ': ',
+        nextImport: 'Próxima importação',
+        counts: (played: number, resumed: number, unmapped: number) =>
+          `${played === 1 ? '1 título marcado' : `${played} títulos marcados`} como reproduzido${played === 1 ? '' : 's'}, ${resumed === 1 ? '1 ponto de retomada' : `${resumed} pontos de retomada`}, ${unmapped === 1 ? '1 título não encontrado' : `${unmapped} títulos não encontrados`} no Polyfin.`,
+        problem: {
+          reconnect: (name: string) =>
+            `${name} recusou a conexão durante a última importação. Conecte-se novamente para importar seu histórico.`,
+          unreachable: (name: string) =>
+            `Não foi possível ler o ${name} por completo durante a última importação. O que foi lido foi importado; a próxima importação tentará novamente.`,
+          rate_limited: (name: string) =>
+            `${name} pediu ao Polyfin para aguardar durante a última importação. O que foi lido foi importado; a próxima importação tentará novamente.`,
+        },
+        watchlist: {
+          lists: {
+            trakt: 'watchlist',
+            mdblist: 'watchlist',
+            simkl: 'lista Plan to Watch',
+            anilist: 'lista Plan to Watch',
+            myanimelist: 'lista Plan to Watch',
+            publicmetadb: 'watchlist',
+          },
+          toggle: (name: string, list: string) => `Importar minha ${list} do ${name}`,
+          toggleHelp: (name: string, list: string) =>
+            `Coloca os filmes e séries da sua ${list} do ${name} na playlist “Para assistir” dos seus aplicativos Jellyfin, a cada importação, uma série como os episódios já exibidos. Só entra o que você ainda não assistiu. O que você começou fica. Um título que o ${name} deixa de listar sai dela, a menos que você tenha começado a assisti-lo ou o adicionado você mesmo. Nada é enviado de volta ao ${name}.`,
+          syncToggle: (name: string, list: string) => `Sincronizar minha ${list} do ${name}`,
+          syncHelp: (name: string, list: string) =>
+            `Coloca os filmes e séries da sua ${list} do ${name} na playlist “Para assistir” dos seus aplicativos Jellyfin, a cada importação, uma série como os episódios já exibidos. Depois que você ativar esta opção, os filmes e séries que você mesmo adiciona a “Para assistir” ou tira dela são enviados a ela. Uma série só sai quando não resta nenhum dos seus episódios. Mover itens, assistir a um título ou excluir a playlist não muda nada lá.`,
+          simklNote:
+            'Um título que o Simkl lista como assistindo, concluído, em pausa ou abandonado fica como está.',
+          full: (name: string) =>
+            `O ${name} recusou o último título enviado: sua watchlist do ${name} está cheia. Libere espaço lá; este aviso some quando uma alteração for enviada.`,
+          counts: (added: number, unmapped: number) =>
+            `${added} adicionado${added === 1 ? '' : 's'} a “Para assistir”, ${unmapped === 1 ? '1 título não encontrado' : `${unmapped} títulos não encontrados`} no Polyfin.`,
+          added: (added: number) =>
+            `${added} adicionado${added === 1 ? '' : 's'} a “Para assistir”.`,
+        },
+        ratings: {
+          toggle: 'Sincronizar minhas avaliações',
+          toggleHelp: (name: string) =>
+            `Envia ao ${name} as avaliações que você dá a filmes e séries como suas notas e, a cada importação, aplica suas notas do ${name} aos títulos que você ainda não avaliou. Uma série que o ${name} divide em várias entradas é ignorada.`,
+          counts: (rated: number, skipped: number) =>
+            `${rated === 1 ? '1 título avaliado' : `${rated} títulos avaliados`}, ${skipped === 1 ? '1 avaliação ignorada' : `${skipped} avaliações ignoradas`}.`,
+        },
+      },
+    },
+  },
+  shareLinks: {
+    share: 'Compartilhar um título',
+    off: 'Não é possível criar links de compartilhamento agora: um administrador os desativou para este servidor ou para sua conta. Enquanto isso, os links ainda ativos não são reproduzidos.',
+    empty: 'Nenhum link compartilhado',
+    emptyHelp:
+      '“Compartilhar um título” disponibiliza um filme ou um episódio por meio de um link. No player web, a página de um filme ou de um episódio também tem a opção “Compartilhar”.',
+    userEmpty: 'Este usuário não tem nenhum link compartilhado.',
+    expiresLabel: 'Expira',
+    expiredLabel: 'Expirado',
+    revokedLabel: 'Revogado',
+    plays: (count: number) => (count === 1 ? '1 reprodução' : `${count} reproduções`),
+    viewers: (count: number) =>
+      count === 1 ? '1 espectador simultâneo' : `${count} espectadores simultâneos`,
+    states: { active: 'Ativo', expired: 'Expirado', revoked: 'Revogado' },
+    revoke: 'Revogar',
+    revokeLabel: (title: string) => `Revogar o link para ${title}`,
+    revokeTitle: 'Revogar este link compartilhado?',
+    revokeConfirm:
+      'O link deixa de funcionar imediatamente, e quem estiver assistindo por meio dele é interrompido em poucos segundos.',
+    revoking: 'Revogando…',
+    revoked: 'Link compartilhado revogado.',
+    search: 'Pesquisar nas suas bibliotecas',
+    searchHelp: 'Um filme, ou uma série para escolher um de seus episódios.',
+    searchButton: 'Pesquisar',
+    searching: 'Pesquisando…',
+    noTitles: 'Nenhum filme ou série encontrado.',
+    titlesFound: (term: string) => `Títulos encontrados para ${term}`,
+    pickTitle: (name: string, details: string) => `Compartilhar ${name}, ${details}`,
+    episodesOf: (series: string) => `Episódios de ${series}`,
+    noEpisodes: 'Esta série não tem nenhum episódio que você possa compartilhar.',
+    back: 'Voltar aos resultados',
+    chosen: 'Título',
+    change: 'Alterar',
+    expires: 'Expira após',
+    expiresHelp: 'Depois disso, ninguém poderá abrir o link. Você pode revogá-lo antes.',
+    after: (hours: number) =>
+      hours === 1 ? '1 hora' : hours === 24 ? '1 dia' : `${hours / 24} dias`,
+    viewersLabel: 'Espectadores simultâneos',
+    viewersHelp:
+      'Quantas pessoas podem assistir pelo link ao mesmo tempo. Cada uma conta como uma das suas reproduções simultâneas.',
+    submit: 'Criar link',
+    creating: 'Criando…',
+    createdTitle: 'Link criado',
+    createdNotice: (title: string) =>
+      `Qualquer pessoa com este link pode assistir a ${title} em um navegador, sem conta, até que ele expire. Copie-o agora: ele só é exibido esta vez.`,
+    copy: 'Copiar o link',
+    copied: 'Link copiado.',
+    copyFailed: 'Não foi possível copiar o link. Selecione-o e copie-o manualmente.',
+    done: 'Concluído',
+  },
+  resetPreferences: {
+    button: 'Redefinir minhas preferências',
+    title: 'Redefinir suas preferências?',
+    help: 'O que você mesmo escolheu volta aos padrões do servidor:',
+    metadataLanguage: 'Idioma dos metadados: O do servidor',
+    webTheme:
+      'Tema do player web: O do servidor, a menos que seu administrador tenha escolhido o seu',
+    audioRegion: 'Região do áudio: Nenhuma',
+    homeRows: 'Fileiras do início: todas as fileiras voltam a aparecer',
+    nextUpWithResume: 'Remover de Continuar assistindo: deixa A seguir como está',
+    trackChoices: 'Escolha de faixas: esquecida para cada série e filme',
+    appPreferences:
+      'As preferências que os apps Jellyfin salvaram na sua conta: idiomas e modo do áudio e das legendas, preferências da tela inicial e de exibição',
+    kept: 'O que você assistiu, seus favoritos, seus pontos de retomada, suas conexões e importações continuam.',
+    confirm: 'Redefinir',
+    resetting: 'Redefinindo…',
+    done: 'Suas preferências foram redefinidas.',
+  },
+  importTitles: {
+    notFound: (count: number) =>
+      count === 1 ? '1 título não encontrado' : `${count} títulos não encontrados`,
+    linkedCount: (count: number) =>
+      count === 1 ? '1 título vinculado' : `${count} títulos vinculados`,
+    title: (source: string) => `Títulos não encontrados: ${source}`,
+    help: 'Vincule um ao título dele no IMDb ou no TMDB: o que ele importaria é adicionado na hora, e de novo a cada importação seguinte.',
+    none: 'Não resta nenhum título nesta lista.',
+    trackerReasons: {
+      not_found: 'Não está no Polyfin',
+      not_mapped: 'Não identificado pelo Polyfin',
+    },
+    morePlaces: (count: number) => `e mais ${count}`,
+    fieldLabel: (title: string) => `Vincular ${title} a`,
+    fieldHint: 'Um id do IMDb ou do TMDB, ou o endereço do título no IMDb ou no TMDB',
+    placeholder: 'tt1234567, tmdb:123…',
+    link: 'Vincular',
+    linkedTo: (title: string, by: string | null) =>
+      by === null ? `Vinculado a ${title}.` : `Vinculado a ${title} por ${by}.`,
+    marksStay:
+      'Remover o vínculo o interrompe nas importações seguintes. As marcações já feitas ficam.',
+    unlink: 'Remover o vínculo',
+    linked: (title: string, target: string) => `${title} está vinculado a ${target}.`,
+    unlinked: (title: string) =>
+      `O vínculo de ${title} foi removido. As marcações já feitas ficam.`,
+    errors: {
+      invalid_target:
+        'Digite um id do IMDb (tt…), um id do TMDB ou o endereço de um título no IMDb ou no TMDB.',
+      kind_mismatch:
+        'Este título é de outro tipo: vincule um filme a um filme, e uma série ou um episódio a uma série.',
+      target_not_found: 'Nenhum título tem este id do TMDB.',
+    },
+    sectionTitle: 'Títulos não encontrados',
+    sectionHelp:
+      'Os títulos que as importações deste usuário não encontraram, por importação. Vincule um ao título dele no IMDb ou no TMDB: vale na hora, e de novo nas importações seguintes.',
+    sectionNone: 'As importações dele encontraram todos os títulos.',
+  },
+}
+
+export default account
