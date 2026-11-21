@@ -352,6 +352,15 @@ A listing of a library or a collection that takes more than 5 seconds logs "A li
 - `read`: the addons and the database;
 - `described`: the titles for the app.
 
+A database statement that runs for 500 milliseconds or longer logs "A database statement was slow" (Info), so that a query grown slow, as a library grows, shows in the log:
+
+- `duration`: from sending the statement until its rows are read. For a query sent in a batch, from asking for its result;
+- `sql`: the statement on one line, cut at 300 characters. Its values, sent apart from the statement, are never logged: they can hold passwords or tokens;
+- `error`: what PostgreSQL answered, when the statement failed;
+- `skipped`: when PostgreSQL is slow for every statement, the log takes 20 such lines at once, then one a second. This counts the lines left out since the last one.
+
+Copies of rows in bulk, such as a restore's, are not timed.
+
 ### Server logs
 
 The server log is kept in memory.

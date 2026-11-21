@@ -245,7 +245,7 @@ func TestPoolIsCappedUnlessTheURLSaysOtherwise(t *testing.T) {
 		"host=db user=polyfin dbname=polyfin pool_max_conns=5":                          5,
 		"host=db user=polyfin dbname=polyfin":                                           maxConns,
 	} {
-		config, err := poolConfig(connection)
+		config, err := poolConfig(connection, slog.New(slog.DiscardHandler))
 		if err != nil {
 			t.Fatalf("%s: %v", connection, err)
 		}
@@ -260,7 +260,7 @@ func TestPoolIsCappedUnlessTheURLSaysOtherwise(t *testing.T) {
 		}
 	}
 	for _, connection := range []string{"postgresql://db/polyfin?pool_max_conns=0", "postgresql://db/polyfin?pool_max_conns=many"} {
-		if _, err := poolConfig(connection); err == nil {
+		if _, err := poolConfig(connection, slog.New(slog.DiscardHandler)); err == nil {
 			t.Errorf("%s was accepted", connection)
 		}
 	}

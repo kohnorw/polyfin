@@ -37,7 +37,7 @@ const maxConns = 10
 // ends. Rejected credentials and missing databases are configuration errors
 // that waiting cannot fix: they are returned immediately.
 func Connect(ctx context.Context, url string, logger *slog.Logger) (*pgxpool.Pool, error) {
-	config, err := poolConfig(url)
+	config, err := poolConfig(url, logger)
 	if err != nil {
 		return nil, err
 	}
@@ -73,14 +73,16 @@ func Connect(ctx context.Context, url string, logger *slog.Logger) (*pgxpool.Poo
 }
 
 // poolConfig reads the database URL into the pool's configuration, maxConns
-// connections at most unless the URL's pool_max_conns sets another bound.
-func poolConfig(url string) (*pgxpool.Config, error) {
+// connections at most unless the URL's pool_max_conns sets another bound,
+// with the statements that run slow logged into logger (see slowLog).
+func poolConfig(url string, logger *slog.Logger) (*pgxpool.Config, error) {
 	config, err := pgxpool.ParseConfig(url)
 	if err != nil {
 		// pgconn redacts the password from parse errors.
 		return nil, fmt.Errorf("invalid database URL: %w", err)
 	}
 	config.ConnConfig.RuntimeParams["application_name"] = "polyfin"
+	config.ConnConfig.Tracer = newSlowLog(logger)
 	// pgxpool takes pool_max_conns out of the settings it parses, and
 	// gives the same bound whether the URL set it or not: the URL is
 	// read again to tell.
