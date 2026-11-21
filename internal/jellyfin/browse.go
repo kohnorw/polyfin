@@ -587,6 +587,11 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, QueryResult{Items: []BaseItemDto{}, StartIndex: start})
 		return
 	}
+	// The episodes under a series or a library, through their seasons and
+	// series.
+	if h.episodeListing(w, r, user, parent, genre, fields, keep, start, limit) {
+		return
+	}
 	// A library's series by their episodes, and its titles at random, are
 	// sorted among more than a page.
 	if key, ok := episodeOrder(r); ok && h.episodeOrderListing(w, r, user, parent, key, genre, fields, keep, start, limit) {

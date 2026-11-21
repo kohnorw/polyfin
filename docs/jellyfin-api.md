@@ -487,6 +487,16 @@ The web player's TV shows tab sorts a series library by "Date Episode Added" and
 - `SeriesDatePlayed` is, as in Jellyfin, the latest date the user played one of the series' episodes through ([`OrderMapper.cs`, lines 78 to 87](https://github.com/jellyfin/jellyfin/blob/v12.4/Jellyfin.Server.Implementations/Item/OrderMapper.cs#L78-L87)); `DatePlayed` the date the user last played the series itself ([lines 32 to 48](https://github.com/jellyfin/jellyfin/blob/v12.4/Jellyfin.Server.Implementations/Item/OrderMapper.cs#L32-L48)).
 - Jellyfin sorts the whole library; Polyfin its first titles, as for titles at random, since a remote catalog is read a page at a time.
 
+### Episodes through their series for apps
+
+- `/Items?ParentId=<series>&Recursive=true&IncludeItemTypes=Episode` lists every episode of the series, specials included, in its order (see [Episode orders for apps](#episode-orders-for-apps)), sorted by `SortBy` when it is given. `TotalRecordCount` counts them all.
+- With a library as `ParentId`, the same listing gives the episodes of the library's series, series by series in the library's order, each series' episodes in its order, whatever `SortBy` asks: its pages would mix otherwise. Its series are read 10 at a time until the page asked for is filled, and 50 at most for one listing, so that a page never asks the addons for the whole catalog. While series are left, `TotalRecordCount` counts the episodes read and one more, so that apps ask for the next page, and `X-Polyfin-Partial-Total` is `true`.
+- Other parents, and listings that ask for other types too, are listed as before.
+
+**Compared with Jellyfin**
+
+- Jellyfin lists a library's episodes from its database, all of them, sorted as asked. Polyfin reads them from the addons, a few series at a time.
+
 ### Live TV in item search
 
 - `/Items` with `searchTerm` finds channels asked as `TvChannel` or `LiveTvChannel`, and programmes asked as `LiveTvProgram`, `Program` or `TvProgram`, filtered by `isMovie`, `isSeries`, `isNews`, `isKids` and `isSports`. It finds at most `limit` of each.
