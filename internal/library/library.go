@@ -3049,7 +3049,26 @@ func episodeItem(series Item, meta stremio.Meta, posters map[int]string, w words
 	if item.PremiereDate != nil {
 		item.ProductionYear = item.PremiereDate.Year()
 	}
+	item.ProviderIDs = episodeIDs(video)
 	return item
+}
+
+// episodeIDs returns an episode's own TMDB and TVDB identifiers, as its
+// metadata addon gives them, under the names Jellyfin uses; nil when it
+// gives neither. Its series' identifiers stay the series'.
+func episodeIDs(video stremio.Video) map[string]string {
+	tmdb, tvdb := video.MoviedbID.ID(), video.TvdbID.ID()
+	if tmdb == 0 && tvdb == 0 {
+		return nil
+	}
+	ids := make(map[string]string, 2)
+	if tmdb > 0 {
+		ids["Tmdb"] = strconv.Itoa(tmdb)
+	}
+	if tvdb > 0 {
+		ids["Tvdb"] = strconv.Itoa(tvdb)
+	}
+	return ids
 }
 
 // Seasons lists a series' seasons, in its order (see episodeorder.go).

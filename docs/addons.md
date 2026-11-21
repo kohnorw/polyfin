@@ -204,6 +204,7 @@ Anime databases make each season, or part of a season, an entry of its own. Its 
   - Verdicts are kept for good and still apply once the key is removed. A different `moviedb_id` the addon gives later is checked anew. Without a key, nothing is checked.
   - Once corrected, apps, tracking services, imports and segment databases use the corrected identifier. Marks already sent or imported stay.
   - Titles already kept get these identifiers as their descriptions are read again. A library's [description refresh](addons-and-libraries.md#library-description-refresh) reads them all at once.
+- An episode's own `moviedb_id` and `tvdb_id`, given on its video as a number or a text, are its `Tmdb` and `Tvdb` in Jellyfin apps (`ProviderIds`). One that is not a positive number is left out, and they are not checked against TMDB. The series keeps its own identifiers, and an episode's page links to no site by them.
 - A movie's anime entry is the one the mapping gives for its IMDb or TMDB identifier.
 - An episode's anime entry is the one that holds its TVDB season and number, as for [AniList and MyAnimeList](tracking.md#finding-the-entry).
 - The series' TVDB identifier comes from its description. Otherwise it comes from its IMDb identifier's entries, when they agree.
