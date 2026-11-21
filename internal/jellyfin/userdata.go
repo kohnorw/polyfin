@@ -18,21 +18,28 @@ import (
 	"github.com/moodiness/polyfin/internal/userdata"
 )
 
+// userDataRoutes serves the user's marks. Each DELETE also answers as a
+// POST to its address followed by /Delete, the form of apps that send no
+// DELETE requests, such as VidHub.
 func (h *Handler) userDataRoutes(rt *router) {
 	signedIn := func(method, pattern string, handler http.HandlerFunc) {
 		rt.handle(method, pattern, h.authenticated(handler))
 	}
+	unmarked := func(pattern string, handler http.HandlerFunc) {
+		signedIn(http.MethodDelete, pattern, handler)
+		signedIn(http.MethodPost, pattern+"/Delete", handler)
+	}
 	for _, played := range []string{"/UserPlayedItems/{itemId}", "/Users/{userId}/PlayedItems/{itemId}"} {
 		signedIn(http.MethodPost, played, h.markPlayed(true))
-		signedIn(http.MethodDelete, played, h.markPlayed(false))
+		unmarked(played, h.markPlayed(false))
 	}
 	for _, favorite := range []string{"/UserFavoriteItems/{itemId}", "/Users/{userId}/FavoriteItems/{itemId}"} {
 		signedIn(http.MethodPost, favorite, h.markFavorite(true))
-		signedIn(http.MethodDelete, favorite, h.markFavorite(false))
+		unmarked(favorite, h.markFavorite(false))
 	}
 	for _, item := range []string{"/UserItems/{itemId}", "/Users/{userId}/Items/{itemId}"} {
 		signedIn(http.MethodPost, item+"/Rating", h.rate(true))
-		signedIn(http.MethodDelete, item+"/Rating", h.rate(false))
+		unmarked(item+"/Rating", h.rate(false))
 		signedIn(http.MethodGet, item+"/UserData", h.userData)
 		signedIn(http.MethodPost, item+"/UserData", h.updateUserData)
 	}

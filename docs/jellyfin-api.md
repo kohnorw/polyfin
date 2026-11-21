@@ -607,6 +607,10 @@ Polyfin adds routes for what Jellyfin 12.4 has no route for: taking a title off 
 - `GET /Polyfin/UserItems/Hidden` lists the hidden titles, the latest hidden first, as a listing describes them.
 - `DELETE /Polyfin/UserItems/{id}/NextUp` takes a series off the user's Next Up, a season or an episode standing for its series, and `POST` puts it back; both answer 204, and 400 for an item that is neither a series nor in one. The series stays off until one of its episodes is played after the removal or one is released after it (see [Continue Watching and Next Up](watch-state.md#continue-watching-and-next-up)).
 
+### Unmarking without DELETE for apps
+
+- Each `DELETE` of a mark also answers as a `POST` to its address followed by `/Delete`, as an Emby server does: `POST /UserPlayedItems/{id}/Delete` marks the item unplayed, `POST /UserFavoriteItems/{id}/Delete` takes it off the favorites, and `POST /UserItems/{id}/Rating/Delete` clears its like, each with the same answer. So do `/Users/{userId}/PlayedItems/{id}/Delete`, `/Users/{userId}/FavoriteItems/{id}/Delete` and `/Users/{userId}/Items/{id}/Rating/Delete`. VidHub unmarks this way; Jellyfin 12.4 has no such routes.
+
 ### Home screen sections for apps
 
 - The choice is the user's `Configuration.LatestItemsExcludes`, a list of library identifiers.
