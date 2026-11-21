@@ -634,7 +634,7 @@ func (c *Client) Meta(ctx context.Context, manifestURL, metaType, id string, con
 		Meta *described `json:"meta"`
 	}
 	if err := unmarshal(body, &response); err != nil {
-		return Meta{}, fmt.Errorf("%w: meta: %v", ErrInvalidResponse, err)
+		return Meta{}, fmt.Errorf("%w: meta: %w", ErrInvalidResponse, err)
 	}
 	if response.Meta == nil || response.Meta.ID == "" {
 		return Meta{}, ErrNotFound

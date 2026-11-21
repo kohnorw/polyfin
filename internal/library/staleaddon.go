@@ -29,7 +29,8 @@ type StaleAddon struct {
 // its description again the same way. Pages and descriptions already
 // that old keep their date. Its page sizes are forgotten, and learnt
 // again from the pages it gives next (see learnPageSize), and so are its
-// version lists (see ForgetAddonVersionLists).
+// version lists (see ForgetAddonVersionLists). The titles it had no
+// description of lately are asked of it again (see absence).
 func (s *Service) MarkAddonStale(ctx context.Context, addon accounts.ID) (StaleAddon, error) {
 	var stale StaleAddon
 	now := s.now()
@@ -65,6 +66,7 @@ func (s *Service) MarkAddonStale(ctx context.Context, addon accounts.ID) (StaleA
 		kept.at = metasAt
 		return kept, true
 	})
+	s.absent.DeleteFunc(func(key metaKey, _ absence) bool { return key.addon == addon })
 	s.sizes.mu.Lock()
 	for key := range s.sizes.byCatalog {
 		if key.addon == addon {

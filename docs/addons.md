@@ -292,7 +292,7 @@ An addon's page, in **Content › Sources** or **My sources**, reads the addon a
 **Refresh everything**, in the more-actions menu, asks first. **The address didn't change**, under **Once configured**, runs it without asking (see [Configuring an addon](#configuring-an-addon)). It downloads the manifest as **Refresh** does, then has what Polyfin keeps of the addon asked for again as it is next needed, never all at once:
 
 - **Catalog pages:** they count as old. Each still shows at once and is read again in the background when shown. The hourly task "Read the libraries' first pages" reads every first page again within the hour (see [Catalog pages](addons-and-libraries.md#catalog-pages)).
-- **Descriptions:** they count as old. Each is read again in the background when its title is shown.
+- **Descriptions:** they count as old. Each is read again in the background when its title is shown. The titles the addon had no description of lately are asked of it again (see [Titles an addon doesn't describe](addons-and-libraries.md#catalog-pages)).
 - **Page sizes:** the page lengths Polyfin learned from the addon are forgotten, and learned again from its next pages.
 - **Version lists:** they are forgotten, as the task "Forget the version lists" does for every addon. Each title asks the addon again when opened or played. Pins and blocks stay.
 

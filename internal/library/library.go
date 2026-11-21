@@ -95,7 +95,10 @@ type Service struct {
 	pages       *cache.Cache[pageKey, fetched[[]stremio.Meta]]
 	searchPages *cache.Cache[pageKey, fetched[[]stremio.Meta]]
 	metas       *cache.Cache[metaKey, fetched[stremio.Meta]]
-	flight      singleflight.Group
+	// absent remembers briefly the titles addons had no description of
+	// (see noDescription).
+	absent *cache.Cache[metaKey, absence]
+	flight singleflight.Group
 	// joined, when tests set it, is called with the key of each call to
 	// shared once it waits on the key's fetch: the one it started, or the
 	// one under way it shares.
@@ -476,6 +479,7 @@ func New(db *pgxpool.Pool, store *addons.Store, client *stremio.Client, logger *
 	s.libraryImages = cache.NewLasting[pageKey, fetched[foundImage]](1000, s.keptCatalogLife, clock)
 	s.catalogSlots = newAddonSlots[string](catalogHostFetches)
 	s.failedRefreshes = cache.NewLasting[pageKey, time.Time](4000, func() time.Duration { return failedRefreshWait }, clock)
+	s.absent = cache.NewLasting[metaKey, absence](maxAbsent, func() time.Duration { return absentFor }, clock)
 	s.pace = newPacing(clock)
 	s.prefetches = make(chan struct{}, prefetchLimit)
 	s.translations = make(chan struct{}, translationReaders)
