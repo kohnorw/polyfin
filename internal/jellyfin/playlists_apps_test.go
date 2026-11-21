@@ -109,8 +109,10 @@ func TestShuffleFollowsSortByOnAPlaylistsChildren(t *testing.T) {
 				t.Errorf("%s: the playlist's order every time", path)
 			}
 		}
-		// The Android app's own browser asks for names.
-		if got := s.listedNames(t, token, "/Items?parentId="+id+"&sortBy=SortName&imageTypeLimit=1&enableImageTypes=Primary&startIndex=1&limit=2", true); !slices.Equal(got, []string{"Movie 2", "Pilot"}) {
+		// The Android app's own browser asks for names: episodes' sort
+		// names start with their padded season and number, as in Jellyfin,
+		// so the episodes come in their order before the movies.
+		if got := s.listedNames(t, token, "/Items?parentId="+id+"&sortBy=SortName&imageTypeLimit=1&enableImageTypes=Primary&startIndex=1&limit=2", true); !slices.Equal(got, []string{"Second", "Return"}) {
 			t.Errorf("by name, from the second: %v", got)
 		}
 	}

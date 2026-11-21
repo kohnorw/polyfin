@@ -541,6 +541,7 @@ A title's details come from metadata addons, local files and TMDB. These notes c
 - `DisplayOrder` is kept from `POST /Items/{id}` on a series, as Jellyfin keeps it ([`ItemUpdateController.cs`, lines 412 to 415](https://github.com/jellyfin/jellyfin/blob/v12.4/Jellyfin.Api/Controllers/ItemUpdateController.cs#L412-L415)), and given back in the series' `DisplayOrder` ([`DtoService.cs`, lines 1207 to 1210](https://github.com/jellyfin/jellyfin/blob/v12.4/Emby.Server.Implementations/Dto/DtoService.cs#L1207-L1210)). Empty or absent is aired.
 - In an order, `/Shows/{id}/Seasons` lists the group's seasons, with identifiers of their own, which `/Items/{id}`, `/Items?ParentId=` and `/Shows/{id}/Episodes?seasonId=` take; `seasonId` also takes a season of the addon's. An episode's `ParentIndexNumber`, `IndexNumber`, `SeasonId`, `SeasonName` and `ParentId` are those of the order; its `Id` is the same in every order.
 - `/Shows/{id}/Episodes?season=` filters by the order's season number.
+- Listings sort by `SortBy=IndexNumber` and `ParentIndexNumber`: an episode's number and season where it shows, a season's number. An episode's `SortName` is its season and number, padded to three and four digits, then its name in lower case, `001 - 0002 - pilot`, as Jellyfin names episodes, so `SortBy=SortName` lists a season's episodes in order too. A sort name set in the metadata editor replaces it, and `SortBy=SortName` sorts every item by the sort name set, else by its name.
 
 ### Movie recommendations for apps
 

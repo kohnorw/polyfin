@@ -941,8 +941,18 @@ func descendingAt(orders []string, i int) bool {
 func compareBy(key string, a, b library.Item, state userState) int {
 	da, db := state.data[a.ID], state.data[b.ID]
 	switch strings.ToLower(key) {
-	case "sortname", "name", "seriessortname":
+	case "sortname":
+		return compareSortNames(a, b)
+	case "name", "seriessortname":
 		return cmp.Compare(strings.ToLower(a.Name), strings.ToLower(b.Name))
+	case "indexnumber":
+		_, numberA := listedNumbers(a)
+		_, numberB := listedNumbers(b)
+		return cmp.Compare(numberA, numberB)
+	case "parentindexnumber":
+		seasonA, _ := listedNumbers(a)
+		seasonB, _ := listedNumbers(b)
+		return cmp.Compare(seasonA, seasonB)
 	case "dateplayed", "seriesdateplayed":
 		switch {
 		case before(da.LastPlayed, db.LastPlayed):
@@ -976,6 +986,33 @@ func compareBy(key string, a, b library.Item, state userState) int {
 		return cmp.Compare(a.Runtime, b.Runtime)
 	}
 	return 0
+}
+
+// listedNumbers returns the ParentIndexNumber and IndexNumber an item is
+// listed with: an episode's season and number where its series' order
+// shows it (see library.Item.ShownPlace), a season's number as its
+// IndexNumber.
+func listedNumbers(item library.Item) (season, number int) {
+	if item.Kind == library.KindEpisode {
+		place := item.ShownPlace()
+		return place.Season, place.Episode
+	}
+	return item.ParentIndexNumber, item.IndexNumber
+}
+
+// compareSortNames orders a and b by their sort names (see sortName).
+// Two episodes without a sort name set compare their numbers, then their
+// names, as their sort names would, without making them.
+func compareSortNames(a, b library.Item) int {
+	if a.Kind == library.KindEpisode && b.Kind == library.KindEpisode && a.SortName == "" && b.SortName == "" {
+		seasonA, numberA := listedNumbers(a)
+		seasonB, numberB := listedNumbers(b)
+		if c := cmp.Or(cmp.Compare(seasonA, seasonB), cmp.Compare(numberA, numberB)); c != 0 {
+			return c
+		}
+		return strings.Compare(strings.ToLower(strings.TrimSpace(a.Name)), strings.ToLower(strings.TrimSpace(b.Name)))
+	}
+	return strings.Compare(sortName(a), sortName(b))
 }
 
 func compareBool(a, b bool) int {
