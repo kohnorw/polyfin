@@ -1334,22 +1334,32 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 	if wanted == (accounts.ID{}) {
 		wanted = opened
 	}
+	named := false
 	for _, name := range []string{"mediaSourceId", "tag"} {
 		if id, ok := parseGUID(query(r, name)); ok {
-			wanted = id
+			wanted, named = id, true
 		}
 	}
-	// The title's own identifier stands for the version PlaybackInfo and
-	// item details name after it: the first they offer, those that failed
-	// lately left out, and those the version rules or the user's quality
-	// group hide (see firstWorkingVersion).
-	if wanted == item.ID && versioned(item.Kind) {
-		wanted = h.firstWorkingVersion(h.mediaContext(r, servedToAnyone, user), user, item)
+	// The title alone, in a request without a play session or a media
+	// source, as Infuse and external players ask for it, stands for the
+	// version the device's last PlaybackInfo chose for the title (see
+	// lastChosen). Else the title's own identifier stands for the version
+	// PlaybackInfo and item details name after it: the first they offer,
+	// those that failed lately left out, and those the version rules or
+	// the user's quality group hide (see firstWorkingVersion).
+	version, chosen := library.Version{}, false
+	if !named {
+		version, chosen = h.lastChosen(r.Context(), user, grant, item, wanted)
 	}
-	version, err := h.version(r.Context(), user, item, wanted)
-	if err != nil {
-		processingError(w, http.StatusBadRequest)
-		return
+	if !chosen {
+		if wanted == item.ID && versioned(item.Kind) {
+			wanted = h.firstWorkingVersion(h.mediaContext(r, servedToAnyone, user), user, item)
+		}
+		version, err = h.version(r.Context(), user, item, wanted)
+		if err != nil {
+			processingError(w, http.StatusBadRequest)
+			return
+		}
 	}
 	// An app that may not be told where the version comes from gets it
 	// through Polyfin, whatever its grant asks (see keptFromSource).
@@ -1398,6 +1408,30 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 		h.Logger.Warn("A stream could not be served", "addon", version.AddonLog, "error", err)
 		h.streamFailed(r, user, item, query(r, "deviceId"))
 	}
+}
+
+// lastChosen is the version a stream request for the title alone plays,
+// wanted being the title opened, when it names no media source and
+// carries no play session: the one its device's last PlaybackInfo chose
+// for the title, while it is still one of the title's versions. Infuse
+// and external players send such requests, and would otherwise get the
+// title's first version, which PlaybackInfo may have passed over, as a
+// host that failed or asked to slow down. A media source named, the
+// title's own identifier included, keeps what it names: PlaybackInfo
+// lists a version chosen under its own identifier unless it is the
+// first. ok is false when no such choice stands.
+func (h *Handler) lastChosen(ctx context.Context, user accounts.User, grant playback.Grant, item library.Item, wanted accounts.ID) (library.Version, bool) {
+	if wanted != item.ID || !versioned(item.Kind) || grant.Version != (accounts.ID{}) || grant.Device == (accounts.ID{}) {
+		return library.Version{}, false
+	}
+	h.chosen.mu.Lock()
+	chosen, ok := h.chosen.chosen[grant.Device]
+	h.chosen.mu.Unlock()
+	if !ok || chosen.title != item.ID {
+		return library.Version{}, false
+	}
+	version, err := h.version(ctx, user, item, chosen.version)
+	return version, err == nil
 }
 
 // mimeTypes are the content types of media containers.
