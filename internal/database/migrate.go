@@ -1,6 +1,7 @@
 package database
 
 import (
+	"cmp"
 	"context"
 	"crypto/sha256"
 	"embed"
@@ -8,10 +9,12 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"log/slog"
 	"maps"
 	"regexp"
 	"slices"
 	"strconv"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -45,19 +48,39 @@ type migration struct {
 	checksum string
 }
 
-// Migrate brings the schema to the version this build ships.
+// Migrate brings the schema to the version this build ships, logging into
+// logger while it waits for another Polyfin migrating the same database,
+// each migration it applies, and the sessions a migration waits for.
 //
 // Each migration runs in its own transaction. Polyfin refuses to start when a
 // migration it already applied was edited, unless superseded lists the
 // checksum it was applied with, or when the database was migrated by a
 // newer Polyfin: both would leave the schema in a state the code does not
 // expect.
-func Migrate(ctx context.Context, pool *pgxpool.Pool) error {
+func Migrate(ctx context.Context, pool *pgxpool.Pool, logger *slog.Logger) error {
 	migrations, err := shippedMigrations()
 	if err != nil {
 		return err
 	}
-	return migrate(ctx, pool, migrations)
+	return migrator{logger: logger}.migrate(ctx, pool, migrations)
+}
+
+// The pace of Migrate's logs. While another Polyfin holds the migration
+// lock, Migrate tries it again every lockPoll, and says that it waits at
+// once, then every waitLog. A migration still running blockedAfter its
+// start is looked at for the sessions whose locks it waits for, then
+// every waitLog.
+const (
+	lockPoll     = time.Second
+	waitLog      = 30 * time.Second
+	blockedAfter = 10 * time.Second
+)
+
+// migrator applies migrations, logging into logger. Its zero durations
+// stand for lockPoll, waitLog and blockedAfter; tests set shorter ones.
+type migrator struct {
+	logger                    *slog.Logger
+	poll, every, blockedAfter time.Duration
 }
 
 // Fingerprint identifies the schema Migrate brings a database to: it
@@ -116,13 +139,17 @@ func loadMigrations(files fs.FS) ([]migration, error) {
 	return migrations, nil
 }
 
-func migrate(ctx context.Context, pool *pgxpool.Pool, migrations []migration) error {
+// migrate applies the migrations the database lacks, under the migration
+// lock (see lock). A database that applied none, being created, logs each
+// migration at Debug, and one line at Info once done; an upgrade logs
+// each at Info.
+func (r migrator) migrate(ctx context.Context, pool *pgxpool.Pool, migrations []migration) error {
 	conn, err := pool.Acquire(ctx)
 	if err != nil {
 		return err
 	}
 	defer conn.Release()
-	if _, err := conn.Exec(ctx, "SELECT pg_advisory_lock($1)", migrationLock); err != nil {
+	if err := r.lock(ctx, conn); err != nil {
 		return fmt.Errorf("lock the schema: %w", err)
 	}
 	defer func() {
@@ -158,10 +185,28 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, migrations []migration) er
 		}
 	}
 
+	pending := 0
+	for _, m := range migrations {
+		if _, done := applied[m.version]; !done {
+			pending++
+		}
+	}
+	if pending == 0 {
+		return nil
+	}
+	level := slog.LevelInfo
+	if len(applied) == 0 {
+		level = slog.LevelDebug
+	}
+	r.logger.Info("Migrating the database", "pending", pending, "applied", len(applied))
+	began := time.Now()
 	for _, m := range migrations {
 		if _, done := applied[m.version]; done {
 			continue
 		}
+		name := fmt.Sprintf("%04d_%s", m.version, m.name)
+		start := time.Now()
+		stop := r.watchLocks(ctx, pool, conn.Conn().PgConn().PID(), name)
 		err := pgx.BeginFunc(ctx, conn, func(tx pgx.Tx) error {
 			if _, err := tx.Exec(ctx, m.sql); err != nil {
 				return err
@@ -171,11 +216,109 @@ func migrate(ctx context.Context, pool *pgxpool.Pool, migrations []migration) er
 				m.version, m.name, m.checksum)
 			return err
 		})
+		stop()
 		if err != nil {
-			return fmt.Errorf("apply migration %04d_%s: %w", m.version, m.name, err)
+			return fmt.Errorf("apply migration %s: %w", name, err)
+		}
+		r.logger.Log(ctx, level, "Applied a database migration", "migration", name, "duration", time.Since(start).Round(time.Millisecond))
+	}
+	r.logger.Info("The database is migrated", "migrations", pending, "duration", time.Since(began).Round(time.Millisecond))
+	return nil
+}
+
+// lock takes the migration lock on conn, the session migrating. While
+// another session holds it, another Polyfin migrating the same database
+// as a rule, lock tries again every poll until ctx ends, and logs that it
+// waits, with the session holding the lock, at once and then every
+// waitLog.
+func (r migrator) lock(ctx context.Context, conn *pgxpool.Conn) error {
+	began := time.Now()
+	var logged time.Time
+	for {
+		var locked bool
+		if err := conn.QueryRow(ctx, "SELECT pg_try_advisory_lock($1)", migrationLock).Scan(&locked); err != nil {
+			return err
+		}
+		if locked {
+			if !logged.IsZero() {
+				r.logger.Info("Another Polyfin finished migrating", "waited", time.Since(began).Round(time.Second))
+			}
+			return nil
+		}
+		if logged.IsZero() || time.Since(logged) >= cmp.Or(r.every, waitLog) {
+			attrs := []any{"waited", time.Since(began).Round(time.Second)}
+			// The session holding the lock; none when it let go meanwhile.
+			var pid int32
+			var host string
+			if conn.QueryRow(ctx, `SELECT l.pid, coalesce(host(a.client_addr), '')
+				FROM pg_locks l LEFT JOIN pg_stat_activity a ON a.pid = l.pid
+				WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1
+					AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
+					AND l.classid::bigint = $1 AND l.objid::bigint = $2`,
+				migrationLock>>32, migrationLock&0xffffffff).Scan(&pid, &host) == nil {
+				attrs = append(attrs, "holder_pid", pid)
+				if host != "" {
+					attrs = append(attrs, "holder_host", host)
+				}
+			}
+			r.logger.Info("Waiting for another Polyfin to finish migrating", attrs...)
+			logged = time.Now()
+		}
+		timer := time.NewTimer(cmp.Or(r.poll, lockPoll))
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return ctx.Err()
+		case <-timer.C:
 		}
 	}
-	return nil
+}
+
+// watchLocks looks, blockedAfter the migration name started and then
+// every waitLog until stop, for the sessions holding the locks the
+// migration, run by the backend pid, waits for, as pg_blocking_pids
+// tells, and logs them: their pid, application, state and host, never
+// their statements. stop returns once it no longer looks.
+func (r migrator) watchLocks(ctx context.Context, pool *pgxpool.Pool, pid uint32, name string) (stop func()) {
+	ctx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	began := time.Now()
+	go func() {
+		defer close(done)
+		timer := time.NewTimer(cmp.Or(r.blockedAfter, blockedAfter))
+		defer timer.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-timer.C:
+			}
+			rows, _ := pool.Query(ctx, `SELECT a.pid, coalesce(a.application_name, ''), coalesce(a.state, ''), coalesce(host(a.client_addr), '')
+				FROM pg_stat_activity a WHERE a.pid = ANY(pg_blocking_pids($1)) ORDER BY a.pid`, int64(pid))
+			var blocking []string
+			var holder int32
+			var application, state, host string
+			_, err := pgx.ForEachRow(rows, []any{&holder, &application, &state, &host}, func() error {
+				session := fmt.Sprintf("pid %d", holder)
+				for _, detail := range []string{application, state, host} {
+					if detail != "" {
+						session += ", " + detail
+					}
+				}
+				blocking = append(blocking, session)
+				return nil
+			})
+			if err == nil && len(blocking) > 0 {
+				r.logger.Warn("A database migration waits for locks other sessions hold", "migration", name,
+					"waited", time.Since(began).Round(time.Second), "blocking", blocking)
+			}
+			timer.Reset(cmp.Or(r.every, waitLog))
+		}
+	}()
+	return func() {
+		cancel()
+		<-done
+	}
 }
 
 // createSchemaMigrations makes the table recording the migrations applied.

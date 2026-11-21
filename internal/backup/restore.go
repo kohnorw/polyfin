@@ -772,7 +772,7 @@ func (s *Service) Restore(ctx context.Context, plan Plan) error {
 	if err == nil {
 		// The backup's schema may be older: it is brought to this
 		// Polyfin's before anything is written to it.
-		if migrateErr := database.Migrate(ctx, pool); migrateErr != nil {
+		if migrateErr := database.Migrate(ctx, pool, s.cfg.Logger); migrateErr != nil {
 			return fmt.Errorf("the backup was restored, but could not be migrated: %w", migrateErr)
 		}
 		// The backup holds the signing secret of the server it was made

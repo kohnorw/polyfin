@@ -213,7 +213,7 @@ func TestARestoreOfAnOlderBackupIsMigrated(t *testing.T) {
 		t.Fatal(err)
 	}
 	old := r.backUp(t, time.Date(2026, 10, 1, 4, 0, 0, 0, time.Local))
-	if err := database.Migrate(ctx, r.pool); err != nil {
+	if err := database.Migrate(ctx, r.pool, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatal(err)
 	}
 	dav := newTestWebDAV(t, "polyfin", "dav password")

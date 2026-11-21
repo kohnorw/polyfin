@@ -291,7 +291,7 @@ func serve(ctx context.Context, cfg config.Config, environ []string, restore *pe
 		return fmt.Errorf("connect to PostgreSQL: %w", err)
 	}
 	defer pool.Close()
-	if err := database.Migrate(ctx, pool); err != nil {
+	if err := database.Migrate(ctx, pool, logger); err != nil {
 		return fmt.Errorf("migrate the database: %w", err)
 	}
 	serverID, err := database.ServerID(ctx, pool)
