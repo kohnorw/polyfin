@@ -3,8 +3,10 @@ package cache
 
 import (
 	"encoding/json"
+	"math"
 	"reflect"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -70,15 +72,45 @@ func NewLasting[K comparable, V any](capacity int, lifetime func() time.Duration
 
 // Sized bounds c in bytes as well as in entries, and returns it: once the
 // sizes of the values kept, as size tells them, add up to more than
-// maxBytes, the least recently used entries are evicted. A value larger
-// than maxBytes on its own is not kept. size is called once for each value
-// stored, which keeps its size; JSONSize suits values decoded from JSON
-// that Polyfin or a service it trusts wrote, MemorySize those decoded from
-// what any other host sends. Sized is called on a new cache, before it is
-// used.
+// maxBytes, the least recently used entries are evicted. maxBytes is the
+// budget of a server with memory to spare: Budget scales it to the share
+// SetBudgetShare set. A value larger than that on its own is not kept.
+// size is called once for each value stored, which keeps its size;
+// JSONSize suits values decoded from JSON that Polyfin or a service it
+// trusts wrote, MemorySize those decoded from what any other host sends.
+// Sized is called on a new cache, before it is used.
 func (c *Cache[K, V]) Sized(maxBytes int, size func(V) int) *Cache[K, V] {
-	c.size, c.maxBytes = size, maxBytes
+	c.size, c.maxBytes = size, Budget(maxBytes)
 	return c
+}
+
+// budgetShare holds, as math.Float64bits, the share of their budgets the
+// memory caches take; 0 stands for 1, all of it.
+var budgetShare atomic.Uint64
+
+// SetBudgetShare has the memory caches made afterwards take share of
+// their budgets, above 0 and at most 1 (see Budget). Polyfin sets it once
+// at start, from its memory limit, before it makes its caches.
+func SetBudgetShare(share float64) {
+	budgetShare.Store(math.Float64bits(min(max(share, 0), 1)))
+}
+
+// Budget is the bytes a memory cache whose budget is maxBytes keeps, at
+// the share SetBudgetShare set (see scaled).
+func Budget(maxBytes int) int {
+	share := 1.0
+	if bits := budgetShare.Load(); bits != 0 {
+		share = math.Float64frombits(bits)
+	}
+	return scaled(maxBytes, share)
+}
+
+// scaled is share of maxBytes, a byte at least for a budget of any.
+func scaled(maxBytes int, share float64) int {
+	if maxBytes <= 0 || share >= 1 {
+		return maxBytes
+	}
+	return max(int(float64(maxBytes)*share), 1)
 }
 
 // JSONSize is the length of the JSON encoding of value, a size for Sized

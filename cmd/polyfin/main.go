@@ -262,6 +262,9 @@ func serve(ctx context.Context, cfg config.Config, environ []string, restore *pe
 	for _, retired := range cfg.Retired {
 		logger.Info(retired.Name+" is no longer read: its value is a setting, under "+retired.Section, "variable", retired.Name)
 	}
+	// Before anything is cached: Go's soft memory limit, from the
+	// container's, and the memory caches' budgets that follow it.
+	limitMemory(logger)
 	// The programs Polyfin runs, FFmpeg above all, end with it even when it
 	// is killed (see process.KillChildrenOnExit).
 	if err := process.KillChildrenOnExit(); err != nil {
