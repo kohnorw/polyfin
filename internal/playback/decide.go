@@ -1065,7 +1065,13 @@ func (s subject) property(name string) (value, reason) {
 		}
 		return number(rate), videoFramerateNotSupported
 	case "RefFrames":
-		return number(video.RefFrames), refFramesNotSupported
+		// A remote video reports none, as with Jellyfin, but its analysis
+		// may know them (see MediaStream.KnownRefFrames).
+		refs := video.RefFrames
+		if refs == nil {
+			refs = video.KnownRefFrames
+		}
+		return number(refs), refFramesNotSupported
 	case "IsAnamorphic":
 		return flag(video.IsAnamorphic), anamorphicVideoNotSupported
 	case "IsInterlaced":

@@ -305,8 +305,13 @@ func videoStream(s media.Stream, index int, remote bool) MediaStream {
 	}
 	// Jellyfin reports one reference frame for every video it reads from a
 	// file, and none for a remote source (observed on the oracle's .strm).
+	// The decision still knows a remote source's count when its analysis
+	// gave it: a rule on RefFrames that the app requires would otherwise
+	// convert the video for want of it.
 	if !remote {
 		stream.RefFrames = new(max(s.RefFrames, 1))
+	} else if s.RefFrames > 0 {
+		stream.KnownRefFrames = new(s.RefFrames)
 	}
 	if s.Width > 0 && s.Height > 0 {
 		stream.Width, stream.Height = new(s.Width), new(s.Height)

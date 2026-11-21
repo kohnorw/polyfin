@@ -49,6 +49,8 @@ A condition applies whether `IsRequired` is set or not. One about another codec,
 
 The other conditions decide only whether the source plays as it is or its video is copied, as in Jellyfin, whose encoder does not read them either. They cover reference frames, bit depth, dynamic range, codec tag, and anamorphic or interlaced video.
 
+A version from an addon or a link reports no `RefFrames` in its `MediaStreams`, as a remote source has none in Jellyfin. The decision still reads the reference frames its analysis counted: an app that requires `RefFrames` at most 4 for 1080p H.264, as Moonfin for Android TV does, plays a version with 4 or fewer as it is, rather than getting it converted or copied for want of the count.
+
 **Compared with Jellyfin**
 
 - Jellyfin applies these conditions in `StreamBuilder.BuildStreamVideoItem` and `ApplyTranscodingConditions`. Its encoder scales the picture within `MaxWidth` and `MaxHeight` (`EncodingHelper.GetFixedOutputSize`), and aims for the `VideoBitrate`. It drops frames above `MaxFramerate` (`GetFramerateParam`, `-r`), and passes the profile and the level asked to the encoder (`GetVideoQualityParam`). Polyfin does the same, but for the level and the profile.
@@ -56,6 +58,7 @@ The other conditions decide only whether the source plays as it is or its video 
 - Jellyfin passes the encoder the profile the source has when the condition allows it, else the first the condition lists. Polyfin writes the highest the condition allows.
 - Jellyfin keeps the source's whole bitrate when the picture is made smaller. Polyfin keeps the share of it the smaller picture is, as for its own caps.
 - Under the app's `VideoBitrate`, Jellyfin decides the audio under the app's bitrate limit only. Polyfin decides the audio under that cap too, with the audio sent, so that PlaybackInfo and the conversion agree: the conversion reads only the `TranscodingUrl`'s bitrates.
+- Jellyfin knows no reference frames of a remote source, so a required `RefFrames` condition fails for it. Polyfin decides with the count its analysis gave, without reporting it.
 
 ### Bitrate of converted video
 
