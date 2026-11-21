@@ -416,8 +416,9 @@ func TestABudgetKeepsItsShare(t *testing.T) {
 }
 
 // A cache made once a smaller share is set keeps that share of its
-// bytes. Not parallel: the share is the process's, which the parallel
-// tests, paused until the others end, do not see changed.
+// bytes.
+//
+//nolint:paralleltest // sets the process's budget share, which the parallel tests, paused until the others end, do not see changed
 func TestACacheMadeUnderASmallerShareKeepsLess(t *testing.T) {
 	SetBudgetShare(0.5)
 	defer SetBudgetShare(1)
