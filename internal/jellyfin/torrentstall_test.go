@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -80,7 +81,9 @@ func playsWaiting(t *testing.T) int {
 }
 
 // playHLSLeaving asks PlaybackInfo as playHLS does, from an app that
-// gives up waiting for the answer after wait.
+// gives up waiting for the answer after wait. The status and the spaces
+// that keep the app waiting may come first (see patientWriter): the
+// answer itself must not.
 func (p torrentPlay) playHLSLeaving(t *testing.T, picked string, wait time.Duration) {
 	t.Helper()
 	ctx, cancel := context.WithTimeout(t.Context(), wait)
@@ -90,9 +93,13 @@ func (p torrentPlay) playHLSLeaving(t *testing.T, picked string, wait time.Durat
 		strings.NewReader(`{"DeviceProfile":`+hlsOnlyProfile+`}`))
 	request.Header.Set("Authorization", app("web", p.token))
 	request.Header.Set("Content-Type", "application/json")
-	if response, err := testClient.Do(request); err == nil {
-		response.Body.Close()
-		t.Fatalf("PlaybackInfo answered %d before the app gave up", response.StatusCode)
+	response, err := testClient.Do(request)
+	if err != nil {
+		return
+	}
+	defer response.Body.Close()
+	if body, err := io.ReadAll(response.Body); err == nil {
+		t.Fatalf("PlaybackInfo answered %d %.200s before the app gave up", response.StatusCode, body)
 	}
 }
 

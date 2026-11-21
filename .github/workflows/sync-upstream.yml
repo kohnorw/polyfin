@@ -91,7 +91,7 @@ jobs:
         run: |
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          scripts/sync-upstream.sh
+          bash scripts/sync-upstream.sh
 
       - name: Set up Go
         if: steps.merge.outputs.state == 'merged'

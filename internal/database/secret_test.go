@@ -14,7 +14,7 @@ func TestANewSigningSecretReplacesTheStoredOne(t *testing.T) {
 	t.Parallel()
 	pool := testdb.Empty(t)
 	ctx := t.Context()
-	if err := Migrate(ctx, pool); err != nil {
+	if err := Migrate(ctx, pool, quiet); err != nil {
 		t.Fatal(err)
 	}
 	id, err := ServerID(ctx, pool)

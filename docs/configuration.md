@@ -101,6 +101,16 @@ Polyfin Desktop and tests:
 
 With `POLYFIN_DESKTOP` set, the server knows that the app starts it again after a restart. It then offers the app's updates in the admin app (see [Restart and updates](updates-and-restarts.md#restart-and-updates)).
 
+### Memory limit
+
+In a container with a memory limit, such as Compose's `mem_limit` or `docker run --memory`, Polyfin keeps its own memory under half of it. The other half is left to FFmpeg, which converts in the same container, and to the PostgreSQL that `POLYFIN_DATABASE=embedded` runs there. One conversion takes 200 to 400 MB, a 4K one with HDR tone mapped on the processor about 1 GB. A memory folder for conversion counts in the limit too (see [A memory folder for conversion](installation.md#a-memory-folder-for-conversion)).
+
+- **Go's soft limit:** half the container's limit, read at start from its cgroup (v2's `memory.max`, else v1's `memory.limit_in_bytes`). Near it, Polyfin frees memory more often rather than grow past it.
+- **The caches in memory:** catalog pages, descriptions, searches, stream and subtitle lists, smart lists, artwork, TMDB answers, and the tracks and fonts of files being played can take about 1.2 GB together. They keep all of it with a soft limit of 4 GiB or more, a container of 8 GiB. Below that, each keeps the share of its size the soft limit is of 4 GiB, at least a thirty-second: an eighth with a 1 GiB container, about 150 MB together. From a container of 256 MiB up, they thus take 30 % of the soft limit at most.
+- **The log:** at start, `Go's memory limit is half the container's`, with the limit in `limit_mib`, the container's in `container_mib` and the caches' share in `cache_share`.
+- **`GOMEMLIMIT`:** set, as Go reads it, such as `GOMEMLIMIT=1500MiB`, it is the soft limit instead, and the caches follow it the same way. The log then says `Go's memory limit is GOMEMLIMIT's`. `GOMEMLIMIT=off` sets none, and keeps the caches whole.
+- **Without a limit:** no container limit and no `GOMEMLIMIT`, as on most computers and with Polyfin Desktop: Go sets no soft limit and the caches keep all of their size.
+
 ### Detailed log
 
 Polyfin logs at the `info` level. It logs at the `debug` level while **Detailed log (to diagnose a problem)**, in **Settings › Diagnostics**, is on.

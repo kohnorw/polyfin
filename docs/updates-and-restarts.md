@@ -48,6 +48,15 @@ A pre-release is a release GitHub marks as one, or whose tag is one, such as `v1
 
 - Jellyfin 12.4 has no check for its own new versions: `HasUpdateAvailable` of `/System/Info` is marked obsolete, "This should be handled by the package manager" ([SystemInfo.cs, lines 133 to 135](https://github.com/jellyfin/jellyfin/blob/v12.4/MediaBrowser.Model/System/SystemInfo.cs#L133-L135)), and never set, so it is always false ([SystemManager.cs, lines 56 to 83](https://github.com/jellyfin/jellyfin/blob/v12.4/Emby.Server.Implementations/SystemManager.cs#L56-L83)). Polyfin sets it from its own check, following releases alone unless **Include pre-releases** is on.
 
+## The database at an update
+
+A new version may change the database's tables. Polyfin makes these changes, its migrations, at start, each in a transaction of its own.
+
+- **The log:** `Migrating the database`, with how many migrations are `pending`; then `Applied a database migration` for each, with its name in `migration` and its `duration`; then `The database is migrated`. A new, empty database logs each migration at Debug only.
+- **Two Polyfins on one database:** one migrates while the other waits. The one waiting logs `Waiting for another Polyfin to finish migrating` at once, then every 30 seconds, with how long it waited in `waited` and the session that migrates in `holder_pid` and `holder_host`. It logs `Another Polyfin finished migrating` once its turn comes. A Polyfin stopped while migrating lets the other go on as soon as PostgreSQL sees its connection close.
+- **A migration waiting for a table:** another session, such as `psql` left open in a transaction, can hold a table a migration changes. After 10 seconds, then every 30 seconds while it waits, the log says `A database migration waits for locks other sessions hold`, with the migration in `migration` and the sessions in `blocking`: the process ID, application, state and address of each, never what it runs. Ending that session lets the update go on, for example with `SELECT pg_terminate_backend(<pid>);`.
+- **No time limit:** Polyfin waits for those locks as long as it takes, since a time limit could fail a sound update behind a long backup or a slow query.
+
 ## Restart and updates
 
 Administrators restart Polyfin, and start its update, from the foot of **Server state** on **Home**, without opening the host or Docker. **Search** finds both, as "Restart Polyfin" and "Update now". Each opens **Home** with the action's confirmation.

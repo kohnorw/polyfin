@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"hash/fnv"
+	"net/http"
 	"reflect"
 	"runtime/debug"
 	"strconv"
@@ -550,6 +551,12 @@ func (s *Service) fetchPage(ctx context.Context, src source, key pageKey) ([]str
 			s.logger.Info("An addon asked to wait: no catalog page is asked of its server until the wait ends", "addon",
 				src.addon.addon.LogName(), "catalog", src.catalog.ID, "skip", key.skip, "genre", key.genre, "wait", wait)
 		}
+		// A search the addon did not answer within its request's timeout
+		// leaves the addon's search catalog out for a while: the searches
+		// would ask it again for each term (see searched).
+		if key.search != "" && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			s.lateSearch(src)
+		}
 		return nil, err
 	}
 	release()
@@ -687,6 +694,8 @@ func (s *Service) meta(ctx context.Context, addon installed, metaType, id string
 // (see iptv.Opening), else the one kept in the database, else the addon's
 // answer. Background work's request waits for its turn (see pacing)
 // before it is shared, so that a user's request never waits behind it.
+// An addon that had no description of the title lately fails at once,
+// with ErrNotFound, unasked (see absence).
 func (s *Service) keptMeta(ctx context.Context, addon installed, metaType, id string) (fetched[stremio.Meta], error) {
 	// An IPTV source describes its titles from its database, with details
 	// once a title was opened: it is not cached here, lest a listing's
@@ -702,6 +711,11 @@ func (s *Service) keptMeta(ctx context.Context, addon installed, metaType, id st
 			s.refreshMeta(ctx, addon, key, kept.at)
 		}
 		return kept, nil
+	}
+	// An addon that had no description of the title lately is not asked
+	// again: the next addon is, at once.
+	if s.absentFrom(addon, key) {
+		return fetched[stremio.Meta]{}, failedAt(addon, "", errAbsent)
 	}
 	if paces(ctx, addon.addon) {
 		// A description kept in the database takes no turn.
@@ -728,12 +742,80 @@ func (s *Service) keptMeta(ctx context.Context, addon installed, metaType, id st
 			}
 			return kept, nil
 		}
-		return s.fetchKeptMeta(ctx, addon, key)
+		if s.absentFrom(addon, key) {
+			return nil, failedAt(addon, "", errAbsent)
+		}
+		kept, err := s.fetchKeptMeta(ctx, addon, key)
+		if noDescription(err) {
+			s.absent.Put(key, absenceOf(addon))
+		}
+		return kept, err
 	})
 	if err != nil {
 		return fetched[stremio.Meta]{}, err
 	}
 	return result.(fetched[stremio.Meta]), nil
+}
+
+const (
+	// absentFor is how long an addon that had no description of a title
+	// is not asked for it again. A title's page is opened again and again
+	// within minutes, as an app goes back to it, plays it, or moves from
+	// one episode to the next, and each open would wait on the same
+	// useless request, and spend the addon's requests; an addon that lacks
+	// a title seldom gains it within a quarter of an hour, and Refresh
+	// metadata asks it again at once.
+	absentFor = 15 * time.Minute
+	// maxAbsent bounds the titles remembered so, a few hundred bytes each:
+	// the least recently used are forgotten first.
+	maxAbsent = 10000
+)
+
+// errAbsent is the failure of a description of an addon that had none of
+// the title lately: ErrNotFound, as its answer was.
+var errAbsent = fmt.Errorf("%w, as it answered lately", stremio.ErrNotFound)
+
+// absence remembers that an addon had no description of a title, with
+// the address and the manifest read of the addon then: an addon given
+// another address, or whose manifest was read again since, is asked
+// again.
+type absence struct {
+	address     string
+	refreshedAt time.Time
+}
+
+func absenceOf(addon installed) absence {
+	return absence{addon.addon.ManifestURL, addon.addon.RefreshedAt}
+}
+
+// absentFrom reports whether addon had no description of key's title
+// lately, as it is now.
+func (s *Service) absentFrom(addon installed, key metaKey) bool {
+	kept, ok := s.absent.Get(key)
+	return ok && kept == absenceOf(addon)
+}
+
+// noDescription reports whether err tells that the addon has no
+// description of the title: it answered 404, or a description that is
+// empty or null, or an answer that is not JSON. A failure that may pass
+// does not: no answer in time, a server error, a request refused, for its
+// rate or otherwise, the addon's notice in place of the description, or
+// no answer at all. Those are asked again as before (see request).
+func noDescription(err error) bool {
+	if err == nil || errors.Is(err, stremio.ErrRateLimited) {
+		return false
+	}
+	if errors.Is(err, stremio.ErrNotFound) || stremio.StatusOf(err) == http.StatusNotFound {
+		return true
+	}
+	_, unreadable := errors.AsType[*json.SyntaxError](err)
+	return unreadable && errors.Is(err, stremio.ErrInvalidResponse)
+}
+
+// forgetAbsences forgets which addons had no description of a title, each
+// then asked for it again.
+func (s *Service) forgetAbsences(metaType, id string) {
+	s.absent.DeleteFunc(func(key metaKey, _ absence) bool { return key.metaType == metaType && key.id == id })
 }
 
 // metaStale reports whether a description is to be asked for again.
@@ -849,6 +931,7 @@ func (s *Service) loadMeta(ctx context.Context, addon installed, key metaKey) (f
 // description kept.
 func (s *Service) keepMeta(ctx context.Context, addon installed, key metaKey, kept fetched[stremio.Meta], store bool) fetched[stremio.Meta] {
 	keep := func() {
+		s.absent.Delete(key)
 		s.metas.Put(key, kept)
 		if !store {
 			return
@@ -1025,6 +1108,7 @@ const WarmInterval = time.Hour
 // the database that no one read for long, and the catalogs and titles no
 // read saw for long (see arrivals.go).
 func (s *Service) Warm(ctx context.Context) error {
+	ctx = stremio.WithOrigin(ctx, stremio.OriginCatalogs)
 	scopes := []struct {
 		scope  addons.Scope
 		member bool
@@ -1119,7 +1203,7 @@ const collectionsAtOnce = 2
 // as a request is served (see PerRequest): its view is built once.
 func (s *Service) ReadCollections(ctx context.Context) error {
 	started := time.Now()
-	ctx = withRefreshing(context.WithValue(ctx, wholeKey{}, true))
+	ctx = withRefreshing(context.WithValue(stremio.WithOrigin(ctx, stremio.OriginCatalogs), wholeKey{}, true))
 	var server accounts.User
 	v, err := s.view(ctx, server)
 	if err != nil {

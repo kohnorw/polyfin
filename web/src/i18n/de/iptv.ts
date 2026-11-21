@@ -57,6 +57,8 @@ const iptv: typeof en = {
         'Der letzte Abruf ist fehlgeschlagen: Die Datei ist weg, oder Polyfin kann sie nicht mehr lesen.',
       file_refused:
         'Der letzte Abruf ist fehlgeschlagen: Nur Administratoren können eine Datei des Servers verwenden.',
+      empty:
+        'Der letzte Abruf ist fehlgeschlagen: Das Fernsehprogramm enthielt keine Sendungen. Das zuletzt heruntergeladene Fernsehprogramm bleibt erhalten.',
     } as Record<string, string>,
     sectionsLabel: 'Abschnitte',
     sections: {

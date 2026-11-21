@@ -422,7 +422,9 @@ func TestVersionRulesWithQualityGroups(t *testing.T) {
 
 // Prefer versions the app plays without conversion looks among the first
 // versions in the rules' order; without it, the first that plays is
-// taken, in that order.
+// taken, in that order. It never trades the user's language for a
+// conversion saved: MULTI, whose audio states no language, does not
+// replace FRENCH for a French user.
 func TestVersionRulesBeforePreferDirectPlay(t *testing.T) {
 	t.Parallel()
 	p := versionRulesOn(t, newTestServer(t, 10))
@@ -460,7 +462,7 @@ func TestVersionRulesBeforePreferDirectPlay(t *testing.T) {
 		t.Errorf("first that plays: %v %+v", chosen(answer), firstWords(answer.MediaSources))
 	}
 	p.setting(t, func(s *accounts.Settings) { s.PreferDirectPlay = true })
-	if answer := p.ask(t, token, p.movie, chrome, nil); chosen(answer) != p.versions[2].ID {
+	if answer := p.ask(t, token, p.movie, chrome, nil); chosen(answer) != p.versions[3].ID {
 		t.Errorf("preferring no conversion: %v %+v", chosen(answer), firstWords(answer.MediaSources))
 	}
 }

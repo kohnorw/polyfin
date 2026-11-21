@@ -43,7 +43,7 @@ The admin app uses no WebSocket: it asks the server again every few seconds.
 
 ## Slow answers
 
-A torrent version's first play over a slow swarm can keep the app's PlaybackInfo request waiting for up to 3 minutes (see [Torrents](torrents.md#deadlines)). The request sends nothing until it answers.
+A torrent version's first play over a slow swarm can keep the app's PlaybackInfo request waiting for up to 3 minutes (see [Torrents](torrents.md#deadlines)). Once the versions are listed with a torrent among them, the request sends a space every 5 seconds until it answers; before that, and for a play without torrents, it sends nothing until it answers.
 
 That wait starts once the versions are listed, and the request can last longer from its start. With the default settings, it lasts about 5 minutes at most:
 

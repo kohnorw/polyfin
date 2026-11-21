@@ -35,7 +35,7 @@ This is a fork of [moodiness/polyfin](https://github.com/moodiness/polyfin). It 
 - Administrators can stop any playback from **Now Playing**. Playbacks paused for over an hour end.
 - Cinemeta is searched when the user's own search catalogs find nothing.
 - TMDB answers are kept for two weeks, across restarts. Settled titles' descriptions are kept for six weeks.
-- `adjacentTo` is answered, so apps find the next episode. NostalgiaTV-style episode listings and genres are supported. Jellyfin for Roku plays converted versions.
+- `adjacentTo` is answered, so apps find the next episode. NostalgiaTV-style episode listings and genres are supported (`episodePoolListing` in episodepool.go answers a library's episodes before upstream's `episodeListing`, whose bound test is skipped). Jellyfin for Roku plays converted versions.
 - A chosen audio language wins over a file's default audio flag.
 
 **NVIDIA**

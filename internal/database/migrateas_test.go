@@ -72,7 +72,7 @@ func TestMigrateAsMakesTheSchemaMigrateMakes(t *testing.T) {
 		t.Fatal(err)
 	}
 	// The copy other packages' tests take of a database Migrate made.
-	migrated, once := testdb.Copy(t, fingerprint[:16], Migrate), testdb.Empty(t)
+	migrated, once := testdb.Copy(t, fingerprint[:16], migrateShipped), testdb.Empty(t)
 	if err := pgx.BeginFunc(ctx, once, func(tx pgx.Tx) error { return MigrateAs(ctx, tx, applied) }); err != nil {
 		t.Fatal(err)
 	}
@@ -91,7 +91,7 @@ func TestMigrateAsMakesTheSchemaMigrateMakes(t *testing.T) {
 		}
 	}
 	// Migrate finds nothing left to apply.
-	if err := Migrate(ctx, once); err != nil {
+	if err := Migrate(ctx, once, quiet); err != nil {
 		t.Errorf("Migrate on the schema made in one transaction: %v", err)
 	}
 }
@@ -154,7 +154,7 @@ func TestMigrateAsAppliesTheMigrationsToldOnly(t *testing.T) {
 	if got := recorded(); !slices.Equal(got, want) {
 		t.Errorf("migrations applied: %q, want %q", got, want)
 	}
-	if err := Migrate(ctx, pool); err != nil {
+	if err := Migrate(ctx, pool, quiet); err != nil {
 		t.Fatal(err)
 	}
 	if got := recorded(); len(got) != len(applied) {

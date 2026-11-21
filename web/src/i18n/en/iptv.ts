@@ -53,6 +53,8 @@ const iptv = {
         'The last fetch failed: the server asked Polyfin to slow down. It is tried again in a few minutes.',
       file_unreadable: 'The last fetch failed: the file is gone, or Polyfin can no longer read it.',
       file_refused: 'The last fetch failed: only administrators can use a file of the server.',
+      empty:
+        'The last fetch failed: the guide answered with no programmes. The last guide downloaded is kept.',
     } as Record<string, string>,
     sectionsLabel: 'Sections',
     sections: {

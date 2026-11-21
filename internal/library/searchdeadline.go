@@ -10,19 +10,31 @@ import (
 // A search answers with what its search catalogs found by its deadline,
 // not after the slowest of them: an addon that never answers would hold
 // every search for its request's 15-second timeout (see stremio.Client).
+// The deadline follows the addons' order: it is searchGrace after the
+// first search catalog, in that order, to find its page, those before it
+// having answered, as their failures leave the place to the next one.
 // Pages that come after the deadline are kept for the next search of the
-// same term (see page), and a search catalog that missed the deadline is
-// left out of the searches for a while (see lateSearches).
+// same term (see page). A search catalog that held a search for
+// searchPatience or searchBound without answering, or whose request timed
+// out, is left out of the searches for a while (see lateSearches).
 //
 // Folder matching and the metadata editor (RemoteSearch) still wait for
 // every addon: a title left out there would leave a file unmatched, or be
 // missing from what an administrator chooses from.
 const (
-	// searchGrace is how long a search waits for its other title
-	// searches once one of them found its page. A page is usually read
-	// in well under a second, so an addon three seconds slower than the
-	// fastest one is late: the search answers without it.
-	searchGrace = 3 * time.Second
+	// searchGrace is how long a search waits for the other title searches
+	// once the first one in the addons' order found its page. A search
+	// page is usually read in a few hundred milliseconds, and addons of
+	// about the same speed answer within this grace; a slower one's page
+	// is kept and lists its titles at the next search, which an app sends
+	// anyway as the term is typed. Past 300 ms an answer no longer feels
+	// immediate; peopleGrace is as long.
+	searchGrace = 300 * time.Millisecond
+	// searchPatience is how long a search waits for the title searches
+	// ranked before one that found its page: a slow addon first in the
+	// order holds a search no longer once another addon found titles,
+	// as long as the grace of earlier versions.
+	searchPatience = 3 * time.Second
 	// searchBound is how long a search waits for its title searches at
 	// most, when none found its page: a third less than an addon
 	// request's timeout, which an addon that never answers takes whole.
@@ -121,7 +133,7 @@ func (s *Service) skipsSearch(src source) bool {
 }
 
 // lateSearch leaves src out of the searches for lateSearchLife, as it
-// missed a search's deadline.
+// held a search past its patience or bound, or its request timed out.
 func (s *Service) lateSearch(src source) {
 	now := s.now()
 	if s.lateSearches.remember(searchCatalogOf(src.key(0)), now, now.Add(lateSearchLife)) {

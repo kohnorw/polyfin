@@ -438,10 +438,10 @@ func TestSessionsFollowReports(t *testing.T) {
 		t.Fatalf("while playing: %+v", playing)
 	}
 	// A progress report keeps what it does not repeat, except CanSeek.
-	sessions.Progress(device, user, PlayState{Position: 2 * time.Minute, Paused: true})
+	sessions.Progress(device, user, PlayState{Position: 2 * time.Minute, Paused: true}, true)
 	pausedAt := now
 	now = now.Add(time.Minute)
-	sessions.Progress(device, user, PlayState{Position: 2 * time.Minute, Paused: true})
+	sessions.Progress(device, user, PlayState{Position: 2 * time.Minute, Paused: true}, true)
 	now = now.Add(time.Minute)
 	playing, _ = sessions.Playing(device)
 	if playing.Position != 2*time.Minute || playing.MediaSourceID != "source" || playing.PlayMethod != "DirectPlay" || playing.CanSeek {
@@ -451,13 +451,13 @@ func TestSessionsFollowReports(t *testing.T) {
 	if !playing.PausedAt.Equal(pausedAt) {
 		t.Errorf("paused at %v, want %v", playing.PausedAt, pausedAt)
 	}
-	sessions.Progress(device, user, PlayState{Position: 2 * time.Minute})
+	sessions.Progress(device, user, PlayState{Position: 2 * time.Minute}, true)
 	if playing, _ := sessions.Playing(device); !playing.PausedAt.IsZero() {
 		t.Errorf("still paused since %v", playing.PausedAt)
 	}
 	// A report for another item starts it.
-	sessions.Progress(device, user, PlayState{Item: accounts.ID{9}})
-	if playing, _ := sessions.Playing(device); playing.Item != (accounts.ID{9}) || playing.MediaSourceID != "" {
+	sessions.Progress(device, user, PlayState{Item: accounts.ID{9}}, false)
+	if playing, _ := sessions.Playing(device); playing.Item != (accounts.ID{9}) || playing.MediaSourceID != "" || playing.Progressed {
 		t.Errorf("next item: %+v", playing)
 	}
 	sessions.Stop(device)

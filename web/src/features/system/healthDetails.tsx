@@ -17,6 +17,7 @@ import {
   queryClient,
   queryKeys,
   type AddonHealth,
+  type AddonOriginCount,
   type Health,
   type ShareHealth,
   type Sources,
@@ -24,6 +25,7 @@ import {
 import { settingsPath } from '@/app/navigation'
 import {
   Badge,
+  cx,
   Button,
   ExternalButtonLink,
   EmptyState,
@@ -179,7 +181,7 @@ export function addonTone(
 }
 
 function Addons({ health, sources }: { health: Health; sources: Sources | undefined }) {
-  const { t } = useI18n()
+  const { language, t } = useI18n()
   const text = t.system.health
   const check = useMutation({
     mutationFn: checkAddon,
@@ -216,10 +218,13 @@ function Addons({ health, sources }: { health: Health; sources: Sources | undefi
                   </span>
                 }
                 meta={
-                  <span className="flex flex-wrap items-center gap-x-2">
+                  <span className="flex flex-wrap items-center gap-x-2 gap-y-1">
                     <StatusPill tone={tone}>{text.addonStatus[status]}</StatusPill>
                     {addon.failure !== '' && addon.enabled && (
                       <span>{text.failures[addon.failure] ?? addon.failure}</span>
+                    )}
+                    {reportsRateLimits(addon) && (
+                      <StatusPill tone="warn">{text.addonRateLimited}</StatusPill>
                     )}
                   </span>
                 }
@@ -251,11 +256,169 @@ function Addons({ health, sources }: { health: Health; sources: Sources | undefi
                     <dd className="text-ink-3">{text.requests(addon.requests, addon.failures)}</dd>
                   </div>
                 </dl>
+                {addon.backgroundPause && (
+                  <Notice tone="warn" nested className="mt-4">
+                    {text.backgroundPaused(
+                      new Intl.DateTimeFormat(language, { timeStyle: 'short' }).format(
+                        new Date(addon.backgroundPause.until),
+                      ),
+                      addon.backgroundPause.reason,
+                    )}
+                  </Notice>
+                )}
+                <AddonTraffic addon={addon} />
+                <AddonNotices addon={addon} />
               </Row>
             )
           })}
         </RowList>
       )}
+    </div>
+  )
+}
+
+/** The time a notice or a rate limit counts as recent, for the warning beside the addon's state. */
+const recentRateLimit = 60 * 60 * 1000
+
+/**
+ * Whether the addon's answers told of a rate limit within the last hour, its own or that of an
+ * addon it gathers, or its server's background requests pause after one.
+ */
+function reportsRateLimits(addon: AddonHealth): boolean {
+  return (
+    addon.backgroundPause?.reason === 'rate_limited' ||
+    addon.notices.some(
+      (notice) =>
+        notice.rateLimited && Date.now() - new Date(notice.lastAt).getTime() < recentRateLimit,
+    )
+  )
+}
+
+/**
+ * The addon's requests of the last hour and of the last 24 hours by origin: a bar parts those users
+ * waited for from the background work's, then a line for each origin with requests.
+ */
+function AddonTraffic({ addon }: { addon: AddonHealth }) {
+  const { t } = useI18n()
+  const text = t.system.health
+  const hour = addon.hour.reduce((sum, c) => sum + c.requests, 0)
+  const apps = addon.hour.find((c) => c.origin === 'apps')?.requests ?? 0
+  const background = hour - apps
+  const origins = addon.day.filter((c) => c.requests > 0)
+  if (origins.length === 0) {
+    return <p className="mt-4 text-small text-ink-3">{text.trafficNone}</p>
+  }
+  return (
+    <div className="mt-4 space-y-2.5">
+      <p className="text-small text-ink-2 figures">{text.trafficSummary(hour, background)}</p>
+      {hour > 0 && (
+        <div
+          role="img"
+          aria-label={text.trafficSummary(hour, background)}
+          className="flex h-2.5 overflow-hidden rounded-full bg-ink/20"
+        >
+          <span className="bg-link" style={{ width: `${(apps / hour) * 100}%` }} />
+          <span className="bg-warn" style={{ width: `${(background / hour) * 100}%` }} />
+        </div>
+      )}
+      <table className="w-full text-small figures">
+        <caption className="sr-only">{text.trafficTitle}</caption>
+        <thead>
+          <tr className="text-ink-3">
+            <th scope="col" className="py-1 text-left font-normal">
+              {text.trafficOrigin}
+            </th>
+            <th scope="col" className="py-1 pl-4 text-right font-normal">
+              {text.trafficHour}
+            </th>
+            <th scope="col" className="py-1 pl-4 text-right font-normal">
+              {text.trafficDay}
+            </th>
+          </tr>
+        </thead>
+        <tbody>
+          {origins.map((day) => {
+            const inHour = addon.hour.find((c) => c.origin === day.origin)
+            return (
+              <tr key={day.origin} className="border-t border-line">
+                <th scope="row" className="py-1 text-left font-normal text-ink">
+                  <span className="flex items-center gap-2">
+                    <span
+                      aria-hidden="true"
+                      className={cx(
+                        'size-2 shrink-0 rounded-full',
+                        day.origin === 'apps' ? 'bg-link' : 'bg-warn',
+                      )}
+                    />
+                    {text.trafficOrigins[day.origin]}
+                  </span>
+                </th>
+                <td className="py-1 pl-4 text-right text-ink">
+                  <TrafficFigure count={inHour} />
+                </td>
+                <td className="py-1 pl-4 text-right text-ink">
+                  <TrafficFigure count={day} />
+                </td>
+              </tr>
+            )
+          })}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
+/** An origin's requests, with those that failed. */
+function TrafficFigure({ count }: { count: AddonOriginCount | undefined }) {
+  const { t } = useI18n()
+  if (!count || count.requests === 0) return <span className="text-ink-3">0</span>
+  return (
+    <>
+      {count.requests}
+      {count.failures > 0 && (
+        <span className="text-warn"> · {t.system.health.trafficFailed(count.failures)}</span>
+      )}
+    </>
+  )
+}
+
+/** The texts the addon's answers carried lately, rate limits marked. */
+function AddonNotices({ addon }: { addon: AddonHealth }) {
+  const { language, t } = useI18n()
+  const text = t.system.health
+  if (addon.notices.length === 0) return null
+  return (
+    <div className="mt-4 space-y-2">
+      <SubTitle>{text.noticesTitle}</SubTitle>
+      <p className="text-small text-ink-3">{text.noticesHelp}</p>
+      <ul className="space-y-2">
+        {addon.notices.map((notice) => {
+          // The first answer of a notice still told may be days old: its date is told then.
+          const first = new Date(notice.firstAt)
+          const since = new Intl.DateTimeFormat(
+            language,
+            first.toDateString() === new Date().toDateString()
+              ? { timeStyle: 'short' }
+              : { dateStyle: 'short', timeStyle: 'short' },
+          ).format(first)
+          return (
+            <li key={notice.text} className="rounded-row bg-s2 px-3 py-2">
+              <div className="flex flex-wrap items-start gap-2">
+                {notice.rateLimited && (
+                  <Badge tone="warn" icon={WarningIcon}>
+                    {text.noticeRateLimited}
+                  </Badge>
+                )}
+                <p className="min-w-0 text-small break-words text-ink">{notice.text}</p>
+              </div>
+              <p className="mt-1 text-micro text-ink-3 figures">
+                {text.noticeSeen(notice.answers, notice.background, since)} ·{' '}
+                <RelativeTime iso={notice.lastAt} />
+              </p>
+            </li>
+          )
+        })}
+      </ul>
     </div>
   )
 }

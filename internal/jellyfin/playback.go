@@ -57,7 +57,11 @@ func (h *Handler) playbackRoutes(rt *router) {
 }
 
 // record applies a playback report to the device's session and to the
-// user's data.
+// user's data. A stop that gives no position was at the last position the
+// device's progress reports gave for the item, when they gave one: apps
+// that send no position on stopping keep their resume point, where
+// Jellyfin would mark the item played. An app that never reported its
+// progress keeps Jellyfin's rule.
 func (h *Handler) record(r *http.Request, event playbackEvent, state playback.PlayState, positionKnown bool) {
 	c := callerFrom(r.Context())
 	before, had := h.sessions.Playing(c.Device.ID)
@@ -65,11 +69,14 @@ func (h *Handler) record(r *http.Request, event playbackEvent, state playback.Pl
 	case playbackStarted:
 		h.sessions.Start(c.Device.ID, c.User.ID, state)
 	case playbackProgressed:
-		h.sessions.Progress(c.Device.ID, c.User.ID, state)
+		h.sessions.Progress(c.Device.ID, c.User.ID, state, positionKnown)
 	case playbackStopped:
 		h.sessions.Stop(c.Device.ID)
 		// Another of the user's devices may go on from it at once.
 		h.served.stopped(c.User.ID, c.Device.ID)
+		if !positionKnown && had && before.Progressed && (state.Item == (accounts.ID{}) || state.Item == before.Item) {
+			state.Position, positionKnown = before.Reported, true
+		}
 	}
 	// The report has arrived: it is recorded even when the app hangs up
 	// right after sending it, as when it closes once playback stops.
@@ -92,7 +99,37 @@ func (h *Handler) recorded(ctx context.Context, event playbackEvent, state playb
 	}
 	current, switched := h.leaveTitle(c.Device.ID, event, state.PlaySessionID)
 	h.followTorrents(c.Device.ID, c.User.ID, event, current, switched, had)
+	if event == playbackStopped && state.Failed {
+		h.failedStop(ctx, c.User, c.Device, state, positionKnown, before)
+		return
+	}
 	h.track(ctx, c.User, c.Device, event, state, positionKnown, before)
+}
+
+// failedStop follows a stop the app reports as failed. As with Jellyfin,
+// the user's data stays as it was and the tracking services hear nothing
+// of it; the playbacks Polyfin follows and the activity log still learn
+// that it stopped. playing is what the device was known to play before.
+func (h *Handler) failedStop(ctx context.Context, user accounts.User, device accounts.Device, state playback.PlayState, positionKnown bool,
+	playing playback.NowPlaying) {
+	id, mediaSource := state.Item, state.MediaSourceID
+	if id == (accounts.ID{}) {
+		id = playing.Item
+	}
+	if mediaSource == "" && playing.Item == id {
+		mediaSource = playing.MediaSourceID
+	}
+	if id == (accounts.ID{}) {
+		return
+	}
+	item, err := h.played(ctx, user, id)
+	if err != nil {
+		return
+	}
+	h.followPlayback(user, device, playbackStopped, state, positionKnown, playing, item)
+	if item.Kind != library.KindChannel && !h.reportedLive(ctx, user, item, mediaSource) {
+		h.recordPlayback(ctx, user, device.DeviceName, playbackStopped, item)
+	}
 }
 
 // sessionWindow is how recently a device must have been active to count as
@@ -460,6 +497,23 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 		}
 		defer release()
 	}
+	// A torrent's first analysis waits for its pieces, longer than apps
+	// wait for a first byte: while one may be waited for, the answer is
+	// kept going with spaces before its JSON (see patientWriter), and
+	// every answer is then a 200.
+	var patient *patientWriter
+	patientFor := func(versions []library.Version) {
+		if patient == nil && h.mayWaitForTorrent(versions) {
+			patient = newPatientWriter(w, playbackInfoPatience)
+			w = patient
+		}
+	}
+	defer func() {
+		if patient != nil {
+			patient.stop()
+		}
+	}()
+	patientFor(p.versions)
 	settings := h.Accounts.Settings()
 	// The title's own identifier names no version in particular: Jellyfin
 	// names a single version after its item, and the apps that play from a
@@ -514,11 +568,16 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	if choice.decided == nil && !complete && !choice.late && r.Context().Err() == nil {
 		versions, err := h.Library.Versions(r.Context(), user, item.ID)
 		if err != nil {
+			if patient != nil {
+				h.refusePlay(w, r, user, item, "NoCompatibleStream", plays.FailedNoStream)
+				return
+			}
 			h.browseError(w, r, err)
 			return
 		}
 		unstarted = unstarted || h.unstartedTorrent(versions)
 		h.offer(r.Context(), user, &p, versions)
+		patientFor(p.versions)
 		c = plan(p.versions)
 		choice = h.choose(r, user, p, opened, request, c, prefer)
 		unstarted = unstarted || choice.unstarted
@@ -615,6 +674,12 @@ type playbackInfoResponse struct {
 type noCompatibleStream struct {
 	MediaSources []MediaSourceInfo
 	ErrorCode    string
+}
+
+// mayWaitForTorrent reports whether a play of versions may wait for a
+// torrent: one is among them that did not fail to start lately.
+func (h *Handler) mayWaitForTorrent(versions []library.Version) bool {
+	return slices.ContainsFunc(versions, func(v library.Version) bool { return v.Torrent != nil && !h.didNotStart(v) })
 }
 
 // readPlaybackInfoBody reads a posted PlaybackInfoDto over the query's
@@ -1316,22 +1381,32 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 	if wanted == (accounts.ID{}) {
 		wanted = opened
 	}
+	named := false
 	for _, name := range []string{"mediaSourceId", "tag"} {
 		if id, ok := parseGUID(query(r, name)); ok {
-			wanted = id
+			wanted, named = id, true
 		}
 	}
-	// The title's own identifier stands for the version PlaybackInfo and
-	// item details name after it: the first they offer, those that failed
-	// lately left out, and those the version rules or the user's quality
-	// group hide (see firstWorkingVersion).
-	if wanted == item.ID && versioned(item.Kind) {
-		wanted = h.firstWorkingVersion(h.mediaContext(r, servedToAnyone, user), user, item)
+	// The title alone, in a request without a play session or a media
+	// source, as Infuse and external players ask for it, stands for the
+	// version the device's last PlaybackInfo chose for the title (see
+	// lastChosen). Else the title's own identifier stands for the version
+	// PlaybackInfo and item details name after it: the first they offer,
+	// those that failed lately left out, and those the version rules or
+	// the user's quality group hide (see firstWorkingVersion).
+	version, chosen := library.Version{}, false
+	if !named {
+		version, chosen = h.lastChosen(r.Context(), user, grant, item, wanted)
 	}
-	version, err := h.version(r.Context(), user, item, wanted)
-	if err != nil {
-		processingError(w, http.StatusBadRequest)
-		return
+	if !chosen {
+		if wanted == item.ID && versioned(item.Kind) {
+			wanted = h.firstWorkingVersion(h.mediaContext(r, servedToAnyone, user), user, item)
+		}
+		version, err = h.version(r.Context(), user, item, wanted)
+		if err != nil {
+			processingError(w, http.StatusBadRequest)
+			return
+		}
 	}
 	// An app that may not be told where the version comes from gets it
 	// through Polyfin, whatever its grant asks (see keptFromSource).
@@ -1380,6 +1455,30 @@ func (h *Handler) stream(w http.ResponseWriter, r *http.Request) {
 		h.Logger.Warn("A stream could not be served", "addon", version.AddonLog, "error", err)
 		h.streamFailed(r, user, item, query(r, "deviceId"))
 	}
+}
+
+// lastChosen is the version a stream request for the title alone plays,
+// wanted being the title opened, when it names no media source and
+// carries no play session: the one its device's last PlaybackInfo chose
+// for the title, while it is still one of the title's versions. Infuse
+// and external players send such requests, and would otherwise get the
+// title's first version, which PlaybackInfo may have passed over, as a
+// host that failed or asked to slow down. A media source named, the
+// title's own identifier included, keeps what it names: PlaybackInfo
+// lists a version chosen under its own identifier unless it is the
+// first. ok is false when no such choice stands.
+func (h *Handler) lastChosen(ctx context.Context, user accounts.User, grant playback.Grant, item library.Item, wanted accounts.ID) (library.Version, bool) {
+	if wanted != item.ID || !versioned(item.Kind) || grant.Version != (accounts.ID{}) || grant.Device == (accounts.ID{}) {
+		return library.Version{}, false
+	}
+	h.chosen.mu.Lock()
+	chosen, ok := h.chosen.chosen[grant.Device]
+	h.chosen.mu.Unlock()
+	if !ok || chosen.title != item.ID {
+		return library.Version{}, false
+	}
+	version, err := h.version(ctx, user, item, chosen.version)
+	return version, err == nil
 }
 
 // mimeTypes are the content types of media containers.
@@ -1714,6 +1813,8 @@ type playbackReport struct {
 	PlaybackOrder       string
 	PlaylistItemId      string
 	NowPlayingQueue     []queueItem
+	// Failed is set on stops of playbacks that failed (PlaybackStopInfo).
+	Failed bool
 }
 
 func (report playbackReport) state() playback.PlayState {
@@ -1739,6 +1840,7 @@ func (report playbackReport) state() playback.PlayState {
 		state.VolumeLevel = new(int(report.VolumeLevel.value))
 	}
 	state.Queued, state.Next = report.NowPlayingQueue != nil, report.next()
+	state.Failed = report.Failed
 	return state
 }
 

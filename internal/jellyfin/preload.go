@@ -8,6 +8,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/source"
+	"github.com/moodiness/polyfin/internal/stremio"
 )
 
 // With next-episode preloading on (Settings.PreloadNextEpisodes), Polyfin
@@ -30,7 +31,7 @@ const (
 // preloadLoop runs the preload passes until ctx is done, as background
 // work, whose requests to addons are paced (see library.Background).
 func (h *Handler) preloadLoop(ctx context.Context) {
-	ctx = library.Background(ctx)
+	ctx = library.Background(stremio.WithOrigin(ctx, stremio.OriginPreload))
 	timer := time.NewTimer(preloadFirst)
 	defer timer.Stop()
 	for {

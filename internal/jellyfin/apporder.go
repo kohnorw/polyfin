@@ -7,19 +7,23 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/forwarded"
 	"github.com/moodiness/polyfin/internal/library"
+	"github.com/moodiness/polyfin/internal/localization"
+	"github.com/moodiness/polyfin/internal/playback"
 )
 
 // With Settings › Playback › Prefer versions the app plays without
 // conversion, a title's versions are ordered for the app asking when its
 // device profile is known (see knownPlay): the versions Polyfin knows the
 // app plays without conversion, as they are or repackaged with their
-// tracks copied, come before the others, after the other steps of the
-// order but Play local files first, whose local files stay first for its
-// users (see ordered). Item details, PlaybackInfo and every request naming
-// the title's own identifier for its first version follow it, so that the
-// version menu shows first the version Play prefers, and the identifier
-// the app sends for it picks it (see playbackInfo). Polyfin knows how a
-// version plays as its name says it (see listedDecision), reading nothing:
+// tracks copied, and in the user's languages as well as the first version
+// of the order known (see playedLanguages), come before the others, after
+// the other steps of the order but Play local files first, whose local
+// files stay first for its users (see ordered). Item details, PlaybackInfo
+// and every request naming the title's own identifier for its first
+// version follow it, so that the version menu shows first the version
+// Play prefers, and the identifier the app sends for it picks it (see
+// playbackInfo). Polyfin knows how a version plays as its name says it
+// (see listedDecision), reading nothing:
 // a version neither analyzed nor described by RemuxDB stays among those
 // that need a conversion. Without the profile, before a device's first
 // play since the server started, the order is the server's, and Play
@@ -79,13 +83,21 @@ func (h *Handler) mediaContext(r *http.Request, route mediaRoute, user accounts.
 	return context.WithValue(ctx, callerKey{}, caller{User: user, Device: device, Token: token})
 }
 
-// playsUnconverted tells which of item's versions the app plays without
-// conversion, as far as their analysis or RemuxDB's description tells,
-// with the user's track preferences and the subtitle files listed lately.
-func (h *Handler) playsUnconverted(ctx context.Context, a *appOrder, user accounts.User, item library.Item, versions []library.Version) map[accounts.ID]bool {
+// appPlay is how the app plays a version, as far as Polyfin knows it: with
+// or without conversion, and in which languages.
+type appPlay struct {
+	unconverted bool
+	languages   playedLanguages
+}
+
+// playsUnconverted tells how the app plays those of item's versions whose
+// analysis or RemuxDB's description Polyfin has, with the user's track
+// preferences and the subtitle files listed lately: without conversion or
+// not, and the languages of the tracks it plays. The others are left out.
+func (h *Handler) playsUnconverted(ctx context.Context, a *appOrder, user accounts.User, item library.Item, versions []library.Version) map[accounts.ID]appPlay {
 	p := playable{item: item, tracks: h.titleTracks(ctx, user, item)}
 	p.subtitles, _ = h.keptSubtitles(user, item.ID)
-	result := make(map[accounts.ID]bool, len(versions))
+	result := make(map[accounts.ID]appPlay, len(versions))
 	for _, version := range versions {
 		analysis, analyzed := h.Playback.Analyzed(ctx, version.ID)
 		known := analyzed
@@ -100,7 +112,73 @@ func (h *Handler) playsUnconverted(ctx context.Context, a *appOrder, user accoun
 			streams = h.withTextCopies(ctx, p, version, analysis, streams)
 		}
 		decision, plays := h.listedDecision(p, version, streams, analysis, a.request, a.allowed)
-		result[version.ID] = plays && (decision.DirectPlay || decision.Streamed() && decision.Video == nil && decision.Audio == nil)
+		result[version.ID] = appPlay{
+			unconverted: plays && (decision.DirectPlay || decision.Streamed() && decision.Video == nil && decision.Audio == nil),
+			languages:   languagesPlayed(p.tracks, streams, decision),
+		}
 	}
 	return result
+}
+
+// playedLanguages are the languages of the tracks a version plays for the
+// user: its audio track's, ranked for their preferred language and region
+// (see trackPreferences.audioRank), and its subtitle's when one shows.
+//
+// Prefer versions the app plays without conversion never trades them for
+// a conversion saved: a version the app plays without conversion comes
+// before the one the order would play only when its languages are as good
+// (see asGoodAs). The user's languages, the server's default ones and the
+// choices remembered on the title thus come first, then fewer conversions.
+type playedLanguages struct {
+	audio     string
+	audioRank int
+	subtitled bool
+	subtitle  string
+	forced    bool
+}
+
+// languagesPlayed returns the languages of the tracks decision plays among
+// streams, with the user's track preferences.
+func languagesPlayed(preferences trackPreferences, streams []playback.MediaStream, decision playback.Decision) playedLanguages {
+	var played playedLanguages
+	for _, stream := range streams {
+		switch {
+		case stream.Type == "Audio" && stream.Index == decision.AudioStreamIndex:
+			played.audio, played.audioRank = stream.Language, preferences.audioRank(stream)
+		case stream.Type == "Subtitle" && stream.Index == decision.SubtitleStreamIndex:
+			played.subtitled, played.subtitle, played.forced = true, stream.Language, stream.IsForced
+		}
+	}
+	return played
+}
+
+// asGoodAs reports whether a version playing l plays the user's languages
+// as well as one playing first: its audio is in a language they prefer
+// more, or in first's language, and, when first shows a subtitle, it
+// shows one too, in its language and as forced or full (see keeps).
+func (l playedLanguages) asGoodAs(first playedLanguages) bool {
+	switch {
+	case l.audioRank > first.audioRank:
+		return true
+	case l.audioRank < first.audioRank || !keeps(l.audio, first.audio):
+		return false
+	case !first.subtitled:
+		return true
+	}
+	return l.subtitled && l.forced == first.forced && keeps(l.subtitle, first.subtitle)
+}
+
+// keeps reports whether a track in language keeps a track in first's: the
+// same language, or any when first states none, which tells nothing of
+// what the user would get. A track of no stated language keeps only
+// another of none: a version labeled MULTI whose tracks state none may
+// play another language than first's.
+func keeps(language, first string) bool {
+	switch {
+	case localization.Undetermined(first):
+		return true
+	case localization.Undetermined(language):
+		return false
+	}
+	return localization.SameLanguage(language, first)
 }

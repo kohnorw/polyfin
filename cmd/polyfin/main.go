@@ -262,6 +262,9 @@ func serve(ctx context.Context, cfg config.Config, environ []string, restore *pe
 	for _, retired := range cfg.Retired {
 		logger.Info(retired.Name+" is no longer read: its value is a setting, under "+retired.Section, "variable", retired.Name)
 	}
+	// Before anything is cached: Go's soft memory limit, from the
+	// container's, and the memory caches' budgets that follow it.
+	limitMemory(logger)
 	// The programs Polyfin runs, FFmpeg above all, end with it even when it
 	// is killed (see process.KillChildrenOnExit).
 	if err := process.KillChildrenOnExit(); err != nil {
@@ -291,7 +294,7 @@ func serve(ctx context.Context, cfg config.Config, environ []string, restore *pe
 		return fmt.Errorf("connect to PostgreSQL: %w", err)
 	}
 	defer pool.Close()
-	if err := database.Migrate(ctx, pool); err != nil {
+	if err := database.Migrate(ctx, pool, logger); err != nil {
 		return fmt.Errorf("migrate the database: %w", err)
 	}
 	serverID, err := database.ServerID(ctx, pool)
@@ -669,7 +672,7 @@ func serve(ctx context.Context, cfg config.Config, environ []string, restore *pe
 		if err != nil {
 			return watchlist.Made{}, err
 		}
-		return lib.WatchlistEntries(library.Background(ctx), user, title)
+		return lib.WatchlistEntries(library.Background(stremio.WithOrigin(ctx, stremio.OriginWatchlists)), user, title)
 	})
 	// The titles every import did not find are kept, each with what it
 	// would import, and a user may link one to its IMDb or TMDB title:
@@ -901,6 +904,7 @@ func serve(ctx context.Context, cfg config.Config, environ []string, restore *pe
 			Addons:           addonClient,
 			SearchesLeaveOut: lib.SearchesLeaveOut,
 			StreamsTimingOut: lib.StreamsTimingOut,
+			BackgroundPause:  lib.BackgroundPause,
 			Cache:            sources,
 			Folders:          work,
 			MoveDataDirTo:    cfg.MoveDataDirTo,
@@ -1022,7 +1026,10 @@ func serve(ctx context.Context, cfg config.Config, environ []string, restore *pe
 	if err := registry.Load(ctx, tasks.NewStore(pool)); err != nil {
 		return fmt.Errorf("read the tasks' triggers and last runs: %w", err)
 	}
-	registry.Start(ctx)
+	// The tasks' requests to addons count as background work's in Health,
+	// as those of the kind each task names, such as its catalogs, where it
+	// names one.
+	registry.Start(stremio.InBackground(ctx))
 	// Recordings in progress when ctx ends are finished, as partial, when
 	// Polyfin starts again.
 	go recorder.Run(ctx)

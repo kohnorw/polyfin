@@ -204,6 +204,7 @@ Anime databases make each season, or part of a season, an entry of its own. Its 
   - Verdicts are kept for good and still apply once the key is removed. A different `moviedb_id` the addon gives later is checked anew. Without a key, nothing is checked.
   - Once corrected, apps, tracking services, imports and segment databases use the corrected identifier. Marks already sent or imported stay.
   - Titles already kept get these identifiers as their descriptions are read again. A library's [description refresh](addons-and-libraries.md#library-description-refresh) reads them all at once.
+- An episode's own `moviedb_id` and `tvdb_id`, given on its video as a number or a text, are its `Tmdb` and `Tvdb` in Jellyfin apps (`ProviderIds`). One that is not a positive number is left out, and they are not checked against TMDB. The series keeps its own identifiers, and an episode's page links to no site by them.
 - A movie's anime entry is the one the mapping gives for its IMDb or TMDB identifier.
 - An episode's anime entry is the one that holds its TVDB season and number, as for [AniList and MyAnimeList](tracking.md#finding-the-entry).
 - The series' TVDB identifier comes from its description. Otherwise it comes from its IMDb identifier's entries, when they agree.
@@ -292,7 +293,7 @@ An addon's page, in **Content › Sources** or **My sources**, reads the addon a
 **Refresh everything**, in the more-actions menu, asks first. **The address didn't change**, under **Once configured**, runs it without asking (see [Configuring an addon](#configuring-an-addon)). It downloads the manifest as **Refresh** does, then has what Polyfin keeps of the addon asked for again as it is next needed, never all at once:
 
 - **Catalog pages:** they count as old. Each still shows at once and is read again in the background when shown. The hourly task "Read the libraries' first pages" reads every first page again within the hour (see [Catalog pages](addons-and-libraries.md#catalog-pages)).
-- **Descriptions:** they count as old. Each is read again in the background when its title is shown.
+- **Descriptions:** they count as old. Each is read again in the background when its title is shown. The titles the addon had no description of lately are asked of it again (see [Titles an addon doesn't describe](addons-and-libraries.md#catalog-pages)).
 - **Page sizes:** the page lengths Polyfin learned from the addon are forgotten, and learned again from its next pages.
 - **Version lists:** they are forgotten, as the task "Forget the version lists" does for every addon. Each title asks the addon again when opened or played. Pins and blocks stay.
 
@@ -526,6 +527,7 @@ After a refusal for its rate, an addon's server gets no background request for a
 - **The pause:** as long as `Retry-After` asks, 15 minutes at most. Without it, a minute, when the refused title is asked again anyway.
 - **Meanwhile:** requests users wait for are still sent. Watchlist checks skip the addon, and check its titles at their next hour.
 - **The log:** it says once per pause, at Info, `An addon refused a request for its rate: Polyfin's background requests to its server pause`, with the addon and the wait.
+- **Health:** **System › Health › Addons** shows the pause until it ends, the notices the addon's answers carried, rate limits marked, and its requests of the last hour and day by origin, so that a limit background work reaches shows at a glance (see [What Health shows](health.md#what-health-shows)).
 
 There is nothing to set. An addon without limits only has Polyfin's background work spread over a few more seconds. A home page with 20 titles of Continue Watching and Next Up has them listed within about half a minute from one such addon, with their follow-ups after.
 

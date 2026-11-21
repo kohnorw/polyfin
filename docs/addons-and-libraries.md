@@ -334,6 +334,7 @@ To answer quickly, Polyfin reads ahead:
 - **Collection pages:** jellyfin-web's collection pages ask for every title at once, up to 500 in Polyfin. Reading them can take long the first time. The page waits for the addons 3 seconds at most, and shows the titles read by then, at least the first page of each catalog. Polyfin reads the rest in the background. The next time, the page shows them all at once. If Polyfin is still reading, it shows those read so far after 1 second at most.
 - **Every collection, on a schedule:** the scheduled task "Read every collection" reads every collection of the server's collection libraries whole. It runs by hand, or when its triggers say: none by default. Give it one under **System › Schedule**, such as every day at a quiet hour, at 12 hours apart at least (see [Triggers](administration.md#triggers)). It reads two collections at a time, then every catalog of the server's [smart lists](smart-lists-and-search.md#smart-lists) up to its maximum. It asks the addons again for the pages past **Refresh catalogs after (minutes)**, and waits for their answers. Every collection page and smart list then opens at once with all its titles. It asks the addons for many pages: leave it without triggers for an addon you share with others. The server log tells how many collections and smart lists it read, and how long it took.
 - **Descriptions:** a title's description is read again after 6 hours, or when its page opens after **Refresh catalogs after (minutes)**. Meanwhile, the one known shows. A whole library's are read again on request (see [Library description refresh](#library-description-refresh)).
+- **Titles an addon doesn't describe:** when an addon answers that it has no description of a title (HTTP 404, an empty description, or an answer that isn't JSON), Polyfin remembers it for 15 minutes. Meanwhile a title page that opens again asks the next addon at once, and that addon isn't asked again. **Refresh metadata** on the title, **Refresh everything** on the addon's page, an addon given another address, and its manifest read again all ask it again. Failures that may pass, such as no answer in time, a server error, "too many requests" or a refused request, aren't remembered: the addon is asked again as before.
 - **Apps that give up:** when an app gives up on a request, what Polyfin was reading for it goes on, and is kept for the next request. Other apps waiting for the same page get it.
 
 Polyfin checks that a description is the title's:
@@ -348,14 +349,16 @@ A search reads the first page of the search catalogs, as Stremio apps do. Those 
 
 | Step | Time |
 |---|---|
-| The search answers once the title searches have answered, or after the first found its page | 3 seconds after the first page found |
+| The search answers once the title searches have answered, or once the first source in the order found titles, those before it having answered or failed | 0.3 seconds after that source's page |
+| When a source earlier in the order hasn't answered, and a later one found titles | 3 seconds after the first page found, at most |
 | When no title search found a page | 10 seconds at most |
 | Then it waits for people-search catalogs | 0.3 seconds more |
 | A search is kept for the next search of the same term | 10 minutes |
 | An empty answer is kept | 1 minute, as an addon may answer nothing while what it reads from fails |
 
-- A later answer is kept for the next search of the same term.
-- A search catalog that did not answer in time is left out of searches for 5 minutes, unless one of its pages comes in meanwhile. So an addon that never answers delays one search, not each of them. **System › Health** tells it meanwhile, and the log names the addon.
+- A later answer is kept for the next search of the same term: a slower addon's titles show at the next search, which apps send anyway as you type.
+- The order is [the order of sources](addons.md#the-order-of-sources): the source first in it gives the time. An addon that usually answers fast, placed first, keeps searches quick.
+- A search catalog that held a search for 3 or 10 seconds without answering, or whose request timed out, is left out of searches for 5 minutes, unless one of its pages comes in meanwhile. So an addon that never answers delays one search at most, not each of them. **System › Health** tells it meanwhile, and the log names the addon. An addon that answers after the 0.3 seconds held no search, and isn't left out.
 - Matching a local folder's files, and **Identify**, still wait for every addon (see [Failed searches](unmatched-files.md#failed-searches)).
 
 <a id="refreshing-a-library-s-descriptions"></a><a id="refreshing-a-librarys-descriptions"></a>

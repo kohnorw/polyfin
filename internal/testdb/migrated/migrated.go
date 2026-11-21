@@ -3,6 +3,8 @@
 package migrated
 
 import (
+	"context"
+	"log/slog"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -20,5 +22,7 @@ func New(t testing.TB) *pgxpool.Pool {
 	if err != nil {
 		t.Fatal(err)
 	}
-	return testdb.Copy(t, fingerprint[:16], database.Migrate)
+	return testdb.Copy(t, fingerprint[:16], func(ctx context.Context, pool *pgxpool.Pool) error {
+		return database.Migrate(ctx, pool, slog.New(slog.DiscardHandler))
+	})
 }

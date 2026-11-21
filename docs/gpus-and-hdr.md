@@ -97,10 +97,11 @@ Frames always go through memory in these cases:
 
 A server busy with other conversions at startup times its GPU and processor too slow. So Polyfin keeps its timings and times again later.
 
-- **Kept timings:** each timing that is not busy is kept in `gpu-timings.json`, in the data folder, never in the database. They are kept per GPU method, device, encoders, GPU model, driver, FFmpeg build and number of processors. A missing, unreadable or foreign file is ignored; the log says `The timings kept are ignored` for the last two.
-- **A new history:** another GPU, driver or FFmpeg build starts a new one. Timings older than 7 days are dropped.
-- **At startup:** the best of each chain over the last 7 days applies as soon as the GPU is chosen: the SDR and HDR chains with their speeds, and the processor's speed, so its 1080p or 720p cap. The log says `Applied the best recent timings`. Then the timings run as before.
-- **No kept timing:** at the first start, or with a new GPU, driver or FFmpeg build, the timing applies whatever it is, as before.
+- **Kept timings:** each timing that is not busy is kept in `gpu-timings.json`, in the data folder, never in the database. They are kept per GPU method, device, encoders, GPU model, driver, FFmpeg build, processor model and number of processors. A missing, unreadable or foreign file is ignored; the log says `The timings kept are ignored` for the last two.
+- **A new history:** another GPU, driver, FFmpeg build or processor starts a new one. Timings older than 7 days are dropped.
+- **At startup:** the best of each chain over the last 7 days applies as soon as the GPU is chosen: the SDR and HDR chains with their speeds, and the processor's speed, so its 1080p or 720p cap. The log says `Applied the best recent timings`. Then the GPU's timings run as before.
+- **The processor at startup:** with a timing of the processor's tone mapping kept from the last 7 days, Polyfin does not time it again at startup: the log says `The processor's HDR tone mapping is not timed at startup: its best timing of the last 7 days applies`. The scheduled task below keeps that timing fresh. That timing keeps every processor busy for several seconds and needs close to 1 GB of memory.
+- **No kept timing:** at the first start, with a new GPU, driver, FFmpeg build or processor, or after 7 days without a timing, the timing runs at startup and applies whatever it is, as before.
 - **A busy timing:** one where a chain converts under 60 % of its best of the last 7 days, or fails where its best converted. The log says `Timed while the server was busy: kept the best recent timings`, with `timed=gpu` or `timed=processor` and the chains in `below`. It is neither kept nor applied, and the best stays in force. Polyfin times again 30 to 60 minutes later, once quiet, until a timing is not busy: the log says `Timing again once the server is quiet`, with the wait in `after`.
 - **A timing not busy:** it is kept, and the best of the last 7 days applies. A timing a little lower than the best thus changes nothing.
 - **Quiet:** for 10 minutes, Polyfin itself did none of this: convert video (playbacks, channels, conversions streamed as one file), convert a file whole, record, air a channel it makes, or run a heavy scheduled task (Make thumbnails, Find commercials in recordings, Scan local folders, Back up the database). Only Polyfin's own work counts, not other programs.
@@ -108,6 +109,7 @@ A server busy with other conversions at startup times its GPU and processor too 
 - **Work that starts during a timing:** it stops the timing, and the log says `Work started during the timing: it is tried again when the server is quiet`. The timing waits for the next quiet window.
 - **Playbacks:** new timings apply to playbacks starting afterwards. Those under way keep their way to the end.
 - **Unchanged:** the thresholds have no extra margin, and each run still converts 2 seconds of 4K test pattern, within 20 seconds.
+- **Lighter samples:** the 4K HDR samples that x265 makes for the timings use no lookahead, no B-frames and one frame thread, which more than halves their memory. Making a sample is not timed. In a container limited to fewer processors than the host has, x264 gets as many threads as the processors Polyfin may use.
 
 ### Giving the container an NVIDIA GPU
 
@@ -161,7 +163,7 @@ When HDR video is converted to SDR, Polyfin tone maps it. HDR tone mapped to SDR
 | VideoToolbox, on macOS | `scale_vt`, through the system's own tone mapping to BT.709 | 4K | HDR10 and HLG. No Dolby Vision profile 5. |
 | Processor, elsewhere | FFmpeg's tone mapping filter | **Maximum quality of HDR converted by the processor** | No Dolby Vision profile 5. |
 
-**The processor's cap with Automatic:** Polyfin measures the processor at startup and again when the server is quiet, in the background, and keeps the best of the last 7 days (see [When Polyfin times again](#when-polyfin-times-again)). It converts 2 seconds of generated 4K HDR10 to 1080p the way conversions run on the server: decoded and encoded on the GPU when there is one.
+**The processor's cap with Automatic:** Polyfin measures the processor at startup when no timing of the last 7 days is kept, and again when the server is quiet, in the background, and keeps the best of the last 7 days (see [When Polyfin times again](#when-polyfin-times-again)). It converts 2 seconds of generated 4K HDR10 to 1080p the way conversions run on the server: decoded and encoded on the GPU when there is one.
 
 - 1080p when that runs at 1.5 times real time or faster.
 - Else 720p, which also applies until the first measurement ends, or when it fails.

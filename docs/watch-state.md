@@ -134,11 +134,15 @@ Two settings decide when a title counts as played and when a resume point is kep
 
 - The resume threshold must be below the played one, or Polyfin refuses it.
 - A title under 5 minutes is marked played once past the resume threshold, as in Jellyfin.
+- A stop that gives no position was at the last position the app's progress reports gave for that title. An app that never reported its progress plays the title through: it is marked played, with one more play.
+- A stop the app reports as failed changes nothing: the played mark, resume point and plays stay as they were, and tracking services hear nothing of it.
 
 **Compared with Jellyfin**
 
 - These replace Jellyfin's `MaxResumePct` and `MinResumePct`, with the same defaults, 90 and 5.
 - Jellyfin takes any values; Polyfin keeps them in the ranges above.
+- Jellyfin marks a title played on any stop without a position. Polyfin does so only for apps that never reported a position during the playback: an app that stops without one leaves the title at its last reported position, and tracking services get no false play.
+- A failed stop (`Failed` in `PlaybackStopInfo`) leaves the watch state alone in both.
 
 ### Playlists
 

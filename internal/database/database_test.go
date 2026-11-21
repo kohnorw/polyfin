@@ -26,7 +26,7 @@ func TestMigrateCreatesAStableServerIdentity(t *testing.T) {
 	t.Parallel()
 	pool := testdb.Empty(t)
 	ctx := t.Context()
-	if err := Migrate(ctx, pool); err != nil {
+	if err := Migrate(ctx, pool, quiet); err != nil {
 		t.Fatal(err)
 	}
 	first, err := ServerID(ctx, pool)
@@ -37,7 +37,7 @@ func TestMigrateCreatesAStableServerIdentity(t *testing.T) {
 		t.Fatalf("server ID %q is not 32 lowercase hex characters", first)
 	}
 	// A restart runs Migrate again: the identity clients know must survive it.
-	if err := Migrate(ctx, pool); err != nil {
+	if err := Migrate(ctx, pool, quiet); err != nil {
 		t.Fatal(err)
 	}
 	if again, _ := ServerID(ctx, pool); again != first {
@@ -101,7 +101,7 @@ func TestMigrateRecordsASupersededChecksumAsShipped(t *testing.T) {
 	t.Parallel()
 	pool := testdb.Empty(t)
 	ctx := t.Context()
-	if err := Migrate(ctx, pool); err != nil {
+	if err := Migrate(ctx, pool, quiet); err != nil {
 		t.Fatal(err)
 	}
 	shipped, err := shippedMigrations()
@@ -132,7 +132,7 @@ func TestMigrateRecordsASupersededChecksumAsShipped(t *testing.T) {
 	if err := CheckApplied(applied()); err != nil {
 		t.Fatalf("CheckApplied with 0.72.0's 0239: %v", err)
 	}
-	if err := Migrate(ctx, pool); err != nil {
+	if err := Migrate(ctx, pool, quiet); err != nil {
 		t.Fatalf("Migrate with 0.72.0's 0239: %v", err)
 	}
 	if checksum := applied()[239]; checksum != shipped[238].checksum {
@@ -145,7 +145,7 @@ func TestMigrateRecordsASupersededChecksumAsShipped(t *testing.T) {
 	if err := CheckApplied(applied()); !errors.Is(err, ErrChangedMigration) {
 		t.Errorf("CheckApplied with an edited 0239: %v", err)
 	}
-	if err := Migrate(ctx, pool); !errors.Is(err, ErrChangedMigration) || !strings.Contains(err.Error(), "0239_catalog_renames") {
+	if err := Migrate(ctx, pool, quiet); !errors.Is(err, ErrChangedMigration) || !strings.Contains(err.Error(), "0239_catalog_renames") {
 		t.Errorf("Migrate with an edited 0239: %v", err)
 	}
 }
@@ -245,7 +245,7 @@ func TestPoolIsCappedUnlessTheURLSaysOtherwise(t *testing.T) {
 		"host=db user=polyfin dbname=polyfin pool_max_conns=5":                          5,
 		"host=db user=polyfin dbname=polyfin":                                           maxConns,
 	} {
-		config, err := poolConfig(connection)
+		config, err := poolConfig(connection, slog.New(slog.DiscardHandler))
 		if err != nil {
 			t.Fatalf("%s: %v", connection, err)
 		}
@@ -260,7 +260,7 @@ func TestPoolIsCappedUnlessTheURLSaysOtherwise(t *testing.T) {
 		}
 	}
 	for _, connection := range []string{"postgresql://db/polyfin?pool_max_conns=0", "postgresql://db/polyfin?pool_max_conns=many"} {
-		if _, err := poolConfig(connection); err == nil {
+		if _, err := poolConfig(connection, slog.New(slog.DiscardHandler)); err == nil {
 			t.Errorf("%s was accepted", connection)
 		}
 	}

@@ -393,3 +393,45 @@ func TestMemorySizeCountsWhatAValueHolds(t *testing.T) {
 		t.Errorf("a value that leads to itself: %d", got)
 	}
 }
+
+// A budget keeps the share of its bytes set for a small memory limit, a
+// byte at least, and all of them otherwise.
+func TestABudgetKeepsItsShare(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		budget int
+		share  float64
+		want   int
+	}{
+		{96 << 20, 1, 96 << 20},
+		{96 << 20, 0.125, 12 << 20},
+		{128 << 20, 1.0 / 32, 4 << 20},
+		{10, 0.01, 1},
+		{0, 0.5, 0},
+	} {
+		if got := scaled(tc.budget, tc.share); got != tc.want {
+			t.Errorf("%d at %v: %d, want %d", tc.budget, tc.share, got, tc.want)
+		}
+	}
+}
+
+// A cache made once a smaller share is set keeps that share of its
+// bytes.
+//
+//nolint:paralleltest // sets the process's budget share, which the parallel tests, paused until the others end, do not see changed
+func TestACacheMadeUnderASmallerShareKeepsLess(t *testing.T) {
+	SetBudgetShare(0.5)
+	defer SetBudgetShare(1)
+	c := newClock(time.Hour).sized(100)
+	c.Put("a", strings.Repeat("a", 30))
+	c.Put("b", strings.Repeat("b", 30))
+	if _, ok := c.Get("a"); ok {
+		t.Error("60 bytes kept within half of 100")
+	}
+	if _, ok := c.Get("b"); !ok {
+		t.Error("the newest value was evicted")
+	}
+	if got := Budget(128 << 20); got != 64<<20 {
+		t.Errorf("budget %d, want %d", got, 64<<20)
+	}
+}

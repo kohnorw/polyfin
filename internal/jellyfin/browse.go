@@ -594,7 +594,7 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 	}
 	// Every episode of the TV libraries, as live-TV style apps such as
 	// NostalgiaTV ask (see episodepool.go).
-	if h.episodeListing(w, r, user, parent, hasParent, names, fields, start, limit) {
+	if h.episodePoolListing(w, r, user, parent, hasParent, names, fields, start, limit) {
 		return
 	}
 	if !hasParent {
@@ -616,6 +616,11 @@ func (h *Handler) items(w http.ResponseWriter, r *http.Request) {
 		// The library cannot be narrowed to the requested genre, studio or
 		// year.
 		writeJSON(w, http.StatusOK, QueryResult{Items: []BaseItemDto{}, StartIndex: start})
+		return
+	}
+	// The episodes under a series or a library, through their seasons and
+	// series.
+	if h.episodeListing(w, r, user, parent, genre, fields, keep, start, limit) {
 		return
 	}
 	// A library's series by their episodes, and its titles at random, are

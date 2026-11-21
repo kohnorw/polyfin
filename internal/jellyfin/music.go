@@ -3,6 +3,7 @@ package jellyfin
 import (
 	"cmp"
 	"errors"
+	"fmt"
 	"io"
 	"math/rand/v2"
 	"net/http"
@@ -260,12 +261,20 @@ func (h *Handler) writeMusic(w http.ResponseWriter, r *http.Request, user accoun
 }
 
 // sortName is what items sort by name on, and their SortName: the sort
-// name an administrator set, else their name, without regard to case.
+// name an administrator set, else their name, without regard to case. An
+// episode's name follows its season and number where it shows, padded to
+// three and four digits as Jellyfin's are, "001 - 0002 - name", so that
+// episodes sorted by name come in order.
 func sortName(item library.Item) string {
 	if item.SortName != "" {
 		return strings.ToLower(item.SortName)
 	}
-	return strings.ToLower(strings.TrimSpace(item.Name))
+	name := strings.ToLower(strings.TrimSpace(item.Name))
+	if item.Kind == library.KindEpisode {
+		season, number := listedNumbers(item)
+		return fmt.Sprintf("%03d - %04d - %s", season, number, name)
+	}
+	return name
 }
 
 // letterRange is what the alphabet pickers of Jellyfin apps narrow a list

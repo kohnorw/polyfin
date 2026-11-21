@@ -50,10 +50,10 @@ type episodePools struct {
 
 var pools episodePools
 
-// episodeListing answers a library-wide episode listing (see above). It
+// episodePoolListing answers a library-wide episode listing (see above). It
 // reports whether it answered: it leaves other listings alone, those of a
 // series, a season, a collection or a movie library included.
-func (h *Handler) episodeListing(w http.ResponseWriter, r *http.Request, user accounts.User, parent accounts.ID, hasParent bool,
+func (h *Handler) episodePoolListing(w http.ResponseWriter, r *http.Request, user accounts.User, parent accounts.ID, hasParent bool,
 	names nameFilter, fields fieldSet, start, limit int) bool {
 	if recursive, _ := boolQuery(r, "recursive"); !recursive {
 		return false

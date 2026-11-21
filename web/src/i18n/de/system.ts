@@ -381,7 +381,7 @@ const system: typeof en = {
       },
       addonsTitle: 'Add-ons',
       addonsHelp:
-        'Basierend auf den Anfragen von Apps seit dem Serverstart. „Prüfen“ fragt ein Add-on einmalig nach seinem Manifest, höchstens einmal pro Minute.',
+        'Basierend auf den Anfragen an jedes Add-on seit dem Serverstart, für Apps und im Hintergrund. „Prüfen“ fragt ein Add-on einmalig nach seinem Manifest, höchstens einmal pro Minute.',
       noAddons: 'Der Server hat kein Add-on.',
       addonStatus: {
         ok: 'Antwortet',
@@ -404,6 +404,37 @@ const system: typeof en = {
       requestsTerm: 'Anfragen',
       requests: (count: number, failures: number) =>
         `${count} ${count === 1 ? 'Anfrage' : 'Anfragen'}, ${failures} fehlgeschlagen`,
+      addonRateLimited: 'Meldet Anfragelimits',
+      backgroundPaused: (until: string, reason: 'rate_limited' | 'timeout') =>
+        reason === 'rate_limited'
+          ? `Polyfins Hintergrundanfragen an seinen Server pausieren bis ${until}, weil es eine wegen zu vieler Anfragen abgelehnt hat. Wiedergaben fragen es weiterhin.`
+          : `Polyfins Hintergrundanfragen an seinen Server pausieren bis ${until}, weil es Anfragen nach Versionen nicht rechtzeitig beantwortet hat. Wiedergaben fragen es weiterhin.`,
+      trafficTitle: 'Anfragen nach Herkunft',
+      trafficNone: 'Keine Anfrage in den letzten 24 Stunden.',
+      trafficSummary: (count: number, background: number) =>
+        count === 0
+          ? 'Keine Anfrage in der letzten Stunde.'
+          : `${count} ${count === 1 ? 'Anfrage' : 'Anfragen'} in der letzten Stunde, davon ${background} im Hintergrund (${Math.round((background / count) * 100)} %)`,
+      trafficOrigin: 'Herkunft',
+      trafficHour: 'Letzte Stunde',
+      trafficDay: 'Letzte 24 Std.',
+      trafficOrigins: {
+        apps: 'Wiedergaben und Seiten in Apps',
+        preload: 'Vorladen',
+        watchlists: 'Prüfen der Merklisten',
+        catalogs: 'Kataloge und Startseitenzeilen',
+        ratings: 'Altersfreigaben',
+        refresh: 'Aktualisieren der Quellen',
+        imports: 'Importe',
+        other: 'Andere Hintergrundarbeit',
+      },
+      trafficFailed: (count: number) => `${count} fehlgeschlagen`,
+      noticesTitle: 'Hinweise in seinen Antworten',
+      noticesHelp:
+        'Was seine Antworten in den letzten 24 Stunden statt etwas Abspielbarem sagten, etwa dass ein Add-on fehlschlug, das es sammelt. Links und Schlüssel sind ausgeblendet.',
+      noticeRateLimited: 'Zu viele Anfragen',
+      noticeSeen: (answers: number, background: number, since: string) =>
+        `${answers} ${answers === 1 ? 'Antwort' : 'Antworten'} seit ${since}, davon ${background} an Hintergrundarbeit`,
       check: 'Prüfen',
       checkLabel: (name: string) => `${name} jetzt prüfen`,
       checking: 'Wird geprüft…',

@@ -305,18 +305,20 @@ func (c *imageCache) put(key string, image artwork) {
 }
 
 // remember keeps image in memory, forgetting the least recently used
-// beyond imageCacheBytes; c.mu is held.
+// beyond imageCacheBytes, scaled to the memory limit (see cache.Budget);
+// c.mu is held.
 func (c *imageCache) remember(key string, image artwork) {
 	if element, ok := c.memory[key]; ok {
 		c.order.MoveToFront(element)
 		return
 	}
-	if len(image.body) > imageCacheBytes/4 {
+	budget := cache.Budget(imageCacheBytes)
+	if len(image.body) > budget/4 {
 		return
 	}
 	c.memory[key] = c.order.PushFront(&memoryImage{key: key, image: image})
 	c.size += len(image.body)
-	for c.size > imageCacheBytes {
+	for c.size > budget {
 		oldest := c.order.Back()
 		c.order.Remove(oldest)
 		kept := oldest.Value.(*memoryImage)

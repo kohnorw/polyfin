@@ -98,7 +98,10 @@ type Service struct {
 	pages       *cache.Cache[pageKey, fetched[[]stremio.Meta]]
 	searchPages *cache.Cache[pageKey, fetched[[]stremio.Meta]]
 	metas       *cache.Cache[metaKey, fetched[stremio.Meta]]
-	flight      singleflight.Group
+	// absent remembers briefly the titles addons had no description of
+	// (see noDescription).
+	absent *cache.Cache[metaKey, absence]
+	flight singleflight.Group
 	// joined, when tests set it, is called with the key of each call to
 	// shared once it waits on the key's fetch: the one it started, or the
 	// one under way it shares.
@@ -184,12 +187,13 @@ type Service struct {
 	// context.WithTimeout, which tests replace (see SetCreditsWaitBound).
 	creditsWait  time.Duration
 	creditsBound func(ctx context.Context, wait time.Duration) (context.Context, context.CancelFunc)
-	// searchGrace and searchBound bound how long a search waits for its
-	// title searches, and lateSearches are the search catalogs it leaves
-	// out, as they were late (see searchdeadline.go).
-	searchGrace  time.Duration
-	searchBound  time.Duration
-	lateSearches lateSearches
+	// searchGrace, searchPatience and searchBound bound how long a search
+	// waits for its title searches, and lateSearches are the search
+	// catalogs it leaves out, as they were late (see searchdeadline.go).
+	searchGrace    time.Duration
+	searchPatience time.Duration
+	searchBound    time.Duration
+	lateSearches   lateSearches
 	// catalogWaits are the waits hosts asked for, catalogSlots bound the
 	// catalog pages asked of each host at once, and failedRefreshes are
 	// the pages whose refresh failed lately (see catalogwaits.go).
@@ -458,6 +462,7 @@ func New(db *pgxpool.Pool, store *addons.Store, client *stremio.Client, logger *
 		creditsWait:    titleCreditsWait,
 		creditsBound:   context.WithTimeout,
 		searchGrace:    searchGrace,
+		searchPatience: searchPatience,
 		searchBound:    searchBound,
 		music:          eclipse.NewClient(client),
 		watchlist:      watchlist.New(db),
@@ -480,6 +485,7 @@ func New(db *pgxpool.Pool, store *addons.Store, client *stremio.Client, logger *
 	s.libraryImages = cache.NewLasting[pageKey, fetched[foundImage]](1000, s.keptCatalogLife, clock)
 	s.catalogSlots = newAddonSlots[string](catalogHostFetches)
 	s.failedRefreshes = cache.NewLasting[pageKey, time.Time](4000, func() time.Duration { return failedRefreshWait }, clock)
+	s.absent = cache.NewLasting[metaKey, absence](maxAbsent, func() time.Duration { return absentFor }, clock)
 	s.pace = newPacing(clock)
 	s.prefetches = make(chan struct{}, prefetchLimit)
 	s.translations = make(chan struct{}, translationReaders)
@@ -3095,7 +3101,26 @@ func episodeItem(series Item, meta stremio.Meta, posters map[int]string, w words
 	if item.PremiereDate != nil {
 		item.ProductionYear = item.PremiereDate.Year()
 	}
+	item.ProviderIDs = episodeIDs(video)
 	return item
+}
+
+// episodeIDs returns an episode's own TMDB and TVDB identifiers, as its
+// metadata addon gives them, under the names Jellyfin uses; nil when it
+// gives neither. Its series' identifiers stay the series'.
+func episodeIDs(video stremio.Video) map[string]string {
+	tmdb, tvdb := video.MoviedbID.ID(), video.TvdbID.ID()
+	if tmdb == 0 && tvdb == 0 {
+		return nil
+	}
+	ids := make(map[string]string, 2)
+	if tmdb > 0 {
+		ids["Tmdb"] = strconv.Itoa(tmdb)
+	}
+	if tvdb > 0 {
+		ids["Tvdb"] = strconv.Itoa(tvdb)
+	}
+	return ids
 }
 
 // Seasons lists a series' seasons, in its order (see episodeorder.go).
@@ -3353,22 +3378,25 @@ func (s *Service) search(ctx context.Context, v view, term string, kinds []Kind,
 
 // searched reads the first page of each search catalog, together, and
 // interleaves their titles as merged does. It answers once the title
-// searches did, or at its deadline: searchGrace after one of them found
-// its page, searchBound at most. It then waits peopleGrace more for the
-// people searches, and only for them, within searchBound, when there are
-// only people searches. Searches still running then answer for the next
-// request: their pages are kept (see page). The title searches that
-// missed the deadline are left out of the searches for a while, and so
-// are those already left out (see lateSearch).
+// searches did, or at its deadline: searchGrace after the first title
+// search in the sources' order found its page, those before it having
+// answered; searchPatience after any title search found its page, while
+// one before it has not answered; searchBound at most. It then waits
+// peopleGrace more for the people searches, and only for them, within
+// searchBound, when there are only people searches. Searches still
+// running then answer for the next request: their pages are kept (see
+// page). The title searches that held it past its patience or its bound
+// are left out of the searches for a while (see lateSearch); those still
+// running past the grace held nothing, and are not.
 func (s *Service) searched(ctx context.Context, v view, sources []source, need int) []listed {
 	sources = slices.DeleteFunc(slices.Clone(sources), s.skipsSearch)
 	lists := make([][]stremio.Meta, len(sources))
-	asked, answered := make([]bool, len(sources)), make([]bool, len(sources))
+	asked, answered, found := make([]bool, len(sources)), make([]bool, len(sources)), make([]bool, len(sources))
 	var mu sync.Mutex
 	var titleSearches, all sync.WaitGroup
 	fetches := make(chan struct{}, catalogFetches)
-	found := make(chan struct{})
-	var foundOnce sync.Once
+	// titleAnswers tells each title search's answer.
+	titleAnswers := make(chan struct{}, len(sources))
 	people, titles := false, 0
 	for i, src := range sources {
 		byPeople := searchesPeople(src.catalog)
@@ -3394,32 +3422,58 @@ func (s *Service) searched(ctx context.Context, v view, sources []source, need i
 				s.logger.Warn("A search catalog could not be read", "addon", src.addon.addon.LogName(), "catalog", src.catalog.ID, "error", err)
 			}
 			mu.Lock()
-			lists[i], answered[i] = metas, true
+			lists[i], answered[i], found[i] = metas, true, err == nil
 			mu.Unlock()
-			if err == nil && !byPeople {
-				foundOnce.Do(func() { close(found) })
+			if !byPeople {
+				titleAnswers <- struct{}{}
 			}
 		}()
 	}
+	// leading reports whether the first title search in the sources'
+	// order to find its page did, all those before it having answered,
+	// and whether any title search found its page.
+	leading := func() (first, some bool) {
+		mu.Lock()
+		defer mu.Unlock()
+		waiting := false
+		for i, src := range sources {
+			if searchesPeople(src.catalog) {
+				continue
+			}
+			if found[i] {
+				first, some = first || !waiting, true
+			}
+			waiting = waiting || !answered[i]
+		}
+		return first, some
+	}
 	everything := done(&all)
-	titlesDone, firstFound := everything, (<-chan struct{})(nil)
+	titlesDone := everything
 	if titles > 0 {
-		titlesDone, firstFound = done(&titleSearches), found
+		titlesDone = done(&titleSearches)
 	}
 	bound := time.NewTimer(s.searchBound)
 	defer bound.Stop()
-	var grace <-chan time.Time
-	finished, late := false, false
-	for !finished && !late && ctx.Err() == nil {
+	var grace, patience <-chan time.Time
+	finished, ended, late := false, false, false
+	for !finished && !ended && ctx.Err() == nil {
 		select {
 		case <-titlesDone:
 			finished = true
-		case <-firstFound:
-			firstFound, grace = nil, time.After(s.searchGrace)
+		case <-titleAnswers:
+			first, some := leading()
+			if first && grace == nil {
+				grace = time.After(s.searchGrace)
+			}
+			if some && patience == nil {
+				patience = time.After(s.searchPatience)
+			}
 		case <-grace:
-			late = true
+			ended = true
+		case <-patience:
+			ended, late = true, true
 		case <-bound.C:
-			late = true
+			ended, late = true, true
 		case <-ctx.Done():
 		}
 	}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"log/slog"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -243,5 +244,84 @@ func TestIntelToneMappingKeepsItsDeinterlacer(t *testing.T) {
 	}
 	if f.runs["check"] != nil || f.runs["hdr gpu"] != nil || f.runs["hdr memory"] != nil {
 		t.Errorf("Vulkan timed on an Intel GPU: %q", f.runs)
+	}
+}
+
+// A start reuses the processor's timing kept from the last 7 days for
+// its key, a failed one too, and times nothing; a timing older than 7
+// days, or of another FFmpeg build, is timed again at start, with the
+// light x265 sample, and kept. The test drives the clock the timings
+// count by.
+func TestTheProcessorTimingIsKeptAWeekPerFFmpegBuild(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 11, 21, 12, 0, 0, 0, time.UTC)
+	key := timingKey{Method: "none", FFmpeg: "n8.0 1a2b3c4d", CPU: "AMD Ryzen 7 5700U", Processors: 8}
+	newBuild := key
+	newBuild.FFmpeg = "n8.1 5e6f7a8b"
+	for _, tc := range []struct {
+		name   string
+		keyNow timingKey
+		age    time.Duration
+		speed  float64
+		timed  bool
+		height int
+		logged string
+	}{
+		{"kept 2 days ago", key, 48 * time.Hour, 1.7, false, 1080, "speed=1.7x height=1080"},
+		{"failed 2 days ago", key, 48 * time.Hour, 0, false, 720, "speed=none height=720"},
+		{"kept 8 days ago", key, 8 * 24 * time.Hour, 1.7, true, 720, ""},
+		{"of another FFmpeg build", newBuild, 48 * time.Hour, 1.7, true, 720, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			// The sample converts at 1.2 times real time.
+			r := &recordingRunner{answer: func([]string) (time.Duration, error) { return at(1.2), nil }}
+			log := &syncBuffer{}
+			m := &Manager{dir: t.TempDir(), logger: slog.New(slog.NewTextHandler(log, nil)), detected: map[string]*Hardware{},
+				done: make(chan struct{}), run: r.run,
+				can: capabilities{encoders: []string{"libx264", "libx265"}, filters: []string{"zscale", "tonemap"}}}
+			path := filepath.Join(t.TempDir(), "gpu-timings.json")
+			keep(t, path, keptTiming{timingKey: key, At: now.Add(-tc.age), chainTimings: chainTimings{Speeds: map[string]float64{chainProcessor: tc.speed}}})
+			m.UseTimings(path)
+			m.timings.identify = func(*Hardware) timingKey { return tc.keyNow }
+			m.retime.clock = func() time.Time { return now }
+			m.timeToneMappingLater()
+			m.measuring.Wait()
+			if !m.processorTimed.Load() || m.ToneMappedHeight() != tc.height {
+				t.Errorf("timed %v at %dp", m.processorTimed.Load(), m.ToneMappedHeight())
+			}
+			if !tc.timed {
+				if r.count() != 0 || len(keptIn(t, path)) != 1 ||
+					!strings.Contains(log.String(), `msg="The processor's HDR tone mapping is not timed at startup: its best timing of the last 7 days applies" `+tc.logged) {
+					t.Errorf("%d runs, kept %+v, logged %s", r.count(), keptIn(t, path), log)
+				}
+				return
+			}
+			if r.count() != 2 || !r.ran("log-level=error:rc-lookahead=0:bframes=0:frame-threads=1") {
+				t.Errorf("runs: %q", r.runs)
+			}
+			got := keptIn(t, path)
+			if last := got[len(got)-1]; last.timingKey != tc.keyNow || !last.At.Equal(now) || !near(last.Speeds[chainProcessor], 1.2) {
+				t.Errorf("kept %+v", got)
+			}
+		})
+	}
+}
+
+// The processor's model, as /proc/cpuinfo names it on x86, on a
+// Raspberry Pi, and on ARM boards that only write its codes.
+func TestCPUInfoNamesTheProcessor(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct{ info, want string }{
+		{"processor\t: 0\nvendor_id\t: AuthenticAMD\nmodel name\t: AMD Ryzen 7 5700U with Radeon Graphics\nprocessor\t: 1\nmodel name\t: AMD Ryzen 7 5700U with Radeon Graphics\n",
+			"AMD Ryzen 7 5700U with Radeon Graphics"},
+		{"processor\t: 0\nBogoMIPS\t: 108.00\nCPU implementer\t: 0x41\nCPU part\t: 0xd08\n\nHardware\t: BCM2835\nModel\t\t: Raspberry Pi 4 Model B Rev 1.4\n",
+			"Raspberry Pi 4 Model B Rev 1.4"},
+		{"processor\t: 0\nCPU implementer\t: 0x41\nCPU part\t: 0xd0c\nprocessor\t: 1\nCPU implementer\t: 0x41\nCPU part\t: 0xd0c\n", "0x41:0xd0c"},
+		{"", ""},
+	} {
+		if got := cpuinfoModel(tc.info); got != tc.want {
+			t.Errorf("%q: %q, want %q", tc.info, got, tc.want)
+		}
 	}
 }

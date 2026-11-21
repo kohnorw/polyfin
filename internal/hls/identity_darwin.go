@@ -13,3 +13,10 @@ func (m *Manager) systemGPU(*Hardware) (gpu, driver string) {
 	}
 	return gpu, driver
 }
+
+// systemProcessor names the processor as macOS tells it, such as
+// "Apple M2"; empty when it cannot read it.
+func systemProcessor() string {
+	model, _ := unix.Sysctl("machdep.cpu.brand_string")
+	return model
+}

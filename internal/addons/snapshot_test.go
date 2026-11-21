@@ -143,7 +143,7 @@ func TestWatchedStoreIgnoresOtherSchemas(t *testing.T) {
 		t.Fatal(err)
 	}
 	neighbourPool := sameDatabase(t, other, func(config *pgxpool.Config) { config.ConnConfig.RuntimeParams["search_path"] = "neighbour" })
-	if err := database.Migrate(t.Context(), neighbourPool); err != nil {
+	if err := database.Migrate(t.Context(), neighbourPool, slog.New(slog.DiscardHandler)); err != nil {
 		t.Fatal(err)
 	}
 	neighbour := New(neighbourPool, stremio.NewClient("test"))

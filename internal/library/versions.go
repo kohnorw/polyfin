@@ -1129,14 +1129,8 @@ func noticeText(notices []stremio.Stream) string {
 	const most = 300
 	texts := make([]string, 0, len(notices))
 	for _, notice := range notices {
-		var parts []string
-		for _, part := range []string{notice.Name, notice.Title, notice.Description} {
-			if part = strings.Join(strings.Fields(part), " "); part != "" && !slices.Contains(parts, part) {
-				parts = append(parts, part)
-			}
-		}
-		if len(parts) > 0 {
-			texts = append(texts, strings.Join(parts, ": "))
+		if text := notice.NoticeText(); text != "" {
+			texts = append(texts, text)
 		}
 	}
 	text := strings.Join(texts, " | ")

@@ -48,6 +48,10 @@ type HealthSources struct {
 	// time, when the pause ends (library.Service.StreamsTimingOut); nil
 	// tells none.
 	StreamsTimingOut func(addon addons.Addon) (time.Time, bool)
+	// BackgroundPause tells, while the background requests to an addon's
+	// server pause, when the pause ends and why, a Failure code of
+	// stremio's (library.Service.BackgroundPause); nil tells none.
+	BackgroundPause func(addon addons.Addon) (time.Time, string, bool)
 	// Cache keeps the sources being played. Folders are the folders of
 	// the run, which keep it, the segments and the cache, those the
 	// settings chose that could not be written into at start among them.
@@ -653,9 +657,9 @@ type pausedHostJSON struct {
 	Until time.Time `json:"until"`
 }
 
-// addonHealthJSON is how the requests made to an addon for apps went since
-// the server started; Requests is 0 when none was. Owner is the user whose
-// own addon it is, nil for the server's.
+// addonHealthJSON is how the requests made to an addon went since the
+// server started, for apps and in the background; Requests is 0 when none
+// was. Owner is the user whose own addon it is, nil for the server's.
 type addonHealthJSON struct {
 	ID            string     `json:"id"`
 	Owner         *ownerJSON `json:"owner"`
@@ -674,6 +678,52 @@ type addonHealthJSON struct {
 	// its catalog pages not asked for until then; nil when none runs.
 	// Failure is rate_limited meanwhile.
 	CatalogsWaitUntil *time.Time `json:"catalogsWaitUntil"`
+	// Hour and Day count the requests of the last hour and of the last 24
+	// hours by origin, each origin once, in the order of stremio.Origin.
+	Hour []originCountJSON `json:"hour"`
+	Day  []originCountJSON `json:"day"`
+	// Notices are the texts its answers carried lately instead of
+	// something to play, the latest first.
+	Notices []noticeJSON `json:"notices"`
+	// BackgroundPause is the pause of the background requests to the
+	// addon's server, nil when none runs.
+	BackgroundPause *backgroundPauseJSON `json:"backgroundPause"`
+}
+
+// originCountJSON counts the requests of an origin: apps, the requests
+// users wait for, or a kind of background work (see stremio.Origin).
+type originCountJSON struct {
+	Origin   string `json:"origin"`
+	Requests int    `json:"requests"`
+	Failures int    `json:"failures"`
+}
+
+// noticeJSON is a notice an addon's answers carried (see stremio.Notice):
+// answers counts them since firstAt, background those to background work.
+type noticeJSON struct {
+	Text        string    `json:"text"`
+	RateLimited bool      `json:"rateLimited"`
+	Answers     int       `json:"answers"`
+	Background  int       `json:"background"`
+	FirstAt     time.Time `json:"firstAt"`
+	LastAt      time.Time `json:"lastAt"`
+}
+
+// backgroundPauseJSON is when a pause of background requests ends, and
+// why: rate_limited or timeout.
+type backgroundPauseJSON struct {
+	Until  time.Time `json:"until"`
+	Reason string    `json:"reason"`
+}
+
+// originCounts lists counts as the admin API tells them.
+func originCounts(counts stremio.Counts) []originCountJSON {
+	result := make([]originCountJSON, len(counts.Requests))
+	for origin := range counts.Requests {
+		result[origin] = originCountJSON{Origin: stremio.Origin(origin).String(), Requests: counts.Requests[origin],
+			Failures: counts.Failures[origin]}
+	}
+	return result
 }
 
 // softwareEncoders are the CPU encoders conversions use.
@@ -893,7 +943,13 @@ func (h *handler) health(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) addonHealth(addon addons.Addon, owner *ownerJSON) addonHealthJSON {
 	result := addonHealthJSON{ID: addon.ID.String(), Owner: owner, Name: addon.Name(), Enabled: addon.Enabled,
-		RefreshedAt: addon.RefreshedAt}
+		RefreshedAt: addon.RefreshedAt, Hour: originCounts(stremio.Counts{}), Day: originCounts(stremio.Counts{}),
+		Notices: []noticeJSON{}}
+	if h.Health.BackgroundPause != nil {
+		if until, reason, ok := h.Health.BackgroundPause(addon); ok {
+			result.BackgroundPause = &backgroundPauseJSON{Until: until, Reason: reason}
+		}
+	}
 	if h.Health.Addons == nil {
 		return result
 	}
@@ -911,6 +967,11 @@ func (h *handler) addonHealth(addon addons.Addon, owner *ownerJSON) addonHealthJ
 	result.Requests, result.Failures = health.Requests, health.Failures
 	if !health.CatalogsWaitUntil.IsZero() {
 		result.CatalogsWaitUntil = new(health.CatalogsWaitUntil)
+	}
+	result.Hour, result.Day = originCounts(health.Traffic.Hour), originCounts(health.Traffic.Day)
+	for _, notice := range health.Notices {
+		result.Notices = append(result.Notices, noticeJSON{Text: notice.Text, RateLimited: notice.RateLimited,
+			Answers: notice.Answers, Background: notice.Background, FirstAt: notice.First, LastAt: notice.Last})
 	}
 	return result
 }

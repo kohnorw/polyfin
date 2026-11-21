@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"slices"
 	"strconv"
 	"strings"
@@ -40,7 +41,11 @@ func (m *Manager) ToneMappedHeight() int {
 // background, once the GPU's chains are timed (see measureLater), keeps
 // how fast it converted, as settleProcessor makes it, and the height that
 // gives, and logs where HDR is then tone mapped (see HDRPath). A timing
-// made while the server was busy is made again later. Close stops it.
+// made while the server was busy is made again later. With a timing of
+// the processor kept from the last 7 days for this GPU, FFmpeg build and
+// processor, failed ones included, it times nothing: the best applies,
+// and the scheduled timings made when quiet keep it fresh (see Retime).
+// Close stops it.
 func (m *Manager) timeToneMappingLater() {
 	ctx, cancel := context.WithCancel(context.Background())
 	m.measuring.Add(1)
@@ -62,8 +67,11 @@ func (m *Manager) timeToneMappingLater() {
 		if m.HasFilters("zscale", "tonemap") {
 			m.retime.run.Lock()
 			hw := m.Hardware()
-			_, speed, timed := m.timeToneMapping(ctx, hw)
-			if timed && ctx.Err() == nil {
+			if speed, kept := m.keptProcessorSpeed(hw); kept {
+				m.setProcessorSpeed(speed)
+				m.logger.Info("The processor's HDR tone mapping is not timed at startup: its best timing of the last 7 days applies",
+					"speed", speedText(speed), "height", m.ToneMappedHeight())
+			} else if _, speed, timed := m.timeToneMapping(ctx, hw); timed && ctx.Err() == nil {
 				speed, busy = m.settleProcessor(hw, speed)
 				m.setProcessorSpeed(speed)
 			}
@@ -77,17 +85,31 @@ func (m *Manager) timeToneMappingLater() {
 	}()
 }
 
+// keptProcessorSpeed is the best speed the processor tone mapped HDR at
+// on hw, nil for no GPU, among the timings kept of the last 7 days (see
+// UseTimings), 0 when they all failed, and whether any is kept.
+func (m *Manager) keptProcessorSpeed(hw *Hardware) (float64, bool) {
+	if !m.timings.on() {
+		return 0, false
+	}
+	best, _ := m.timings.best(m.logger, m.timingKey(hw), m.retime.now())
+	speed, kept := best.Speeds[chainProcessor]
+	return speed, kept
+}
+
 // timeToneMapping converts a 4K HDR10 sample to 1080p with the processor's
 // tone mapping, as conversions run on this server: decoded on hw when
 // there is one, else in software, and encoded by hw's H.264 encoder, else
-// by x264 at Polyfin's preset. It reports HighToneMappedHeight when the
+// by x264 at Polyfin's preset, with as many threads as the processors
+// Polyfin may use (see timingThreads). Only that conversion is timed, not
+// the sample's. It reports HighToneMappedHeight when the
 // sample converted at fastToneMapping times real time or faster, else
 // LowToneMappedHeight, with how many times real time it converted at, 0
 // when it failed, and whether it timed at all; it logs what it timed, and
 // why it failed.
 func (m *Manager) timeToneMapping(ctx context.Context, hw *Hardware) (int, float64, bool) {
 	encoding := VideoEncoding{Encoder: "libx264", Width: 1920, Height: 1080, ToneMap: true, ToneMapOnCPU: true}
-	encoder := []string{"-c:v", "libx264", "-preset", "veryfast"}
+	encoder := slices.Concat([]string{"-c:v", "libx264", "-preset", "veryfast"}, timingThreads())
 	if hw != nil {
 		if i := slices.IndexFunc(hw.Encoders, func(e string) bool { return strings.HasPrefix(e, "h264_") }); i >= 0 {
 			encoding.Encoder, encoding.Hardware = hw.Encoders[i], hw
@@ -139,7 +161,7 @@ func (m *Manager) makeHDRSample(ctx context.Context, hw *Hardware, path string) 
 		}
 	}
 	if slices.Contains(m.can.encoders, "libx265") {
-		encodes = append(encodes, slices.Concat(pattern, []string{"-vf", "format=yuv420p10le," + hdrTags, "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error"}))
+		encodes = append(encodes, slices.Concat(pattern, []string{"-vf", "format=yuv420p10le," + hdrTags, "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error:" + lightSample}))
 	}
 	err := errNoHDREncoder
 	for _, encode := range encodes {
@@ -148,4 +170,15 @@ func (m *Manager) makeHDRSample(ctx context.Context, hw *Hardware, path string) 
 		}
 	}
 	return err
+}
+
+// timingThreads bounds the threads of x264 in a timing to the processors
+// Go may use, where they are fewer than the system has: in a container
+// limited to 2 of 10 processors, x264 would size its threads, and its
+// memory, for the 10. Elsewhere x264 picks its own, as in conversions.
+func timingThreads() []string {
+	if n := runtime.GOMAXPROCS(0); n < runtime.NumCPU() {
+		return []string{"-threads", strconv.Itoa(n)}
+	}
+	return nil
 }

@@ -165,6 +165,7 @@ func (s *Service) Resolve(ctx context.Context, refs []TitleRef) ([][]TitleTarget
 // media server holds): they have no target, and none was recorded for
 // them.
 func (s *Service) ResolveFromSource(ctx context.Context, refs []TitleRef) ([][]TitleTarget, []bool, error) {
+	ctx = stremio.WithOrigin(ctx, stremio.OriginImports)
 	unplaced := make([]bool, len(refs))
 	titles, err := s.knownTitles(ctx, refs)
 	if err != nil {

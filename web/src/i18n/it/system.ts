@@ -382,7 +382,7 @@ const system: typeof en = {
       },
       addonsTitle: 'Add-on',
       addonsHelp:
-        'In base alle richieste fatte per le applicazioni dall’avvio del server. «Verifica» chiede una volta il manifest a un add-on, al massimo una volta al minuto.',
+        'In base alle richieste fatte a ogni add-on dall’avvio del server, per le applicazioni e in background. «Verifica» chiede una volta il manifest a un add-on, al massimo una volta al minuto.',
       noAddons: 'Il server non ha alcun add-on.',
       addonStatus: {
         ok: 'Risponde',
@@ -405,6 +405,37 @@ const system: typeof en = {
       requestsTerm: 'Richieste',
       requests: (count: number, failures: number) =>
         `${count} ${count === 1 ? 'richiesta' : 'richieste'}, ${failures} non ${failures === 1 ? 'riuscita' : 'riuscite'}`,
+      addonRateLimited: 'Segnala limiti di richieste',
+      backgroundPaused: (until: string, reason: 'rate_limited' | 'timeout') =>
+        reason === 'rate_limited'
+          ? `Le richieste in background di Polyfin al suo server sono in pausa fino alle ${until}, perché ne ha rifiutata una per troppe richieste. Le riproduzioni lo interrogano comunque.`
+          : `Le richieste in background di Polyfin al suo server sono in pausa fino alle ${until}, perché non ha risposto in tempo alle richieste di versioni. Le riproduzioni lo interrogano comunque.`,
+      trafficTitle: 'Richieste per origine',
+      trafficNone: 'Nessuna richiesta nelle ultime 24 ore.',
+      trafficSummary: (count: number, background: number) =>
+        count === 0
+          ? 'Nessuna richiesta nell’ultima ora.'
+          : `${count} ${count === 1 ? 'richiesta' : 'richieste'} nell’ultima ora, di cui ${background} in background (${Math.round((background / count) * 100)}%)`,
+      trafficOrigin: 'Origine',
+      trafficHour: 'Ultima ora',
+      trafficDay: 'Ultime 24 h',
+      trafficOrigins: {
+        apps: 'Riproduzioni e pagine nelle app',
+        preload: 'Precaricamento',
+        watchlists: 'Controlli delle liste da guardare',
+        catalogs: 'Cataloghi e righe iniziali',
+        ratings: 'Classificazioni',
+        refresh: 'Aggiornamento delle origini',
+        imports: 'Importazioni',
+        other: 'Altro lavoro in background',
+      },
+      trafficFailed: (count: number) => `${count} non ${count === 1 ? 'riuscita' : 'riuscite'}`,
+      noticesTitle: 'Avvisi nelle sue risposte',
+      noticesHelp:
+        'Ciò che le sue risposte hanno detto invece di offrire qualcosa da riprodurre, nelle ultime 24 ore, come il fallimento di un add-on che raccoglie. Link e chiavi sono nascosti.',
+      noticeRateLimited: 'Troppe richieste',
+      noticeSeen: (answers: number, background: number, since: string) =>
+        `${answers} ${answers === 1 ? 'risposta' : 'risposte'} da ${since}, di cui ${background} al lavoro in background`,
       check: 'Verifica',
       checkLabel: (name: string) => `Verifica ${name} ora`,
       checking: 'Verifica in corso…',

@@ -358,7 +358,7 @@ const system = {
       },
       addonsTitle: 'Addons',
       addonsHelp:
-        'From the requests made for apps since the server started. “Check” asks an addon for its manifest once, at most once a minute.',
+        'From the requests Polyfin made to each addon since the server started, for apps and in the background. “Check” asks an addon for its manifest once, at most once a minute.',
       noAddons: 'The server has no addon.',
       addonStatus: {
         ok: 'Answering',
@@ -382,6 +382,37 @@ const system = {
       requestsTerm: 'Requests',
       requests: (count: number, failures: number) =>
         `${count} ${count === 1 ? 'request' : 'requests'}, ${failures} failed`,
+      addonRateLimited: 'Reports rate limits',
+      backgroundPaused: (until: string, reason: 'rate_limited' | 'timeout') =>
+        reason === 'rate_limited'
+          ? `Polyfin’s background requests to its server pause until ${until}, as it refused one for too many requests. Plays still ask it.`
+          : `Polyfin’s background requests to its server pause until ${until}, as it did not answer requests for versions in time. Plays still ask it.`,
+      trafficTitle: 'Requests by origin',
+      trafficNone: 'No request in the last 24 hours.',
+      trafficSummary: (count: number, background: number) =>
+        count === 0
+          ? 'No request in the last hour.'
+          : `${count} ${count === 1 ? 'request' : 'requests'} in the last hour, ${background} of them in the background (${Math.round((background / count) * 100)}%)`,
+      trafficOrigin: 'Origin',
+      trafficHour: 'Last hour',
+      trafficDay: 'Last 24 h',
+      trafficOrigins: {
+        apps: 'Plays and pages in apps',
+        preload: 'Preloading',
+        watchlists: 'Watchlist checks',
+        catalogs: 'Catalogs and home rows',
+        ratings: 'Ratings',
+        refresh: 'Source refreshes',
+        imports: 'Imports',
+        other: 'Other background work',
+      },
+      trafficFailed: (count: number) => `${count} failed`,
+      noticesTitle: 'Notices in its answers',
+      noticesHelp:
+        'What its answers said instead of something to play, over the last 24 hours, such as the failure of an addon it gathers. Links and keys are hidden.',
+      noticeRateLimited: 'Too many requests',
+      noticeSeen: (answers: number, background: number, since: string) =>
+        `${answers} ${answers === 1 ? 'answer' : 'answers'} since ${since}, ${background} of them to background work`,
       check: 'Check',
       checkLabel: (name: string) => `Check ${name} now`,
       checking: 'Checking…',

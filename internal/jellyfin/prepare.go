@@ -13,6 +13,7 @@ import (
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/library"
 	"github.com/moodiness/polyfin/internal/playback"
+	"github.com/moodiness/polyfin/internal/stremio"
 	"github.com/moodiness/polyfin/internal/thumbnails"
 )
 
@@ -122,7 +123,7 @@ func (p *preparations) work() {
 		p.queue = p.queue[1:]
 		p.running[next.key] = true
 		p.mu.Unlock()
-		ctx, cancel := context.WithTimeout(library.Background(context.Background()), preparationTimeout)
+		ctx, cancel := context.WithTimeout(library.Background(stremio.WithOrigin(context.Background(), stremio.OriginPreload)), preparationTimeout)
 		done := p.run(ctx, next)
 		cancel()
 		p.mu.Lock()
@@ -276,7 +277,7 @@ func (h *Handler) prepareListed(ctx context.Context, user accounts.User, item li
 	}
 	go func() {
 		defer logPanic(h.Logger, "Preparing a title's versions ended on a panic")
-		ctx, cancel := context.WithTimeout(library.Background(context.WithoutCancel(ctx)), preparationTimeout)
+		ctx, cancel := context.WithTimeout(library.Background(stremio.WithOrigin(context.WithoutCancel(ctx), stremio.OriginPreload)), preparationTimeout)
 		defer cancel()
 		if p, err := h.playable(ctx, user, item); err == nil {
 			h.prepareOpened(ctx, user, item, p.versions, opened)

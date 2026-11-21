@@ -86,13 +86,15 @@ type chosen struct {
 }
 
 // tried is what trying a candidate gave: whether it plays, and plays
-// without conversion; unreadable when it could not be analyzed, unstarted
-// when it is a torrent that could not start.
+// without conversion, with the languages of the tracks it plays;
+// unreadable when it could not be analyzed, unstarted when it is a
+// torrent that could not start.
 type tried struct {
 	n           int
 	decided     decided
 	plays       bool
 	unconverted bool
+	languages   playedLanguages
 	unreadable  bool
 	unstarted   bool
 }
@@ -228,7 +230,8 @@ func (h *Handler) choose(r *http.Request, user accounts.User, p playable, opened
 			return tried{n: n}
 		}
 		outcomes.note(n, TryPlays, nil)
-		return tried{n: n, decided: d, plays: true, unconverted: prefer && h.unconverted(detached.Context(), d, request)}
+		return tried{n: n, decided: d, plays: true, unconverted: prefer && h.unconverted(detached.Context(), d, request),
+			languages: languagesPlayed(p.tracks, d.source.MediaStreams, d.decision)}
 	}
 
 	attempted := min(c.analyzed, len(c.order))
@@ -340,8 +343,9 @@ func (h *Handler) choose(r *http.Request, user accounts.User, p playable, opened
 
 // pick picks among the candidates tried, in order, the one a play
 // chooses, and reports whether it is done: the first that plays, or with
-// prefer the first that plays without conversion, else the first that
-// plays. sides parts the candidates, by their index: prefer looks no
+// prefer the first that plays without conversion and the user's languages
+// as well as the first that plays (see playedLanguages), else the first
+// that plays. sides parts the candidates, by their index: prefer looks no
 // further than the side of the first that plays, so that, for a user given
 // Play local files first, a local file that plays at all comes before a
 // remote stream. Until patient ends, it waits for each candidate before the
@@ -357,7 +361,7 @@ func pick(states []*tried, sides []int, prefer, patient bool) (int, bool) {
 		case !t.plays:
 		case first >= 0 && sides[n] != sides[first]:
 			return first, true
-		case !prefer || t.unconverted:
+		case !prefer || t.unconverted && (first < 0 || t.languages.asGoodAs(states[first].languages)):
 			return n, true
 		case first < 0:
 			first = n

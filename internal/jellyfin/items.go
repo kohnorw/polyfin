@@ -707,9 +707,13 @@ func trailers(list []library.Trailer) []MediaUrl {
 	return result
 }
 
-// externalURLs links a title to the sites of its provider identifiers.
+// externalURLs links a title to the sites of its provider identifiers. An
+// episode's own identifiers name no page of their sites: it has none.
 func externalURLs(ids map[string]string, kind library.Kind) []MediaUrl {
 	result := []MediaUrl{}
+	if kind == library.KindEpisode {
+		return result
+	}
 	if id := ids["Imdb"]; id != "" {
 		result = append(result, MediaUrl{Name: "IMDb", Url: "https://www.imdb.com/title/" + id})
 	}

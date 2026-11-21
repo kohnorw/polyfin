@@ -8,6 +8,7 @@ import (
 
 	"github.com/moodiness/polyfin/internal/accounts"
 	"github.com/moodiness/polyfin/internal/cache"
+	"github.com/moodiness/polyfin/internal/stremio"
 )
 
 // recordedSeries bounds the series episodeRecording remembers.
@@ -87,7 +88,7 @@ func (s *Service) recordEpisodesLater(ctx context.Context, listed map[accounts.I
 func (s *Service) recordEpisodes() {
 	ctx, done := s.detached(context.Background())
 	defer done()
-	ctx = Background(ctx)
+	ctx = Background(stremio.WithOrigin(ctx, stremio.OriginCatalogs))
 	m := &s.episodeRecords
 	for {
 		m.mu.Lock()

@@ -263,7 +263,7 @@ type held struct {
 
 // New returns a service importing with options.
 func New(options Options) *Service {
-	ctx, cancel := context.WithCancel(context.Background())
+	ctx, cancel := context.WithCancel(stremio.WithOrigin(context.Background(), stremio.OriginImports))
 	signOuts, cancelSignOuts := context.WithCancel(context.Background())
 	return &Service{settings: options.Settings, titles: options.Titles, userData: options.UserData, addons: options.Addons,
 		activity: options.Activity, logger: options.Logger, db: options.DB, box: options.Secrets, sources: options.Sources, now: time.Now,
