@@ -114,7 +114,7 @@ func near(a, b float64) bool {
 }
 
 // The best timings of the last 7 days apply as soon as the GPU is chosen,
-// each chain's own; the timing at startup joins them.
+// each chain's own; the GPU's timing at startup joins them.
 func TestTheBestRecentTimingsApplyAtStart(t *testing.T) {
 	t.Parallel()
 	m, _, path, log := timedManager(t, usual)
@@ -142,8 +142,9 @@ func TestTheBestRecentTimingsApplyAtStart(t *testing.T) {
 	}
 	close(release)
 	m.measuring.Wait()
-	// The GPU's timing and the processor's are kept each on its own.
-	if got := keptIn(t, path); len(got) != 4 || !near(got[2].Speeds[chainHDRGPU], 1.3) || !near(got[3].Speeds[chainProcessor], 1.7) {
+	// The GPU's timing is kept; the processor's of the last 7 days stands,
+	// and it is not timed at startup.
+	if got := keptIn(t, path); len(got) != 3 || !near(got[2].Speeds[chainHDRGPU], 1.3) || got[2].Speeds[chainProcessor] != 0 {
 		t.Errorf("kept %+v", got)
 	}
 	if hw := m.Hardware(); hw.HDRSpeed != 1.4 || !hw.VulkanDecoding || m.ToneMappedHeight() != 1080 {
@@ -232,7 +233,7 @@ func TestABusyTimingIsLeftOutAndTimedAgainWhenQuiet(t *testing.T) {
 		t.Errorf("the busy timing was kept: %+v", got)
 	}
 	for _, want := range []string{`msg="Timed while the server was busy: kept the best recent timings" timed=gpu below="[hdr_gpu 0.4x (best 1.3x) hdr_memory 0.3x (best 1.2x) sdr_gpu failed (best 0.5x) sdr_memory 1.0x (best 3.5x)]"`,
-		`timed=processor below="[processor 0.8x (best 1.7x)]"`, `msg="Timing again once the server is quiet"`} {
+		`msg="The processor's HDR tone mapping is not timed at startup: its best timing of the last 7 days applies" speed=1.7x`, `msg="Timing again once the server is quiet"`} {
 		if !strings.Contains(log.String(), want) {
 			t.Errorf("did not log %s: %s", want, log)
 		}

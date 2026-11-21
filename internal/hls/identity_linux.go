@@ -66,3 +66,13 @@ func (m *Manager) systemGPU(hw *Hardware) (gpu, driver string) {
 	}
 	return "", ""
 }
+
+// systemProcessor names the processor as /proc/cpuinfo tells it (see
+// cpuinfoModel); empty when it cannot read it.
+func systemProcessor() string {
+	data, err := os.ReadFile("/proc/cpuinfo")
+	if err != nil {
+		return ""
+	}
+	return cpuinfoModel(string(data))
+}

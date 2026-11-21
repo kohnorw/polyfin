@@ -57,3 +57,15 @@ func (m *Manager) systemGPU(hw *Hardware) (gpu, driver string) {
 	}
 	return strings.Join(gpus, ", "), strings.Join(drivers, ", ")
 }
+
+// systemProcessor names the first processor as Windows's registry tells
+// it; empty when it cannot read it.
+func systemProcessor() string {
+	key, err := registry.OpenKey(registry.LOCAL_MACHINE, `HARDWARE\DESCRIPTION\System\CentralProcessor\0`, registry.QUERY_VALUE)
+	if err != nil {
+		return ""
+	}
+	defer key.Close()
+	name, _, _ := key.GetStringValue("ProcessorNameString")
+	return strings.TrimSpace(name)
+}

@@ -170,7 +170,8 @@ func (m *Manager) DetectHardware(want, device string) (Hardware, bool) {
 // outcome, after why each GPU method tried before or instead of the one
 // chosen failed, at the outcome's level. The first choice also times HDR
 // tone mapped on the processor in the background, once the GPU's chains
-// are (see timeToneMapping).
+// are, unless a timing of the last 7 days is kept (see
+// timeToneMappingLater).
 func (m *Manager) SelectHardware(want, device string) {
 	hw, ok := m.DetectHardware(want, device)
 	level := slog.LevelInfo
@@ -389,6 +390,11 @@ func (m *Manager) deviceToneMaps(hw Hardware) bool {
 // BT.2020 display mastered at 1000 nits, and content up to 1000 nits.
 const hdr10Params = "log-level=error:hdr10=1:master-display=G(13250,34500)B(7500,3000)R(34000,16000)WP(15635,16450)L(10000000,1):max-cll=1000,400"
 
+// lightSample are x265's options for the 4K samples the timings convert,
+// whose own encoding is not timed: no lookahead, no B-frames and one
+// frame at a time halve x265's memory, 875 MB rather than 1.9 GB.
+const lightSample = "rc-lookahead=0:bframes=0:frame-threads=1"
+
 // The PCI vendor IDs of Intel and AMD, as Linux names a render node's and
 // Direct3D 11 an adapter's.
 const (
@@ -570,7 +576,7 @@ func (m *Manager) measure(ctx context.Context, hw Hardware) (Hardware, chainTimi
 	case slices.Contains(hw.Encoders, "hevc_nvenc"):
 		encode = []string{"-vf", "format=p010le," + hdrTags, "-c:v", "hevc_nvenc", "-profile:v", "main10"}
 	case slices.Contains(m.can.encoders, "libx265"):
-		encode = []string{"-vf", "format=yuv420p10le," + hdrTags, "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error"}
+		encode = []string{"-vf", "format=yuv420p10le," + hdrTags, "-c:v", "libx265", "-preset", "ultrafast", "-x265-params", "log-level=error:" + lightSample}
 	default:
 		return hw, found
 	}
@@ -609,7 +615,7 @@ func (m *Manager) measure(ctx context.Context, hw Hardware) (Hardware, chainTimi
 func (m *Manager) timeDeviceToneMapping(ctx context.Context, hw Hardware, found *chainTimings, dir string, pattern []string, encoder string) Hardware {
 	hdr := filepath.Join(dir, "hdr10.mkv")
 	if _, err := m.timed(ctx, slices.Concat(probeStart, pattern, []string{"-vf", "format=yuv420p10le," + hdrTags, "-c:v", "libx265", "-preset", "ultrafast",
-		"-x265-params", hdr10Params, hdr})); err != nil {
+		"-x265-params", hdr10Params + ":" + lightSample, hdr})); err != nil {
 		return hw
 	}
 	took, err := m.timeChain(ctx, hdr, encoder, VideoEncoding{ToneMap: true, Hardware: &hw}, 1080)

@@ -117,8 +117,9 @@ func (hw Hardware) untimed() Hardware {
 
 // timingKey is what timings hold for: the GPU method, its device and
 // encoders, the GPU and its driver as the system names them, empty when
-// it does not, the FFmpeg build and the processors. Timings of another
-// key do not count.
+// it does not, the FFmpeg build, the processor's model, empty when the
+// system does not name it, and the number of processors. Timings of
+// another key do not count.
 type timingKey struct {
 	Method     string `json:"method"`
 	Device     string `json:"device,omitempty"`
@@ -126,6 +127,7 @@ type timingKey struct {
 	GPU        string `json:"gpu,omitempty"`
 	Driver     string `json:"driver,omitempty"`
 	FFmpeg     string `json:"ffmpeg"`
+	CPU        string `json:"cpu,omitempty"`
 	Processors int    `json:"processors"`
 }
 
@@ -313,7 +315,7 @@ func (m *Manager) timingKey(hw *Hardware) timingKey {
 	if s.identify != nil {
 		return s.identify(hw)
 	}
-	key, ffmpeg := timingKey{Method: "none", Processors: runtime.NumCPU()}, m.ffmpeg
+	key, ffmpeg := timingKey{Method: "none", CPU: processorModel(), Processors: runtime.NumCPU()}, m.ffmpeg
 	if hw != nil {
 		key.Method, key.Device, key.Encoders = hw.Method, hw.Device, strings.Join(hw.Encoders, ",")
 		if hw.FFmpeg != "" {
@@ -367,4 +369,32 @@ func ffmpegBuild(path string) string {
 		return hex.EncodeToString(sum[:4])
 	}
 	return fields[2] + " " + hex.EncodeToString(sum[:4])
+}
+
+// processorModel names the processor as the system does (see
+// systemProcessor), asked once.
+var processorModel = sync.OnceValue(systemProcessor)
+
+// cpuinfoModel names the processor that /proc/cpuinfo describes in
+// info: its "model name", as x86 and some ARM kernels write it, else
+// the board's "Model", as on a Raspberry Pi, else the "CPU implementer"
+// and "CPU part" codes other ARM kernels write; empty without any.
+func cpuinfoModel(info string) string {
+	fields := map[string]string{}
+	for line := range strings.Lines(info) {
+		name, value, ok := strings.Cut(line, ":")
+		name = strings.TrimSpace(name)
+		if _, seen := fields[name]; ok && !seen {
+			fields[name] = strings.TrimSpace(value)
+		}
+	}
+	switch {
+	case fields["model name"] != "":
+		return fields["model name"]
+	case fields["Model"] != "":
+		return fields["Model"]
+	case fields["CPU implementer"] != "" || fields["CPU part"] != "":
+		return fields["CPU implementer"] + ":" + fields["CPU part"]
+	}
+	return ""
 }
