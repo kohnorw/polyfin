@@ -300,7 +300,8 @@ PlaybackInfo waits for a torrent version's start and a piece, not for its whole 
 - The play itself waits no longer for them, and leaves nothing behind waiting.
 - A swarm that sends nothing never holds the app's request past 90 seconds.
 - A slow swarm, or a route that stops answering after the torrent started, never holds it past 3 minutes.
-- jellyfin-web sets no limit on that request, nor do Traefik and Caddy by default. nginx closes a response silent for 60 seconds unless told otherwise (see [Reverse proxy](reverse-proxy.md)).
+- jellyfin-web sets no limit on that request, nor do Traefik and Caddy by default.
+- While a torrent version may be waited for, PlaybackInfo sends its answer's status after 5 seconds, then a space every 5 seconds, which JSON allows before the answer, as for a slow channel. Swiftfin, which gives up after 20 seconds without a byte, and nginx, which closes a response silent for 60 seconds unless told otherwise (see [Reverse proxy](reverse-proxy.md)), keep waiting. An app whose whole request has a time limit, as the Android apps' 30 seconds, still gives up at that limit.
 
 The read of the index ends within 3 minutes, read whole or failed. What it reads waits at most a piece's wait at a time, twice, so it ends well before. A read that would still wait then is tried again at the next play.
 

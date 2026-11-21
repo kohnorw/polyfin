@@ -491,6 +491,23 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 		}
 		defer release()
 	}
+	// A torrent's first analysis waits for its pieces, longer than apps
+	// wait for a first byte: while one may be waited for, the answer is
+	// kept going with spaces before its JSON (see patientWriter), and
+	// every answer is then a 200.
+	var patient *patientWriter
+	patientFor := func(versions []library.Version) {
+		if patient == nil && h.mayWaitForTorrent(versions) {
+			patient = newPatientWriter(w, playbackInfoPatience)
+			w = patient
+		}
+	}
+	defer func() {
+		if patient != nil {
+			patient.stop()
+		}
+	}()
+	patientFor(p.versions)
 	settings := h.Accounts.Settings()
 	// The title's own identifier names no version in particular: Jellyfin
 	// names a single version after its item, and the apps that play from a
@@ -545,11 +562,16 @@ func (h *Handler) playbackInfo(w http.ResponseWriter, r *http.Request) {
 	if choice.decided == nil && !complete && !choice.late && r.Context().Err() == nil {
 		versions, err := h.Library.Versions(r.Context(), user, item.ID)
 		if err != nil {
+			if patient != nil {
+				h.refusePlay(w, r, user, item, "NoCompatibleStream", plays.FailedNoStream)
+				return
+			}
 			h.browseError(w, r, err)
 			return
 		}
 		unstarted = unstarted || h.unstartedTorrent(versions)
 		h.offer(r.Context(), user, &p, versions)
+		patientFor(p.versions)
 		c = plan(p.versions)
 		choice = h.choose(r, user, p, opened, request, c, prefer)
 		unstarted = unstarted || choice.unstarted
@@ -646,6 +668,12 @@ type playbackInfoResponse struct {
 type noCompatibleStream struct {
 	MediaSources []MediaSourceInfo
 	ErrorCode    string
+}
+
+// mayWaitForTorrent reports whether a play of versions may wait for a
+// torrent: one is among them that did not fail to start lately.
+func (h *Handler) mayWaitForTorrent(versions []library.Version) bool {
+	return slices.ContainsFunc(versions, func(v library.Version) bool { return v.Torrent != nil && !h.didNotStart(v) })
 }
 
 // readPlaybackInfoBody reads a posted PlaybackInfoDto over the query's
