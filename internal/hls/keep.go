@@ -28,11 +28,13 @@ const keepFor = 30 * time.Second
 // video is kept keepFor, its FFmpeg waiting where it was: a new session
 // asking for the same video takes it over, with the segments made, and
 // the track it asks for starts at the segment it asks for, the old
-// track's FFmpeg stopping. A session its app never stopped stops as its
-// device asks for the version in a new session, which takes its video
-// over (see Manager.supersede). A kept video no session took over stops,
-// and its segments are removed; so does one kept before for the same
-// user, device and version, once another is kept or converted.
+// track's FFmpeg stopping. A session its app never stopped stops once
+// idle a short while after its device asked for the version in a new
+// session (see Manager.supersede); one already idle then stops at once,
+// and the new session takes its video over. A session still asked for
+// is never taken over. A kept video no session took over stops, and its
+// segments are removed; so does one kept before for the same user,
+// device and version, once another is kept or converted.
 //
 // Kept video counts once toward the conversions at once, being the
 // user's playback of the version. Copied video is not kept: it costs no

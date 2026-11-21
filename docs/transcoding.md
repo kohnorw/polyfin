@@ -381,7 +381,7 @@ Apps change the audio track of a converted video by playing it again, from the s
 - **Same video:** the video is known by its user, device, version, segment format and conversion (codec, size, bitrate, tone mapping, burned subtitle, quality), not by its audio track.
 - **Bounds:**
   - one kept video per user, device and version: another quality or burned subtitle converts anew, and ends the video kept there;
-  - a play session its app did not stop is taken over too, once the same device asks for the same version in a new session, as an app retrying a play does: the older session stops then (see [HLS segment cutting for apps](jellyfin-api.md#hls-segment-cutting-for-apps));
+  - a play session its app did not stop is taken over too when the same device asks for the same version in a new session, as an app retrying a play does, if the older session asked nothing for 15 seconds; one still asking keeps its video, and the new session converts its own (see [HLS segment cutting for apps](jellyfin-api.md#hls-segment-cutting-for-apps));
   - kept video counts once toward **Video conversions at once** (see [Video conversions at once](#video-conversions-at-once));
   - kept video no session takes over within 30 seconds stops, and its segments are removed;
   - copied video (DirectStream), Live TV and [converted downloads](#converted-downloads) start again as before.

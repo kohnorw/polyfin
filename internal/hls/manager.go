@@ -56,6 +56,13 @@ const (
 	// measuring the qualities it switches between, as hls.js does, comes
 	// back to the one it left within seconds.
 	variantLinger = 10 * time.Second
+	// outlivedIdle is how long a play session goes on without a request
+	// once its device plays the same version in a newer session, rather
+	// than idleTimeout: an app retrying a play asks nothing more of the
+	// session it gave up, while a player still playing one asks for a
+	// segment as each one plays, every 10 seconds at most for most
+	// versions, and is not stopped while it waits for one.
+	outlivedIdle = 15 * time.Second
 	// tolerance absorbs the rounding between the keyframe index and the
 	// timestamps in FFmpeg's output.
 	tolerance = 2 * time.Millisecond
@@ -928,10 +935,13 @@ type Manager struct {
 	// playouts are the channels Polyfin airs itself, by channel (see
 	// playout.go).
 	playouts map[string]*playout
-	// superseded are the play sessions stopped as their device started a
-	// newer one of the same version, with when (see supersede).
-	superseded map[string]time.Time
-	closed     bool
+	// outlived are the play sessions whose device plays their version in
+	// a newer one, which stop once idle for outlive, in nanoseconds (see
+	// supersede); reads counts the requests of each session under way.
+	outlived map[string]struct{}
+	reads    map[string]*sessionReads
+	outlive  atomic.Int64
+	closed   bool
 }
 
 // NewManager returns a manager running FFmpeg from ffmpegPath and keeping
@@ -948,6 +958,7 @@ func NewManager(ffmpegPath, dir string, logger *slog.Logger) (*Manager, error) {
 		detected: map[string]*Hardware{}, encodings: map[Key]*encoding{}, lives: map[Key]*live{}, recordings: map[Key]context.CancelFunc{},
 		kept: map[Key]*keeping{}, playouts: map[string]*playout{}}
 	m.linger.Store(int64(variantLinger))
+	m.outlive.Store(int64(outlivedIdle))
 	m.keepFor.Store(int64(keepFor))
 	m.retime.seen.Store(time.Now().UnixNano())
 	go m.stopIdle()
@@ -985,6 +996,8 @@ func (m *Manager) Close() {
 func (m *Manager) Stop(session string) {
 	m.mu.Lock()
 	m.stopProgressives(func(key Key) bool { return key.Session == session })
+	delete(m.outlived, session)
+	delete(m.reads, session)
 	m.mu.Unlock()
 	m.stopWhere(func(key Key, _ *encoding) bool { return key.Session == session })
 	m.stopLives(func(key Key, _ *live) bool { return key.Session == session })
@@ -992,73 +1005,178 @@ func (m *Manager) Stop(session string) {
 	m.release(session)
 }
 
-// supersede stops, as their app's stop would, the play sessions in which
-// key's device played key's version before key's session: an app that
-// retries a play starts a new session without stopping the one it gave
-// up, whose FFmpeg would otherwise hold its encoder until it is idle. A
-// kept video of theirs stays for key's session to take over (see
-// KeepVideo). A session superseded is not played again: its requests get
-// ErrStopped, which supersede returns. Keys without a session, device or
-// version, and kept video's, supersede nothing.
-func (m *Manager) supersede(key Key) error {
+// supersede shortens the life of the play sessions in which key's device
+// plays key's version beside key's session: an app that retries a play
+// starts a new session without stopping the one it gave up, whose FFmpeg
+// would otherwise hold its encoder until idle for idleTimeout. Such a
+// session stops, as its app's stop would, once no player asked anything
+// of it for Manager.outlive: at once when that is already so, else when
+// stopOutlived finds it so. A session still asked for goes on, as two
+// players of the device, each in its own session, both play. Its kept
+// video stays for key's session to take over (see KeepVideo), which it
+// does only once the session that played it stopped. Keys without a
+// session, device or version, and kept video's, shorten nothing.
+func (m *Manager) supersede(key Key) {
 	if key.Session == "" || key.Device == "" || key.Version == "" {
-		return nil
+		return
 	}
+	keptFor := m.keptSessions()
+	window := time.Duration(m.outlive.Load())
+	now := time.Now()
+	var idle []string
 	m.mu.Lock()
-	if _, gone := m.superseded[key.Session]; gone {
-		m.mu.Unlock()
-		return ErrStopped
-	}
-	var older []string
+	asked := m.sessionsAsked(keptFor, now)
 	for k := range m.encodings {
-		if k.Session != "" && k.Session != key.Session && k.sameDevice(key) && !slices.Contains(older, k.Session) {
-			older = append(older, k.Session)
+		session := k.Session
+		if session == "" {
+			session = keptFor[k.playback()]
 		}
-	}
-	var keepings []*keeping
-	for playback, k := range m.kept {
-		if playback.sameDevice(key) {
-			keepings = append(keepings, k)
+		if session == "" || session == key.Session || !k.sameDevice(key) || slices.Contains(idle, session) {
+			continue
 		}
+		if now.Sub(asked[session]) >= window {
+			idle = append(idle, session)
+			continue
+		}
+		if m.outlived == nil {
+			m.outlived = map[string]struct{}{}
+		}
+		m.outlived[session] = struct{}{}
 	}
 	m.mu.Unlock()
-	// A kept video plays for the session that took it over last, until
-	// that session stops.
+	m.stopSessions(idle, key.Version)
+}
+
+// keptSessions returns the sessions the kept videos play for, by the key
+// of their first variant, those kept for a session to take over left out.
+func (m *Manager) keptSessions() map[Key]string {
+	m.mu.Lock()
+	keepings := make([]*keeping, 0, len(m.kept))
+	for _, k := range m.kept {
+		keepings = append(keepings, k)
+	}
+	m.mu.Unlock()
+	sessions := make(map[Key]string, len(keepings))
 	for _, k := range keepings {
 		k.mu.Lock()
-		if session := k.session; !k.ended && !k.released.Load() && session != "" && session != key.Session && !slices.Contains(older, session) {
-			older = append(older, session)
+		if !k.ended && !k.released.Load() && k.session != "" {
+			sessions[k.key] = k.session
 		}
 		k.mu.Unlock()
 	}
-	if len(older) == 0 {
-		return nil
-	}
-	now := time.Now()
-	m.mu.Lock()
-	if m.superseded == nil {
-		m.superseded = map[string]time.Time{}
-	}
-	for _, session := range older {
-		m.superseded[session] = now
-	}
-	m.mu.Unlock()
-	for _, session := range older {
-		m.logger.Info("A play session's encoding was stopped: its device started the same version again", "version", key.Version)
-		m.Stop(session)
-	}
-	return nil
+	return sessions
 }
 
-// forgetSuperseded forgets the sessions superseded longer than an idle
-// encoding lasts: an app that still asks of one gave up on it long ago.
-func (m *Manager) forgetSuperseded() {
+// sessionsAsked returns when a player last asked anything of each play
+// session with encodings, kept video counting for the session keptFor
+// says it plays for: now for a session with a request under way, else
+// the later of the encodings' last request and the end of the session's
+// last request (see reading). The caller holds m.mu.
+func (m *Manager) sessionsAsked(keptFor map[Key]string, now time.Time) map[string]time.Time {
+	asked := map[string]time.Time{}
+	for k, e := range m.encodings {
+		session := k.Session
+		if session == "" {
+			session = keptFor[k.playback()]
+		}
+		if session == "" {
+			continue
+		}
+		e.playback.mu.Lock()
+		used := e.playback.used
+		e.playback.mu.Unlock()
+		if r := m.reads[session]; r != nil && r.n > 0 {
+			used = now
+		} else if r != nil && r.done.After(used) {
+			used = r.done
+		}
+		if used.After(asked[session]) {
+			asked[session] = used
+		}
+	}
+	return asked
+}
+
+// sessionReads counts the requests of a play session under way, and
+// tells when the last one ended.
+type sessionReads struct {
+	n    int
+	done time.Time
+}
+
+// reading counts a request of key's session under way until the
+// function it returns is called: a session waiting for a segment is
+// still played, however long ago it asked (see supersede).
+func (m *Manager) reading(key Key) func() {
+	if key.Session == "" {
+		return func() {}
+	}
+	m.mu.Lock()
+	if m.reads == nil {
+		m.reads = map[string]*sessionReads{}
+	}
+	r := m.reads[key.Session]
+	if r == nil {
+		r = &sessionReads{}
+		m.reads[key.Session] = r
+	}
+	r.n++
+	m.mu.Unlock()
+	return func() {
+		m.mu.Lock()
+		r.n--
+		r.done = time.Now()
+		m.mu.Unlock()
+	}
+}
+
+// forgetReads forgets the sessions without a request under way for an
+// idle encoding's life.
+func (m *Manager) forgetReads() {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	for session, at := range m.superseded {
-		if time.Since(at) > idleTimeout {
-			delete(m.superseded, session)
+	for session, r := range m.reads {
+		if r.n == 0 && time.Since(r.done) > idleTimeout {
+			delete(m.reads, session)
 		}
+	}
+}
+
+// stopOutlived stops the sessions supersede shortened the life of that no
+// player asked anything of for Manager.outlive, and forgets those that
+// stopped.
+func (m *Manager) stopOutlived() {
+	m.mu.Lock()
+	pending := len(m.outlived)
+	m.mu.Unlock()
+	if pending == 0 {
+		return
+	}
+	keptFor := m.keptSessions()
+	window := time.Duration(m.outlive.Load())
+	now := time.Now()
+	var idle []string
+	m.mu.Lock()
+	asked := m.sessionsAsked(keptFor, now)
+	for session := range m.outlived {
+		at, running := asked[session]
+		if !running || now.Sub(at) >= window {
+			delete(m.outlived, session)
+		}
+		if running && now.Sub(at) >= window {
+			idle = append(idle, session)
+		}
+	}
+	m.mu.Unlock()
+	m.stopSessions(idle, "")
+}
+
+// stopSessions stops sessions that a newer one of their device and
+// version outlived, of version when known.
+func (m *Manager) stopSessions(sessions []string, version string) {
+	for _, session := range sessions {
+		m.logger.Info("A play session's encoding was stopped: its device plays the same version in a newer one", "version", version)
+		m.Stop(session)
 	}
 }
 
@@ -1081,6 +1199,8 @@ func (m *Manager) stopWhere(match func(Key, *encoding) bool) {
 func (m *Manager) stopIdle() {
 	ticker := time.NewTicker(idleTimeout / 6)
 	defer ticker.Stop()
+	outlived := time.NewTicker(outlivedIdle / 3)
+	defer outlived.Stop()
 	for {
 		select {
 		case <-m.done:
@@ -1089,7 +1209,9 @@ func (m *Manager) stopIdle() {
 			m.stopWhere(func(_ Key, e *encoding) bool { return e.idle() })
 			m.stopLives(func(_ Key, l *live) bool { return l.idle() })
 			m.stopAudios(func(_ AudioKey, e *audioEncoding) bool { return e.idle() })
-			m.forgetSuperseded()
+			m.forgetReads()
+		case <-outlived.C:
+			m.stopOutlived()
 		}
 	}
 }
@@ -1224,9 +1346,8 @@ func (m *Manager) converting(shared *userVersion, leaving *live) int {
 // Init opens the initialization segment of a fragmented MP4 encoding: that
 // of its segments other than the fast ones (see FastInit).
 func (m *Manager) Init(ctx context.Context, key Key, open Opener) (*os.File, error) {
-	if err := m.supersede(key); err != nil {
-		return nil, err
-	}
+	defer m.reading(key)()
+	m.supersede(key)
 	if m.keeps(key) {
 		return m.keptFile(ctx, key, open, -1)
 	}
@@ -1243,9 +1364,8 @@ func (m *Manager) Init(ctx context.Context, key Key, open Opener) (*os.File, err
 // FastInit opens the initialization segment of the fast segments of a
 // fragmented MP4 encoding (see Plan.FastFrom).
 func (m *Manager) FastInit(ctx context.Context, key Key, open Opener) (*os.File, error) {
-	if err := m.supersede(key); err != nil {
-		return nil, err
-	}
+	defer m.reading(key)()
+	m.supersede(key)
 	if m.keeps(key) {
 		return nil, ErrNotFound
 	}
@@ -1265,9 +1385,8 @@ func (m *Manager) Segment(ctx context.Context, key Key, open Opener, n int) (*os
 	if n < 0 {
 		return nil, ErrNotFound
 	}
-	if err := m.supersede(key); err != nil {
-		return nil, err
-	}
+	defer m.reading(key)()
+	m.supersede(key)
 	if m.keeps(key) {
 		return m.keptFile(ctx, key, open, n)
 	}
@@ -1286,9 +1405,8 @@ func (m *Manager) Segment(ctx context.Context, key Key, open Opener, n int) (*os
 // the variant of key's playback asked for last, whichever key names: every
 // variant extracts them. Kept video extracts them, not its audio.
 func (m *Manager) Subtitles(ctx context.Context, key Key, open Opener, n int) error {
-	if err := m.supersede(key); err != nil {
-		return err
-	}
+	defer m.reading(key)()
+	m.supersede(key)
 	if m.keeps(key) {
 		key, open = key.keptVideo(), videoAlone(open)
 	}
@@ -1446,12 +1564,6 @@ func (m *Manager) encoding(ctx context.Context, key Key, open Opener) (*encoding
 	}
 	e := m.encodings[key]
 	if e == nil {
-		// A request of a superseded session that came as it was stopped
-		// starts nothing again.
-		if _, gone := m.superseded[key.Session]; gone && key.Session != "" {
-			m.mu.Unlock()
-			return nil, ErrStopped
-		}
 		if !m.admits(key, nil) {
 			m.mu.Unlock()
 			return nil, ErrBusy
