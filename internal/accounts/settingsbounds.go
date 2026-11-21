@@ -101,7 +101,7 @@ func DefaultSettings() Settings {
 
 		AnalysisTimeout:     DefaultAnalysisTimeout,
 		VersionAttempts:     DefaultVersionAttempts,
-		PreferDirectPlay:    false,
+		PreferDirectPlay:    true,
 		SendAppsToSource:    false,
 		VersionOrder:        []string{},
 		VersionCodecOrder:   slices.Clone(VersionCodecs),

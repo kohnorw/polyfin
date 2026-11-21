@@ -584,7 +584,8 @@ func rangeRank(hdr, first library.DynamicRange) int {
 // the quality group, leaving out the versions taller than it while one
 // fits or has an unknown height, else keeping them all, the closest to the
 // group first; then the criteria, ties keeping the addons' order. Then, for
-// the app asking, the versions it plays without conversion come first (see
+// the app asking, the versions it plays without conversion come first,
+// those playing the user's languages as well as the first known does (see
 // appOrder); last, Play local files first puts the local files before the
 // others for the users given it (see localfirst.go), each side keeping
 // the order above. With criteria or an order for the app, a page of the
@@ -621,9 +622,6 @@ func (h *Handler) ordered(ctx context.Context, user accounts.User, item library.
 	}
 	app := h.appOrderFor(ctx, user)
 	var unconverted map[accounts.ID]bool
-	if app != nil {
-		unconverted = h.playsUnconverted(ctx, app, user, item, kept)
-	}
 	place := make(map[accounts.ID]int, len(kept))
 	for i, version := range kept {
 		place[version.ID] = i
@@ -649,6 +647,30 @@ func (h *Handler) ordered(ctx context.Context, user accounts.User, item library.
 		return cmp.Compare(place[a.ID], place[b.ID])
 	}
 	slices.SortFunc(kept, compare)
+	if app != nil {
+		// The versions the app plays without conversion move first, those
+		// whose languages are as good as the first version's known in the
+		// order above, on each side of Play local files first.
+		played := h.playsUnconverted(ctx, app, user, item, kept)
+		firsts := map[int]playedLanguages{}
+		unconverted = make(map[accounts.ID]bool, len(played))
+		for _, version := range kept {
+			side := 0
+			if user.LocalFirst {
+				side = remoteRank(version)
+			}
+			plays, known := played[version.ID]
+			if !known {
+				continue
+			}
+			first, found := firsts[side]
+			if !found {
+				first, firsts[side] = plays.languages, plays.languages
+			}
+			unconverted[version.ID] = plays.unconverted && plays.languages.asGoodAs(first)
+		}
+		slices.SortFunc(kept, compare)
+	}
 	if (len(rules.order) > 0 || app != nil) && len(kept) > 0 {
 		if shown := h.watched.shown(user.ID, kept[0].Item, orderKey(rules, user, app)); len(shown) > 0 {
 			kept = keptInPlace(kept, shown, compare)

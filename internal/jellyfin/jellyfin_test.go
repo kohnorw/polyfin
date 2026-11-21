@@ -204,9 +204,11 @@ func newServerSealing(t *testing.T, failures int, ffprobe, ffmpeg string, reach 
 		t.Fatal(err)
 	}
 	// Playback is prepared ahead, the default, only in the tests that turn
-	// it on: the others count every request to the sources.
+	// it on: the others count every request to the sources. Versions the
+	// app plays without conversion come first, the default too, only in
+	// the tests that turn it on: the others play the server's order.
 	settings := store.Settings()
-	settings.PrepareAhead = false
+	settings.PrepareAhead, settings.PreferDirectPlay = false, false
 	if _, err := store.UpdateSettings(t.Context(), settings); err != nil {
 		t.Fatal(err)
 	}
