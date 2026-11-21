@@ -57,6 +57,8 @@ const iptv: typeof en = {
         'L’ultimo recupero non è riuscito: il file non c’è più, o Polyfin non può più leggerlo.',
       file_refused:
         'L’ultimo recupero non è riuscito: solo gli amministratori possono usare un file del server.',
+      empty:
+        'L’ultimo recupero non è riuscito: la guida non conteneva alcun programma. Resta l’ultima guida scaricata.',
     } as Record<string, string>,
     sectionsLabel: 'Sezioni',
     sections: {

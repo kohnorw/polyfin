@@ -252,7 +252,7 @@ func TestXMLTVGuidesAreRefreshed(t *testing.T) {
 	if got := airing(); !slices.Equal(got, []string{"One: Second"}) {
 		t.Errorf("programmes after a failed fetch: %q", got)
 	}
-	for body, code := range map[string]string{"<html>Sign in</html>": "malformed", "<tv></tv>": ""} {
+	for body, code := range map[string]string{"<html>Sign in</html>": "malformed", "<tv></tv>": "empty"} {
 		guide.set(body, 0)
 		if err := e.service.RefreshGuide(t.Context(), addons.Shared(), key); err != nil {
 			t.Fatal(err)
@@ -261,8 +261,69 @@ func TestXMLTVGuidesAreRefreshed(t *testing.T) {
 			t.Errorf("%s: error %q, want %q", body, status.Error, code)
 		}
 	}
-	if got := airing(); len(got) != 0 {
-		t.Errorf("a guide fetched empty keeps programmes: %q", got)
+	if got := airing(); !slices.Equal(got, []string{"One: Second"}) {
+		t.Errorf("programmes after an empty guide: %q", got)
+	}
+}
+
+// A valid guide without programmes, such as <tv/>, does not replace a
+// guide that had some: the last one stays, and the fetch fails as empty,
+// told in the guide's error and tried again sooner. A guide that never
+// had programmes is fetched empty without failing, and a guide with
+// programmes again replaces the last one and clears the error.
+func TestAnEmptyGuideKeepsTheLastOne(t *testing.T) {
+	t.Parallel()
+	e := newEnv(t)
+	at := &clock{now: time.Now().UTC().Truncate(time.Minute)}
+	e.service.SetClock(at.Now)
+	key := e.tvCatalog(addons.Shared(), stremio.Meta{ID: "tv:one", Type: "tv", Name: "One"})
+	channel := `<channel id="1"><display-name>One</display-name></channel>`
+	guide := newGuideServer(t, "<tv/>")
+	if _, err := e.addons.SetGuide(t.Context(), addons.Shared(), key, guide.url); err != nil {
+		t.Fatal(err)
+	}
+	airing := func() []string {
+		t.Helper()
+		now := at.Now()
+		programs, err := e.service.Programs(t.Context(), e.member, now, now.Add(time.Second))
+		if err != nil {
+			t.Fatal(err)
+		}
+		return programTitles(programs)
+	}
+	refresh := func(body string) guideStatus {
+		t.Helper()
+		guide.set(body, 0)
+		if err := e.service.RefreshGuide(t.Context(), addons.Shared(), key); err != nil {
+			t.Fatal(err)
+		}
+		return e.guideOf(addons.Shared(), key)
+	}
+	if status := refresh("<tv/>"); status.Error != "" || status.FetchedAt == nil {
+		t.Fatalf("a guide that never had programmes, fetched empty: %+v", status)
+	}
+	full := `<tv>` + channel + programme("1", at.Now().Add(-time.Hour), at.Now().Add(time.Hour), "First") + `</tv>`
+	if status := refresh(full); status.Error != "" || status.Programmes != 1 || !slices.Equal(airing(), []string{"One: First"}) {
+		t.Fatalf("first guide: %+v, %q", status, airing())
+	}
+	fetched := e.guideOf(addons.Shared(), key).FetchedAt
+	for _, empty := range []string{"<tv/>", `<tv>` + channel + `</tv>`,
+		`<tv>` + channel + programme("1", at.Now().Add(-72*time.Hour), at.Now().Add(-71*time.Hour), "Long gone") + `</tv>`} {
+		at.advance(time.Minute)
+		status := refresh(empty)
+		if status.Error != "empty" || status.Programmes != 1 || !status.FetchedAt.Equal(*fetched) || !status.CheckedAt.Equal(at.Now()) {
+			t.Errorf("%s: %+v", empty, status)
+		}
+		if retry, ok := e.service.GuideRetry(status.ID); !ok || !retry.After(at.Now()) {
+			t.Errorf("%s: tried again at %v, %v", empty, retry, ok)
+		}
+		if got := airing(); !slices.Equal(got, []string{"One: First"}) {
+			t.Errorf("%s: programmes %q", empty, got)
+		}
+	}
+	second := strings.Replace(full, "First", "Second", 1)
+	if status := refresh(second); status.Error != "" || !slices.Equal(airing(), []string{"One: Second"}) {
+		t.Errorf("a guide with programmes again: %+v, %q", status, airing())
 	}
 }
 

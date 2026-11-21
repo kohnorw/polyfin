@@ -63,6 +63,9 @@ const (
 	// is a member's (see iptv.ErrLocalFile).
 	guideFileUnreadable = "file_unreadable"
 	guideFileRefused    = "file_refused"
+	// guideEmpty is a guide downloaded without a programme in the window
+	// kept, while the guide held some.
+	guideEmpty = "empty"
 )
 
 var errTooManyProgrammes = errors.New("too many programmes")
@@ -253,6 +256,11 @@ func (s *Service) fetchGuide(ctx context.Context, c addons.LiveCatalog, g addons
 		}
 		code := ""
 		switch {
+		case err == nil && programmes == 0 && g.Programmes > 0:
+			// A valid guide without a programme in the window, such as
+			// <tv/>, would leave the channels without any: the last
+			// guide that had some is kept, as for a failed download.
+			code = guideEmpty
 		case err == nil:
 		case errors.Is(err, stremio.ErrPrivateNetwork):
 			code = guidePrivateNetwork

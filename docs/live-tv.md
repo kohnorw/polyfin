@@ -341,6 +341,8 @@ Some IPTV addons publish no Native EPG guide, while their provider publishes one
 
 The catalog's row then shows when its first guide was last fetched and will be fetched next. It also shows how many of its channels are mapped to a guide channel, and why the last fetch failed, if it did. The **Guides** page shows the same for each guide, with the channels and programmes it held.
 
+A guide that downloads without a programme from a day ago to 8 days ahead, such as an empty `<tv/>`, does not replace one that had programmes. The last guide downloaded stays, its fetch fails as **the guide answered with no programmes**, and it is tried again as after a failed download. A guide that never had programmes is fetched empty without failing.
+
 #### Guide files and limits
 
 A guide may be plain XML, compressed with gzip, or a ZIP archive. Polyfin tells which by its content, not its name.

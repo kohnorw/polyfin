@@ -56,6 +56,8 @@ const iptv: typeof en = {
       file_unreadable:
         'A última busca falhou: o arquivo sumiu, ou o Polyfin não consegue mais lê-lo.',
       file_refused: 'A última busca falhou: só administradores podem usar um arquivo do servidor.',
+      empty:
+        'A última busca falhou: o guia respondeu sem nenhum programa. O último guia baixado é mantido.',
     } as Record<string, string>,
     sectionsLabel: 'Seções',
     sections: {

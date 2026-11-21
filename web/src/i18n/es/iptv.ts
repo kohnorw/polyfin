@@ -57,6 +57,8 @@ const iptv: typeof en = {
         'La última descarga falló: el archivo ya no está, o Polyfin ya no puede leerlo.',
       file_refused:
         'La última descarga falló: solo los administradores pueden usar un archivo del servidor.',
+      empty:
+        'La última descarga falló: la guía respondió sin ningún programa. Se conserva la última guía descargada.',
     } as Record<string, string>,
     sectionsLabel: 'Secciones',
     sections: {

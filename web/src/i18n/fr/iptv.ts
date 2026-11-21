@@ -57,6 +57,8 @@ const iptv: typeof en = {
         'La dernière récupération a échoué\u202f: le fichier a disparu, ou Polyfin ne peut plus le lire.',
       file_refused:
         'La dernière récupération a échoué\u202f: seuls les administrateurs peuvent utiliser un fichier du serveur.',
+      empty:
+        'La dernière récupération a échoué\u202f: le guide n’a renvoyé aucun programme. Le dernier guide téléchargé est conservé.',
     } as Record<string, string>,
     sectionsLabel: 'Sections',
     sections: {
