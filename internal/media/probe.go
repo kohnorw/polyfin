@@ -150,13 +150,27 @@ type Prober struct {
 	Reads Reading
 }
 
+// probeRequest is how many bytes each of ffprobe's HTTP requests of a
+// file asks for, its first included: one block of the source cache, which
+// fetches whole blocks. Asked open-ended, a request had the loopback
+// interface send what the socket's buffers take, megabytes past what
+// ffprobe reads, which the cache then fetched from the file's host.
+const probeRequest = 1 << 20
+
 // Probe analyzes the source at url, which ffprobe reads over HTTP. A PQ
 // video track's mastering display is known only when its container tells
 // it: reading its first frame (see MasteringDisplay) is left to the Intel
-// GPUs that need it.
+// GPUs that need it. A file is read probeRequest bytes a request; a
+// playlist or a manifest, whose segments are files of their own, as each
+// asks.
 func (p Prober) Probe(ctx context.Context, url string) (Analysis, error) {
 	// Enough to find every track of a remote file without reading far.
-	return p.probe(ctx, url, "-probesize", "20M", "-analyzeduration", "10M")
+	options := []string{"-probesize", "20M", "-analyzeduration", "10M"}
+	if p.Reads == File {
+		size := strconv.Itoa(probeRequest)
+		options = append(options, "-initial_request_size", size, "-request_size", size)
+	}
+	return p.probe(ctx, url, options...)
 }
 
 // Input is what FFmpeg and ffprobe read a version from when it is not one
