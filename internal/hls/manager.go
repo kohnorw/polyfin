@@ -928,7 +928,10 @@ type Manager struct {
 	// playouts are the channels Polyfin airs itself, by channel (see
 	// playout.go).
 	playouts map[string]*playout
-	closed   bool
+	// superseded are the play sessions stopped as their device started a
+	// newer one of the same version, with when (see supersede).
+	superseded map[string]time.Time
+	closed     bool
 }
 
 // NewManager returns a manager running FFmpeg from ffmpegPath and keeping
@@ -989,6 +992,76 @@ func (m *Manager) Stop(session string) {
 	m.release(session)
 }
 
+// supersede stops, as their app's stop would, the play sessions in which
+// key's device played key's version before key's session: an app that
+// retries a play starts a new session without stopping the one it gave
+// up, whose FFmpeg would otherwise hold its encoder until it is idle. A
+// kept video of theirs stays for key's session to take over (see
+// KeepVideo). A session superseded is not played again: its requests get
+// ErrStopped, which supersede returns. Keys without a session, device or
+// version, and kept video's, supersede nothing.
+func (m *Manager) supersede(key Key) error {
+	if key.Session == "" || key.Device == "" || key.Version == "" {
+		return nil
+	}
+	m.mu.Lock()
+	if _, gone := m.superseded[key.Session]; gone {
+		m.mu.Unlock()
+		return ErrStopped
+	}
+	var older []string
+	for k := range m.encodings {
+		if k.Session != "" && k.Session != key.Session && k.sameDevice(key) && !slices.Contains(older, k.Session) {
+			older = append(older, k.Session)
+		}
+	}
+	var keepings []*keeping
+	for playback, k := range m.kept {
+		if playback.sameDevice(key) {
+			keepings = append(keepings, k)
+		}
+	}
+	m.mu.Unlock()
+	// A kept video plays for the session that took it over last, until
+	// that session stops.
+	for _, k := range keepings {
+		k.mu.Lock()
+		if session := k.session; !k.ended && !k.released.Load() && session != "" && session != key.Session && !slices.Contains(older, session) {
+			older = append(older, session)
+		}
+		k.mu.Unlock()
+	}
+	if len(older) == 0 {
+		return nil
+	}
+	now := time.Now()
+	m.mu.Lock()
+	if m.superseded == nil {
+		m.superseded = map[string]time.Time{}
+	}
+	for _, session := range older {
+		m.superseded[session] = now
+	}
+	m.mu.Unlock()
+	for _, session := range older {
+		m.logger.Info("A play session's encoding was stopped: its device started the same version again", "version", key.Version)
+		m.Stop(session)
+	}
+	return nil
+}
+
+// forgetSuperseded forgets the sessions superseded longer than an idle
+// encoding lasts: an app that still asks of one gave up on it long ago.
+func (m *Manager) forgetSuperseded() {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for session, at := range m.superseded {
+		if time.Since(at) > idleTimeout {
+			delete(m.superseded, session)
+		}
+	}
+}
+
 func (m *Manager) stopWhere(match func(Key, *encoding) bool) {
 	m.mu.Lock()
 	var stopping []*encoding
@@ -1016,6 +1089,7 @@ func (m *Manager) stopIdle() {
 			m.stopWhere(func(_ Key, e *encoding) bool { return e.idle() })
 			m.stopLives(func(_ Key, l *live) bool { return l.idle() })
 			m.stopAudios(func(_ AudioKey, e *audioEncoding) bool { return e.idle() })
+			m.forgetSuperseded()
 		}
 	}
 }
@@ -1150,6 +1224,9 @@ func (m *Manager) converting(shared *userVersion, leaving *live) int {
 // Init opens the initialization segment of a fragmented MP4 encoding: that
 // of its segments other than the fast ones (see FastInit).
 func (m *Manager) Init(ctx context.Context, key Key, open Opener) (*os.File, error) {
+	if err := m.supersede(key); err != nil {
+		return nil, err
+	}
 	if m.keeps(key) {
 		return m.keptFile(ctx, key, open, -1)
 	}
@@ -1166,6 +1243,9 @@ func (m *Manager) Init(ctx context.Context, key Key, open Opener) (*os.File, err
 // FastInit opens the initialization segment of the fast segments of a
 // fragmented MP4 encoding (see Plan.FastFrom).
 func (m *Manager) FastInit(ctx context.Context, key Key, open Opener) (*os.File, error) {
+	if err := m.supersede(key); err != nil {
+		return nil, err
+	}
 	if m.keeps(key) {
 		return nil, ErrNotFound
 	}
@@ -1185,6 +1265,9 @@ func (m *Manager) Segment(ctx context.Context, key Key, open Opener, n int) (*os
 	if n < 0 {
 		return nil, ErrNotFound
 	}
+	if err := m.supersede(key); err != nil {
+		return nil, err
+	}
 	if m.keeps(key) {
 		return m.keptFile(ctx, key, open, n)
 	}
@@ -1203,6 +1286,9 @@ func (m *Manager) Segment(ctx context.Context, key Key, open Opener, n int) (*os
 // the variant of key's playback asked for last, whichever key names: every
 // variant extracts them. Kept video extracts them, not its audio.
 func (m *Manager) Subtitles(ctx context.Context, key Key, open Opener, n int) error {
+	if err := m.supersede(key); err != nil {
+		return err
+	}
 	if m.keeps(key) {
 		key, open = key.keptVideo(), videoAlone(open)
 	}
@@ -1360,6 +1446,12 @@ func (m *Manager) encoding(ctx context.Context, key Key, open Opener) (*encoding
 	}
 	e := m.encodings[key]
 	if e == nil {
+		// A request of a superseded session that came as it was stopped
+		// starts nothing again.
+		if _, gone := m.superseded[key.Session]; gone && key.Session != "" {
+			m.mu.Unlock()
+			return nil, ErrStopped
+		}
 		if !m.admits(key, nil) {
 			m.mu.Unlock()
 			return nil, ErrBusy
