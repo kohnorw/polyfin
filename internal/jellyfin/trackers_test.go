@@ -155,6 +155,8 @@ func TestUsersTrackingServicesHearOfTheirMoviesAndEpisodes(t *testing.T) {
 		tr.mark(t, http.MethodPost, "/UserPlayedItems/"+untracked)
 	}
 
+	// A stop the app reports as failed is not heard of.
+	tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": tr.movie, "Failed": true})
 	// The movie runs 1h30: started, stopped past the played mark.
 	tr.report(t, "/Sessions/Playing", map[string]any{"ItemId": tr.movie, "PositionTicks": 0})
 	tr.report(t, "/Sessions/Playing/Stopped", map[string]any{"ItemId": tr.movie, "PositionTicks": int64(52_000_000_000)})

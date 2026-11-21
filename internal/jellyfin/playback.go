@@ -57,7 +57,11 @@ func (h *Handler) playbackRoutes(rt *router) {
 }
 
 // record applies a playback report to the device's session and to the
-// user's data.
+// user's data. A stop that gives no position was at the last position the
+// device's progress reports gave for the item, when they gave one: apps
+// that send no position on stopping keep their resume point, where
+// Jellyfin would mark the item played. An app that never reported its
+// progress keeps Jellyfin's rule.
 func (h *Handler) record(r *http.Request, event playbackEvent, state playback.PlayState, positionKnown bool) {
 	c := callerFrom(r.Context())
 	before, had := h.sessions.Playing(c.Device.ID)
@@ -65,11 +69,14 @@ func (h *Handler) record(r *http.Request, event playbackEvent, state playback.Pl
 	case playbackStarted:
 		h.sessions.Start(c.Device.ID, c.User.ID, state)
 	case playbackProgressed:
-		h.sessions.Progress(c.Device.ID, c.User.ID, state)
+		h.sessions.Progress(c.Device.ID, c.User.ID, state, positionKnown)
 	case playbackStopped:
 		h.sessions.Stop(c.Device.ID)
 		// Another of the user's devices may go on from it at once.
 		h.served.stopped(c.User.ID, c.Device.ID)
+		if !positionKnown && had && before.Progressed && (state.Item == (accounts.ID{}) || state.Item == before.Item) {
+			state.Position, positionKnown = before.Reported, true
+		}
 	}
 	// The report has arrived: it is recorded even when the app hangs up
 	// right after sending it, as when it closes once playback stops.
@@ -92,7 +99,37 @@ func (h *Handler) recorded(ctx context.Context, event playbackEvent, state playb
 	}
 	current, switched := h.leaveTitle(c.Device.ID, event, state.PlaySessionID)
 	h.followTorrents(c.Device.ID, c.User.ID, event, current, switched, had)
+	if event == playbackStopped && state.Failed {
+		h.failedStop(ctx, c.User, c.Device, state, positionKnown, before)
+		return
+	}
 	h.track(ctx, c.User, c.Device, event, state, positionKnown, before)
+}
+
+// failedStop follows a stop the app reports as failed. As with Jellyfin,
+// the user's data stays as it was and the tracking services hear nothing
+// of it; the playbacks Polyfin follows and the activity log still learn
+// that it stopped. playing is what the device was known to play before.
+func (h *Handler) failedStop(ctx context.Context, user accounts.User, device accounts.Device, state playback.PlayState, positionKnown bool,
+	playing playback.NowPlaying) {
+	id, mediaSource := state.Item, state.MediaSourceID
+	if id == (accounts.ID{}) {
+		id = playing.Item
+	}
+	if mediaSource == "" && playing.Item == id {
+		mediaSource = playing.MediaSourceID
+	}
+	if id == (accounts.ID{}) {
+		return
+	}
+	item, err := h.played(ctx, user, id)
+	if err != nil {
+		return
+	}
+	h.followPlayback(user, device, playbackStopped, state, positionKnown, playing, item)
+	if item.Kind != library.KindChannel && !h.reportedLive(ctx, user, item, mediaSource) {
+		h.recordPlayback(ctx, user, device.DeviceName, playbackStopped, item)
+	}
 }
 
 // sessionWindow is how recently a device must have been active to count as
@@ -1695,6 +1732,8 @@ type playbackReport struct {
 	PlaybackOrder       string
 	PlaylistItemId      string
 	NowPlayingQueue     []queueItem
+	// Failed is set on stops of playbacks that failed (PlaybackStopInfo).
+	Failed bool
 }
 
 func (report playbackReport) state() playback.PlayState {
@@ -1720,6 +1759,7 @@ func (report playbackReport) state() playback.PlayState {
 		state.VolumeLevel = new(int(report.VolumeLevel.value))
 	}
 	state.Queued, state.Next = report.NowPlayingQueue != nil, report.next()
+	state.Failed = report.Failed
 	return state
 }
 

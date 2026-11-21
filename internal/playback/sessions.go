@@ -28,6 +28,8 @@ type PlayState struct {
 	// is the item it plays after Item, zero when nothing follows.
 	Queued bool
 	Next   accounts.ID
+	// Failed is set on a stop the app reports as failed.
+	Failed bool
 }
 
 // NowPlaying is what one device plays, as last reported.
@@ -38,6 +40,11 @@ type NowPlaying struct {
 	CheckedIn time.Time
 	// PausedAt is when the current pause began, zero while playing.
 	PausedAt time.Time
+	// Progressed reports whether a progress report of the playback gave
+	// its position, and Reported is the last such position: a stop that
+	// gives none was at it.
+	Progressed bool
+	Reported   time.Duration
 }
 
 // Sessions tracks what each signed-in device plays, from the reports
@@ -71,26 +78,31 @@ func (s *Sessions) started(user accounts.ID, state PlayState) *NowPlaying {
 	return playing
 }
 
-// Progress records a device's progress. A report for another item than the
-// one known starts it, as when a player skips the start report. Fields a
-// report leaves out keep their value, except CanSeek, which Jellyfin resets.
-func (s *Sessions) Progress(device, user accounts.ID, state PlayState) {
+// Progress records a device's progress, with the position the report gave
+// when positionKnown. A report for another item than the one known starts
+// it, as when a player skips the start report. Fields a report leaves out
+// keep their value, except CanSeek, which Jellyfin resets.
+func (s *Sessions) Progress(device, user accounts.ID, state PlayState, positionKnown bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	current, ok := s.devices[device]
 	if !ok || (state.Item != (accounts.ID{}) && current.Item != state.Item) {
-		s.devices[device] = s.started(user, state)
-		return
+		current = s.started(user, state)
+		s.devices[device] = current
+	} else {
+		now := s.now()
+		switch {
+		case !state.Paused:
+			current.PausedAt = time.Time{}
+		case !current.Paused:
+			current.PausedAt = now
+		}
+		current.PlayState = withDefaults(state, current.PlayState)
+		current.CheckedIn = now
 	}
-	now := s.now()
-	switch {
-	case !state.Paused:
-		current.PausedAt = time.Time{}
-	case !current.Paused:
-		current.PausedAt = now
+	if positionKnown {
+		current.Progressed, current.Reported = true, state.Position
 	}
-	current.PlayState = withDefaults(state, current.PlayState)
-	current.CheckedIn = now
 }
 
 // Stop records that a device stopped playing.
