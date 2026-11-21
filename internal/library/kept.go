@@ -502,6 +502,12 @@ func (s *Service) fetchPage(ctx context.Context, src source, key pageKey) ([]str
 			s.logger.Info("An addon asked to wait: no catalog page is asked of its server until the wait ends", "addon",
 				src.addon.addon.LogName(), "catalog", src.catalog.ID, "skip", key.skip, "genre", key.genre, "wait", wait)
 		}
+		// A search the addon did not answer within its request's timeout
+		// leaves the addon's search catalog out for a while: the searches
+		// would ask it again for each term (see searched).
+		if key.search != "" && errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			s.lateSearch(src)
+		}
 		return nil, err
 	}
 	release()

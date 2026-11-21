@@ -349,14 +349,16 @@ A search reads the first page of the search catalogs, as Stremio apps do. Those 
 
 | Step | Time |
 |---|---|
-| The search answers once the title searches have answered, or after the first found its page | 3 seconds after the first page found |
+| The search answers once the title searches have answered, or once the first source in the order found titles, those before it having answered or failed | 0.3 seconds after that source's page |
+| When a source earlier in the order hasn't answered, and a later one found titles | 3 seconds after the first page found, at most |
 | When no title search found a page | 10 seconds at most |
 | Then it waits for people-search catalogs | 0.3 seconds more |
 | A search is kept for the next search of the same term | 10 minutes |
 | An empty answer is kept | 1 minute, as an addon may answer nothing while what it reads from fails |
 
-- A later answer is kept for the next search of the same term.
-- A search catalog that did not answer in time is left out of searches for 5 minutes, unless one of its pages comes in meanwhile. So an addon that never answers delays one search, not each of them. **System › Health** tells it meanwhile, and the log names the addon.
+- A later answer is kept for the next search of the same term: a slower addon's titles show at the next search, which apps send anyway as you type.
+- The order is [the order of sources](addons.md#the-order-of-sources): the source first in it gives the time. An addon that usually answers fast, placed first, keeps searches quick.
+- A search catalog that held a search for 3 or 10 seconds without answering, or whose request timed out, is left out of searches for 5 minutes, unless one of its pages comes in meanwhile. So an addon that never answers delays one search at most, not each of them. **System › Health** tells it meanwhile, and the log names the addon. An addon that answers after the 0.3 seconds held no search, and isn't left out.
 - Matching a local folder's files, and **Identify**, still wait for every addon (see [Failed searches](unmatched-files.md#failed-searches)).
 
 <a id="refreshing-a-library-s-descriptions"></a><a id="refreshing-a-librarys-descriptions"></a>

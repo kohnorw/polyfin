@@ -114,7 +114,7 @@ A local folder's files are left unmatched because the search of their titles fai
 
 ### Search catalog too slow
 
-An addon's search catalog did not answer a search in time. This is a warning, with a link to **Addons** (see [Catalog pages](addons-and-libraries.md#catalog-pages)).
+An addon's search catalog held a search for 3 seconds or more without answering, or its search request timed out. This is a warning, with a link to **Addons** (see [Catalog pages](addons-and-libraries.md#catalog-pages)).
 
 - Searches leave the addon out for 5 minutes, then ask it again.
 - It comes and goes with the searches, so it is not sent as a health problem. The addon's own failure, "did not answer in time", is.

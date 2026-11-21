@@ -57,19 +57,21 @@ func timedSearch(e env, term string) ([]string, time.Duration) {
 	return names(found), time.Since(started)
 }
 
-// An addon that never answers holds no search past its deadline: the
-// search answers with the other addons' titles, and the next searches
-// leave that addon out without waiting for it, until a while has passed.
-// System › Health tells it meanwhile.
+// An addon first in the order that never answers holds a search for the
+// patience only, once another addon found titles: the search answers with
+// their titles, and the next searches leave that addon out without
+// waiting for it, until a while has passed. System › Health tells it
+// meanwhile.
 func TestASearchDoesNotWaitForAnAddonThatNeverAnswers(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
 	elapsed := new(atomic.Int64)
 	e.service.now = func() time.Time { return time.Now().Add(time.Duration(elapsed.Load())) }
-	quick := searchAddon("quick", "Quick", false, "Lantern Harbor", "Lantern Bay")
-	e.install(addons.Shared(), quick)
+	e.service.searchPatience = 100 * time.Millisecond
 	silent := searchAddon("silent", "Silent", false, "Lantern Point")
 	held(e, silent)
+	quick := searchAddon("quick", "Quick", false, "Lantern Harbor", "Lantern Bay")
+	e.install(addons.Shared(), quick)
 	silentID := e.addonID("silent")
 
 	// The silent addon is held until the test ends: a search that waited
@@ -88,7 +90,7 @@ func TestASearchDoesNotWaitForAnAddonThatNeverAnswers(t *testing.T) {
 
 	// Searches past the deadline would now wait for the silent addon's
 	// request to time out: they do not ask it.
-	e.service.searchGrace, e.service.searchBound = time.Hour, time.Hour
+	e.service.searchGrace, e.service.searchPatience, e.service.searchBound = time.Hour, time.Hour, time.Hour
 	for _, term := range []string{"lantern", "harbor"} {
 		found, took := timedSearch(e, term)
 		if took > 10*time.Second || len(found) == 0 {
@@ -100,7 +102,7 @@ func TestASearchDoesNotWaitForAnAddonThatNeverAnswers(t *testing.T) {
 	}
 
 	// After a while, it is asked again.
-	e.service.searchGrace, e.service.searchBound = searchGrace, searchBound
+	e.service.searchGrace, e.service.searchPatience, e.service.searchBound = searchGrace, 100*time.Millisecond, searchBound
 	elapsed.Store(int64(lateSearchLife + time.Second))
 	if found, _ := timedSearch(e, "bay"); !slices.Equal(found, []string{"Lantern Bay"}) {
 		t.Errorf("later search: %v", found)
@@ -108,18 +110,25 @@ func TestASearchDoesNotWaitForAnAddonThatNeverAnswers(t *testing.T) {
 	eventually(t, "asking the silent addon again", func() bool { return len(silent.catalogRequests()) == 2 })
 }
 
-// A page that comes after the search's deadline is kept: the next search
-// of the term lists its titles without asking the addon again.
+// A search answers searchGrace after the first addon in the order found
+// titles, without the slower addons, which it does not leave out: their
+// late page is kept, and the next search of the term lists its titles
+// without asking the addon again.
 func TestALateSearchPageIsKeptForTheNextSearch(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
+	e.service.searchPatience, e.service.searchBound = time.Hour, time.Hour
 	e.install(addons.Shared(), searchAddon("quick", "Quick", false, "Lantern Harbor"))
 	slow := searchAddon("slow", "Slow", false, "Lantern Point")
 	open := held(e, slow)
 
-	found, took := timedSearch(e, "lantern")
-	if took > 10*time.Second || !slices.Equal(found, []string{"Lantern Harbor"}) {
-		t.Fatalf("first search: %v after %v", found, took)
+	// Neither the patience nor the bound ends the search: its grace does.
+	found, _ := timedSearch(e, "lantern")
+	if !slices.Equal(found, []string{"Lantern Harbor"}) {
+		t.Fatalf("first search: %v", found)
+	}
+	if e.service.SearchesLeaveOut(e.addonID("slow")) {
+		t.Error("the slower addon, which held no search, is left out")
 	}
 	open()
 	eventually(t, "the late page listed", func() bool {
@@ -135,13 +144,14 @@ func TestALateSearchPageIsKeptForTheNextSearch(t *testing.T) {
 }
 
 // Folder matching and the metadata editor still wait for every metadata
-// addon, one that missed a search's deadline included.
+// addon, one left out of the searches included.
 func TestRemoteSearchWaitsForEveryAddon(t *testing.T) {
 	t.Parallel()
 	e := newEnv(t)
-	e.install(addons.Shared(), searchAddon("quick", "Quick", true, "Lantern Harbor"))
+	e.service.searchPatience = 100 * time.Millisecond
 	slow := searchAddon("slow", "Slow", true, "Lantern Point")
 	open := held(e, slow)
+	e.install(addons.Shared(), searchAddon("quick", "Quick", true, "Lantern Harbor"))
 	if found, _ := timedSearch(e, "lantern"); !slices.Equal(found, []string{"Lantern Harbor"}) {
 		t.Fatalf("search: %v", found)
 	}
