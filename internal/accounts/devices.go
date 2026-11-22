@@ -237,7 +237,10 @@ func (s *Store) DeviceByToken(ctx context.Context, token, remoteAddress string) 
 	if entry.user.Ended(now) {
 		return Device{}, User{}, ErrNotFound
 	}
-	if now.Sub(entry.device.LastActivityAt) >= activityResolution || entry.device.RemoteAddress != remoteAddress {
+	due := now.Sub(entry.device.LastActivityAt) >= activityResolution
+	moved := entry.device.RemoteAddress != remoteAddress
+	if (due || moved) && s.activityWrites.claim(entry.device.ID, remoteAddress, now, due) {
+		defer s.activityWrites.release(entry.device.ID)
 		// The user's app moves with the time only.
 		_, err := s.db.Exec(ctx, `WITH touched AS (
 				UPDATE devices SET last_activity_at = greatest(last_activity_at, $3), remote_address = $2 WHERE id = $1 RETURNING user_id, client

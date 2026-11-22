@@ -33,6 +33,7 @@ This is a fork of [moodiness/polyfin](https://github.com/moodiness/polyfin). It 
 - Pre-release rips (cam, telesync, telecine, screener) are hidden by default, using upstream's **Hidden releases**.
 - **Play every file in the web player**: browsers get H.264 in place of HEVC, Dolby Vision or AV1, which they often show black (**Settings › Conversion**).
 - Usenet streams have their own size record, so AIOStreams NZBs play.
+- A device's activity is written by one of its requests at a time, and an address it was written from in the last 30 seconds is not written again: apps reached through a Cloudflare Tunnel, which may come from IPv4 and IPv6 by turns, no longer have their video requests queue on the device's row.
 - Administrators can stop any playback from **Now Playing**. Playbacks paused for over an hour end.
 - Cinemeta is searched when the user's own search catalogs find nothing.
 - TMDB answers are kept for two weeks, across restarts. Settled titles' descriptions are kept for six weeks.
