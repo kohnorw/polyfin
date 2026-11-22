@@ -94,7 +94,8 @@ func askedProgramFields(fields fieldSet) programFields {
 // EnableUserData. LiveTvManager.AddInfoToProgramDto adds StartDate,
 // EpisodeTitle and the categories (IsMovie and the like, as `|=` on a
 // null only sets them true), with ChannelInfo or ChannelImage the
-// channel's name and number, with ChannelImage its image's tag, then
+// channel's name and number, with ChannelImage its image's tag (here
+// with ChannelInfo too, see below), then
 // AddRecordingInfo the timers (TimerId, Status, SeriesTimerId). The
 // other fields come with the ItemFields that ask for them.
 //
@@ -271,7 +272,10 @@ func (h *Handler) appendLeanProgram(b []byte, item library.Item, f programFields
 		b = appendJSONKey(b, "ChannelNumber", false)
 		b = appendJSONString(b, channel.Number)
 	}
-	if f.channelImage && channel.Images.Primary != "" {
+	// ChannelInfo gives the channel's logo too, as Jellyfin before 12 did
+	// and as jellyfin-web 12.4 still expects of its programme cards, which
+	// ask ChannelInfo alone for the logo they show (this fork).
+	if withChannel && channel.Images.Primary != "" {
 		b = appendJSONKey(b, "ChannelPrimaryImageTag", false)
 		b = appendJSONString(b, library.ImageTag(channel.Images.Primary))
 	}

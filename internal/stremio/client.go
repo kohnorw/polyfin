@@ -67,6 +67,9 @@ type Client struct {
 	// context.WithTimeout but in tests (see SetTimeoutBound).
 	timeout, streamTimeout time.Duration
 	bound                  func(ctx context.Context, timeout time.Duration) (context.Context, context.CancelFunc)
+	// rasterizeSVG draws an SVG image into a PNG picture, nil while none
+	// is set (see RasterizeSVGWith).
+	rasterizeSVG func(ctx context.Context, svg []byte) ([]byte, error)
 }
 
 // NewClient returns a client identifying itself with the Polyfin version.
@@ -558,13 +561,21 @@ func (c *Client) Manifest(ctx context.Context, manifestURL string, confined bool
 // maxImageBytes bounds artwork downloads.
 const maxImageBytes = 15 << 20
 
-// Image downloads artwork referenced by an addon. Only image responses are
-// accepted, so an addon cannot make the server relay arbitrary content,
-// and of those only raster pictures, told by their bytes: the type
-// returned is the bytes', never the one their server gave. Anything else,
-// an SVG image among them, is ErrNoPicture. An artwork server that
-// answers 429, or 503, with a Retry-After asks to wait that long, which
-// RetryAfter reads from the error.
+// pictureHead is how much of an answer is read to tell whether it is a
+// picture before the rest is: enough for a raster picture's signature, and
+// for the start of an SVG image after its XML declaration and a comment.
+const pictureHead = 4 << 10
+
+// Image downloads artwork referenced by an addon. Only pictures are
+// accepted, so an addon cannot make the server relay arbitrary content:
+// raster pictures, told by their bytes, whatever type their server gave
+// them, as IPTV providers and storage buckets often serve logos as
+// application/octet-stream. The type returned is the bytes', never the
+// one their server gave. An SVG image, a document that may hold a script,
+// is relayed only drawn into a PNG picture (see RasterizeSVGWith); without
+// a rasterizer, it and anything else are ErrNoPicture. An artwork server
+// that answers 429, or 503, with a Retry-After asks to wait that long,
+// which RetryAfter reads from the error.
 func (c *Client) Image(ctx context.Context, target string, confined bool) ([]byte, string, error) {
 	ctx, cancel := c.bound(ctx, c.timeout)
 	defer cancel()
@@ -572,7 +583,7 @@ func (c *Client) Image(ctx context.Context, target string, confined bool) ([]byt
 	if err != nil || (request.URL.Scheme != "https" && request.URL.Scheme != "http") {
 		return nil, "", fmt.Errorf("%w: invalid image URL", ErrUnreachable)
 	}
-	request.Header.Set("Accept", "image/*")
+	request.Header.Set("Accept", "image/avif,image/webp,image/png,image/svg+xml,image/*,*/*;q=0.8")
 	request.Header.Set("User-Agent", c.userAgent)
 	response, err := c.do(request, confined)
 	if err != nil {
@@ -580,19 +591,43 @@ func (c *Client) Image(ctx context.Context, target string, confined bool) ([]byt
 	}
 	defer response.Body.Close()
 	contentType := response.Header.Get("Content-Type")
-	if response.StatusCode != http.StatusOK || !strings.HasPrefix(contentType, "image/") {
+	if response.StatusCode != http.StatusOK {
 		wait, waits := parseRetryAfter(response.Header.Get("Retry-After"), time.Now())
 		if waits && (response.StatusCode == http.StatusTooManyRequests || response.StatusCode == http.StatusServiceUnavailable) {
 			return nil, "", fmt.Errorf("%w: %w %s, %w", ErrUnreachable, httpStatus(response.StatusCode), contentType, wait)
 		}
 		return nil, "", fmt.Errorf("%w: %w %s", ErrUnreachable, httpStatus(response.StatusCode), contentType)
 	}
-	body, err := io.ReadAll(io.LimitReader(response.Body, maxImageBytes+1))
+	// What is no picture by its first bytes is not read further: a page or
+	// a video named as artwork costs no more than its head.
+	head := make([]byte, pictureHead)
+	n, err := io.ReadFull(response.Body, head)
+	if err != nil && !errors.Is(err, io.ErrUnexpectedEOF) && !errors.Is(err, io.EOF) {
+		return nil, "", fmt.Errorf("%w: %w", ErrUnreachable, err)
+	}
+	head = head[:n]
+	_, raster := relayed.Picture(head)
+	svg := !raster && c.rasterizeSVG != nil && svgImage(head)
+	if !raster && !svg {
+		return nil, "", noPicture{}
+	}
+	rest, err := io.ReadAll(io.LimitReader(response.Body, maxImageBytes+1-int64(n)))
 	if err != nil {
 		return nil, "", fmt.Errorf("%w: %w", ErrUnreachable, err)
 	}
+	body := append(head, rest...)
 	if len(body) > maxImageBytes {
 		return nil, "", fmt.Errorf("%w: image larger than %d bytes", ErrInvalidResponse, maxImageBytes)
+	}
+	if svg {
+		if len(body) > maxSVGBytes {
+			return nil, "", noPicture{}
+		}
+		drawn, err := c.rasterizeSVG(ctx, body)
+		if err != nil {
+			return nil, "", fmt.Errorf("%w: %w", noPicture{}, err)
+		}
+		body = drawn
 	}
 	pictureType, ok := relayed.Picture(body)
 	if !ok {
