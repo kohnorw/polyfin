@@ -125,10 +125,11 @@ func TestGuideProgramsAsJellyfinDescribesThem(t *testing.T) {
 
 	// The fields asked add theirs; those Jellyfin's LiveTvManager removes
 	// (CanDelete, CanDownload, Etag, DisplayPreferencesId) stay out.
+	// ChannelInfo gives the channel's logo too (this fork).
 	withFields := list("&EnableImages=false&EnableUserData=false&Fields=ChannelInfo,Overview,CanDelete,Etag")
 	keys, values := members(t, listedItems(t, withFields)[0])
 	want := []string{"Name", "ServerId", "Id", "ChannelId", "ChannelName", "Overview", "RunTimeTicks", "Type", "ImageBlurHashes",
-		"MediaType", "EndDate", "ChannelNumber", "StartDate", "IsNews"}
+		"MediaType", "EndDate", "ChannelNumber", "ChannelPrimaryImageTag", "StartDate", "IsNews"}
 	if !slices.Equal(keys, want) || string(values["ChannelName"]) != `"One"` || string(values["ChannelNumber"]) != `"1"` ||
 		string(values["Overview"]) != `"The news."` {
 		t.Errorf("a programme with fields: %v %s", keys, withFields)
@@ -202,7 +203,8 @@ func leanListing(t *testing.T, h *Handler, w http.ResponseWriter, items []librar
 // A lean programme gives, in BaseItemDto's order, the members Jellyfin
 // 12.4 sets on a programme for the fields asked, with the full
 // description's values, and those only Jellyfin's gives with Jellyfin's
-// values.
+// values; with ChannelInfo, the channel's logo too, as Jellyfin before 12
+// gave it (this fork).
 func TestLeanProgrammesGiveJellyfinsMembers(t *testing.T) {
 	t.Parallel()
 	s := newTestServer(t, 10)
@@ -226,7 +228,8 @@ func TestLeanProgrammesGiveJellyfinsMembers(t *testing.T) {
 		{"IsHD", base, nil},
 		{"ChannelInfo", []string{"Name", "ServerId", "Id", "PremiereDate", "OfficialRating", "ChannelId", "ChannelName",
 			"CommunityRating", "CriticRating", "RunTimeTicks", "ProductionYear", "IndexNumber", "ParentIndexNumber", "Type",
-			"ImageBlurHashes", "MediaType", "EndDate", "ChannelNumber", "StartDate", "IsMovie", "IsKids", "IsRepeat", "EpisodeTitle"}, nil},
+			"ImageBlurHashes", "MediaType", "EndDate", "ChannelNumber", "ChannelPrimaryImageTag", "StartDate", "IsMovie", "IsKids", "IsRepeat",
+			"EpisodeTitle"}, nil},
 		{all, []string{"Name", "OriginalTitle", "ServerId", "Id", "DateCreated", "SortName", "ForcedSortName", "PremiereDate",
 			"ExternalUrls", "EnableMediaSourceDisplay", "OfficialRating", "ChannelId", "ChannelName", "Overview", "Taglines", "Genres",
 			"CommunityRating", "CriticRating", "CustomRating", "RunTimeTicks", "PlayAccess", "ProductionYear", "IndexNumber",

@@ -555,6 +555,10 @@ func serve(ctx context.Context, cfg config.Config, environ []string, restore *pe
 		return fmt.Errorf("prepare the OCR directory: %w", err)
 	}
 	player.UseTesseract(cfg.FFmpeg, ocrDir, &ocr.Tesseract{Path: cfg.Tesseract, DataDir: cfg.TessdataDir, TempDir: ocrDir})
+	// SVG artwork, as IPTV playlists name for many channels' logos, is
+	// drawn into a picture by FFmpeg, its file written meanwhile in the
+	// same scratch folder.
+	addonClient.RasterizeSVGWith(stremio.FFmpegSVG(cfg.FFmpeg, ocrDir))
 	// The data of the languages Tesseract lacks is downloaded into
 	// POLYFIN_TESSDATA_DIR from Health, or by itself as the settings ask.
 	player.FetchLanguagesWith(&ocr.Downloader{Dir: cfg.TessdataDir, URL: cfg.TessdataURL})

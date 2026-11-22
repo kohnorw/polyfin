@@ -24,6 +24,7 @@ This is a fork of [moodiness/polyfin](https://github.com/moodiness/polyfin). It 
 - **Live TV access** (a user's or group's **Visible libraries**) gives or takes IPTV sources and their categories. It works alongside upstream's channel rules.
 - A **TV Categories** view with a **Favorites** folder, and a programme schedule on a channel's page, including in Streamyfin.
 - No Replay or record buttons. Live TV libraries can be renamed and given an image.
+- **Channel logos** show whatever type their server gives them, as IPTV providers often serve them as `application/octet-stream`, and SVG logos are drawn into PNG pictures with FFmpeg. Programmes give their channel's logo with `ChannelInfo`, as Jellyfin before 12 did, so jellyfin-web's programme cards show it.
 
 **Playback and library**
 

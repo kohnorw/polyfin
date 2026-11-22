@@ -136,8 +136,12 @@ func describeLive(dto *BaseItemDto, item library.Item, fields fieldSet, detail b
 		if detail || fields.has("ChannelInfo") {
 			dto.ChannelName, dto.ChannelNumber = channel.Name, channel.Number
 		}
-		if detail {
+		// The channel's logo, which apps show on a programme's card, comes
+		// with ChannelInfo as it did from Jellyfin before 12 (this fork).
+		if detail || fields.has("ChannelInfo") || fields.has("ChannelImage") {
 			dto.ChannelPrimaryImageTag = library.ImageTag(channel.Images.Primary)
+		}
+		if detail {
 			dto.Tags = new(nonNil(item.Genres))
 		}
 		// Like Jellyfin's guide programmes, a programme gives the episode it
