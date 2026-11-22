@@ -332,6 +332,9 @@ type Store struct {
 	unreadable map[string]string
 	// signIns remembers the access tokens and API keys resolved lately.
 	signIns signIns
+	// activityWrites are the devices whose activity is being written, or
+	// was lately, and when that began (see claimActivityWrite, this fork).
+	activityWrites activityWrites
 	// leavers are told of each user deleted (see OnDelete); leaversMu
 	// guards them.
 	leaversMu sync.Mutex
